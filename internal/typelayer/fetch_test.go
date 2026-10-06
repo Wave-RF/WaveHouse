@@ -17,19 +17,12 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 )
 
-// unpublishedBase is a registry that publishes nothing: every tag is a 404,
-// with no network involved.
-func unpublishedBase(t *testing.T) []string {
-	t.Helper()
-	return []string{"file://" + t.TempDir()}
-}
-
 // TestNewEngine_AutofetchNeedsNoInstalledArtifact: with autofetch on, boot
 // does not wait for an artifact; the line is fetched at its first bind, and a
 // fetch that fails is that tenant's Unavailable, naming the fetch.
 func TestNewEngine_AutofetchNeedsNoInstalledArtifact(t *testing.T) {
 	t.Parallel()
-	eng, err := NewEngine(Config{CacheDir: t.TempDir(), AutoFetch: true, Bases: unpublishedBase(t)})
+	eng, err := NewEngine(Config{CacheDir: t.TempDir(), AutoFetch: true, Offline: true})
 	require.NoError(t, err, "nothing installed is not a boot failure")
 	t.Cleanup(eng.Close)
 	if installedCause(eng.reg, testLine) == "" {
@@ -40,14 +33,14 @@ func TestNewEngine_AutofetchNeedsNoInstalledArtifact(t *testing.T) {
 	u := unavailable(t, eng, "fresh")
 	assert.Empty(t, u.Table, "the cause covers every table of the tenant")
 	assert.Contains(t, u.Cause, "chtypes could not fetch the artifact for ClickHouse "+testLine)
-	assert.Contains(t, u.Cause, string(chtypes.CodeArtifactUnpublished))
+	assert.Contains(t, u.Cause, string(chtypes.CodeArtifactMissing))
 }
 
 // TestBind_FailedFetchIsThatTenantsUnavailable: a line the registry cannot
 // supply leaves the tenants on an installed line answering.
 func TestBind_FailedFetchIsThatTenantsUnavailable(t *testing.T) {
 	testEngine(t) // installs the test line
-	eng, err := NewEngine(Config{AutoFetch: true, Bases: unpublishedBase(t)})
+	eng, err := NewEngine(Config{AutoFetch: true, Offline: true})
 	require.NoError(t, err)
 	t.Cleanup(eng.Close)
 
@@ -55,7 +48,7 @@ func TestBind_FailedFetchIsThatTenantsUnavailable(t *testing.T) {
 	eng.Bind("current", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	u := unavailable(t, eng, "old")
 	assert.Contains(t, u.Cause, "chtypes could not fetch the artifact for ClickHouse 1.2")
-	assert.Contains(t, u.Cause, string(chtypes.CodeArtifactUnpublished))
+	assert.Contains(t, u.Cause, string(chtypes.CodeArtifactMissing))
 	answers(t, eng, "current")
 }
 
@@ -65,7 +58,7 @@ func TestBind_FailedFetchIsThatTenantsUnavailable(t *testing.T) {
 func TestBind_WrongLineCacheNeverServes(t *testing.T) {
 	testEngine(t) // installs the test line
 	for _, autofetch := range []bool{false, true} {
-		eng, err := NewEngine(Config{AutoFetch: autofetch, Bases: unpublishedBase(t)})
+		eng, err := NewEngine(Config{AutoFetch: autofetch, Offline: true})
 		require.NoError(t, err)
 		t.Cleanup(eng.Close)
 		if installedCause(eng.reg, "26.3") == "" || installedCause(eng.reg, "99.1") == "" {
@@ -98,7 +91,7 @@ func TestNewEngine_UnwritableCacheWarns(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: restoring a test directory for its removal
 	logs := logtest.Capture(t, slog.LevelWarn)
 
-	eng, err := NewEngine(Config{CacheDir: dir, AutoFetch: true, Bases: unpublishedBase(t)})
+	eng, err := NewEngine(Config{CacheDir: dir, AutoFetch: true, Offline: true})
 	require.NoError(t, err)
 	eng.Close()
 	recs := withMsg(logRecords(t, logs), "chtypes cache is not writable: autofetch cannot install a missing line here; mount a writable directory at it")

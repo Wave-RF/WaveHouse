@@ -611,7 +611,7 @@ func TestImageUnset_FailedArtifactOpenCommitsNothing(t *testing.T) {
 // next tenant, in any zone, is served and sets the image zone.
 func TestImageUnset_FailedFetchCommitsNothing(t *testing.T) {
 	eng := unsetImage(t)
-	unpublished, err := NewEngine(Config{CacheDir: t.TempDir(), AutoFetch: true, Bases: []string{"file://" + t.TempDir()}})
+	unpublished, err := NewEngine(Config{CacheDir: t.TempDir(), AutoFetch: true, Offline: true})
 	require.NoError(t, err)
 	t.Cleanup(unpublished.Close)
 	if installedCause(unpublished.reg, testLine) == "" {
@@ -620,7 +620,7 @@ func TestImageUnset_FailedFetchCommitsNothing(t *testing.T) {
 	unpublished.Bind("fresh", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
 	u := unavailable(t, unpublished, "fresh")
 	assert.Contains(t, u.Cause, "chtypes could not fetch the artifact for ClickHouse "+testLine)
-	assert.Contains(t, u.Cause, string(chtypes.CodeArtifactUnpublished))
+	assert.Contains(t, u.Cause, string(chtypes.CodeArtifactMissing))
 	require.Empty(t, imageZone())
 
 	eng.Bind("utc", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})

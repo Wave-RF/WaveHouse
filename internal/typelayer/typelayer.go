@@ -65,10 +65,9 @@ const (
 // Config is boot-tier, read once at process start. A library is opened
 // lazily, by the first Bind for its line (~120 MB resident each).
 type Config struct {
-	// CacheDir is the chtypes v1 cache, the layout directory itself
-	// (CHTYPES_CACHE semantics); "" means $CHTYPES_CACHE, else
-	// ${XDG_CACHE_HOME:-~/.cache}/chtypes/v1. The read-only system layouts
-	// (systemLayouts) are searched after it either way.
+	// CacheDir is the chtypes cache root (CHTYPES_CACHE semantics); "" means
+	// $CHTYPES_CACHE, else the SDK's per-user default. The SDK's read-only
+	// system layouts are searched after it either way.
 	CacheDir string
 	// AutoFetch fetches a line no layout holds, at its first Bind, into the
 	// cache. Off, that line is its tenants' Unavailable, and NewEngine refuses
@@ -77,10 +76,10 @@ type Config struct {
 	// Bases are the registries and mirrors a fetch tries, in order; nil means
 	// $CHTYPES_ARTIFACTS_URL, else chtypes' own registry.
 	Bases []string
+	// Offline forbids any network fetch: a line no layout holds is that
+	// tenant's Unavailable (CHTYPES_ARTIFACT_MISSING) instead of a fetch.
+	Offline bool
 }
-
-// systemLayouts are the read-only layouts the SDK searches after the cache.
-var systemLayouts = []string{"/usr/local/share/chtypes/v1", "/opt/chtypes/v1"}
 
 // Engine is the process's one chtypes registry plus every tenant's compiled
 // tables. It is opened once at boot; discovery rebinds a tenant after each of
@@ -165,7 +164,7 @@ type tenantSet struct {
 // and the process's image zone must come from a server's own zone, which only
 // discovery knows (see openLine).
 func NewEngine(cfg Config) (*Engine, error) {
-	root := cacheRoot(cfg.CacheDir)
+	root, systemLayouts := cachePaths(cfg.CacheDir)
 	if cfg.CacheDir != "" {
 		if _, err := os.Stat(root); errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("chtypes: the artifact directory %s does not exist", root)
@@ -173,7 +172,7 @@ func NewEngine(cfg Config) (*Engine, error) {
 	}
 	strict := true
 	reg, err := chtypes.NewRegistry(chtypes.WithAutoFetch(cfg.AutoFetch),
-		chtypes.WithFetchOptions(chtypes.FetchOptions{CacheDir: cfg.CacheDir, Bases: cfg.Bases, StrictCache: &strict}))
+		chtypes.WithFetchOptions(chtypes.FetchOptions{CacheDir: cfg.CacheDir, Bases: cfg.Bases, Offline: cfg.Offline, StrictCache: &strict}))
 	if err != nil {
 		return nil, err
 	}
@@ -219,23 +218,30 @@ func probeWritable(dir string) error {
 	return os.Remove(f.Name())
 }
 
-// cacheRoot is the cache layout the SDK reads for dir, in its own precedence.
-func cacheRoot(dir string) string {
+// cachePaths is the one place WaveHouse knows chtypes' cache layout: the root
+// the SDK reads for dir, in its own precedence, and the read-only system
+// layouts it searches after it. chtypes go v1.1.0 exposes neither (only the
+// CLI's `chtypes where` does), so this mirrors it; a later SDK that does
+// should replace this function's body and nothing else. The layout version
+// segment ("v1") is the part that changes between SDK generations.
+func cachePaths(dir string) (root string, system []string) {
+	const layout = "v1"
+	system = []string{"/usr/local/share/chtypes/" + layout, "/opt/chtypes/" + layout}
 	if dir != "" {
-		return dir
+		return dir, system
 	}
 	if env := os.Getenv("CHTYPES_CACHE"); env != "" {
-		return env
+		return env, system
 	}
 	base := os.Getenv("XDG_CACHE_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return "${XDG_CACHE_HOME:-~/.cache}/chtypes/v1"
+			return "${XDG_CACHE_HOME:-~/.cache}/chtypes/" + layout, system
 		}
 		base = filepath.Join(home, ".cache")
 	}
-	return filepath.Join(base, "chtypes", "v1")
+	return filepath.Join(base, "chtypes", layout), system
 }
 
 // Table returns tenant id's current compiled handle for a table, read-locked.

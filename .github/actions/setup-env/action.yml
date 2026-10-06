@@ -44,7 +44,7 @@
 #      lockfile + astro.config.mjs. Speeds up warm `astro check` /
 #      `astro build` — unchanged content skips the parse + transform
 #      pipeline. See #132.
-#   7. chtypes artifact cache (~/.cache/chtypes/v1) keyed on the test
+#   7. chtypes artifact cache (`chtypes where`) keyed on the test
 #      ClickHouse line plus its newest build's digest — the .so the SDK
 #      dlopens. Measured for the 26.8 line (linux-amd64): ~340 MiB on disk
 #      (289 MiB unpacked .so, 49 MiB compressed layer). Every run fetches the
@@ -196,8 +196,9 @@ runs:
     # restore-keys bring back the previous build, the fetch below installs the
     # new one on top, and --prune drops the old before the save, so an entry
     # holds one build. runner.arch is in the key: an arm64 runner must never
-    # restore amd64 .so files. The `v1` in the path is chtypes' layout version;
-    # the key's `v2` is this cache's shape (v1 was keyed on the retired lock).
+    # restore amd64 .so files. The path is `chtypes where`, so the SDK's layout
+    # version is not named here; the key's `v2` is this cache's shape (v1 was
+    # keyed on the retired lock).
     - name: Resolve the chtypes artifact cache key
       if: ${{ inputs.chtypes == 'true' }}
       id: chtypes-key
@@ -206,6 +207,7 @@ runs:
         case "$RUNNER_OS" in Linux) os=linux ;; macOS) os=darwin ;; *) os=unknown ;; esac
         case "$RUNNER_ARCH" in X64) arch=amd64 ;; ARM64) arch=arm64 ;; *) arch=unknown ;; esac
         echo "line=$(scripts/fetch-chtypes.sh --print-line)" >> "$GITHUB_OUTPUT"
+        echo "cache=$(scripts/fetch-chtypes.sh --where)" >> "$GITHUB_OUTPUT"
         if digest="$(scripts/fetch-chtypes.sh --resolve --platform "$os-$arch")"; then
           echo "build=$(printf '%s' "${digest#sha256:}" | cut -c1-16)" >> "$GITHUB_OUTPUT"
         else
@@ -216,7 +218,7 @@ runs:
       if: ${{ inputs.chtypes == 'true' && steps.chtypes-key.outputs.build != '' }}
       id: chtypes-cache
       with:
-        path: ~/.cache/chtypes/v1
+        path: ${{ steps.chtypes-key.outputs.cache }}
         key: chtypes-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.chtypes-key.outputs.line }}-${{ steps.chtypes-key.outputs.build }}
         restore-keys: |
           chtypes-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.chtypes-key.outputs.line }}-
@@ -226,7 +228,7 @@ runs:
     - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: ${{ inputs.chtypes == 'true' && steps.chtypes-key.outputs.build == '' }}
       with:
-        path: ~/.cache/chtypes/v1
+        path: ${{ steps.chtypes-key.outputs.cache }}
         key: chtypes-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.chtypes-key.outputs.line }}-
         restore-keys: |
           chtypes-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.chtypes-key.outputs.line }}-

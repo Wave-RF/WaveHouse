@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prefetch the chtypes artifact for ClickHouse line(s) into a chtypes v1 cache,
+# Prefetch the chtypes artifact for ClickHouse line(s) into a chtypes cache,
 # with the SDK's own CLI at the version go.mod requires. Optional: an API
 # process and the test helpers fetch a missing line themselves (autofetch).
 # Callers: .github/actions/setup-env (once per CI job, before the suites), and
@@ -10,18 +10,20 @@
 # it does). chtypes verifies the build's signed statement on every install.
 #
 # Usage: scripts/fetch-chtypes.sh [<line> ...] [--platform <os-arch>] [--cache <dir>] [--offline] [--prune]
-#        scripts/fetch-chtypes.sh --print-line | --resolve [--platform <os-arch>]
+#        scripts/fetch-chtypes.sh --print-line | --where | --resolve [--platform <os-arch>]
 #   <line>        ClickHouse major.minor line(s), e.g. 26.9. Default: the line
 #                 of the pinned test ClickHouse (chversion.Test in
 #                 internal/chversion/chversion.go).
 #   --platform    os-arch to fetch for (default: $CHTYPES_TARGET, else this
 #                 host), e.g. linux-amd64 for a container from a Mac.
 #   --cache       cache directory (default: $CHTYPES_CACHE, else
-#                 ~/.cache/chtypes/v1; see `chtypes where`).
+#                 per-user cache; see --where).
 #   --offline     no network: succeed only if the cache holds a build.
 #   --prune       then delete every other build of the platform from the
 #                 cache, so it holds exactly what this run fetched (needs jq).
 #   --print-line  print the default line and exit.
+#   --where       print the cache root the SDK would use (`chtypes where`,
+#                 honouring --cache) and exit.
 #   --resolve     print the default line's current manifest digest for the
 #                 platform, from the registry's index, and exit (needs curl
 #                 and jq). Unverified: a cache key, never a trust decision.
@@ -36,7 +38,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PIN_FILE="$REPO_ROOT/internal/chversion/chversion.go"
 DEFAULT_BASE="https://registry.wavehouse.dev/chtypes/v1"
-USAGE="Usage: $0 [<line> ...] [--platform <os-arch>] [--cache <dir>] [--offline] [--prune] | --print-line | --resolve"
+USAGE="Usage: $0 [<line> ...] [--platform <os-arch>] [--cache <dir>] [--offline] [--prune] | --print-line | --where | --resolve"
 
 die() {
 	printf '%s%s%s\n' "${RED}" "$*" "${RESET}" >&2
@@ -79,6 +81,10 @@ while [ $# -gt 0 ]; do
 		mode=print-line
 		shift
 		;;
+	--where)
+		mode=where
+		shift
+		;;
 	--resolve)
 		mode=resolve
 		shift
@@ -102,6 +108,14 @@ if [ "$mode" = print-line ]; then
 fi
 [ -n "$platform" ] || platform="${CHTYPES_TARGET:-}"
 [ -n "$platform" ] || platform="$(go env GOOS)-$(go env GOARCH)"
+
+if [ "$mode" = where ]; then
+	cd "$REPO_ROOT"
+	if [ -n "$cache" ]; then
+		exec go run github.com/wave-rf/chtypes/go/cmd/chtypes where --cache "$cache"
+	fi
+	exec go run github.com/wave-rf/chtypes/go/cmd/chtypes where
+fi
 
 if [ "$mode" = resolve ]; then
 	# The OCI distribution path of the first base: https://host/repo becomes

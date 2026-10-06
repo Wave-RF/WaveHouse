@@ -32,7 +32,7 @@ const probeTenant tenant.ID = "typelayertest-probe"
 
 // SkipWithoutArtifact makes sure the chtypes artifact for TestServerVersion's
 // line is installed for this host, fetching it into the per-user cache
-// (~/.cache/chtypes/v1, or $CHTYPES_CACHE) on a miss, and skips t when it
+// (the SDK default, or $CHTYPES_CACHE) on a miss, and skips t when it
 // cannot — or fails it under WAVEHOUSE_TEST_REQUIRE_CHTYPES=1. It opens the
 // line's library the way a UTC tenant's first bind does, so the process's
 // image zone is UTC from then on. A test that boots an API process with
