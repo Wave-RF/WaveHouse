@@ -61,18 +61,26 @@ func noPersistence(hc *container.HostConfig) {
 func startContainer(t *testing.T, req testcontainers.ContainerRequest, port string) (testcontainers.Container, string) {
 	t.Helper()
 	ctx := context.Background()
-	if req.HostConfigModifier == nil {
-		req.HostConfigModifier = noPersistence
-	}
-	req.WaitingFor = wait.ForListeningPort(port).WithStartupTimeout(90 * time.Second)
-	ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{ContainerRequest: req, Started: true})
-	testcontainers.CleanupContainer(t, ctr)
+	ctr, err := runContainer(ctx, t, req, port)
 	require.NoError(t, err)
 	host, err := ctr.Host(ctx)
 	require.NoError(t, err)
 	mapped, err := ctr.MappedPort(ctx, port)
 	require.NoError(t, err)
 	return ctr, net.JoinHostPort(host, mapped.Port())
+}
+
+// runContainer starts req and waits for port to listen, leaving a failed
+// start to its caller.
+func runContainer(ctx context.Context, t *testing.T, req testcontainers.ContainerRequest, port string) (testcontainers.Container, error) {
+	t.Helper()
+	if req.HostConfigModifier == nil {
+		req.HostConfigModifier = noPersistence
+	}
+	req.WaitingFor = wait.ForListeningPort(port).WithStartupTimeout(90 * time.Second)
+	ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{ContainerRequest: req, Started: true})
+	testcontainers.CleanupContainer(t, ctr)
+	return ctr, err
 }
 
 func startStandalone(t *testing.T, image string, cmd ...string) *server {
@@ -104,23 +112,44 @@ func startDragonfly(t *testing.T) *server {
 // MOVED. The node announces 127.0.0.1 on a host port bound to the same
 // number, so the address the client learns from CLUSTER SLOTS is dialable
 // from the test.
+//
+// The host port is the test's pick, and the host may refuse to publish it:
+// Docker Desktop refuses the ports Windows has reserved, which lie in the
+// range freePort draws from (about one pick in twenty on the machine this
+// was seen on), and any host refuses one taken since freePort let it go. A
+// refused pick is answered with another.
 func startCluster(t *testing.T) *server {
 	t.Helper()
-	port := freePort(t)
-	p := network.MustParsePort(port + "/tcp")
-	ctr, _ := startContainer(t, testcontainers.ContainerRequest{
-		Image: redisImage,
-		Cmd: []string{
-			"redis-server", "--port", port, "--cluster-enabled", "yes", "--cluster-port", "16379",
-			"--cluster-announce-ip", "127.0.0.1", "--save", "", "--appendonly", "no",
-		},
-		ExposedPorts: []string{port + "/tcp"},
-		HostConfigModifier: func(hc *container.HostConfig) {
-			noPersistence(hc)
-			hc.PortBindings = network.PortMap{p: {{HostPort: port}}}
-		},
-	}, port+"/tcp")
-	code, out, err := ctr.Exec(context.Background(), []string{"redis-cli", "-p", port, "cluster", "addslotsrange", "0", "16383"})
+	ctx := context.Background()
+	var (
+		ctr  testcontainers.Container
+		port string
+	)
+	for attempt := 1; ; attempt++ {
+		port = freePort(t)
+		p := network.MustParsePort(port + "/tcp")
+		var err error
+		ctr, err = runContainer(ctx, t, testcontainers.ContainerRequest{
+			Image: redisImage,
+			Cmd: []string{
+				"redis-server", "--port", port, "--cluster-enabled", "yes", "--cluster-port", "16379",
+				"--cluster-announce-ip", "127.0.0.1", "--save", "", "--appendonly", "no",
+			},
+			ExposedPorts: []string{port + "/tcp"},
+			HostConfigModifier: func(hc *container.HostConfig) {
+				noPersistence(hc)
+				hc.PortBindings = network.PortMap{p: {{HostPort: port}}}
+			},
+		}, port+"/tcp")
+		if err == nil {
+			break
+		}
+		if attempt == clusterPortPicks || !portRefused(err) {
+			require.NoError(t, err)
+		}
+		t.Logf("host port %s refused, picking another: %v", port, err)
+	}
+	code, out, err := ctr.Exec(ctx, []string{"redis-cli", "-p", port, "cluster", "addslotsrange", "0", "16383"})
 	require.NoError(t, err)
 	require.Zero(t, code, "%v", out)
 	s := &server{ctr: ctr, addr: net.JoinHostPort("127.0.0.1", port), mode: cache.RedisCluster}
@@ -132,6 +161,21 @@ func startCluster(t *testing.T) *server {
 		return err
 	})
 	return s
+}
+
+// clusterPortPicks is how many host ports startCluster tries before it gives
+// up.
+const clusterPortPicks = 5
+
+// portRefused reports whether a container failed to start because the host
+// would not publish its port: reserved (Docker Desktop's "ports are not
+// available") or taken (the engine's "port is already allocated" and
+// "address already in use").
+func portRefused(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "ports are not available") ||
+		strings.Contains(msg, "port is already allocated") ||
+		strings.Contains(msg, "address already in use")
 }
 
 func freePort(t *testing.T) string {
