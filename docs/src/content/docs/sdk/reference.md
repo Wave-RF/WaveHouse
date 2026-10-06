@@ -138,7 +138,11 @@ npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 pnpm codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev server of the four settings files, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`. Codegen does not support [a nested settings directory](/deployment#the-nested-settings-directory): its `/v1/ops/*` routes admit the operator key alone, which codegen has no option to send, and it would read tenant `0`'s schema only.
+Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev server of the four settings files, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`. Over [a nested settings directory](/deployment#the-nested-settings-directory) its `/v1/ops/*` routes admit the [operator key](/api#authentication) alone (an admin-role token gets `403`), so pass it with `--operator-key <key>` and name the tenant with `--tenant <id>`; without `--tenant` the request reads tenant `0`'s schema on either shape:
+
+```bash
+npx wavehouse-codegen --url https://wh.example.com --operator-key "$WH_AUTH_OPERATOR_KEY" --tenant acme --out ./src/db.d.ts
+```
 
 **Options:**
 
@@ -147,6 +151,10 @@ Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev serve
 | `--url`, `-u` | WaveHouse base URL | `http://localhost:8080` |
 | `--out`, `-o` | Output .d.ts file path | `./wavehouse.d.ts` |
 | `--auth`, `-a` | Bearer token (if auth required) | — |
+| `--operator-key`, `-k` | Operator key, sent as `X-Operator-Key` (the credential a nested directory's `/v1/ops/*` routes admit) | — |
+| `--tenant`, `-t` | Tenant whose schema to read, sent as `?tenant=` | tenant `0` |
+
+A request carrying `--auth` or `--operator-key` does not follow a redirect: across origins `fetch` drops the bearer token and sends the operator key on to the redirect's target. Codegen stops and names that target, so point `--url` at the final address.
 
 The generated row type is the **read** shape, and computed columns are where it and the server disagree. An `EPHEMERAL` column declares a default, so codegen emits it, yet no query can ever return it — the type says readable where only the write is real. `MATERIALIZED` and `ALIAS` columns declare defaults too, so they are emitted as optional, but supplying either on `insert` is a `400` carrying ClickHouse's own code 117 (`Unknown field found while parsing JSONEachRow format: x`), and the type will not catch it. An `EPHEMERAL` value is accepted on a JSON `insert` when the role may write the column, a `DEFAULT` column reads it and no `MATERIALIZED`, `ALIAS` or other `EPHEMERAL` column does; it feeds that default and is never stored or returned. Otherwise it is a `400` with code 117, like an unknown column. Omit computed columns; the server fills them in.
 
