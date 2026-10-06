@@ -181,10 +181,11 @@ export interface ClicksRow {
 | ClickHouse Type | TypeScript Type |
 |----------------|-----------------|
 | `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Enum*`, `IPv4/6` | `string` |
-| `UInt*`, `Int*`, `Float*`, `Decimal*` | `number` — 64-bit and wider integers and `Decimal*` come back as JSON numbers, not strings, so `JSON.parse` rounds a value past 2^53 — store an id that large as a `String` column to keep every digit; a `Float*` NaN or infinity comes back as `null` from queries and pipes, and as a string (`"nan"`, `"inf"`, `"-inf"`) on a stream |
+| `UInt*`, `Int*`, `Decimal*` | `number` — 64-bit and wider integers and `Decimal*` come back as JSON numbers, not strings, so `JSON.parse` rounds a value past 2^53 — store an id that large as a `String` column to keep every digit|
+| `Float32`, `Float64`, `BFloat16` | `number \| "nan" \| "inf" \| "-inf"` — a NaN or infinity comes back as the string `"nan"`, `"inf"` or `"-inf"` from queries, pipes and streams alike, so narrow with `typeof v === "number"` before doing arithmetic; `Nullable` adds `\| null`, which stays a SQL `NULL` only |
 | `Bool` | `boolean` |
 | `Nullable(T)` | `T \| null` |
-| `Array(T)` | `T[]` |
+| `Array(T)` | `T[]` (`(T)[]` parenthesized when `T` is a union, as for floats) |
 | `Map(K, V)` | `Record<K, V>` |
 | `LowCardinality(T)` | same as `T` |
 
