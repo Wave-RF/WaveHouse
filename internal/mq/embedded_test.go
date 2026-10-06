@@ -663,6 +663,14 @@ func TestEmbeddedNATS_Publish_RestartsDeliveryOnAReopenedQueue(t *testing.T) {
 	defer cancel()
 	x := newJoinFixture(ctx, t)
 	globex := Topic{Tenant: "globex", Table: "t"}
+	// Another tenant's streams keep the streams directory occupied: after a
+	// stream is deleted the server, on a goroutine of its own, removes that
+	// directory and the account's once they are empty, and with globex's
+	// pair the only streams the reopen below would race it — a store made in
+	// a directory being removed, which the server refuses as "error creating
+	// store for stream" (nats-server 2.14.6 and 2.15.0, reported as
+	// https://github.com/nats-io/nats-server/issues/8725).
+	require.NoError(t, x.e.SetMaxBytes(ctx, "acme", testBudget))
 	// A delivery proves the pulls are live before the streams go.
 	require.NoError(t, x.e.Publish(ctx, globex, []byte("x")))
 	x.delivered(t, globex)
@@ -1062,7 +1070,10 @@ func TestEmbeddedNATS_Publish_QueueFull(t *testing.T) {
 // that is refused as a full queue, and nothing is opened for it.
 func TestEmbeddedNATS_Publish_OpensTheQueueAtTheLastBudget(t *testing.T) {
 	t.Parallel()
-	e := newTestEmbedded(t, "acme")
+	// initech's streams keep the streams directory occupied while acme's are
+	// gone, so the reopen does not race the server's removal of it (see
+	// TestEmbeddedNATS_Publish_RestartsDeliveryOnAReopenedQueue).
+	e := newTestEmbedded(t, "acme", "initech")
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
@@ -1087,7 +1098,10 @@ func TestEmbeddedNATS_Publish_OpensTheQueueAtTheLastBudget(t *testing.T) {
 // outlives the caller's cancellation.
 func TestEmbeddedNATS_ReopenOutlivesTheCallersCancellation(t *testing.T) {
 	t.Parallel()
-	e := newTestEmbedded(t, "acme")
+	// globex's streams keep the streams directory occupied while acme's are
+	// gone, so the reopen does not race the server's removal of it (see
+	// TestEmbeddedNATS_Publish_RestartsDeliveryOnAReopenedQueue).
+	e := newTestEmbedded(t, "acme", "globex")
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	cons, err := e.CreateConsumer(ctx, ConsumerConfig{Durable: "buffer", MaxAckPending: 10})
@@ -1527,6 +1541,12 @@ func TestNewEmbedded_DeletesTheStreamsAnEarlierBuildShared(t *testing.T) {
 		_, err := old.js.CreateStream(ctx, jetstream.StreamConfig{Name: name, Subjects: []string{subj}})
 		require.NoError(t, err)
 	}
+	// A stream that is no tenant's keeps the streams directory occupied once
+	// the boot below has deleted the pair, so the queue opened after it does
+	// not race the server's removal of that directory (see
+	// TestEmbeddedNATS_Publish_RestartsDeliveryOnAReopenedQueue).
+	_, err = old.js.CreateStream(ctx, jetstream.StreamConfig{Name: "KEPT", Subjects: []string{"kept"}})
+	require.NoError(t, err)
 	_, err = old.js.Publish(ctx, "ingest.events", []byte("pre-tenant"))
 	require.NoError(t, err)
 	require.NoError(t, old.Close())
