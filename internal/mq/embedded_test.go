@@ -668,7 +668,8 @@ func TestEmbeddedNATS_Publish_RestartsDeliveryOnAReopenedQueue(t *testing.T) {
 	// directory and the account's once they are empty, and with globex's
 	// pair the only streams the reopen below would race it — a store made in
 	// a directory being removed, which the server refuses as "error creating
-	// store for stream" (nats-server 2.14.6).
+	// store for stream" (nats-server 2.14.6 and 2.15.0, reported as
+	// https://github.com/nats-io/nats-server/issues/8725).
 	require.NoError(t, x.e.SetMaxBytes(ctx, "acme", testBudget))
 	// A delivery proves the pulls are live before the streams go.
 	require.NoError(t, x.e.Publish(ctx, globex, []byte("x")))
