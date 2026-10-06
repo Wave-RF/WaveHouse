@@ -473,7 +473,6 @@ func TestImage_DerivedFromTheFirstTenantServed(t *testing.T) {
 		"TestImageUnset_RefusedZoneCommitsNothing",
 		"TestImageUnset_FailedArtifactOpenCommitsNothing",
 		"TestImageUnset_FailedFetchCommitsNothing",
-		"TestImageUnset_WrongLineCommitsNothing",
 		"TestImageUnset_ConcurrentFirstBindsCommitOnce",
 	} {
 		t.Run(test, func(t *testing.T) {
@@ -628,31 +627,6 @@ func TestImageUnset_FailedFetchCommitsNothing(t *testing.T) {
 	eng.Bind("utc", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
 	require.Equal(t, "UTC", imageZone())
 	answers(t, eng, "utc")
-}
-
-// TestImageUnset_WrongLineCommitsNothing: a first open that chtypes answers
-// with another line's library (Wave-RF/chtypes#481) is refused and commits no
-// image zone, though that library's load latched chtypes' setup, so only a
-// tenant in its zone is served next.
-func TestImageUnset_WrongLineCommitsNothing(t *testing.T) {
-	eng := unsetImage(t)
-	wrong, err := NewEngine(Config{CacheDir: t.TempDir(), AutoFetch: true, Bases: []string{"file://" + t.TempDir()}})
-	require.NoError(t, err)
-	t.Cleanup(wrong.Close)
-	answerWith(wrong, eng, testLine)
-	wrong.Bind("lower", "26.3.38.2", "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
-	u := unavailable(t, wrong, "lower")
-	assert.Contains(t, u.Cause, "a request for ClickHouse 26.3 with its "+testLine+".")
-	assert.Contains(t, u.Cause, "Wave-RF/chtypes#481")
-	require.Empty(t, imageZone())
-
-	eng.Bind("utc", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
-	u = unavailable(t, eng, "utc")
-	assert.Contains(t, u.Cause, `"UTC", which chtypes refused as this process's image zone`)
-
-	eng.Bind("tokyo", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
-	require.Equal(t, "Asia/Tokyo", imageZone())
-	answers(t, eng, "tokyo")
 }
 
 // TestImageUnset_ConcurrentFirstBindsCommitOnce: first binds racing commit the

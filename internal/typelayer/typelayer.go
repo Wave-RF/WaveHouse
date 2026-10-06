@@ -71,9 +71,7 @@ type Config struct {
 	CacheDir string
 	// AutoFetch fetches a line no layout holds, at its first Bind, into the
 	// cache. Off, that line is its tenants' Unavailable, and NewEngine refuses
-	// a host with no artifact at all. Until chtypes 1.0.4, processes
-	// installing one build into a shared cache at once can break each other's
-	// install (Wave-RF/chtypes#482), so a shared cache wants a prefetch.
+	// a host with no artifact at all.
 	AutoFetch bool
 	// Bases are the registries and mirrors a fetch tries, in order; nil means
 	// $CHTYPES_ARTIFACTS_URL, else chtypes' own registry.

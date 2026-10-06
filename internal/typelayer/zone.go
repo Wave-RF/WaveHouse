@@ -45,8 +45,7 @@ var image struct {
 // openLine resolves the library for serverVersion's line. A non-empty cause is
 // why the tenant cannot be served: a zone name WaveHouse does not recognise,
 // no loadable artifact for the line (the SDK's own message, with its
-// CHTYPES_ARTIFACT_* code), a fetch that failed (fetchCause), a library from
-// another line (wrongLine), or a first open that fails in the zone (see
+// CHTYPES_ARTIFACT_* code), a fetch that failed (fetchCause), or a first open that fails in the zone (see
 // openFirst). Only the first open asks chtypes about the zone: once an image
 // zone is committed, a tenant in a zone chtypes cannot load gets no cause
 // here, and chtypes refuses each of its calls instead (see knownZone). A
@@ -73,9 +72,6 @@ func (e *Engine) openLine(serverVersion, tz string) (*chtypes.Library, string) {
 			return nil, fetchCause(line, err)
 		}
 		return nil, err.Error()
-	}
-	if cause := wrongLine(line, lib); cause != "" {
-		return nil, cause
 	}
 	e.libs.Store(line, lib)
 	return lib, ""
@@ -117,30 +113,10 @@ func (e *Engine) openFirst(line, tz string) (lib *chtypes.Library, cause string,
 		return nil, fmt.Sprintf("ClickHouse reports server timezone %q, and chtypes could not open a library in it: %s",
 			tz, err), true
 	}
-	if cause := wrongLine(line, lib); cause != "" {
-		// Not served, so not committed here, though that library's load has
-		// locked chtypes' setup to tz: only a tenant in tz is served next.
-		return nil, cause, true
-	}
 	image.zone = tz
 	e.libs.Store(line, lib)
 	slog.Info("chtypes image zone committed", "zone", tz)
 	return lib, "", true
-}
-
-// wrongLine is why lib cannot answer line, "" when the line it was built for
-// (its build_info's clickhouse_minor) is line. chtypes Go 1.0.0 to 1.0.3
-// answer a request for a line the cache holds no install of with a higher
-// line's library when the cache holds one, reporting only a warning
-// (Wave-RF/chtypes#481, to be fixed in 1.0.4). Served, that library would
-// judge the tenant by another ClickHouse version, so it fails closed.
-func wrongLine(line string, lib *chtypes.Library) string {
-	if lib.Minor == line {
-		return ""
-	}
-	return fmt.Sprintf("chtypes answered a request for ClickHouse %s with its %s library (built for %s), which would "+
-		"judge this tenant by another ClickHouse version, so it is refused: chtypes 1.0.3 does this when the cache "+
-		"holds no %s build but a higher line's (Wave-RF/chtypes#481)", line, lib.Version, lib.Minor, line)
 }
 
 // fetchCause is the cause when the open of a line that was not installed
