@@ -41,8 +41,8 @@ var compileSettings = map[string]string{
 // filters compiled over it, and its columns as the compiler declared them.
 // Calls on one handle run concurrently and Close waits for the calls inside
 // it, so nothing here takes a lock around a call. One handle per table shape is
-// shared by all requests; one shared handle scales less than a handle per
-// goroutine (Wave-RF/chtypes#480, fixed upstream, not in a production build).
+// shared by all requests; since library build 20261006.170903 that scales
+// about as well as a handle per goroutine (Wave-RF/chtypes#480).
 type compiled struct {
 	schema  *chtypes.Schema
 	filters *filterCache
