@@ -28,9 +28,7 @@ import (
 // The image zone is the server zone of the first tenant chtypes serves, so a
 // single-zone deployment is exact. A tenant that cannot be served commits
 // nothing (a zone name not recognised, no artifact for its line, or a first
-// open that fails), so the next servable tenant sets the zone (after an
-// artifact that does not load or a fetch that fails, only one in that open's
-// zone). Every other tenant's calls carry its server zone as
+// open that fails), so the next servable tenant sets the zone. Every other tenant's calls carry its server zone as
 // session_timezone, the same zone on a filter's create as on every parse it
 // is evaluated against (Table.zoneOpts): chtypes declines a batch whose
 // filter was created in another zone. What session_timezone does not reach is an expression over a
@@ -87,16 +85,13 @@ func (e *Engine) openLine(serverVersion, tz string) (*chtypes.Library, string) {
 // one is). The zone is committed only once a library has opened under it.
 // With autofetch off, a tenant with no installed artifact on this platform for
 // its line never reaches Setup, and an open that fails leaves the image
-// uncommitted, the tenant unavailable. chtypes clears the setup when its
-// library refuses the zone, but keeps it when the artifact does not load, so
-// Setup then refuses every other zone until a tenant in the held one is served
-// (Wave-RF/chtypes#468). That refusal fails closed: opening anyway would load
-// the library in the held zone.
+// uncommitted, the tenant unavailable. chtypes 1.0.3 unlocks Setup after any
+// open that fails before the library loads (the artifact, the fetch or the
+// zone), so the next servable tenant sets its own zone. If Setup ever refuses,
+// that fails closed: opening anyway would load the library in the held zone.
 //
 // With autofetch on, a missing line is fetched by the open itself, after
-// Setup: chtypes has no call that installs without opening, and an open loads
-// under whatever setup is recorded. So a first open whose fetch fails keeps
-// its setup the same way, until a tenant in its zone is served.
+// Setup: chtypes has no call that installs without opening.
 func (e *Engine) openFirst(line, tz string) (lib *chtypes.Library, cause string, first bool) {
 	image.mu.Lock()
 	defer image.mu.Unlock()
@@ -124,7 +119,7 @@ func (e *Engine) openFirst(line, tz string) (lib *chtypes.Library, cause string,
 	}
 	if cause := wrongLine(line, lib); cause != "" {
 		// Not served, so not committed here, though that library's load has
-		// latched chtypes' setup to tz: only a tenant in tz is served next.
+		// locked chtypes' setup to tz: only a tenant in tz is served next.
 		return nil, cause, true
 	}
 	image.zone = tz
@@ -134,7 +129,7 @@ func (e *Engine) openFirst(line, tz string) (lib *chtypes.Library, cause string,
 }
 
 // wrongLine is why lib cannot answer line, "" when the line it was built for
-// (its build_info's clickhouse_minor) is line. chtypes Go 1.0.0 to 1.0.2
+// (its build_info's clickhouse_minor) is line. chtypes Go 1.0.0 to 1.0.3
 // answer a request for a line the cache holds no install of with a higher
 // line's library when the cache holds one, reporting only a warning
 // (Wave-RF/chtypes#481, to be fixed in 1.0.4). Served, that library would
@@ -144,7 +139,7 @@ func wrongLine(line string, lib *chtypes.Library) string {
 		return ""
 	}
 	return fmt.Sprintf("chtypes answered a request for ClickHouse %s with its %s library (built for %s), which would "+
-		"judge this tenant by another ClickHouse version, so it is refused: chtypes 1.0.2 does this when the cache "+
+		"judge this tenant by another ClickHouse version, so it is refused: chtypes 1.0.3 does this when the cache "+
 		"holds no %s build but a higher line's (Wave-RF/chtypes#481)", line, lib.Version, lib.Minor, line)
 }
 

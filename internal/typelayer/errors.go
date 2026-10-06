@@ -17,9 +17,7 @@ import (
 // a server zone WaveHouse does not recognise or chtypes cannot load, a table
 // that did not compile, or a table whose zone-less DateTime expressions this
 // process cannot compute in its server's zone (that table alone) leaves every
-// other tenant answering. The one exception is a first open whose artifact
-// does not load or does not fetch: chtypes then refuses every tenant in
-// another zone until one in that open's zone is served (see openFirst). A zone chtypes cannot load is a cause only at the
+// other tenant answering. A zone chtypes cannot load is a cause only at the
 // first open: a tenant bound in one after that is not Unavailable, and
 // chtypes refuses each of its calls instead (see knownZone).
 type Unavailable struct {

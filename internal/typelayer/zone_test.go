@@ -472,7 +472,7 @@ func TestImage_DerivedFromTheFirstTenantServed(t *testing.T) {
 		"TestImageUnset_UnknownZoneCommitsNothing",
 		"TestImageUnset_RefusedZoneCommitsNothing",
 		"TestImageUnset_FailedArtifactOpenCommitsNothing",
-		"TestImageUnset_FailedFetchHoldsItsZone",
+		"TestImageUnset_FailedFetchCommitsNothing",
 		"TestImageUnset_WrongLineCommitsNothing",
 		"TestImageUnset_ConcurrentFirstBindsCommitOnce",
 	} {
@@ -589,12 +589,9 @@ func TestImageUnset_RefusedZoneCommitsNothing(t *testing.T) {
 }
 
 // TestImageUnset_FailedArtifactOpenCommitsNothing: a first open whose artifact
-// does not load keeps the artifact's own cause and commits nothing. Unlike a
-// zone chtypes cannot load, chtypes keeps this open's setup, so a tenant in
-// another zone gets Setup's refusal, which names the held zone, and one in
-// that zone sets it. This flips when Wave-RF/chtypes#468 ships: chtypes then
-// clears the setup after a failed first open, so the UTC tenant is served and
-// sets the image zone. Update the test with the chtypes bump that brings it.
+// does not load keeps the artifact's own cause and commits nothing. chtypes
+// 1.0.3 unlocks Setup after that failure, so the next tenant, in any zone, is
+// served and sets the image zone.
 func TestImageUnset_FailedArtifactOpenCommitsNothing(t *testing.T) {
 	eng := unsetImage(t)
 	broken, err := NewEngine(Config{CacheDir: corruptCopy(t)})
@@ -607,23 +604,14 @@ func TestImageUnset_FailedArtifactOpenCommitsNothing(t *testing.T) {
 	require.Empty(t, imageZone())
 
 	eng.Bind("utc", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
-	u = unavailable(t, eng, "utc")
-	assert.Empty(t, u.Table, "the cause covers every table of the tenant")
-	assert.Contains(t, u.Cause, `"UTC", which chtypes refused as this process's image zone`)
-	assert.Contains(t, u.Cause, `"Asia/Tokyo"`)
-	require.Empty(t, imageZone())
-
-	eng.Bind("tokyo", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
-	require.Equal(t, "Asia/Tokyo", imageZone())
-	answers(t, eng, "tokyo")
+	require.Equal(t, "UTC", imageZone())
+	answers(t, eng, "utc")
 }
 
-// TestImageUnset_FailedFetchHoldsItsZone: a first open that has to fetch does
-// so after Setup, since chtypes cannot install without opening, so a fetch that
-// fails keeps that open's setup as a failed load does: a tenant in another zone
-// gets Setup's refusal, and one in the held zone sets it. This flips with
-// Wave-RF/chtypes#468 if its fix covers an open that fails before loading.
-func TestImageUnset_FailedFetchHoldsItsZone(t *testing.T) {
+// TestImageUnset_FailedFetchCommitsNothing: a first open that has to fetch does
+// so after Setup, and chtypes 1.0.3 unlocks Setup when the fetch fails, so the
+// next tenant, in any zone, is served and sets the image zone.
+func TestImageUnset_FailedFetchCommitsNothing(t *testing.T) {
 	eng := unsetImage(t)
 	unpublished, err := NewEngine(Config{CacheDir: t.TempDir(), AutoFetch: true, Bases: []string{"file://" + t.TempDir()}})
 	require.NoError(t, err)
@@ -638,13 +626,8 @@ func TestImageUnset_FailedFetchHoldsItsZone(t *testing.T) {
 	require.Empty(t, imageZone())
 
 	eng.Bind("utc", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
-	u = unavailable(t, eng, "utc")
-	assert.Contains(t, u.Cause, `"UTC", which chtypes refused as this process's image zone`)
-	assert.Contains(t, u.Cause, `"Asia/Tokyo"`)
-
-	eng.Bind("tokyo", testServerVersion, "Asia/Tokyo", []*discovery.TableSchema{eventsTable()})
-	require.Equal(t, "Asia/Tokyo", imageZone())
-	answers(t, eng, "tokyo")
+	require.Equal(t, "UTC", imageZone())
+	answers(t, eng, "utc")
 }
 
 // TestImageUnset_WrongLineCommitsNothing: a first open that chtypes answers
