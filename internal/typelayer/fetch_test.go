@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -106,20 +107,19 @@ func TestNewEngine_UnwritableCacheWarns(t *testing.T) {
 }
 
 // TestNewEngine_UnreadableDefaultCacheRefuses: the cache $CHTYPES_CACHE names
-// is checked as an explicit one is, once it exists: the SDK would skip a
-// record it cannot read and serve, or fetch, around it.
+// is checked in strict mode as an explicit one is: the SDK's default mode would
+// skip a record it cannot read and serve, or fetch, around it.
 func TestNewEngine_UnreadableDefaultCacheRefuses(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a mode-000 directory")
 	}
 	dir := t.TempDir()
-	entry := filepath.Join(dir, "unpacked", "sha256", "0123")
+	entry := filepath.Join(dir, "unpacked", "sha256", strings.Repeat("ab", 32))
 	require.NoError(t, os.MkdirAll(entry, 0o750))
 	require.NoError(t, os.Chmod(entry, 0o000))
 	t.Cleanup(func() { _ = os.Chmod(entry, 0o750) }) //nolint:gosec // G302: restoring a test directory for its removal
 	t.Setenv("CHTYPES_CACHE", dir)
 
 	_, err := NewEngine(Config{AutoFetch: true})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot read the artifact directory "+dir)
+	requireCacheUnusable(t, err, entry, "unreadable_entry")
 }

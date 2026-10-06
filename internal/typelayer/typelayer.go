@@ -17,7 +17,6 @@ package typelayer
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -140,33 +139,43 @@ type tenantSet struct {
 	tables map[string]*Table
 }
 
-// NewEngine opens the registry, which reads the fetch layer's install records
-// and opens no library. It fails when the cache directory cannot be read or is
-// a chtypes 0.x registry (a CacheDir that does not exist is a typo), when a
+// NewEngine opens the registry in chtypes' strict cache mode, which reads the
+// fetch layer's install records and opens no library. Strict mode makes every
+// fault of the cache or of an existing system layout (a directory or install
+// record this user cannot read, a chtypes 0.x registry directory, a record
+// nothing can re-verify) an error satisfying errors.Is(err,
+// chtypes.ErrCacheUnusable), naming the path and reason, instead of a warning
+// and a fall-through to a system layout; NewEngine returns it, so the process
+// does not boot on a cache it cannot trust. It also fails when an explicitly
+// named CacheDir does not exist (strict mode reads a missing directory as an
+// empty cache, which is right for the default path but a typo here), when a
 // base is not a URL, or, with AutoFetch off, when no layout searched holds an
 // artifact for this host, naming the layouts it looked in. With AutoFetch on,
 // a cache this process cannot write is a warning: a line it holds still binds,
-// and a fetch into it fails at that line's first Bind. Anything an artifact
-// itself can be wrong about — a missing line, a refused ABI, a truncated
-// library — surfaces at the first Bind for that line, as that tenant's
-// Unavailable.
+// and a fetch into it fails at that line's first Bind, as that tenant's
+// Unavailable (chtypes reports a failed write under the cache as
+// CHTYPES_CACHE_UNUSABLE, reason unwritable, in every mode). Anything an
+// artifact itself can be wrong about — a missing line, a refused ABI, a
+// truncated library — surfaces at the first Bind for that line, as that
+// tenant's Unavailable.
 //
 // WithPreload is deliberately not used: it opens a library at construction,
 // and the process's image zone must come from a server's own zone, which only
 // discovery knows (see openLine).
 func NewEngine(cfg Config) (*Engine, error) {
 	root := cacheRoot(cfg.CacheDir)
-	if _, err := os.Stat(root); cfg.CacheDir != "" || err == nil {
-		if err := checkLayout(root); err != nil {
-			return nil, err
+	if cfg.CacheDir != "" {
+		if _, err := os.Stat(root); err != nil {
+			return nil, fmt.Errorf("chtypes: cannot read the artifact directory %s: %w", root, err)
 		}
 	}
+	strict := true
 	reg, err := chtypes.NewRegistry(chtypes.WithAutoFetch(cfg.AutoFetch),
-		chtypes.WithFetchOptions(chtypes.FetchOptions{CacheDir: cfg.CacheDir, Bases: cfg.Bases}))
+		chtypes.WithFetchOptions(chtypes.FetchOptions{CacheDir: cfg.CacheDir, Bases: cfg.Bases, StrictCache: &strict}))
 	if err != nil {
 		return nil, err
 	}
-	installed, err := reg.Installed() // also refuses a base that is not a URL
+	installed, err := reg.Installed() // strict mode's cache check; also refuses a base that is not a URL
 	if err != nil {
 		return nil, err
 	}
@@ -206,50 +215,6 @@ func probeWritable(dir string) error {
 	}
 	_ = f.Close()
 	return os.Remove(f.Name())
-}
-
-// checkLayout refuses a cache directory that cannot be read, or that holds a
-// chtypes 0.x registry (<line>/manifest.json) and no v1 layout: a 0.x
-// artifact never loads under v1, and an empty answer would hide why. Reading
-// covers each install record in it, whether or not oci-layout exists: the SDK
-// skips one it cannot read, so a cache mounted without read access for this
-// user would boot on the system layouts alone. A readable layout with nothing
-// for this platform is not refused, since the system layouts are searched
-// after it and autofetch may fill it. Wave-RF/chtypes#486 (a strict cache
-// mode, and records readable across users) would let this go.
-func checkLayout(dir string) error {
-	unreadable := func(err error) error {
-		return fmt.Errorf("chtypes: cannot read the artifact directory %s: %w", dir, err)
-	}
-	if _, err := os.ReadDir(dir); err != nil {
-		return unreadable(err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "oci-layout")); errors.Is(err, os.ErrNotExist) {
-		if v0, _ := filepath.Glob(filepath.Join(dir, "*", "manifest.json")); len(v0) > 0 {
-			return fmt.Errorf("chtypes: %s is a chtypes 0.x registry directory; chtypes v1 reads an OCI layout "+
-				"(fetch the artifact with the v1 chtypes CLI, which writes one)", dir)
-		}
-	} else if err != nil {
-		return unreadable(err)
-	}
-	root := filepath.Join(dir, "unpacked", "sha256")
-	entries, err := os.ReadDir(root)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return unreadable(err)
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		// A pre-seeded entry has no record yet; anything else is unreadable.
-		f, err := os.Open(filepath.Join(root, e.Name(), "verified.json")) //nolint:gosec // G304: the SDK's own install record
-		if err == nil {
-			_ = f.Close()
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return unreadable(err)
-		}
-	}
-	return nil
 }
 
 // cacheRoot is the cache layout the SDK reads for dir, in its own precedence.

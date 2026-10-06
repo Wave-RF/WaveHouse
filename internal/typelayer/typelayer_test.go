@@ -471,19 +471,23 @@ func TestNewEngine_OpensNoLibraryAtConstruction(t *testing.T) {
 	assert.Contains(t, err.Error(), "[CHTYPES_ARTIFACT_", "with the SDK's artifact code")
 }
 
-// TestNewEngine_UnreadableDirectoryFailsAtConstruction: a directory somebody
-// named and that does not exist is a typo, reported at boot.
-func TestNewEngine_UnreadableDirectoryFailsAtConstruction(t *testing.T) {
-	t.Parallel()
-	_, err := NewEngine(Config{CacheDir: filepath.Join(t.TempDir(), "nosuch")})
+// requireCacheUnusable asserts err is chtypes' CHTYPES_CACHE_UNUSABLE for
+// wantPath with wantReason, the error strict cache mode raises.
+func requireCacheUnusable(t *testing.T, err error, wantPath, wantReason string) {
+	t.Helper()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "nosuch")
+	require.ErrorIs(t, err, chtypes.ErrCacheUnusable)
+	var ae *chtypes.ArtifactError
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, wantPath, ae.Path)
+	assert.Equal(t, wantReason, ae.Reason)
+	assert.Contains(t, err.Error(), wantPath)
 }
 
-// TestNewEngine_UnlistableDirectoryFailsAtConstruction: an explicit directory
-// this user cannot list refuses boot, naming it, rather than leaving the
-// system layouts to serve alone.
-func TestNewEngine_UnlistableDirectoryFailsAtConstruction(t *testing.T) {
+// TestNewEngine_StrictRefusesUnlistableDirectory: an explicit directory this
+// user cannot list refuses boot as CHTYPES_CACHE_UNUSABLE, naming it, rather
+// than leaving the system layouts to serve alone.
+func TestNewEngine_StrictRefusesUnlistableDirectory(t *testing.T) {
 	t.Parallel()
 	if os.Geteuid() == 0 {
 		t.Skip("root lists a mode-000 directory")
@@ -492,51 +496,88 @@ func TestNewEngine_UnlistableDirectoryFailsAtConstruction(t *testing.T) {
 	require.NoError(t, os.Mkdir(dir, 0o000))
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: restoring a test directory for its removal
 	_, err := NewEngine(Config{CacheDir: dir})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot read the artifact directory "+dir)
+	requireCacheUnusable(t, err, dir, "unreadable_root")
 }
 
-// TestCheckLayout_UnreadableInstallRecordRefuses: the SDK skips an install
-// record it cannot read, so checkLayout refuses one. A readable layout with no
-// install, or with a pre-seeded entry that has no record yet, is not refused:
-// the system layouts are searched after it.
-func TestCheckLayout_UnreadableInstallRecordRefuses(t *testing.T) {
-	t.Parallel()
+// TestNewEngine_StrictRefusesUnreadableInstallRecord: the SDK's default mode
+// skips an install record it cannot read, so the cache would boot on the system
+// layouts alone; strict mode refuses it. The layout is built around the real
+// artifact's own install record. A readable layout with nothing for this
+// platform, or a pre-seeded entry with no record yet, is not refused.
+func TestNewEngine_StrictRefusesUnreadableInstallRecord(t *testing.T) {
 	if os.Geteuid() == 0 {
-		t.Skip("root reads a mode-000 directory")
+		t.Skip("root reads a mode-000 file")
 	}
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "oci-layout"), []byte(`{"imageLayoutVersion":"1.0.0"}`), 0o600))
-	require.NoError(t, checkLayout(dir), "an empty layout")
-	entry := filepath.Join(dir, "unpacked", "sha256", "0123")
-	require.NoError(t, os.MkdirAll(entry, 0o750))
-	require.NoError(t, checkLayout(dir), "a pre-seeded entry")
-	require.NoError(t, os.WriteFile(filepath.Join(entry, "verified.json"), []byte(`{}`), 0o600))
-	require.NoError(t, checkLayout(dir), "a readable record")
+	dir := corruptLayout(t)
+	entries, err := os.ReadDir(filepath.Join(dir, "unpacked", "sha256"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	entry := filepath.Join(dir, "unpacked", "sha256", entries[0].Name())
 
-	require.NoError(t, os.Chmod(entry, 0o000))
-	t.Cleanup(func() { _ = os.Chmod(entry, 0o750) }) //nolint:gosec // G302: restoring a test directory for its removal
-	err := checkLayout(dir)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot read the artifact directory "+dir)
+	eng, err := NewEngine(Config{CacheDir: dir})
+	require.NoError(t, err, "a readable record")
+	eng.Close()
 
-	// The SDK lists records without oci-layout, so the scan does not need it.
-	require.NoError(t, os.Remove(filepath.Join(dir, "oci-layout")))
-	err = checkLayout(dir)
-	require.Error(t, err, "no oci-layout")
-	assert.Contains(t, err.Error(), "cannot read the artifact directory "+dir)
+	empty := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(empty, "unpacked", "sha256", "0123"), 0o750))
+	eng, err = NewEngine(Config{CacheDir: empty, AutoFetch: true})
+	require.NoError(t, err, "a pre-seeded entry with no record yet")
+	eng.Close()
+
+	record := filepath.Join(entry, "verified.json")
+	require.NoError(t, os.Chmod(record, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(record, 0o600) })
+	_, err = NewEngine(Config{CacheDir: dir})
+	requireCacheUnusable(t, err, record, "unreadable_entry")
 }
 
-// TestNewEngine_V0RegistryIsNamedAsOne: a chtypes 0.x registry directory never
+// TestNewEngine_StrictRefusesV0Registry: a chtypes 0.x registry directory never
 // loads under v1, and an empty answer would hide why.
-func TestNewEngine_V0RegistryIsNamedAsOne(t *testing.T) {
+func TestNewEngine_StrictRefusesV0Registry(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, testLine), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, testLine, "manifest.json"), []byte(`{}`), 0o600))
 	_, err := NewEngine(Config{CacheDir: dir})
+	requireCacheUnusable(t, err, dir, "layout_0x")
+}
+
+// TestNewEngine_UnwritableCacheIsTheTenantsCause: with autofetch on, a cache
+// this process cannot write is a boot warning, not a refusal, and a line it has
+// to fetch into it is that tenant's Unavailable, carrying chtypes'
+// CHTYPES_CACHE_UNUSABLE (reason unwritable, path named).
+func TestNewEngine_UnwritableCacheIsTheTenantsCause(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes a mode-500 directory")
+	}
+	testEngine(t) // skips (or fails under WAVEHOUSE_TEST_REQUIRE_CHTYPES) without the real artifact
+	dir := filepath.Join(t.TempDir(), "ro")
+	require.NoError(t, os.Mkdir(dir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: restoring a test directory for its removal
+
+	eng, err := NewEngine(Config{CacheDir: dir, AutoFetch: true})
+	require.NoError(t, err, "an unwritable cache is a warning at boot")
+	t.Cleanup(eng.Close)
+	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
+	tbl, err := eng.Table(tenant.Default, "events")
+	if err == nil {
+		tbl.Release()
+	}
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "0.x registry")
+	require.True(t, IsUnavailable(err))
+	assert.Contains(t, err.Error(), "[CHTYPES_CACHE_UNUSABLE]")
+	assert.Contains(t, err.Error(), "unwritable")
+	assert.Contains(t, err.Error(), dir)
+}
+
+// TestNewEngine_ExplicitMissingDirectoryFailsAtConstruction: strict mode reads
+// a missing directory as an empty cache, so a typo in an explicit path is
+// WaveHouse's own check.
+func TestNewEngine_ExplicitMissingDirectoryFailsAtConstruction(t *testing.T) {
+	t.Parallel()
+	_, err := NewEngine(Config{CacheDir: filepath.Join(t.TempDir(), "nosuch"), AutoFetch: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nosuch")
 }
 
 // TestNewEngine_NoArtifactFailsAtConstruction: with autofetch off, an API

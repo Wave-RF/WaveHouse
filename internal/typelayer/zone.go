@@ -122,6 +122,9 @@ func (e *Engine) openFirst(line, tz string) (lib *chtypes.Library, cause string,
 // fetchCause is the cause when the open of a line that was not installed
 // failed and left it uninstalled: the fetch failed.
 func fetchCause(line string, err error) string {
+	if errors.Is(err, chtypes.ErrCacheUnusable) {
+		return fmt.Sprintf("chtypes cannot use its cache for ClickHouse %s (%s-%s): %s", line, runtime.GOOS, runtime.GOARCH, err)
+	}
 	return fmt.Sprintf("chtypes could not fetch the artifact for ClickHouse %s (%s-%s): %s",
 		line, runtime.GOOS, runtime.GOARCH, err)
 }
