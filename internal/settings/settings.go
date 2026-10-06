@@ -219,10 +219,10 @@ type SchemaConfig struct {
 	RefreshInterval *int `json:"refresh_interval"`
 }
 
-// StreamConfig tunes GET /v1/stream: the SSE keepalive wheel and how much
-// NATS history the Active Sweeper keeps for gap-fill. Keepalives are
-// per-deployment-proxy knobs and the gap window is a per-tenant replay
-// budget, both of which change while the server runs.
+// StreamConfig tunes GET /v1/stream: the tenant's SSE keepalive wheel and how
+// much NATS history the Active Sweeper keeps for its gap-fill. Keepalives are
+// set to the proxy in front of the tenant's streams and the gap window is its
+// replay budget, both of which change while the server runs.
 type StreamConfig struct {
 	// KeepaliveInterval is the effective per-connection keepalive period in
 	// seconds — the longest a quiet stream goes unwritten before a ":"

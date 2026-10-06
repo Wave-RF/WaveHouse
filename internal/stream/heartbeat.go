@@ -151,7 +151,7 @@ func (hb *Heartbeater) Len() int {
 }
 
 // Run drives the wheel until ctx is cancelled. Run it in its own goroutine for
-// the lifetime of the server.
+// as long as its subscribers are to be kept alive.
 func (hb *Heartbeater) Run(ctx context.Context) {
 	hb.mu.Lock()
 	tick := hb.tickInterval

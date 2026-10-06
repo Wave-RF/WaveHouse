@@ -89,25 +89,6 @@ func defaultPolicy(tenants *settings.Registry) *policy.Policy {
 	return store.Policy()
 }
 
-// shortestKeepalive is the shape of the one keepalive wheel every tenant's
-// streams share: the stream.keepalive_* pair of the tenant with the shortest
-// keepalive_interval among those being served. The interval is an upper bound
-// on how long a quiet stream goes unwritten, so the shortest one keeps every
-// tenant's — at the cost of one tenant setting the cadence for all, which is
-// why honoring each tenant's own is tracked in #597. A flat directory's one
-// tenant gets exactly its own pair; with no tenant served the zeros fall back
-// to the wheel's defaults.
-func shortestKeepalive(tenants *settings.Registry) (period time.Duration, buckets int) {
-	for _, store := range tenants.All() {
-		// Strictly shorter, so tenants tied on the interval resolve to the
-		// first in id order rather than to map order.
-		if p, b := store.Keepalive(); period == 0 || p < period {
-			period, buckets = p, b
-		}
-	}
-	return period, buckets
-}
-
 // gapWindows is the history the sweeper keeps for each tenant: its own
 // stream.gap_window_minutes, since each tenant's events have a queue of their
 // own — for a rejected tenant, the window its folder last had, because a
@@ -370,8 +351,8 @@ func (a *App) discoverySource(id tenant.ID) discovery.Source {
 }
 
 // The store-keyed getters the handlers take: each resolves the request
-// tenant's pool or registry per call, so a reload that repoints the tenant
-// applies to the next request.
+// tenant's pool, registry or keepalive wheel per call, so a reload that
+// repoints the tenant applies to the next request.
 
 func (a *App) chConnFor(s *settings.Store) driver.Conn { return a.chConn(s.Tenant()) }
 
@@ -379,6 +360,10 @@ func (a *App) chTargetFor(s *settings.Store) chconn.Target { return a.pools.Targ
 
 func (a *App) registryFor(s *settings.Store) *discovery.SchemaRegistry {
 	return a.discoveries.For(s.Tenant())
+}
+
+func (a *App) keepaliveFor(s *settings.Store) *stream.Heartbeater {
+	return a.keepalives.For(s.Tenant())
 }
 
 // queryTimeout is the tenant's deadline for a call on the query paths, a
@@ -764,10 +749,11 @@ func (a *App) wireSweeper() {
 // wireStreaming builds the SSE fan-out: one metric set shared by the Hub
 // (drop counts) and the stream handler (write counts); the Hub that
 // projects/serializes each event once per (topic, role) and pushes it to
-// that role's subscribers; the MQ → Hub bridge; and the keepalive wheel.
-// After every reload the Hub ends the open streams of each tenant no longer
-// served, removed or rejected alike (Hub.Prune); the client reconnects into
-// that tenant's 404 or 503 and gap-fills once it is served again.
+// that role's subscribers; the MQ → Hub bridge; and the keepalive wheels,
+// one per served tenant. After every reload the Hub ends the open streams of
+// each tenant no longer served, removed or rejected alike (Hub.Prune); the
+// client reconnects into that tenant's 404 or 503 and gap-fills once it is
+// served again.
 func (a *App) wireStreaming() {
 	a.sseMetrics = stream.NewMetrics()
 	a.hub = stream.NewHub(perTenant(a.tenants, (*settings.Store).Policy), a.discoveries.For, a.sseMetrics)
@@ -792,16 +778,17 @@ func (a *App) wireStreaming() {
 		return nil
 	}})
 
-	// Shared keepalive wheel: one goroutine nudges idle streams so proxies
-	// don't idle-close them. Runs for the process lifetime; a reload that
-	// changes stream.keepalive_* rebuilds the ring in place under the live
-	// connections — any tenant's reload, since every tenant's streams ride
-	// the one wheel (shortestKeepalive).
-	heartbeater := stream.NewHeartbeater(shortestKeepalive(a.tenants))
-	a.tenants.AfterAdopt(func([]tenant.ID) { heartbeater.Reconfigure(shortestKeepalive(a.tenants)) })
-	a.heartbeater = heartbeater
+	// Keepalive wheels: each served tenant's own nudges its idle streams so
+	// proxies don't idle-close them, at that tenant's stream.keepalive_*
+	// (keepalives). A reload that changes a tenant's pair rebuilds that
+	// tenant's ring in place under its live connections and leaves every
+	// other tenant's wheel as it was. The wheels turn for as long as Run does.
+	k := newKeepalives(a.tenants, (*settings.Store).Keepalive)
+	a.keepalives = k
+	a.tenants.AfterAdopt(func([]tenant.ID) { k.reconcile() })
+	k.reconcile()
 	a.add(component{name: "keepalive", run: func(ctx context.Context) error {
-		heartbeater.Run(ctx)
+		k.run(ctx)
 		return nil
 	}})
 }
@@ -936,7 +923,7 @@ func (a *App) wireAuth() func(http.Handler) http.Handler {
 // triggers (these two and POST /v1/ops/settings/reload) funnel into the same
 // serialized Registry.Reload, and a rejected reload keeps the previous good
 // snapshot. They only start in Run, after New has registered every
-// AfterAdopt hook (ClickHouse reconnect, dedupe stores, keepalive wheel, open
+// AfterAdopt hook (ClickHouse reconnect, dedupe stores, keepalive wheels, open
 // streams, auth verifiers): the watcher reloads once as soon as its watch
 // exists, and that reload must already drive every hook — a hook registered
 // after the first reload could miss it.
@@ -1005,7 +992,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 
 	streamHandler := api.NewStreamHandler(a.hub, a.mq)
 	streamHandler.Metrics = a.sseMetrics
-	streamHandler.Heartbeater = a.heartbeater
+	streamHandler.Heartbeater = a.keepaliveFor
 	streamHandler.Served = a.served
 	// Closed when the API server begins shutting down, ending every open
 	// stream at once (see serve).
