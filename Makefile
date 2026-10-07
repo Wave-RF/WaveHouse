@@ -1026,7 +1026,7 @@ clean-test: ## Remove test artifacts (tmp/ — coverage data, logs, NATS state)
 .PHONY: clean-tools
 clean-tools: ## Remove installed tools and pnpm deps (.bin/, node_modules/)
 	@echo "$(YELLOW)==> Cleaning installed tools and pnpm deps...$(RESET)"
-	@rm -rf .bin/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/ docs/node_modules/
+	@rm -rf .bin/ node_modules/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/ docs/node_modules/
 
 .PHONY: clean-all
 clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + clean-tools + dev data + docker volumes
