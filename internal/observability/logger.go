@@ -8,7 +8,7 @@ import (
 	slogmulti "github.com/samber/slog-multi"
 	slogsampling "github.com/samber/slog-sampling"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
-	"go.opentelemetry.io/otel/log/global"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -74,7 +74,7 @@ func NewLogger(component string, level *slog.LevelVar, isJSON bool, otlpSampleRa
 		consoleHandler = slog.NewTextHandler(os.Stdout, opts)
 	}
 
-	otelHandler := otelslog.NewHandler(component, otelslog.WithLoggerProvider(global.GetLoggerProvider()))
+	otelHandler := otelslog.NewHandler(component, otelslog.WithLoggerProvider(otel.GetLoggerProvider()))
 
 	sampler := slogsampling.CustomSamplingOption{
 		Sampler: otlpSamplerFn(otlpSampleRate),

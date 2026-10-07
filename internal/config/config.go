@@ -172,7 +172,7 @@ type Role string
 const (
 	// RoleAPI serves the HTTP API and everything that answers it: schema
 	// discovery, the auth verifiers, the dedupe stores, and the SSE hub with
-	// its bridge off the queue and its keepalive wheel. Per process: every
+	// its bridge off the queue and its keepalive wheels. Per process: every
 	// API process runs its own.
 	RoleAPI Role = "api"
 	// RoleIngest runs the ingest worker, queue to ClickHouse. Under nats each

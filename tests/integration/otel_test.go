@@ -31,7 +31,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/log/global"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/Wave-RF/WaveHouse/internal/observability"
@@ -45,12 +44,12 @@ func guardOTelGlobals(t *testing.T) {
 	savedProp := otel.GetTextMapPropagator()
 	savedTP := otel.GetTracerProvider()
 	savedMP := otel.GetMeterProvider()
-	savedLP := global.GetLoggerProvider()
+	savedLP := otel.GetLoggerProvider()
 	t.Cleanup(func() {
 		otel.SetTextMapPropagator(savedProp)
 		otel.SetTracerProvider(savedTP)
 		otel.SetMeterProvider(savedMP)
-		global.SetLoggerProvider(savedLP)
+		otel.SetLoggerProvider(savedLP)
 	})
 }
 
@@ -320,16 +319,11 @@ func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {
 	}()
 }
 
-// TestOTel_TLSPath_TracesAndMetrics pins the https:// → TLS dial path with
-// trust supplied via OTEL_EXPORTER_OTLP_CERTIFICATE — the same custom-CA path
-// a real operator uses for a private gateway. A regression that broke the TLS
-// dial would surface as a missing count on the corresponding receiver.
-//
-// Logs are deliberately excluded: the pinned otlploggrpc exporter ignores the
-// env TLS-cert vars (upstream bug open-telemetry/opentelemetry-go#6661), so a
-// custom CA does not apply to the logs signal. Log delivery + header
-// propagation are covered by TestOTel_Headers_AppliedToAllSignals (plaintext).
-func TestOTel_TLSPath_TracesAndMetrics(t *testing.T) {
+// TestOTel_TLSPath_AllSignals pins the https:// → TLS dial path with trust
+// supplied via OTEL_EXPORTER_OTLP_CERTIFICATE — the same custom-CA path a real
+// operator uses for a private gateway. A regression that broke the TLS dial
+// would surface as a missing count on the corresponding receiver.
+func TestOTel_TLSPath_AllSignals(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLPTLS(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://"+r.Addr())
@@ -339,6 +333,7 @@ func TestOTel_TLSPath_TracesAndMetrics(t *testing.T) {
 		TracesEnabled:    true,
 		TracesSampleRate: 1.0,
 		MetricsEnabled:   true,
+		LogsEnabled:      true,
 	})
 
 	_, span := otel.Tracer("test").Start(context.Background(), "tls-op")
@@ -348,11 +343,16 @@ func TestOTel_TLSPath_TracesAndMetrics(t *testing.T) {
 	require.NoError(t, err)
 	counter.Add(context.Background(), 1)
 
+	lvl := &slog.LevelVar{}
+	lvl.Set(slog.LevelInfo)
+	observability.NewLogger("wavehouse-test", lvl, true, 1.0).Info("tls-log")
+
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer drainCancel()
 	require.NoError(t, shutdown(drainCtx))
 
 	assert.Equal(t, 1, r.SpanCount(), "TLS path must deliver the span end-to-end")
+	assert.GreaterOrEqual(t, r.LogCount(), 1, "TLS path must deliver logs end-to-end")
 	assert.GreaterOrEqual(t, r.MetricCount(), 1, "TLS path must deliver metrics end-to-end")
 }
 

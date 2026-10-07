@@ -101,7 +101,7 @@ handback() {
 # it's the hand-back's message. One retry covers a transcript not yet flushed.
 report=$(field .last_assistant_message)
 source="the final message"
-if ! printf '%s\n' "$report" | grep -qiE "$verdict_re" || ! printf '%s\n' "$report" | grep -qE "$reviewed_re"; then
+if ! grep -qiE "$verdict_re" <<<"$report" || ! grep -qE "$reviewed_re" <<<"$report"; then
   hb=""
   if [ -f "$transcript" ]; then
     hb=$(handback)

@@ -33,8 +33,9 @@
 #      `main` starts each generation cold (no restore-keys), so superseded
 #      module versions never accumulate in it.
 #   2. Go build objects, `gobuild-v3-` key family, same key inputs,
-#      partitioned by `go-cache-suffix`: the unit, integration and e2e jobs
-#      compile with different flags (-race/-cover/-coverpkg/-tags), so a
+#      partitioned per job by `go-cache-suffix`: the unit, integration and
+#      e2e jobs compile with different flags (-race/-cover/-coverpkg/-tags),
+#      and even jobs with the same flags race to save a shared key, so a
 #      shared entry would only ever be warm for whichever job saved it.
 #      `restore-keys` keeps it warm across dependency bumps — avoids
 #      setup-go's exact-key-only cache (actions/setup-go#357).
@@ -65,7 +66,7 @@ inputs:
     description: "Set up the Go toolchain + the Go module/build cache"
     default: "true"
   go-cache-suffix:
-    description: "REQUIRED when `go` is true (the default) — the action fails the job without one. Per-job Go build-cache partition, e.g. '-unit' (different jobs compile with different flags); an empty suffix yields a restore-key that prefix-matches every other flavor's entry, the cross-flavor restore the gomod-v1/gobuild-v3 split exists to avoid. A job that doesn't build Go passes `go: \"false\"` instead. The shared part of the cache is gomod-v1, which needs no suffix. The default stays empty because a composite action's `required:` isn't enforced by the runner — the guard step is."
+    description: "REQUIRED when `go` is true (the default) — the action fails the job without one. Per-job Go build-cache partition, e.g. '-unit', fresh for every job (jobs compile with different flags, and two jobs on one key race to save it); an empty suffix yields a restore-key that prefix-matches every other flavor's entry, the cross-flavor restore the gomod-v1/gobuild-v3 split exists to avoid. A job that doesn't build Go passes `go: \"false\"` instead. The shared part of the cache is gomod-v1, which needs no suffix. The default stays empty because a composite action's `required:` isn't enforced by the runner — the guard step is."
     default: ""
   golangci:
     description: "Cache the golangci-lint binary + analysis cache (lint job only)"
@@ -106,8 +107,8 @@ runs:
       run: |
         echo "::error title=setup-env::go-cache-suffix is required when go is true (the default)." \
              "An empty suffix cross-matches every other flavor's build cache." \
-             "If this job builds Go: pass a fresh suffix for new compile flags, or an" \
-             "existing flavor's if it compiles identically. If it does not build Go:" \
+             "If this job builds Go: pass a fresh suffix for this job, even if it" \
+             "compiles with another job's flags. If it does not build Go:" \
              "pass go: \"false\". See .github/workflows/README.md."
         exit 1
 
@@ -235,8 +236,7 @@ runs:
       if: ${{ inputs.go == 'true' }}
       shell: bash
       run: |
-        GOTOOLCHAIN="$(awk '/^toolchain /{t=$2} /^go /{g="go"$2} END{print (t != "") ? t : g}' go.mod)"
-        [[ "$GOTOOLCHAIN" =~ ^go[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "::error::go.mod needs a go line of the form x.y.z, got '$GOTOOLCHAIN'"; exit 1; }
+        GOTOOLCHAIN="$(scripts/ci/go-toolchain.sh)"
         echo "GOTOOLCHAIN=$GOTOOLCHAIN" >> "$GITHUB_ENV"
         GOTOOLCHAIN="$GOTOOLCHAIN" go version
 
