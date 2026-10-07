@@ -21,7 +21,10 @@ scratch=$(cd "$scratch" && pwd -P)
 # repository, and name every repository with -C.
 # shellcheck disable=SC2046 # one variable name per word
 unset $(git -C "$scratch" rev-parse --local-env-vars)
-export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+# Hiding untracked files from `git status` leaves the scripts' own
+# --untracked-files=normal as the only thing that finds them.
+printf '[status]\n\tshowUntrackedFiles = no\n' > "$scratch/gitconfig"
+export GIT_CONFIG_GLOBAL=$scratch/gitconfig GIT_CONFIG_NOSYSTEM=1
 if git -C "$scratch" rev-parse --git-dir >/dev/null 2>&1; then
   echo "remote-ci test: git resolves $scratch to an existing repository; refusing to run." >&2
   exit 1
@@ -100,11 +103,26 @@ reset() {
   echo 0 > "$scratch/make-exit"
 }
 
-# run <host> [VAR=value…]: the script under test, in the scratch repository.
-run() {
+# start <host> [VAR=value…]: the script under test, in the scratch repository,
+# in the background; $! is the script's own PID.
+start() {
   local host=$1
   shift
-  (cd "$repo" && env PATH="$scratch/bin:$PATH" "$@" scripts/ci/remote-ci.sh "$host") > "$scratch/out" 2>&1
+  (cd "$repo" && exec env PATH="$scratch/bin:$PATH" "$@" scripts/ci/remote-ci.sh "$host") > "$scratch/out" 2>&1 &
+}
+
+# run <host> [VAR=value…]: start, then wait. A run that hangs is stopped after
+# 60s, so a regression fails here instead of stalling `make verify`.
+run() {
+  local pid dog rc
+  start "$@"
+  pid=$!
+  (sleep 60 && kill -TERM "$pid") > /dev/null 2>&1 &
+  dog=$!
+  wait "$pid"
+  rc=$?
+  kill "$dog" 2> /dev/null
+  return "$rc"
 }
 
 tree() { git -C "$repo" rev-parse 'HEAD^{tree}'; }
@@ -201,6 +219,12 @@ if run devbox; then fail "a host that tested another tree exits non-zero"; fi
 expect_nothing "a tree mismatch (the host tested another tree) writes nothing" "reported testing tree" "$T"
 
 reset
+git -C "$repo" rev-parse HEAD~1 > "$scratch/wrong-commit"
+echo "echo 'ci-remote[000000000000] tree $T'" > "$scratch/during-ci"
+if run devbox; then fail "a report line forged by make's output exits non-zero"; fi
+expect_nothing "a report line forged by make's output doesn't count" "reported testing tree" "$T"
+
+reset
 echo "touch '$repo/new-file'" > "$scratch/during-ci"
 if run devbox; then fail "a worktree dirtied during the run exits non-zero"; fi
 expect_nothing "a worktree dirtied during the run writes nothing" "the worktree changed during the run" "$T"
@@ -212,27 +236,46 @@ if run devbox; then fail "make ci dirtying the host checkout exits non-zero"; fi
 expect_nothing "make ci leaving the host checkout dirty writes nothing" "make ci changed the checkout" "$T"
 
 # ── Interrupted: the host stops the run and cleans up ──
+# The host's make ci records its PID, then waits.
+hold_ci() { echo "echo \$\$ > '$scratch/ci.pid'; exec sleep 60" > "$scratch/during-ci"; }
+wait_for_ci() { for _ in $(seq 100); do [ -s "$scratch/ci.pid" ] && break; sleep 0.1; done; }
+expect_host_stopped() { # <name>
+  local pid
+  pid=$(cat "$scratch/ci.pid" 2> /dev/null)
+  for _ in $(seq 100); do
+    [ -n "$pid" ] && [ -z "$(leftover_runs)" ] && ! kill -0 "$pid" 2> /dev/null && break
+    sleep 0.1
+  done
+  if [ -n "$pid" ] && [ -z "$(leftover_runs)" ] && ! kill -0 "$pid" 2> /dev/null; then
+    ok "$1"
+  else
+    fail "$1" "${pid:-make ci never started}; left: $(leftover_runs)"
+    [ -z "$pid" ] || kill "$pid" 2> /dev/null
+  fi
+  rm -f "$scratch/ci.pid"
+}
+
 reset
-echo "echo \$\$ > '$scratch/ci.pid'; exec sleep 60" > "$scratch/during-ci"
+hold_ci
 set -m
 run devbox &
 local_side=$!
 set +m
-for _ in $(seq 100); do [ -s "$scratch/ci.pid" ] && break; sleep 0.1; done
-kill -TERM -- "-$local_side" 2> /dev/null
+wait_for_ci
+kill -TERM -- "-$local_side" 2> /dev/null # what Ctrl-C does: the whole local process group
 wait "$local_side" 2> /dev/null
-for _ in $(seq 100); do
-  [ -z "$(leftover_runs)" ] && ! kill -0 "$(cat "$scratch/ci.pid")" 2> /dev/null && break
-  sleep 0.1
-done
-if [ -s "$scratch/ci.pid" ] && ! kill -0 "$(cat "$scratch/ci.pid")" 2> /dev/null && [ -z "$(leftover_runs)" ]; then
-  ok "stopping the local side stops make ci on the host and removes its run directory"
-else
-  fail "stopping the local side stops make ci on the host and removes its run directory" "$(leftover_runs)"
-  kill "$(cat "$scratch/ci.pid")" 2> /dev/null
-fi
+expect_host_stopped "stopping the local process group stops make ci on the host and removes its run directory"
 expect_nothing "…and writes nothing" "make ci on devbox" "$T"
-rm -f "$scratch/ci.pid"
+
+reset
+hold_ci
+start devbox
+script=$!
+wait_for_ci
+kill -TERM "$script" # the script alone: its pipeline is left running
+wait "$script" 2> /dev/null
+expect_host_stopped "signaling only the script stops make ci on the host and removes its run directory"
+expect_nothing "…and writes nothing" "make ci on devbox" "$T"
 
 # ── Refusals: nothing reaches the host ──
 reset
@@ -258,6 +301,19 @@ else
 fi
 expect_eq "…through docker exec, in the container's own environment" "$(cat "$scratch/transport.log")" "docker exec -i wh-dev bash -s"
 expect_eq "…recording the container as the host" "$(prov host "$T")" "docker:wh-dev"
+
+# ── Two runs of one tree keep their own logs ──
+reset
+run devbox
+log_a=$(prov log "$T")
+run docker:wh-dev
+log_b=$(prov log "$T")
+if [ "$log_a" != "$log_b" ] && [ -f "$repo/$log_a" ] && [ -f "$repo/$log_b" ] \
+  && [ "$(head -n 1 "$repo/$log_a")" != "$(head -n 1 "$repo/$log_b")" ]; then
+  ok "two runs of the same tree write separate logs, and the provenance names this run's"
+else
+  fail "two runs of the same tree write separate logs, and the provenance names this run's" "$log_a"$'\n'"$log_b"
+fi
 
 # ── The pre-push hook names where make ci passed ──
 zero=0000000000000000000000000000000000000000

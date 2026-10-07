@@ -11,14 +11,15 @@
 #   REMOTE_DIR   base directory for per-run checkouts on the host; a relative
 #                path is under the host's home (default .cache/wavehouse-ci)
 #
-# The host needs bash, git, GNU make 4+, and what `make ci` itself needs: Go,
-# Node and pnpm for `make tools`, and a Docker daemon for the integration and
-# e2e suites. Over ssh the commands run in a login shell, so PATH comes from
-# the host's profile; in a container it is the container's own.
+# The host needs bash, git, GNU make 4+, curl and jq, and what `make ci` itself
+# needs: Go, Node and pnpm for `make tools`, and a Docker daemon for the
+# integration and e2e suites. Over ssh the commands run in a login shell, so
+# PATH comes from the host's profile; in a container it is the container's own.
 #
 # Nothing is pushed. HEAD travels as a git bundle on the transport's stdin and
 # is checked out in a fresh directory under REMOTE_DIR, which is removed after
-# the run unless KEEP=1. Interrupting this script stops the run on the host.
+# the run unless KEEP=1. When this script exits, however it is stopped, the
+# host stops the run within about a second.
 # The markers are written only if the host exits 0, the tree it reports having
 # tested is HEAD^{tree} here, and this worktree is still clean.
 
@@ -67,9 +68,9 @@ remote_main() {
   watcher=$!
   wait "$run"
   # A local `make ci` keys its marker on the tree it leaves behind.
-  if [ -n "$(git status --porcelain)" ]; then
+  if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
     echo "make ci changed the checkout:"
-    git status --short
+    git status --short --untracked-files=normal
     exit 1
   fi
 }
@@ -103,21 +104,24 @@ nonce=$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')
 [ -n "$nonce" ] || die "can't read /dev/urandom"
 
 bundle=$(mktemp) || die "can't create a temporary file"
-trap 'rm -f "$bundle"' EXIT
-git bundle create -q "$bundle" HEAD || die "can't bundle HEAD"
+git bundle create -q "$bundle" HEAD || { rm -f "$bundle"; die "can't bundle HEAD"; }
 size=$(($(wc -c < "$bundle")))
+# Read through fd 3 from here on, so the file is gone however the script ends.
+exec 3< "$bundle"
+rm -f "$bundle"
 
 mkdir -p tmp
-log=tmp/ci-remote-$tree.log
+log=tmp/ci-remote-$tree-$nonce.log
 printf '==> make ci on %s for %s (tree %s), log in %s\n' "$host" "${commit:0:8}" "${tree:0:8}" "$log" >&2
 started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 {
   printf 'commit=%q base=%q keep=%q nonce=%q no_color=%q size=%q\n' "$commit" "$base" "$keep" "$nonce" "${NO_COLOR:-}" "$size"
   declare -f remote_main
   echo 'remote_main; exit'
-  cat "$bundle"
-  # Hold the host's stdin open for as long as the transport runs.
-  while echo; do sleep 1; done 2> /dev/null
+  cat <&3
+  # Hold the host's stdin open while this script runs ($$ is still its PID in
+  # this subshell): a signal to the script alone leaves the transport running.
+  while kill -0 "$$" 2> /dev/null && echo; do sleep 1; done 2> /dev/null
 } | "${transport[@]}" 2>&1 | tee "$log"
 status=("${PIPESTATUS[@]}")
 finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
