@@ -17,7 +17,8 @@ updates:
       # patch exists. Only that range is held, so the fixed 1.85.0 release is
       # proposed as soon as it ships. Drop this ignore once grpc 1.85.0 is
       # tagged, or earlier if a 1.84.x release lists GO-2026-6443 as fixed.
-      # Drop all three holds in this block together then. Tracked in #643,
+      # Drop all three holds in this block together then, and the gRPC re-pin
+      # line in development.md's Updating Dependencies. Tracked in #643,
       # which stays open until they are gone.
       - dependency-name: "google.golang.org/grpc"
         versions: [">= 1.84.0, < 1.85.0"]

@@ -587,7 +587,7 @@ For a combined security scan, run `make verify` — it runs `vulncheck` alongsid
 
 Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for three update configs:
 
-- **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`. `google.golang.org/grpc` 1.84.x is held back (GO-2026-6443, no 1.84.x fix), along with the releases that require it, `go.opentelemetry.io/proto/otlp` 1.11.1 and later and `grpc-gateway/v2` 2.31.0 and later; drop the three holds together when gRPC 1.85.0 ships ([#643](https://github.com/Wave-RF/WaveHouse/issues/643))
+- **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`. `google.golang.org/grpc` 1.84.x is held back (GO-2026-6443, no 1.84.x fix), along with the releases that require it, `go.opentelemetry.io/proto/otlp` 1.11.1 and later and `grpc-gateway/v2` 2.31.0 and later; drop the three holds, and the `go get google.golang.org/grpc@v1.83.2` line under [Updating Dependencies](#updating-dependencies), together when gRPC 1.85.0 ships ([#643](https://github.com/Wave-RF/WaveHouse/issues/643))
 - **GitHub Actions** (root **and** `/.github/actions/setup-env`) — outdated action versions tracked against the SHA pins across `.github/workflows/*` and the `setup-env` composite action, commit prefix `ci:`
 - **npm — pnpm workspace** (root) — covers all three TypeScript packages (the docs site, the SDK, and the E2E tests) in one grouped PR, commit prefix `deps:`
 
