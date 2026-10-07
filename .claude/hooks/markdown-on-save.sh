@@ -14,7 +14,7 @@
 # The commit hook stays a check; this fixes early enough that it rarely fires.
 #
 # The two branches below are mutually exclusive by extension: markdownlint's
-# generic fixers never see .mdx. See scripts/fix-mdx-fences.mjs for why.
+# generic fixers never see .mdx. See scripts/fix-mdx.mjs for why.
 #
 # Safety: best-effort throughout. A missing tool, an unparseable file, or a
 # lint error that has no fix leaves the file alone and never blocks the edit.
@@ -57,11 +57,11 @@ fi
 # corrects spelling there). The generic markdownlint rules are deliberately
 # never run against MDX — markdownlint parses CommonMark, MDX
 # does not, and where the two disagree a generic autofix rewrites the inside of
-# a code block. fix-mdx-fences only ever inserts a blank line beside a JSX tag,
-# so its worst failure is a render-neutral blank line. `make lint` still CHECKS
-# .mdx; it just never acts on the disagreement. Mirrors `fix:md`.
+# a code block. fix-mdx applies only WH002's blank lines and WH001's joins, read
+# from an MDX parse, and won't write a result that changes more than whitespace
+# around prose. `make lint` still CHECKS .mdx with every rule. Mirrors `fix:md`.
 if [ "${rel##*.}" = "mdx" ]; then
-  node scripts/fix-mdx-fences.mjs "$rel" >/dev/null 2>&1 || true
+  node scripts/fix-mdx.mjs "$rel" >/dev/null 2>&1 || true
 elif [ -x node_modules/.bin/markdownlint-cli2 ]; then
   # Plain Markdown: markdownlint's parse IS authoritative, so the full fixer
   # chain is safe. `--no-globs` keeps it to this one file rather than the whole

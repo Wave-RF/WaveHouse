@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,9 +57,9 @@ func buildWavehouseBinary() {
 	if os.Getenv("GOCOVERDIR") != "" {
 		args = append(args, "-cover", "-coverpkg=./...")
 	}
-	_, file, _, _ := runtime.Caller(0)
 	cmd := exec.Command("go", append(args, "./cmd/wavehouse")...) //nolint:gosec // G204: fixed arguments
-	cmd.Dir = filepath.Join(filepath.Dir(file), "..", "..")
+	// go test runs in the package directory, two levels below the module root.
+	cmd.Dir = filepath.Join("..", "..")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		errBinary = fmt.Errorf("go build: %w\n%s", err, out)
 	}

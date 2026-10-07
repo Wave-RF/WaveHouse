@@ -22,16 +22,18 @@
   // would "fix" code that only looks like prose. .mdx IS linted, but through the
   // `**/*.mdx` glob on `lint:md` in package.json, not this file's `globs`, which
   // are .md only so that no generic pass — `fix:md` or a bare `--fix` — can
-  // reach MDX (see the globs note below). The only fixer that touches .mdx is
-  // scripts/fix-mdx-fences.mjs, which just inserts blank lines beside JSX tags.
+  // reach MDX (see the globs note below). The only structural fixer that touches
+  // .mdx is scripts/fix-mdx.mjs, which applies WH001 and WH002 and nothing else.
   //
   // customRules live here and nowhere else — the VS Code extension reads this
   // file too, so no editor-side setting is needed (markdownlint.customRules is
   // deprecated in favor of this file). Note the editor only activates on
-  // Markdown, so .mdx gets no squiggles either way. CI reports both; `make fix`
-  // repairs WH001 in .md and only WH002 in .mdx:
+  // Markdown, so .mdx gets no squiggles either way. CI reports both, and
+  // `make fix` repairs both, in .md and .mdx alike. Both read a parse tree —
+  // markdownlint's micromark tokens, plus an MDX parse for .mdx — not line shape:
   //   WH001  prose paragraphs must not be hard-wrapped   (autofix: joins them)
-  //   WH002  MDX fence adjacent to a JSX tag needs a blank line (fixed in phase 1)
+  //   WH002  MDX fence beside a JSX tag, or inside what CommonMark reads as an
+  //          HTML block, needs a blank line (fixed in phase 1, fix-mdx.mjs)
   // Both are enabled in .markdownlint.json with no path-scoped carve-out of any
   // kind — WH001 over every tracked Markdown file, exactly what CONTRIBUTING.md
   // tells contributors; WH002 over every .mdx (it returns early on .md, where
