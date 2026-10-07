@@ -47,7 +47,8 @@ git -C "$repo" add main.go
 git -C "$repo" commit -q -m code
 
 # ── Stand-ins ──
-#   bin/ssh, bin/docker  record their arguments, then run the host side
+#   bin/ssh, bin/docker  record their arguments, then run the host side in
+#                        a process group of its own, as sshd would
 #   host-bin/make        records each call with the tree of the checkout it
 #                        runs in; `make ci` exits with the code in make-exit
 #                        after running the during-ci script, if there is one
@@ -59,7 +60,10 @@ for cmd in ssh docker; do
   cat > "$scratch/bin/$cmd" << EOF
 #!/usr/bin/env bash
 echo "$cmd \$*" >> "$scratch/transport.log"
-cd "$scratch/home" && HOME="$scratch/home" PATH="$scratch/host-bin:\$PATH" exec bash -s
+cd "$scratch/home" || exit 1
+set -m
+HOME="$scratch/home" PATH="$scratch/host-bin:\$PATH" bash -s &
+wait \$!
 EOF
 done
 cat > "$scratch/host-bin/make" << EOF
@@ -206,6 +210,29 @@ reset
 echo "touch generated-file" > "$scratch/during-ci" # cwd: the host's checkout
 if run devbox; then fail "make ci dirtying the host checkout exits non-zero"; fi
 expect_nothing "make ci leaving the host checkout dirty writes nothing" "make ci changed the checkout" "$T"
+
+# ── Interrupted: the host stops the run and cleans up ──
+reset
+echo "echo \$\$ > '$scratch/ci.pid'; exec sleep 60" > "$scratch/during-ci"
+set -m
+run devbox &
+local_side=$!
+set +m
+for _ in $(seq 100); do [ -s "$scratch/ci.pid" ] && break; sleep 0.1; done
+kill -TERM -- "-$local_side" 2> /dev/null
+wait "$local_side" 2> /dev/null
+for _ in $(seq 100); do
+  [ -z "$(leftover_runs)" ] && ! kill -0 "$(cat "$scratch/ci.pid")" 2> /dev/null && break
+  sleep 0.1
+done
+if [ -s "$scratch/ci.pid" ] && ! kill -0 "$(cat "$scratch/ci.pid")" 2> /dev/null && [ -z "$(leftover_runs)" ]; then
+  ok "stopping the local side stops make ci on the host and removes its run directory"
+else
+  fail "stopping the local side stops make ci on the host and removes its run directory" "$(leftover_runs)"
+  kill "$(cat "$scratch/ci.pid")" 2> /dev/null
+fi
+expect_nothing "…and writes nothing" "make ci on devbox" "$T"
+rm -f "$scratch/ci.pid"
 
 # ── Refusals: nothing reaches the host ──
 reset

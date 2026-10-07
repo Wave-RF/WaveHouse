@@ -18,9 +18,9 @@
 #
 # Nothing is pushed. HEAD travels as a git bundle on the transport's stdin and
 # is checked out in a fresh directory under REMOTE_DIR, which is removed after
-# the run unless KEEP=1. The markers are written only if the host exits 0, the
-# tree it reports having tested is HEAD^{tree} here, and this worktree is still
-# clean.
+# the run unless KEEP=1. Interrupting this script stops the run on the host.
+# The markers are written only if the host exits 0, the tree it reports having
+# tested is HEAD^{tree} here, and this worktree is still clean.
 
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -31,30 +31,41 @@ die() {
 }
 
 # Runs on the host. bash reads a script from a pipe one byte at a time, so
-# after it reads the call below, the bundle that follows is left for `cat`.
+# after it reads the call below, the bundle that follows is left for `head`.
 # Report lines carry this run's nonce, which make's output cannot know.
 remote_main() {
   set -eu
   exec 2>&1
   say() { printf 'ci-remote[%s] %s\n' "$nonce" "$*"; }
+  # shellcheck disable=SC2329 # run by the EXIT trap
+  finish() {
+    if [ -n "${watcher:-}" ]; then kill -- "-$watcher" 2> /dev/null || true; fi
+    if [ "$keep" = 1 ]; then say "kept $dir"; else rm -rf "$dir"; fi
+  }
   case $base in
     /*) ;;
     *) base=$HOME/${base#"~/"} ;;
   esac
   mkdir -p "$base"
   dir=$(mktemp -d "$base/run.XXXXXX")
-  trap 'if [ "$keep" = 1 ]; then say "kept $dir"; else rm -rf "$dir"; fi' EXIT
+  trap finish EXIT
   say "uname $(uname -sm)"
   say "dir $dir"
-  cat > "$dir/head.bundle"
-  exec < /dev/null
+  head -c "$size" > "$dir/head.bundle"
   git clone -q --no-checkout "$dir/head.bundle" "$dir/src"
   cd "$dir/src"
   git -c advice.detachedHead=false checkout -q --detach "$commit"
   say "tree $(git rev-parse 'HEAD^{tree}')"
   if [ -n "$no_color" ]; then export NO_COLOR="$no_color"; fi
-  make tools
-  make ci
+  # Stdin stays open until the local side exits. When it closes first, nobody
+  # is waiting for the run, so stop it: job control gives it a process group
+  # of its own to signal.
+  set -m
+  { make tools && make ci; } < /dev/null &
+  run=$!
+  { cat > /dev/null; kill -TERM -- "-$run"; } > /dev/null 2>&1 &
+  watcher=$!
+  wait "$run"
   # A local `make ci` keys its marker on the tree it leaves behind.
   if [ -n "$(git status --porcelain)" ]; then
     echo "make ci changed the checkout:"
@@ -91,15 +102,22 @@ base=${REMOTE_DIR:-.cache/wavehouse-ci}
 nonce=$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')
 [ -n "$nonce" ] || die "can't read /dev/urandom"
 
+bundle=$(mktemp) || die "can't create a temporary file"
+trap 'rm -f "$bundle"' EXIT
+git bundle create -q "$bundle" HEAD || die "can't bundle HEAD"
+size=$(($(wc -c < "$bundle")))
+
 mkdir -p tmp
 log=tmp/ci-remote-$tree.log
 printf '==> make ci on %s for %s (tree %s), log in %s\n' "$host" "${commit:0:8}" "${tree:0:8}" "$log" >&2
 started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 {
-  printf 'commit=%q base=%q keep=%q nonce=%q no_color=%q\n' "$commit" "$base" "$keep" "$nonce" "${NO_COLOR:-}"
+  printf 'commit=%q base=%q keep=%q nonce=%q no_color=%q size=%q\n' "$commit" "$base" "$keep" "$nonce" "${NO_COLOR:-}" "$size"
   declare -f remote_main
-  echo remote_main
-  git bundle create -q - HEAD
+  echo 'remote_main; exit'
+  cat "$bundle"
+  # Hold the host's stdin open for as long as the transport runs.
+  while echo; do sleep 1; done 2> /dev/null
 } | "${transport[@]}" 2>&1 | tee "$log"
 status=("${PIPESTATUS[@]}")
 finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -112,7 +130,7 @@ remote_dir=$(report dir)
 tested=$(report tree)
 
 [ "${status[1]}" = 0 ] || die "make ci failed on $host (exit ${status[1]}); no marker written. Log: $log"
-[ "${status[0]}" = 0 ] && [ "${status[2]}" = 0 ] || die "the transfer or the log failed (exit ${status[*]}); no marker written."
+[ "${status[2]}" = 0 ] || die "can't write $log; no marker written."
 [ "$tested" = "$tree" ] || die "$host reported testing tree '${tested:0:8}', not ${tree:0:8}; no marker written."
 now=$(git rev-parse "HEAD^{tree}") || die "can't resolve HEAD"
 [ "$now" = "$tree" ] || die "HEAD moved to tree ${now:0:8} during the run, which tested ${tree:0:8}; no marker written. Rerun."
