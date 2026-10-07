@@ -350,7 +350,7 @@ obs-front: ## Start local OTel Front UI
 ##@ Code Quality
 
 # Dynamically find all directories containing Go files, safely ignoring hidden folders like .worktrees
-GO_DIRS := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN) go list -f '{{.Dir}}' ./...)
+GO_DIRS := $(shell GOTOOLCHAIN=$(GOTOOLCHAIN) go list -f '{{.Dir}}' ./...)
 
 # fmt / lint / fix: one Biome binary (biome.json) scans the whole workspace
 # (SDK + e2e + docs); Markdown is owned separately by markdownlint-cli2 (rules in
