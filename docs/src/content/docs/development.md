@@ -571,7 +571,7 @@ go get google.golang.org/grpc@v1.83     # Re-apply the gRPC hold (newest 1.83.x)
 go mod tidy                             # Remove unused, add missing
 ```
 
-`go get -u` ignores Dependabot's holds: until [#643](https://github.com/Wave-RF/WaveHouse/issues/643) closes it pulls `google.golang.org/grpc` 1.84.x, and `make vulncheck` fails on GO-2026-6443. The second line re-applies the hold (`@v1.83` selects the newest 1.83.x patch, the last line without GO-2026-6443), and Go steps `proto/otlp` and `grpc-gateway/v2` back down with it; run it before `go mod tidy`, or `make tidy` finds stale `go.sum` lines (see [Dependabot](#dependabot)).
+`go get -u` ignores Dependabot's holds: until [#643](https://github.com/Wave-RF/WaveHouse/issues/643) closes it pulls `google.golang.org/grpc` 1.84.x, and `make vulncheck` fails on GO-2026-6443. The second line re-applies the hold (`@v1.83` selects the newest 1.83.x patch, 1.83.2, which carries the GO-2026-6443 fix; 1.83.0 and 1.83.1 are affected), and Go steps `proto/otlp` and `grpc-gateway/v2` back down with it ([Dependabot](#dependabot) lists the same holds). Run it before `go mod tidy`, or `make tidy` finds stale `go.sum` lines.
 
 ### Vulnerability Scanning
 
