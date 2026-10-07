@@ -13,7 +13,7 @@ name: CI
 # The short version:
 #   - `changes` classifies the change set once; the test/docs jobs hang
 #     off it and skip when their inputs didn't change.
-#   - e2e (the long pole) builds its own inputs and runs the suite
+#   - e2e (a long pole) builds its own inputs and runs the suite
 #     exactly like local `make test-e2e`; the integration suite runs one
 #     job per part of `make test-integration`; each uploads a raw
 #     coverage fragment.
@@ -255,7 +255,7 @@ jobs:
         run: docker pull -q clickhouse/clickhouse-server:26.6.3.62 >/tmp/clickhouse-pull.log 2>&1 &
       # A suffix per part although the parts compile with the same flags:
       # parts sharing one key would race to save it, and the first to finish
-      # would store only its own test binaries.
+      # would store only the objects of its own test packages.
       - id: setup
         uses: ./.github/actions/setup-env
         with:
@@ -274,11 +274,12 @@ jobs:
           retention-days: 3
           overwrite: true
 
-  # The run's long pole. Builds its own inputs (SDK dist + cover binary,
-  # in parallel, on a warm cache) instead of waiting on a builder job,
-  # runs the suite exactly like local `make test-e2e` (one orchestrator,
-  # sequential files), and uploads its coverage fragment for the
-  # `coverage` job to merge + gate — symmetric with unit/integration.
+  # A long pole of the run, with the integration suite's app part. Builds
+  # its own inputs (SDK dist + cover binary, in parallel, on a warm cache)
+  # instead of waiting on a builder job, runs the suite exactly like local
+  # `make test-e2e` (one orchestrator, sequential files), and uploads its
+  # coverage fragment for the `coverage` job to merge + gate — symmetric
+  # with unit/integration.
   e2e:
     name: E2E tests
     needs: changes
@@ -330,7 +331,7 @@ jobs:
   # job's ~50s of setup onto the critical path after the last suite, for
   # nothing — the setup doesn't depend on the suites' results. Instead it
   # starts at run creation, does its setup IN PARALLEL with the suites, and
-  # blocks only at the merge, polling for the three fragments
+  # blocks only at the merge, polling for the suites' fragments
   # (scripts/ci/wait-artifact.sh) so `make cov` fires within seconds of the
   # last suite finishing. Tail on the critical path: ~10s, not ~50s.
   coverage:
@@ -338,7 +339,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    # Generous: this job starts early and idle-polls until e2e (the long
+    # Generous: this job starts early and idle-polls until e2e (a long
     # pole, itself 25-min capped) uploads. Must comfortably outwait a
     # slow-but-valid e2e that was ALSO scheduled later than this job on a
     # busy runner pool (both hang off `changes`, no inter-dependency); a

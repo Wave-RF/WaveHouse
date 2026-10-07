@@ -45,10 +45,41 @@ write pure/p_test.go integration pure TestPure
 write unit/u_test.go "" unit TestOnlyUnit
 write helpers/h_test.go integration helpers
 printf '\nfunc helper(t *testing.T) {}\n' >>helpers/h_test.go
+# Examples (tagged and not), and a test whose signature wraps.
+cat >mixed/ex_test.go <<'GO'
+//go:build integration
 
-# lists <tags> <run> <pkg>: the sorted names `go test -list` matches (none
-# where the tags leave the package nothing to build).
-lists() { go test -tags "$1" -list "$2" "./$3" 2>/dev/null | grep -E '^(Test|Fuzz)' | sort; }
+package mixed_test
+
+import (
+	"fmt"
+	"testing"
+)
+
+func Example_tagged() {
+	fmt.Println("tagged")
+	// Output: tagged
+}
+
+func TestWrapped(
+	t *testing.T,
+) {
+}
+GO
+cat >mixed/unit_ex_test.go <<'GO'
+package mixed_test
+
+import "fmt"
+
+func Example_untagged() {
+	fmt.Println("untagged")
+	// Output: untagged
+}
+GO
+
+# lists <tags> <run> <pkg>: every entry `go test -list` prints, sorted, but
+# its summary line (none where the tags leave the package nothing to build).
+lists() { go test -tags "$1" -list "$2" "./$3" 2>/dev/null | grep -vE '^(ok|FAIL|\?)[[:space:]]' | sort; }
 
 # selects <pkg> [tags]: the selection runs exactly the tests the tag adds.
 selects() {

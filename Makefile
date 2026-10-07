@@ -453,6 +453,13 @@ test-release-channel:
 test-tagged-tests:
 	$(call run,tagged-tests test,scripts/ci/tagged-tests.test.sh,)
 
+# test-integration-parts: assert scripts/ci/integration-parts.sh, which reads
+# the integration suite's parts for CI's matrix: a list it misread would leave
+# a part out of CI. A verify leaf.
+.PHONY: test-integration-parts
+test-integration-parts:
+	$(call run,integration-parts test,scripts/ci/integration-parts.test.sh,)
+
 .PHONY: vulncheck
 vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
 ifdef V
@@ -561,7 +568,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-tagged-tests vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-tagged-tests test-integration-parts vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.
@@ -801,7 +808,9 @@ INTEGRATION_APP_PKGS     := ./tests/integration/...
 # so a server bump that changes it fails here; beside internal/cache it adds
 # no wall-clock.
 INTEGRATION_BACKEND_PKGS := ./internal/cache/... ./internal/mq/natsspike/...
-# Its untagged tests are the unit suite's: only the ones the tag adds run here.
+# The packages above run all their tests, untagged ones too. internal/mq's
+# untagged tests are the unit suite's, so it runs only the ones the tag adds,
+# in a run of its own.
 INTEGRATION_MQ_PKG := ./internal/mq
 
 .PHONY: test-integration
@@ -812,6 +821,7 @@ test-integration: go-mod-download ## Run Go integration tests + render coverage 
 
 .PHONY: check-integration-parts
 check-integration-parts:
+	@scripts/ci/integration-parts.sh --check $(INTEGRATION_PARTS)
 	@scripts/ci/tagged-tests.sh check integration $(INTEGRATION_APP_PKGS) $(INTEGRATION_BACKEND_PKGS) $(INTEGRATION_MQ_PKG)
 
 # -parallel 8: its parallel tests mostly wait, on leases, handovers and

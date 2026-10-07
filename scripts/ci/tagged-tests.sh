@@ -59,10 +59,11 @@ run)
     echo "tagged-tests: $1 has no test files that only build with '$tag'" >&2
     exit 1
   fi
-  # A test is `func TestXxx(t *testing.T)` at the top level; gofumpt keeps it
-  # at the start of its line. Fuzz targets' seed corpora run under -run too.
+  # Every top-level func named like a test, fuzz target or example: gofumpt
+  # keeps `func Name(` at the start of its line however the signature wraps,
+  # and a helper caught by the name only adds a pattern that matches nothing.
   # shellcheck disable=SC2086 # one path per word; Go file paths hold no spaces
-  names="$({ grep -hoE '^func (Test|Fuzz)[A-Za-z0-9_]*\([A-Za-z0-9_]+ \*testing\.[TF]\)' $files || true; } |
+  names="$({ grep -hoE '^func (Test|Fuzz|Example)[A-Za-z0-9_]*\(' $files || true; } |
     sed -E 's/^func ([A-Za-z0-9_]+)\(.*/\1/' | sort -u | paste -sd'|' -)"
   if [ -z "$names" ]; then
     echo "tagged-tests: $1's '$tag' test files declare no tests" >&2
