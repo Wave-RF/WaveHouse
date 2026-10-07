@@ -235,9 +235,10 @@ func TestDedupeDynamo_Unreachable(t *testing.T) {
 	k := []dedupe.Key{{Table: "events", ID: "e1"}}
 	var d *dedupe.Dynamo
 	// Each attempt is a fresh client, so the breaker's count never carries
-	// over. The five calls run concurrently and the sixth must be refused
-	// without a dial. An attempt that took under half the window cannot have
-	// missed it, so only a slower one (a stalled host) may be retried.
+	// over. Four concurrent failures must not open it, the fifth must, and
+	// the sixth call must be refused without a dial. An attempt that took
+	// under half the window cannot have missed it, so only a slower one (a
+	// stalled host) may be tried again.
 	for attempt := 1; ; attempt++ {
 		var err error
 		d, err = dedupe.NewDynamo(t.Context(), dedupe.DynamoConfig{
@@ -247,9 +248,14 @@ func TestDedupeDynamo_Unreachable(t *testing.T) {
 		m := d.Tenant("acme")
 		require.NoError(t, m.Apply(true))
 
+		reserve := func() error {
+			_, err := m.Reserve(t.Context(), k, time.Minute)
+			require.ErrorIs(t, err, dedupe.ErrUnavailable)
+			return err
+		}
 		start := time.Now()
 		var wg sync.WaitGroup
-		errs := make([]error, 5)
+		errs := make([]error, 4)
 		for i := range errs {
 			wg.Go(func() { _, errs[i] = m.Reserve(t.Context(), k, time.Minute) })
 		}
@@ -258,16 +264,16 @@ func TestDedupeDynamo_Unreachable(t *testing.T) {
 			require.ErrorIs(t, err, dedupe.ErrUnavailable)
 			require.NotContains(t, err.Error(), "short-circuited", "the breaker opened before five failures")
 		}
+		fifth := reserve()
+		require.NotContains(t, fifth.Error(), "short-circuited", "the breaker opened before five failures")
+		sixth := reserve()
 		took := time.Since(start)
-
-		_, err = m.Reserve(t.Context(), k, time.Minute)
-		require.ErrorIs(t, err, dedupe.ErrUnavailable)
-		if strings.Contains(err.Error(), "short-circuited") {
+		if strings.Contains(sixth.Error(), "short-circuited") {
 			break
 		}
 		require.Greater(t, took, window/2, "five failures in under half a second did not open the breaker")
 		require.Less(t, attempt, 5, "five failures in a second never opened the breaker")
-		t.Logf("attempt %d: the five failures took %s, outside the breaker's window; retrying", attempt, took)
+		t.Logf("attempt %d: the six calls took %s, outside the breaker's window; trying again", attempt, took)
 	}
 	assert.ErrorIs(t, d.Check(t.Context()), dedupe.ErrUnavailable)
 }

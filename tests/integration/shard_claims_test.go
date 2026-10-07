@@ -51,7 +51,10 @@ func (l *shardLog) add(topic mq.Topic, proc string, payload []byte) {
 	if l.rows == nil {
 		l.rows, l.at, l.seq = map[mq.Topic]map[string]int{}, map[mq.Topic]time.Time{}, map[mq.Topic][]rowSeen{}
 	}
-	n, _ := strconv.Atoi(string(payload))
+	n, err := strconv.Atoi(string(payload))
+	if err != nil {
+		n = -1 // handoffs reports the row out of order
+	}
 	l.seq[topic] = append(l.seq[topic], rowSeen{n, proc})
 	if l.rows[topic] == nil {
 		l.rows[topic] = map[string]int{}
@@ -67,6 +70,7 @@ func (l *shardLog) handoffs(topic mq.Topic) (changes int, inOrder bool) {
 	defer l.mu.Unlock()
 	inOrder = true
 	for i, r := range l.seq[topic] {
+		inOrder = inOrder && r.n >= 0
 		if i == 0 {
 			continue
 		}
@@ -186,7 +190,8 @@ func publishRows(t *testing.T, b mq.Broker, topics []mq.Topic, rows int) {
 }
 
 // everyRowOnce publishes rows to topics and reports, once every row arrived,
-// whether each reached one of procs and none arrived twice.
+// whether each reached one of procs, none arrived twice, each topic changed
+// writer at most once, and its rows arrived in publish order.
 func everyRowOnce(t *testing.T, b mq.Broker, log *shardLog, topics []mq.Topic, procs ...string) {
 	t.Helper()
 	log.reset()
@@ -203,7 +208,7 @@ func everyRowOnce(t *testing.T, b mq.Broker, log *shardLog, topics []mq.Topic, p
 		assert.Subset(t, procs, log.writers(topic), "%v", topic)
 		assert.Equal(t, 3, log.count(topic), "%v: no row twice", topic)
 		changes, inOrder := log.handoffs(topic)
-		assert.LessOrEqual(t, changes, 1, "%v changed hands more than once: two owners at once", topic)
+		assert.LessOrEqual(t, changes, 1, "%v changed writer %d times; a handover moves it once", topic, changes)
 		assert.True(t, inOrder, "%v: rows arrived out of order", topic)
 	}
 }
@@ -240,8 +245,8 @@ func pinnedUnits(t *testing.T, srv *natstest.Server) int {
 }
 
 // Scaling 1 → 3 → 2 processes: every table is written by one process once
-// each step has settled, a clean stop hands its shards on well inside the
-// lease, and no row is received twice.
+// each step has settled, a clean stop hands its shards on within three
+// leases, and no row is received twice.
 func TestShardClaims_ScaleOneThreeTwo(t *testing.T) {
 	srv := natstest.Start(t)
 	log := &shardLog{}

@@ -88,7 +88,7 @@ if [ -z "$big_why" ]; then
   printf '  ok   %-18s classifies without SIGPIPE\n' "large-input"
 else
   printf '  FAIL %-18s want exit 0 + code=false/docs=true, failed:%s\n' "large-input" "$big_why" >&2
-  printf '       output (%d bytes) between the markers:\n<<<\n%s\n>>>\n' "${#big_out}" "$big_out" >&2
+  printf '       output (%d bytes), as %%q: %q\n' "${#big_out}" "$big_out" >&2
   fails=$((fails + 1))
 fi
 
