@@ -362,8 +362,14 @@ describe("WH001 leaves non-prose alone", () => {
     "a line ending inside a link title",
   );
   unchangedBoth("See ![an alt\ntext](x.png) here.\n", "a line ending inside image alt text");
-  // An HTML block's interior is HTML to CommonMark, and in <pre> every newline shows.
-  unchanged("t.md", "<pre>\nline one\nline two\n</pre>\n", "the inside of an HTML block");
+  // An HTML block's interior is HTML to CommonMark, and in <pre> every newline
+  // shows. MDX calls the same text a paragraph, so .mdx asks CommonMark too.
+  unchangedBoth("<pre>\nline one\nline two\n</pre>\n", "the inside of a <pre> block");
+  unchangedBoth("Prose above it.\n<pre>\nline one\nline two\n</pre>\n", "a <pre> under prose");
+  unchangedBoth(
+    "<script>\nconst a = 1\nconst b = 2\n</script>\n",
+    "the inside of a <script> block",
+  );
   it("neither reports nor joins a line that opens with a tag", () => {
     const src = "Press\n<kbd>Enter</kbd> to go on.\n";
     const { output, stdout } = run("t.md", src, { fix: true });
@@ -384,6 +390,12 @@ describe("WH001 reads .mdx with an MDX parser", () => {
     "joins prose inside a JSX block",
     "<Aside>\n\nProse inside the\naside, wrapped.\n\n</Aside>\n",
     "<Aside>\n\nProse inside the aside, wrapped.\n\n</Aside>\n",
+    { md: false },
+  );
+  fixesTo(
+    "joins prose inside a <div>, an HTML block a blank line ends",
+    "<div>\nProse inside the\ndiv, wrapped.\n</div>\n",
+    "<div>\nProse inside the div, wrapped.\n</div>\n",
     { md: false },
   );
   fixesTo(
@@ -667,6 +679,21 @@ describe("fix-mdx.mjs repairs .mdx with the two rules and nothing else", () => {
     assert.equal(status, 0);
     assert.equal(output, src);
     assert.match(stderr, /t\.mdx:2 WH002 not fixed: a blank line would end the blockquote/);
+  });
+
+  it("leaves a fence inside <pre> for a human — a blank line does not end that HTML block", () => {
+    const src = "<pre>\n```sh\nx\n```\n</pre>\n";
+    const { output, stderr, status } = fixMdx(src);
+    assert.equal(status, 0);
+    assert.equal(output, src);
+    assert.match(
+      stderr,
+      /t\.mdx:2 WH002 not fixed: a blank line does not end the <pre> HTML block/,
+    );
+    assert.match(
+      stderr,
+      /t\.mdx:5 WH002 not fixed: a blank line does not end the <pre> HTML block/,
+    );
   });
 
   it("reads the real text, not markdownlint's comment mask", async () => {

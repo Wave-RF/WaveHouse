@@ -17,10 +17,12 @@
 // given, so this runs the very rules `make lint` runs, through the markdownlint
 // the CLI ships, with every other rule off.
 //
-// Two guards keep it render-neutral, both read from the MDX parse:
-//   - no blank line is inserted inside a list or a blockquote. In a list it
-//     makes the list loose (every item gains a <p>); in a blockquote it ends
-//     the quote. Those are left for a human, and `make lint` still reports them.
+// Two guards keep it render-neutral:
+//   - no blank line is inserted inside a list or a blockquote, where it makes
+//     the list loose (every item gains a <p>) or ends the quote, nor inside a
+//     `<pre>`, `<script>`, `<style>` or `<textarea>` HTML block, which it does
+//     not end, so WH002 would still fire. Those are left for a human, and
+//     `make lint` still reports them.
 //   - before anything is written, the result must keep the original's block
 //     structure, every code/math/ESM/JSX/table block byte for byte, and every
 //     non-whitespace character in order. A file that fails is left untouched
@@ -42,6 +44,7 @@ import {
   mdxInvariant,
   parseMdx,
   splitFrontMatter,
+  verbatimHtmlBlocks,
 } from "./markdownlint-rules/lib/mdx.mjs";
 import wh002 from "./markdownlint-rules/mdx-fence-needs-blank-line.mjs";
 import wh001 from "./markdownlint-rules/no-hard-wrapped-prose.mjs";
@@ -64,23 +67,41 @@ if (files.length === 0) {
   files.push(...listed.split("\n").filter(Boolean));
 }
 
+/** The rules' findings, plus the `<pre>`-like HTML blocks in markdownlint's parse. */
 async function violations(file, text) {
+  // The library exposes its CommonMark tokens only to rules.
+  let verbatim = [];
+  const collect = {
+    names: ["verbatim-html-blocks"],
+    description: "Collects the HTML blocks a blank line does not end",
+    tags: ["html"],
+    parser: "micromark",
+    function: (params) => {
+      verbatim = verbatimHtmlBlocks(params.parsers.micromark.tokens);
+    },
+  };
   const results = await lint({
     strings: { [file]: text },
-    customRules: [wh001, wh002],
-    config: { default: false, WH001: true, WH002: true },
+    customRules: [wh001, wh002, collect],
+    config: { default: false, WH001: true, WH002: true, "verbatim-html-blocks": true },
   });
   // A "not checked" report says the rule could not parse the file; it marks no
   // place to insert a blank line.
-  return results[file]
+  const errors = results[file]
     .filter((error) => !error.errorDetail?.startsWith("not checked"))
     .map((error) => ({ ...error, rule: error.ruleNames[0] }));
+  return { errors, verbatim };
 }
 
 /** Why a blank line above `lineNumber` would not be a safe fix, or null. */
-function unsafeInsert(lines, lineNumber, mdx, offset) {
-  if (!lines[lineNumber - 2]?.trim()) return "a blank line above it does not separate it";
+function unsafeInsert(lines, lineNumber, mdx, offset, verbatim) {
   const line = lineNumber - offset;
+  const html = verbatim.find((b) => b.startLine < line && line <= b.endLine);
+  if (html) {
+    const tag = html.text.trim().match(/^<\w+/)[0];
+    return `a blank line does not end the ${tag}> HTML block it is in`;
+  }
+  if (!lines[lineNumber - 2]?.trim()) return "a blank line above it does not separate it";
   const container = [...descendants(mdx.tokens)].find(
     (t) => CONTAINERS.has(t.type) && t.startLine < line && line <= t.endLine,
   );
@@ -102,11 +123,10 @@ async function fix(file, source) {
         skip: `not valid MDX at line ${mdx.error.line + offset}: ${mdx.error.reason}`,
       };
 
-    const errors = await violations(file, text);
+    const { errors, verbatim } = await violations(file, text);
     const lines = text.split(helpers.newLineRe);
-    const inserts = errors
-      .filter((e) => e.rule === "WH002" && !unsafeInsert(lines, e.lineNumber, mdx, offset))
-      .map((e) => e.lineNumber);
+    const unsafe = (e) => unsafeInsert(lines, e.lineNumber, mdx, offset, verbatim);
+    const inserts = errors.filter((e) => e.rule === "WH002" && !unsafe(e)).map((e) => e.lineNumber);
     if (inserts.length > 0) {
       // Bottom up, so earlier line numbers stay valid.
       for (const line of [...new Set(inserts)].sort((a, b) => b - a)) lines.splice(line - 1, 0, "");
@@ -117,10 +137,7 @@ async function fix(file, source) {
     if (joins.length === 0) {
       const left = errors
         .filter((e) => e.rule === "WH002")
-        .map(
-          (e) =>
-            `${file}:${e.lineNumber} WH002 not fixed: ${unsafeInsert(lines, e.lineNumber, mdx, offset)}`,
-        );
+        .map((e) => `${file}:${e.lineNumber} WH002 not fixed: ${unsafe(e)}`);
       return { text, left };
     }
     text = applyFixes(text, joins);
@@ -161,7 +178,7 @@ for (const file of files) {
     continue;
   }
   if (check) {
-    for (const e of await violations(file, source)) {
+    for (const e of (await violations(file, source)).errors) {
       if (e.fixInfo || e.rule === "WH002")
         console.error(`${file}:${e.lineNumber} ${e.ruleNames.join("/")} ${e.errorDetail}`);
     }
