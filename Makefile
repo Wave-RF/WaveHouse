@@ -446,6 +446,15 @@ test-classify-paths:
 test-release-channel:
 	$(call run,release-channel test,scripts/ci/release-channel.test.sh,)
 
+# test-review-gate: feed the pre-push review hooks (.claude/hooks/
+# review-marker.sh and agent-bash-gate.sh) synthetic hook events in a scratch
+# repository with sibling worktrees: a marker must attest to the exact commit a
+# reviewer read, and the push gate must judge the worktree and commits a push
+# actually targets. A verify leaf, same as test-classify-paths.
+.PHONY: test-review-gate
+test-review-gate:
+	$(call run,review-gate test,.claude/hooks/review-gate.test.sh,)
+
 .PHONY: vulncheck
 vulncheck: go-mod-download ## Run govulncheck -scan package (V=1: symbol-level scan with example traces)
 ifdef V
@@ -536,11 +545,11 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (14): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# Leaves (15): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
 # for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
-# test-classify-paths and test-release-channel for the tooling;
+# test-classify-paths, test-release-channel and test-review-gate for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
 # nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
 # (`biome check`) but NOT fmt-ts (`biome format`) — check already covers
@@ -554,7 +563,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-review-gate vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.
@@ -621,12 +630,28 @@ build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
 	@$(MAKE) -j $(JOBS) build build-ts build-docs
 	@echo "$(GREEN)$(BOLD)✔ All artifacts built$(RESET)"
 
-# build-ts: pnpm-driven SDK build → clients/ts/dist/ (ESM + CJS + .d.ts).
-# Required by test-e2e (e2e tests import the built artifact) and by
-# build-all. Standalone via `make build-ts`.
+# build-ts: pnpm-driven SDK build → clients/ts/dist/ (ESM + CJS + .d.ts + the
+# IIFE bundle), then smoke-loads each entry point (smoke-ts-dist). Required by
+# test-e2e (e2e tests import the built artifact) and by build-all. Standalone
+# via `make build-ts`.
 .PHONY: build-ts
-build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/
+build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/ and smoke-load each entry point
 	@$(PNPM) --filter $(SDK_NAME) run build
+	@$(MAKE) --no-print-directory smoke-ts-dist
+
+# smoke-ts-dist: load the built ESM, CJS and IIFE entry points like a consumer
+# and compare their export surfaces. Runs at the OLDEST Node `engines.node`
+# admits, because an ESM-only dependency only breaks `require()` before 22.12
+# and the floating .nvmrc Node hides it. That Node is fetched once from
+# nodejs.org into .bin/ against a pinned sha256 (fetch-node.sh, like
+# shellcheck) rather than through pnpm, which on pnpm 11 asks nodejs.org on
+# every run. No pnpm-install prereq of its own: build-ts has already installed
+# the SDK's runtime deps, which dist/ loads from node_modules.
+.PHONY: smoke-ts-dist
+smoke-ts-dist: ## Smoke-load the built SDK entry points at the oldest Node engines.node admits
+	@v=$$(node clients/ts/scripts/smoke-dist.mjs --min-node) && \
+		n=$$(clients/ts/scripts/fetch-node.sh $$v $(LOCAL_BIN)) && \
+		"$$n" clients/ts/scripts/smoke-dist.mjs --expect-node $$v
 
 # check-docs: astro check — type-checks .astro/.mdx, content-collection frontmatter
 # schemas, and config TS. Catches what `astro build` does NOT (the build strips
@@ -1010,7 +1035,7 @@ clean-test: ## Remove test artifacts (tmp/ — coverage data, logs, NATS state)
 .PHONY: clean-tools
 clean-tools: ## Remove installed tools and pnpm deps (.bin/, node_modules/)
 	@echo "$(YELLOW)==> Cleaning installed tools and pnpm deps...$(RESET)"
-	@rm -rf .bin/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/ docs/node_modules/
+	@rm -rf .bin/ node_modules/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/ docs/node_modules/
 
 .PHONY: clean-all
 clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + clean-tools + dev data + docker volumes
