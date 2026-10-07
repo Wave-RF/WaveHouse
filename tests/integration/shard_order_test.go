@@ -202,6 +202,7 @@ func unitState(t *testing.T, srv *natstest.Server, unit string) (pin string, del
 // never reads as unowned, and no other process may reset it. Once the insert returns, the rest of
 // the table's rows follow, in order.
 func TestShardClaims_BlockedOwnerKeepsItsShard(t *testing.T) {
+	t.Parallel()
 	srv := natstest.Start(t)
 	pub := shardBroker(t, srv.URL())
 	const rows, share = 20, 8
@@ -259,6 +260,7 @@ func TestShardClaims_BlockedOwnerKeepsItsShard(t *testing.T) {
 // A table whose ClickHouse hangs fills only its own unit's share of held
 // rows: a table on another unit of the same process keeps flowing.
 func TestShardClaims_StuckShardDoesNotStallTheOthers(t *testing.T) {
+	t.Parallel()
 	srv := natstest.Start(t)
 	pub := shardBroker(t, srv.URL())
 	stuck := mq.Topic{Tenant: "acme", Table: "stuck"}
@@ -326,6 +328,7 @@ func closeOnce(ch chan struct{}) {
 // next owner binds its units at once rather than waiting to judge them
 // orphaned.
 func TestShardClaims_TableOrderAcrossHandoverAndStop(t *testing.T) {
+	t.Parallel()
 	srv := natstest.Start(t)
 	pub := shardBroker(t, srv.URL())
 	log := &insertLog{}

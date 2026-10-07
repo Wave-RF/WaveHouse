@@ -446,6 +446,20 @@ test-classify-paths:
 test-release-channel:
 	$(call run,release-channel test,scripts/ci/release-channel.test.sh,)
 
+# test-tagged-tests: assert scripts/ci/tagged-tests.sh, which picks the tests
+# `make test-integration` runs by build tag, against `go test -list` on a
+# throwaway module: a tagged test it missed would never run. A verify leaf.
+.PHONY: test-tagged-tests
+test-tagged-tests:
+	$(call run,tagged-tests test,scripts/ci/tagged-tests.test.sh,)
+
+# test-integration-parts: assert scripts/ci/integration-parts.sh, which reads
+# the integration suite's parts for CI's matrix: a list it misread would leave
+# a part out of CI. A verify leaf.
+.PHONY: test-integration-parts
+test-integration-parts:
+	$(call run,integration-parts test,scripts/ci/integration-parts.test.sh,)
+
 # test-review-gate: feed the pre-push review hooks (.claude/hooks/
 # review-marker.sh and agent-bash-gate.sh) synthetic hook events in a scratch
 # repository with sibling worktrees: a marker must attest to the exact commit a
@@ -545,11 +559,12 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (15): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# Leaves (17): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
 # for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
-# test-classify-paths, test-release-channel and test-review-gate for the tooling;
+# test-classify-paths, test-release-channel, test-tagged-tests,
+# test-integration-parts and test-review-gate for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
 # nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
 # (`biome check`) but NOT fmt-ts (`biome format`) — check already covers
@@ -563,7 +578,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-review-gate vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-tagged-tests test-integration-parts test-review-gate vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.
@@ -784,8 +799,9 @@ CI_UNIT_TIMEOUT ?= 60s
 # suite (internal/mq's tagged tests, run on their own, keep a shorter one).
 # The go command kills the package at -timeout + 1m, counting TestMain's
 # wavehouse binary build before m.Run, and the multi-process roles test runs
-# its handover steps in sequence. tests/integration takes about 6m on a CI
-# runner and up to 8m under Docker Desktop: at 240s CI killed it, and 480s
+# its handover steps in sequence. tests/integration took about 6m on a CI
+# runner and up to 8m under Docker Desktop before its slow tests ran in
+# parallel (about 2.5m on four cores now): at 240s CI killed it, and 480s
 # left Docker Desktop half a minute.
 INTEGRATION_TIMEOUT ?= 900s
 
@@ -803,21 +819,67 @@ test-unit: go-mod-download ## Run Go unit tests + render coverage + gate thresho
 .PHONY: test
 test: test-unit
 
+# The integration suite runs in parts, each a target of its own:
+#   app       tests/integration: the wired app against ClickHouse
+#   backends  the shared cache and external NATS backends' own suites
+# CI runs each part as a job of its own, reading the list from
+# INTEGRATION_PARTS (scripts/ci/integration-parts.sh); test-integration runs
+# them all at once. A part only collects coverage into $(COV_INT)/data, which
+# test-integration clears first and renders and gates after. Every package
+# with integration-tagged tests belongs to a part: check-integration-parts,
+# which each part runs first, fails on one left out, and on a part listed
+# without a target or a target left out of the list.
+INTEGRATION_PARTS := app backends
+INTEGRATION_APP_PKGS     := ./tests/integration/...
+# natsspike pins the nats-server behavior the external NATS topology rests on,
+# so a server bump that changes it fails here; beside internal/cache it adds
+# no wall-clock.
+INTEGRATION_BACKEND_PKGS := ./internal/cache/... ./internal/mq/natsspike/...
+# The packages above run all their tests, untagged ones too. internal/mq's
+# untagged tests are the unit suite's, so it runs only the ones the tag adds,
+# in a run of its own.
+INTEGRATION_MQ_PKG := ./internal/mq
+# The packages each part runs, which check-integration-parts holds against the
+# packages with tagged tests: a part dropped from INTEGRATION_PARTS drops its
+# packages from that check too.
+INTEGRATION_PKGS_app      = $(INTEGRATION_APP_PKGS)
+INTEGRATION_PKGS_backends = $(INTEGRATION_BACKEND_PKGS) $(INTEGRATION_MQ_PKG)
+
 .PHONY: test-integration
 test-integration: go-mod-download ## Run Go integration tests + render coverage + gate threshold (requires Docker)
-	@printf "$(CYAN)==> Running Integration Tests...$(RESET)\n"
-	@rm -rf $(COV_INT)/data && mkdir -p $(COV_INT)/data
+	@rm -rf $(COV_INT)/data
+	@$(MAKE) -j $(words $(INTEGRATION_PARTS)) $(addprefix test-integration-,$(INTEGRATION_PARTS))
+	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render integration; fi
+
+.PHONY: check-integration-parts
+check-integration-parts:
+	@scripts/ci/integration-parts.sh --check $(INTEGRATION_PARTS)
+	@scripts/ci/tagged-tests.sh check integration $(foreach p,$(INTEGRATION_PARTS),$(INTEGRATION_PKGS_$(p)))
+
+# -parallel 8: its parallel tests mostly wait, on leases, handovers and
+# containers, so more of them at once than there are cores still fit.
+.PHONY: test-integration-app
+test-integration-app: go-mod-download check-integration-parts ## Integration part: tests/integration (requires Docker)
+	@printf "$(CYAN)==> Running Integration Tests (app)...$(RESET)\n"
+	@mkdir -p $(COV_INT)/data
 	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
 		-tags="integration $(TAGS)" -timeout $(INTEGRATION_TIMEOUT) -coverpkg=./... -race -count=1 \
-		./tests/integration/... ./internal/mq/natsspike/... ./internal/cache/... $(ARGS) \
+		-parallel 8 $(INTEGRATION_APP_PKGS) $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
-	@# internal/mq's integration-tagged tests (the external NATS broker) run
-	@# alone: its untagged tests are the unit suite's.
+
+.PHONY: test-integration-backends
+test-integration-backends: go-mod-download check-integration-parts ## Integration part: the cache and NATS backends (requires Docker)
+	@printf "$(CYAN)==> Running Integration Tests (backends)...$(RESET)\n"
+	@mkdir -p $(COV_INT)/data
 	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
-		-tags="integration $(TAGS)" -timeout 240s -coverpkg=./... -race -count=1 \
-		-run '^Test(ExternalNATS|NewNATS|NATSPermissions_Refuse|Leases)' ./internal/mq $(ARGS) \
+		-tags="integration $(TAGS)" -timeout $(INTEGRATION_TIMEOUT) -coverpkg=./... -race -count=1 \
+		$(INTEGRATION_BACKEND_PKGS) $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
-	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render integration; fi
+	@run="$$(scripts/ci/tagged-tests.sh run integration $(INTEGRATION_MQ_PKG))" && \
+		GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
+		-tags="integration $(TAGS)" -timeout 240s -coverpkg=./... -race -count=1 \
+		-run "$$run" $(INTEGRATION_MQ_PKG) $(ARGS) \
+		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
 
 # test-e2e starts ClickHouse + bin/wavehouse-cov via the orchestrator under
 # scripts/, then runs the SDK vitest harness against the live stack so both
