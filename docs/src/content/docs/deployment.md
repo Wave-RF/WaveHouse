@@ -747,7 +747,7 @@ WaveHouse **pushes** to an OTel collector; scraping-style pipelines (Promtail/Gr
 
 ### Pattern: Local collector (SigNoz, OTel Collector, Alloy)
 
-A local collector almost always speaks **plaintext** gRPC, but the SDK's unset default endpoint is **TLS** at `localhost:4317` — so enabling OTel alone is not enough. Point it at the collector with an explicit `http://` scheme: `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` (or set `OTEL_EXPORTER_OTLP_INSECURE=true`). All three signals (traces, metrics, logs) push through the same connection. This is the simplest setup.
+A local collector almost always speaks **plaintext** gRPC, but the SDK's unset default endpoint is **TLS** at `localhost:4317` — so enabling OTel alone is not enough. Point it at the collector with an explicit `http://` scheme: `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` (or leave the endpoint unset and set `OTEL_EXPORTER_OTLP_INSECURE=true`). All three signals (traces, metrics, logs) push to the same endpoint, each over its own connection. This is the simplest setup.
 
 ```yaml
 otel:
@@ -756,7 +756,7 @@ otel:
 
 ### Pattern: Direct-to-cloud OTLP (Honeycomb, Grafana Cloud)
 
-Set `OTEL_EXPORTER_OTLP_ENDPOINT` to an `https://` URL to select TLS (system root CAs), and `OTEL_EXPORTER_OTLP_HEADERS` for the per-RPC auth every cloud OTLP gateway expects — no sidecar required to terminate TLS or inject auth. For a private or self-signed gateway, point `OTEL_EXPORTER_OTLP_CERTIFICATE` at the CA certificate; for mutual TLS, add `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` and `OTEL_EXPORTER_OTLP_CLIENT_KEY`. These apply to the **trace and metric** signals only — the pinned gRPC logs exporter ignores the env TLS-cert vars (upstream bug [open-telemetry/opentelemetry-go#6661](https://github.com/open-telemetry/opentelemetry-go/issues/6661)), so against a private-CA gateway the logs signal falls back to system roots and won't connect; route logs through a local collector (which terminates TLS itself) until the fix lands upstream.
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` to an `https://` URL to select TLS (system root CAs), and `OTEL_EXPORTER_OTLP_HEADERS` for the per-RPC auth every cloud OTLP gateway expects — no sidecar required to terminate TLS or inject auth. For a private or self-signed gateway, point `OTEL_EXPORTER_OTLP_CERTIFICATE` at the CA certificate; for mutual TLS, add `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` and `OTEL_EXPORTER_OTLP_CLIENT_KEY`. These apply to the trace, metric and log signals alike.
 
 **Honeycomb** (single endpoint, per-RPC auth):
 
@@ -788,9 +788,16 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317   # plaintext gRPC; DD_
 
 The Grafana stack typically wants Prometheus-style scraping for metrics, stdout scraping for logs, and OTLP push for traces. Wire it like this:
 
-- **Logs**: Alloy scrapes stdout via the Docker socket / file tail / k8s logs API. No WaveHouse config needed — stdout always emits 100%.
+- **Logs**: Alloy scrapes stdout via the Docker socket / file tail / k8s logs API — stdout always emits 100%. If traces also go via OTLP (`otel.enabled: true`), keep `otel.logs.enabled` on: it is what puts `trace_id`/`span_id` on the stdout lines, so Loki-to-Tempo links resolve. It also pushes logs over OTLP, so drop that stream in Alloy, or ship logs over OTLP instead of scraping stdout.
 - **Traces**: Set `OTEL_EXPORTER_OTLP_ENDPOINT` to Alloy's `otelcol.receiver.otlp` listener (`http://alloy:4317`). Alloy forwards to Tempo.
-- **Metrics**: Set `prometheus.enabled: true`. Alloy's `prometheus.scrape` reads `http://wavehouse:8080/metrics` (or whatever port you configured). The `prometheus` block is independent of `otel.*` — you can leave `otel.enabled: false` if Alloy is only scraping (no OTLP push at all), or combine the two if traces still go via OTLP.
+- **Metrics**: Set `prometheus.enabled: true`. Alloy's `prometheus.scrape` reads `http://wavehouse:8080/metrics` (or whatever port you configured). The `prometheus` block is independent of `otel.*` — you can leave `otel.enabled: false` if Alloy is only scraping (no OTLP push at all), or combine the two if traces still go via OTLP, with `otel.metrics.enabled: false` so metrics aren't also pushed.
+
+```bash
+export WH_OTEL_ENABLED=true            # traces go via OTLP
+export WH_OTEL_METRICS_ENABLED=false   # Alloy scrapes /metrics instead
+export WH_PROMETHEUS_ENABLED=true
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
+```
 
 For the metrics path specifically: WaveHouse uses the OTel SDK's Prometheus exporter under the hood, which translates OTel metric names to Prometheus conventions automatically (dots and dashes become underscores; counters get a `_total` suffix). Existing OTel instruments don't need renaming.
 
@@ -813,9 +820,9 @@ make obs-grafana  # Full Grafana LGTM stack, auto-login enabled
 make obs-front
 ```
 
-All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP) as **plaintext** receivers. If you are running WaveHouse directly on your host (e.g. `make dev`), set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` to reach them — the SDK's unset default dials `localhost:4317` over **TLS**, which a plaintext receiver rejects.
+All three publish a **plaintext** OTLP gRPC receiver on `4317` (`make obs-front` also publishes OTLP/HTTP on `4318`). If you are running WaveHouse directly on your host, enable OTel and point it at them: `WH_OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 make dev` (`make dev` leaves OTel off, and the SDK's unset default dials `localhost:4317` over **TLS**, which a plaintext receiver rejects).
 
-If you are running a containerized WaveHouse (e.g., via `deployments/compose/standalone.yaml`), you must override its environment to reach the host-bound collector: `OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317`.
+If you are running a containerized WaveHouse (e.g., via `deployments/compose/standalone.yaml`), add `WH_OTEL_ENABLED: "true"` and `OTEL_EXPORTER_OTLP_ENDPOINT: http://host.docker.internal:4317` to the `wavehouse` service's `environment:` block (exporting them in your shell is not enough: the compose file does not pass them through). On Linux Docker Engine also add `extra_hosts: ["host.docker.internal:host-gateway"]` to the service, since only Docker Desktop defines that name.
 
 ### Dashboards
 

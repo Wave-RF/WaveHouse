@@ -162,7 +162,7 @@ These are the small targets behind `make dev` — useful directly when you want 
 
 ### Running with observability
 
-WaveHouse natively exports standard OpenTelemetry (OTLP) data to `127.0.0.1:4317`. Rather than coupling a heavy observability database stack to the dev server, we provide three lightweight, single-container dashboard options.
+With `otel.enabled` on, WaveHouse exports standard OpenTelemetry (OTLP) data to the endpoint in `OTEL_EXPORTER_OTLP_ENDPOINT`. Rather than coupling a heavy observability database stack to the dev server, we provide three lightweight, single-container dashboard options.
 
 You run these in a separate terminal tab alongside `make dev` or your test suites (`make test-e2e`).
 
@@ -177,7 +177,7 @@ They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear
 **Typical Workflow:**
 
 1. Open Tab 1: run `make obs-aspire` (UI opens automatically)
-2. Open Tab 2: run `make dev` (or `make test-e2e`)
+2. Open Tab 2: run `make test-e2e`, which enables OTel and points it at `http://127.0.0.1:4317` for you, or `WH_OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 make dev` (`make dev` leaves OTel off, and the SDK's unset default is TLS, which these local receivers reject)
 3. View traces, metrics, and logs flowing into the UI instantly. No accounts or auth tokens required.
 
 ### Using the SDK against `make dev`
@@ -526,7 +526,7 @@ Run `make help` to see all targets. Key ones:
 | `make fmt` | Check formatting across Go (`gofumpt`) + TS (Biome). Run `make fix` to apply. |
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
 | `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) + Markdown/MDX (markdownlint) + prose (misspell) |
-| `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
+| `make vulncheck` | Run `govulncheck -scan package` (`V=1`: the default symbol-level scan, with example traces) |
 | `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + docs type-check (`astro check` — not a full build, so link validation stays CI's job) (parallel-safe: `make -j verify`) |
 | `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint `--fix`), MDX (`fix-mdx-fences` only — the generic fixers never run over `.mdx`), and docs-prose spelling (misspell, both) |
 | **Build** | |
@@ -566,16 +566,20 @@ All test targets accept `ARGS="..."` for pass-through `go test` flags. Build tar
 ### Updating Dependencies
 
 ```bash
-go get -u ./...        # Update all direct deps to latest minor/patch
-go mod tidy            # Remove unused, add missing
+go get -u ./...                         # Update the main module's non-test deps (direct and indirect); add -t for test-only deps, and run go get -u tool for the tool block
+go get google.golang.org/grpc@v1.83     # Re-apply the gRPC hold (newest 1.83.x) until #643 closes (see below)
+go mod tidy                             # Remove unused, add missing
 ```
+
+`go get -u` ignores Dependabot's holds: until [#643](https://github.com/Wave-RF/WaveHouse/issues/643) closes it pulls `google.golang.org/grpc` 1.84.x, and `make vulncheck` fails on GO-2026-6443. The second line re-applies the hold (`@v1.83` selects the newest 1.83.x patch, 1.83.2, which carries the GO-2026-6443 fix; 1.83.0 and 1.83.1 are affected), and Go steps `proto/otlp` and `grpc-gateway/v2` back down with it ([Dependabot](#dependabot) lists the same holds). Run it before `go mod tidy`, or `make tidy` finds stale `go.sum` lines.
 
 ### Vulnerability Scanning
 
-`govulncheck` analyzes your actual call graph — not just the module graph — so it only reports vulnerabilities in code paths you use.
+`make vulncheck` runs `govulncheck -scan package`: it reports every known vulnerability in a package your code imports, without checking whether the vulnerable function is reachable. That is stricter than govulncheck's default call-graph scan, so a hit does not on its own mean the code path is used.
 
 ```bash
-make vulncheck
+make vulncheck       # package-level scan (what make verify and CI run)
+V=1 make vulncheck   # default symbol-level (call-graph) scan, with example call traces
 ```
 
 For a combined security scan, run `make verify` — it runs `vulncheck` alongside `lint`, and `gosec` is one of the linters enabled in `.golangci.yml`. This is also what CI runs on every push and pull request.
@@ -584,13 +588,15 @@ For a combined security scan, run `make verify` — it runs `vulncheck` alongsid
 
 Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for three update configs:
 
-- **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`
+- **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`. `google.golang.org/grpc` 1.84.x is held back (GO-2026-6443, no 1.84.x fix), along with the releases that require it, `go.opentelemetry.io/proto/otlp` 1.11.1 and later and `grpc-gateway/v2` 2.31.0 and later; drop the three holds, and the `go get google.golang.org/grpc@v1.83` line under [Updating Dependencies](#updating-dependencies), together when gRPC 1.85.0 ships ([#643](https://github.com/Wave-RF/WaveHouse/issues/643))
 - **GitHub Actions** (root **and** `/.github/actions/setup-env`) — outdated action versions tracked against the SHA pins across `.github/workflows/*` and the `setup-env` composite action, commit prefix `ci:`
 - **npm — pnpm workspace** (root) — covers all three TypeScript packages (the docs site, the SDK, and the E2E tests) in one grouped PR, commit prefix `deps:`
 
 PRs are grouped per config to reduce noise. The npm config is pointed at the workspace **root** (`directory: /`), not the individual member directories. The repo has a single root `pnpm-lock.yaml`, and Dependabot only updates a lockfile co-located with the manifest it targets — so a per-member config (the previous setup) bumped a member's `package.json` without regenerating the root lockfile, and every such PR then failed CI's `pnpm install --frozen-lockfile` with `ERR_PNPM_OUTDATED_LOCKFILE`. Pointing at the root lets Dependabot read `pnpm-workspace.yaml`, walk every member, and update the one lockfile.
 
 The GitHub Actions config names **two** directories. `directory: /` reaches `.github/workflows/` but does not descend into `.github/actions/*/action.yml`, so the `setup-env` composite action — which owns every cache in `ci.yml` — was invisible to Dependabot, and its pins went stale against upstream and diverged from `publish-npm.yml`, which Dependabot *does* track and which doesn't call `setup-env`. Listing its directory under `directories:` brings it into the same weekly group; **adding a composite action means adding its directory there**, because nothing else catches the drift.
+
+The npm config sets a 7-day `cooldown` to match pnpm's `minimumReleaseAge`, with the same `@wave-rf/*` and `@wavehouse/*` exclusions as `minimumReleaseAgeExclude`. It covers only the package Dependabot bumps, so transitive packages can still fail pnpm's check ([#441](https://github.com/Wave-RF/WaveHouse/issues/441)), and security updates bypass it.
 
 `typescript` majors are held back (`ignore: version-update:semver-major`) because `tsup` vendors a `rollup-plugin-dts` that crashes on TypeScript 7 during `clients/ts`'s `prepare` script — i.e. inside `pnpm install`, which takes every Node job down at once. See the comment in `.github/dependabot.yml` for the condition that lets it be removed.
 
@@ -609,7 +615,7 @@ make release-sdk-ts VERSION=0.1.0   # tag clients/ts/v0.1.0 → @wavehouse/sdk o
 
 The one thing to do *before* tagging is promote the changelog: `AGENTS.md` requires every PR to add its entry under `## Unreleased`, so open a PR renaming that heading to `## [X.Y.Z] - YYYY-MM-DD` and adding the matching link reference at the foot of the file. Nothing in the release pipeline reads `CHANGELOG.md` — this is for the file's own readers.
 
-**After** tagging an SDK release, raise `docs/package.json`'s `@wavehouse/sdk` range to the new line. The pin floats within `0.1.x` and stops at `0.2.0`, so a new **minor** does not reach the docs site — including its live hero demo — until someone bumps it, which is the point: the bump is where you decide that the deployed demo backend and the site's SDK move together. `minimumReleaseAgeExclude` already exempts `@wavehouse/*` from the 7-day cooldown, so the freshly published version installs immediately. Dependabot will **not** propose this one for you — `@wavehouse/sdk` is in the npm `ignore` list in `.github/dependabot.yml` for exactly this reason, since a grouped Monday `deps:` PR is reviewed by someone thinking about dependency hygiene, not about which wire the demo backend speaks.
+**After** tagging an SDK release, raise `docs/package.json`'s `@wavehouse/sdk` range to the new line. The pin floats within `0.1.x` and stops at `0.2.0`, so a new **minor** does not reach the docs site — including its live hero demo — until someone bumps it, which is the point: the bump is where you decide that the deployed demo backend and the site's SDK move together. `minimumReleaseAgeExclude` already exempts `@wavehouse/*` from pnpm's 7-day `minimumReleaseAge` (and the Dependabot `cooldown` excludes it too), so the freshly published version installs immediately. Dependabot will **not** propose this one for you — `@wavehouse/sdk` is in the npm `ignore` list in `.github/dependabot.yml` for exactly this reason, since a grouped Monday `deps:` PR is reviewed by someone thinking about dependency hygiene, not about which wire the demo backend speaks.
 
 Each runs [`scripts/release.sh`](https://github.com/Wave-RF/WaveHouse/blob/main/scripts/release.sh), which preflights (on `main`, clean tree, in sync with `origin/main`, the tag free both locally and on the remote, the required `CI` check green on *this exact commit*), prints exactly what will be published, and asks before pushing. `DRY_RUN=1 make release-…` stops after the plan. Tag creation is admin-only via the `release tag protection` ruleset.
 

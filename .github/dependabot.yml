@@ -9,6 +9,26 @@ updates:
     groups:
       go-deps:
         patterns: ["*"]
+    ignore:
+      # grpc 1.84.x carries GO-2026-6443 (a server panic on requests with no
+      # :authority/Host header) and `make vulncheck` fails on it, which turns
+      # the whole go-deps group red. The advisory marks 1.84.0 onward as
+      # affected until 1.85.0-dev.0.20260825072537-93e31b48545e, and no 1.84.x
+      # patch exists. Only that range is held, so the fixed 1.85.0 release is
+      # proposed as soon as it ships. Drop this ignore once grpc 1.85.0 is
+      # tagged, or earlier if a 1.84.x release lists GO-2026-6443 as fixed.
+      # Drop all three holds in this block together then, and the gRPC re-pin
+      # line in development.md's Updating Dependencies. Tracked in #643,
+      # which stays open until they are gone.
+      - dependency-name: "google.golang.org/grpc"
+        versions: [">= 1.84.0, < 1.85.0"]
+      # These releases require grpc >= 1.84.0, so bumping either would pull
+      # the vulnerable grpc in transitively despite the hold above. Drop both
+      # together with it.
+      - dependency-name: "go.opentelemetry.io/proto/otlp"
+        versions: [">= 1.11.1"]
+      - dependency-name: "github.com/grpc-ecosystem/grpc-gateway/v2"
+        versions: [">= 2.31.0"]
     commit-message:
       prefix: "deps"
 
@@ -94,5 +114,19 @@ updates:
       # the MINOR bump that crosses the wire boundary.
       - dependency-name: "@wavehouse/sdk"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
+    # Dependabot knows nothing of pnpm's minimumReleaseAge (7 days, see
+    # pnpm-workspace.yaml), so its lockfiles failed our install. Matching the
+    # window means a release younger than it is not proposed at all. Cooldown
+    # covers the dependency being bumped, not the transitive packages
+    # Dependabot re-resolves, so a lockfile can still trip pnpm's policy check;
+    # that remainder stays open in #441. Security updates bypass cooldown.
+    # Not applied to gomod or github-actions: neither has an install-time age
+    # gate to stay consistent with.
+    # The excludes mirror minimumReleaseAgeExclude: pnpm installs those at once.
+    cooldown:
+      default-days: 7
+      exclude:
+        - "@wave-rf/*"
+        - "@wavehouse/*"
     commit-message:
       prefix: "deps"
