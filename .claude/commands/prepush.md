@@ -3,7 +3,7 @@ description: Pre-push gate — judge which reviewers the change needs, run those
 argument-hint: "[all] (default: judge per change; 'all' forces every reviewer)"
 ---
 
-The mandatory pre-push self-review. A push to a PR branch is blocked until a marker exists for HEAD from **every** reviewer in `scripts/pre-push-reviewers.sh` (`.claude/hooks/agent-bash-gate.sh`). You satisfy each marker one of two ways: **run** the reviewer (it writes its marker on `ship_it`), or **skip** it when it adds nothing to *this* change (a logged skip writes the marker). The goal: a real review where it matters, and no 10-minute review of a one-line typo.
+The mandatory pre-push self-review. A push to a PR branch is blocked until a marker exists for the commit being pushed from **every** reviewer in `scripts/pre-push-reviewers.sh` (`.claude/hooks/agent-bash-gate.sh`). You satisfy each marker one of two ways: **run** the reviewer (it writes its marker on `ship_it`), or **skip** it when it adds nothing to *this* change (a logged skip writes the marker). The goal: a real review where it matters, and no 10-minute review of a one-line typo.
 
 ## Preconditions
 
@@ -52,6 +52,6 @@ It prints a ⚠️ when the skip looks risky (e.g. skipping docs review when doc
 2. Commit once every reviewer of the round has finished (HEAD changes → all prior markers, run *and* skipped, go stale for the new HEAD).
 3. Re-run `make ci` **only if** a finding made you edit a tracked file.
 4. Re-decide §2 for the new HEAD, then re-run the kept reviewers in fresh context (parallel) and re-skip the rest.
-5. Repeat until a marker exists for HEAD from every listed reviewer.
+5. Repeat until a marker exists for the commit being pushed from every listed reviewer.
 
 Only then does `git push` succeed (and the gate prints any judgment-skips for the record). Push in a command of its own: the gate blocks a push that follows a commit, merge, checkout or other HEAD-moving git command on the same line. If a reviewer returns `block`, **stop and surface it to the user** — don't push past it. Never `--no-verify`.

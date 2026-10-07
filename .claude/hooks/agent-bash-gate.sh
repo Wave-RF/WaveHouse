@@ -347,7 +347,7 @@ is_assignment() {
 # simple command runs in (`why` is set once that can't be known), and gate
 # every `git push` found.
 walk_commands() {
-  local dir=$1 why="" i=0 n=${#TK_VAL[@]} top
+  local dir=$1 why="" i=0 n=${#TK_VAL[@]} top cstart=0
   local -a words=() dyns=() sdir=() swhy=()
   while [ "$i" -le "$n" ]; do
     if [ "$i" -eq "$n" ] || [ "${TK_OP[i]}" = 1 ]; then
@@ -365,6 +365,7 @@ walk_commands() {
         esac
       fi
     else
+      [ "${#words[@]}" -gt 0 ] || cstart=$i
       words+=("${TK_VAL[i]}"); dyns+=("${TK_DYN[i]}")
     fi
     i=$((i + 1))
@@ -374,7 +375,7 @@ walk_commands() {
 # run_simple: one simple command (words/dyns of walk_commands); follows a cd
 # and gates a git push.
 run_simple() {
-  local k=0 nw=${#words[@]} w a d dwhy sub="" gitenv=""
+  local k=0 j nw=${#words[@]} w a d dwhy sub="" gitenv=""
   while [ "$k" -lt "$nw" ]; do
     w=${words[k]}
     if is_assignment "$w"; then
@@ -388,9 +389,17 @@ run_simple() {
     fi
     k=$((k + 1))
   done
-  [ "$k" -lt "$nw" ] || return 0
+  # A bare assignment sets GIT_DIR / GIT_WORK_TREE for the rest of the line.
+  if [ "$k" -ge "$nw" ]; then
+    [ -z "$gitenv" ] || why="\`${gitenv}\`"
+    return 0
+  fi
 
   case ${words[k]} in
+    export | declare | typeset)
+      for ((j = k + 1; j < nw; j++)); do
+        case ${words[j]} in GIT_DIR | GIT_DIR=* | GIT_WORK_TREE | GIT_WORK_TREE=*) why="\`${words[k]} ${words[j]%%=*}\`" ;; esac
+      done ;;
     cd | pushd)
       k=$((k + 1))
       while [ "$k" -lt "$nw" ]; do
@@ -441,7 +450,7 @@ run_simple() {
         commit | merge | rebase | reset | checkout | switch | cherry-pick | revert | am | pull) HEAD_MOVER=$sub ;;
         push)
           if [ "${dyns[k]}" = 0 ]; then
-            PUSHES=$((PUSHES + 1))
+            FOLLOWED="$FOLLOWED$cstart "
             gate_push "$d" "$dwhy" $((k + 1))
           fi ;;
       esac ;;
@@ -590,21 +599,26 @@ EOF
 # shellcheck disable=SC2016 # the backticks are literal: a push inside `…`
 push_re='(^|[[:space:];|&(`])git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:];|&][^[:space:];|&]*)?)*[[:space:]]+push([[:space:]]|$|[;|&)`])'
 
-# unfollowed_push: true when the tokens hold a `git … push` the walk didn't
-# gate: behind a wrapper it doesn't know (`timeout 60 git push`) or inside a
-# command substitution. A push only mentioned in a quoted string, a heredoc body
-# or a comment is one word or no token at all, so it doesn't count.
+# unfollowed_push: true when a simple command the walk didn't gate (FOLLOWED
+# holds the first-token index of each one it did) holds a `git … push`: behind
+# a wrapper it doesn't know (`timeout 60 git push`) or inside a command
+# substitution. A push only mentioned in a quoted string, a heredoc body or a
+# comment is one word or no token at all, so it doesn't count.
 unfollowed_push() {
-  local i n=${#TK_VAL[@]} w line=""
+  local i n=${#TK_VAL[@]} w line="" dyn="" start=0
   for ((i = 0; i <= n; i++)); do
     if [ "$i" -eq "$n" ] || [ "${TK_OP[i]}" = 1 ]; then
-      printf '%s\n' "$line" | grep -qE "$push_re" && return 0
-      line=""
+      case $FOLLOWED in
+        *" $start "*) ;;
+        *) printf '%s\n%s\n' "$line" "$dyn" | grep -qE "$push_re" && return 0 ;;
+      esac
+      line=""; dyn=""; start=$((i + 1))
       continue
     fi
     w=${TK_VAL[i]}
     if [ "${TK_DYN[i]}" = 1 ]; then
-      printf '%s\n' "$w" | grep -qE "$push_re" && return 0
+      dyn="$dyn$w
+"
       w=Q
     fi
     case $w in *[[:space:]]*) w=Q ;; esac
@@ -622,10 +636,10 @@ if printf '%s\n' "$squashed" | grep -qE "$push_re"; then
   hook_cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
   [ -n "$hook_cwd" ] || block "can't tell which directory this \`git push\` runs in: the hook payload has no cwd."
   tokenize "$cmd" || block "can't parse this command (an unterminated quote or substitution?), so can't tell what it pushes."
-  PUSHES=0
+  FOLLOWED=" "
   HEAD_MOVER=""
   walk_commands "$hook_cwd"
-  if [ "$PUSHES" -eq 0 ] && unfollowed_push; then
+  if unfollowed_push; then
     block "this command runs \`git push\` in a form the gate can't follow (behind a wrapper such as timeout, sudo or env -C, or in a command substitution). Run \`git push\` directly, or as \`git -C <worktree> push …\`."
   fi
 fi

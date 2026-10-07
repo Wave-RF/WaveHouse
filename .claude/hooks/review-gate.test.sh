@@ -15,6 +15,8 @@ gate=$root/.claude/hooks/agent-bash-gate.sh
 marker_hook=$root/.claude/hooks/review-marker.sh
 fails=0
 
+command -v jq >/dev/null 2>&1 || { echo "review-gate test: jq is required (the hooks under test parse JSON with it)." >&2; exit 1; }
+
 scratch=$(mktemp -d) || exit 1
 trap 'rm -rf "$scratch"' EXIT
 scratch=$(cd "$scratch" && pwd -P)
@@ -283,6 +285,15 @@ expect_block "an unresolvable refspec" "$repo" "git push origin no-such-branch" 
 expect_block "a wrapped push" "$repo" "timeout 60 git push" "can't follow"
 expect_block "a push behind sudo" "$repo" "sudo git push origin feat-a" "can't follow"
 expect_block "a push in a command substitution" "$repo" "out=\$(git push origin feat-b 2>&1)" "can't follow"
+# A followed push on the line doesn't excuse an unfollowed one.
+expect_block "a followed push, then a wrapped one" "$repo" "git push origin feat-a && timeout 60 git push origin feat-b" "can't follow"
+expect_block "a followed push, then one in a substitution" "$repo" "git push origin feat-a; out=\$(git -C ../wt-b push 2>&1)" "can't follow"
+expect_block "a followed push, then one behind sudo" "$repo" "git push origin feat-a && sudo git -C ../wt-b push" "can't follow"
+expect_block "push --help, then a wrapped push" "$repo" "git push --help; timeout 5 git push origin feat-b" "can't follow"
+expect_allow "two followed pushes" "$repo" "git push origin feat-a && git push origin feat-a:refs/heads/copy"
+expect_block "export GIT_DIR before the push" "$repo" "export GIT_DIR=$wtb/.git; git push origin HEAD" "can't tell which repository"
+expect_block "declare -x GIT_WORK_TREE before the push" "$repo" "declare -x GIT_WORK_TREE=$wtb; git push" "can't tell which repository"
+expect_block "a bare GIT_DIR assignment before the push" "$repo" "GIT_DIR=$wtb/.git; git push" "can't tell which repository"
 expect_block "the matching refspec ':'" "$repo" "git push origin :" "every branch that exists on both sides"
 expect_block "…and '+:'" "$repo" "git push origin +:" "every branch that exists on both sides"
 expect_block "an unterminated quote" "$repo" "git push origin 'feat-a" "can't parse"
