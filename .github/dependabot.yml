@@ -17,7 +17,8 @@ updates:
       # patch exists. Only that range is held, so the fixed 1.85.0 release is
       # proposed as soon as it ships. Drop this ignore once grpc 1.85.0 is
       # tagged, or earlier if a 1.84.x release lists GO-2026-6443 as fixed.
-      # Tracked in #643.
+      # Drop all three holds in this block together then. Tracked in #643,
+      # which stays open until they are gone.
       - dependency-name: "google.golang.org/grpc"
         versions: [">= 1.84.0, < 1.85.0"]
       # These releases require grpc >= 1.84.0, so bumping either would pull
@@ -120,7 +121,11 @@ updates:
     # that remainder stays open in #441. Security updates bypass cooldown.
     # Not applied to gomod or github-actions: neither has an install-time age
     # gate to stay consistent with.
+    # The excludes mirror minimumReleaseAgeExclude: pnpm installs those at once.
     cooldown:
       default-days: 7
+      exclude:
+        - "@wave-rf/*"
+        - "@wavehouse/*"
     commit-message:
       prefix: "deps"
