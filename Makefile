@@ -216,9 +216,13 @@ export GOTESTSUM_FMT
 
 # -trimpath makes compiled packages independent of the checkout's directory,
 # so every worktree shares one Go build cache entry per package and variant
-# instead of building its own. A caller's GOFLAGS is kept.
+# instead of building its own. A caller's GOFLAGS is kept, and one that already
+# names -trimpath (`-trimpath=false` to opt out) is left alone, which also
+# stops sub-makes from prepending it again.
 GOFLAGS ?=
+ifeq ($(findstring -trimpath,$(GOFLAGS)),)
 override GOFLAGS := -trimpath $(GOFLAGS)
+endif
 export GOFLAGS
 
 # ==============================================================================
