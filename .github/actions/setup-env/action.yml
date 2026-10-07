@@ -192,7 +192,8 @@ runs:
       if: ${{ inputs.go == 'true' }}
       shell: bash
       run: |
-        GOTOOLCHAIN="go$(awk '/^go /{print $2; exit}' go.mod)"
+        GOTOOLCHAIN="$(awk '/^toolchain /{t=$2} /^go /{g="go"$2} END{print (t != "") ? t : g}' go.mod)"
+        [[ "$GOTOOLCHAIN" =~ ^go[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "::error::go.mod needs a go line of the form x.y.z, got '$GOTOOLCHAIN'"; exit 1; }
         echo "GOTOOLCHAIN=$GOTOOLCHAIN" >> "$GITHUB_ENV"
         GOTOOLCHAIN="$GOTOOLCHAIN" go version
 

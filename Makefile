@@ -216,12 +216,16 @@ export GOTESTSUM_FMT
 
 # GOTOOLCHAIN=auto means max(local, go.mod), so a newer local Go (or runner
 # image) silently diverges from CI, and golangci-lint panics type-checking a
-# standard library newer than the Go it was built with. Pin to go.mod's.
+# standard library newer than the Go it was built with. Pin to go.mod's
+# `toolchain` line if it has one, else its `go` line, which must be x.y.z
+# (`go mod edit -go=1.27` writes `1.27`, which is not a toolchain name; bump
+# with `go get go@1.N.P`).
 # The pin is strict, so `go install` in `make tools` also runs on it: a tool
 # that needs a newer Go fails until go.mod's directive catches up. Override
 # with `make GOTOOLCHAIN=local ...` (the environment's value is ignored).
-GO_VERSION := $(shell awk '/^go /{print $$2; exit}' go.mod)
-export GOTOOLCHAIN := go$(GO_VERSION)
+GO_TOOLCHAIN := $(shell awk '/^toolchain /{t=$$2} /^go /{g="go"$$2} END{print (t != "") ? t : g}' go.mod)
+$(if $(shell echo '$(GO_TOOLCHAIN)' | grep -E '^go[0-9]+\.[0-9]+\.[0-9]+'),,$(error go.mod needs a `go` line of the form x.y.z (or a `toolchain` line), got '$(GO_TOOLCHAIN)'; bump with `go get go@1.N.P`))
+export GOTOOLCHAIN := $(GO_TOOLCHAIN)
 
 # ==============================================================================
 # Targets
@@ -719,8 +723,9 @@ DOCS_PROSE   = $(shell bash scripts/docs-prose.sh all 2>/dev/null)
 # Done in Xms" chatter stays out of the verify checklist. Not --reporter=silent:
 # it prints nothing at all, even on failure, so a supply-chain policy violation
 # surfaced as a bare `Error 1`. confirm-modules-purge=false because pnpm's
-# "remove node_modules? (Y/n)" prompt, written to the captured stdout, would
-# otherwise hang the recipe invisibly on a terminal (CI=true skips it in CI).
+# "The modules directory at … will be removed and reinstalled from scratch.
+# Proceed? (Y/n)" prompt, written to the captured stdout, would otherwise hang
+# the recipe invisibly on a terminal (CI=true skips it in CI).
 .PHONY: pnpm-install
 pnpm-install:
 	@out=$$($(PNPM) install --frozen-lockfile --config.confirm-modules-purge=false 2>&1) || { printf '%s\n' "$$out"; exit 1; }
