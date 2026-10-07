@@ -294,6 +294,45 @@ expect_allow "two followed pushes" "$repo" "git push origin feat-a && git push o
 expect_block "export GIT_DIR before the push" "$repo" "export GIT_DIR=$wtb/.git; git push origin HEAD" "can't tell which repository"
 expect_block "declare -x GIT_WORK_TREE before the push" "$repo" "declare -x GIT_WORK_TREE=$wtb; git push" "can't tell which repository"
 expect_block "a bare GIT_DIR assignment before the push" "$repo" "GIT_DIR=$wtb/.git; git push" "can't tell which repository"
+# An exported GIT_DIR or GIT_WORK_TREE outlives a later cd or git -C; only
+# unset or the end of a subshell clears it.
+expect_block "export GIT_DIR, then cd to a reviewed worktree" "$repo" "export GIT_DIR=$wtb/.git; cd $repo && git push" "can't tell which repository"
+expect_block "export GIT_DIR, then git -C a reviewed worktree" "$repo" "export GIT_DIR=$wtb/.git; git -C $repo push" "can't tell which repository"
+expect_block "export GIT_WORK_TREE, then cd" "$repo" "export GIT_WORK_TREE=$wtb; cd $repo; git push" "can't tell which repository"
+expect_block "export GIT_DIR, then pushd" "$repo" "export GIT_DIR=$wtb/.git; pushd $repo >/dev/null; git push" "can't tell which repository"
+expect_block "…and unsetting one of the two leaves the other" "$repo" "export GIT_DIR=$wtb/.git GIT_WORK_TREE=$wtb; unset GIT_DIR; git push" "can't tell which repository"
+expect_block "git --git-dir, then -C a reviewed worktree" "$repo" "git --git-dir=$wtb/.git -C $repo push" "can't tell which repository"
+expect_allow "export GIT_DIR, then unset it" "$repo" "export GIT_DIR=$wtb/.git; unset GIT_DIR; git push"
+expect_allow "export GIT_DIR in a subshell" "$repo" "(export GIT_DIR=$wtb/.git; true) && git push"
+# A HEAD-moving git command the walk doesn't run directly still moves HEAD.
+expect_block "a wrapped commit, then a push" "$repo" "timeout 60 git commit -m x && git push" "separate command"
+expect_block "a commit in a command substitution, then a push" "$repo" "out=\$(git commit --allow-empty -m x 2>&1) && git push" "separate command"
+# Code handed to a shell or eval is not followed; a process substitution is.
+expect_block "a push in bash -c" "$repo" "bash -c \"git push origin feat-b\"" "can't follow"
+expect_block "a push in sh -c, after a cd" "$repo" "sh -c 'cd ../wt-b && git push'" "can't follow"
+expect_block "a push in eval" "$repo" "eval \"git push origin feat-b\"" "can't follow"
+expect_block "a push in a heredoc read by bash" "$repo" "bash <<'EOF'
+cd ../wt-b
+git push origin feat-b
+EOF" "can't follow"
+expect_block "a push in a here-string read by sh" "$repo" "sh <<< 'git -C ../wt-b push'" "can't follow"
+expect_block "a push in an input process substitution" "$repo" "cat <(git push origin feat-b)" "missing pre-push review marker"
+expect_block "a push in an output process substitution" "$repo" "tee >(git -C ../wt-b push)" "missing pre-push review marker"
+expect_allow "a script run by bash, then a push" "$repo" "bash scripts/pre-push-reviewers.sh && git push"
+expect_allow "a heredoc read by bash that doesn't push, then a push" "$repo" "bash <<'EOF'
+echo hi
+EOF
+git push"
+# A command longer than a pipe buffer (64 KB) is checked like any other.
+big=$(printf 'line %05d of a long body\n' $(seq 1 4000))
+expect_block "a push ahead of a 100 KB body" "$repo" "git push origin feat-b && gh pr create --draft --body \"\$(cat <<'EOF'
+$big
+EOF
+)\"" "missing pre-push review marker"
+expect_block "a 100 KB gh pr create without --draft" "$repo" "gh pr create --title \"fix: x\" --body \"\$(cat <<'EOF'
+$big
+EOF
+)\"" "--draft"
 expect_block "the matching refspec ':'" "$repo" "git push origin :" "every branch that exists on both sides"
 expect_block "…and '+:'" "$repo" "git push origin +:" "every branch that exists on both sides"
 expect_block "an unterminated quote" "$repo" "git push origin 'feat-a" "can't parse"
