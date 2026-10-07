@@ -214,6 +214,12 @@ RELEASE_BINARIES := $(addsuffix -release,$(BINARIES))
 export VERSION_LDFLAGS LDFLAGS TAGS
 export GOTESTSUM_FMT
 
+# GOTOOLCHAIN=auto means max(local, go.mod), so a newer local Go (or runner
+# image) silently diverges from CI, and golangci-lint, built against go.mod's
+# Go, panics on packages a newer one processed. Pin to go.mod's directive.
+GO_VERSION := $(shell awk '/^go /{print $$2; exit}' go.mod)
+export GOTOOLCHAIN := go$(GO_VERSION)
+
 # ==============================================================================
 # Targets
 # ==============================================================================
@@ -705,12 +711,14 @@ DOCS_PROSE   = $(shell bash scripts/docs-prose.sh all 2>/dev/null)
 
 # pnpm-install: hidden internal target. Node targets depend on it to ensure
 # workspace deps are present; on a warm tree `--frozen-lockfile` is a fast
-# no-op. No doc string → hidden from `make help`. --reporter=silent drops the
-# "Scope / Already up to date / Done in Xms" chatter so it doesn't clutter the
-# verify checklist; fatal errors (e.g. a lockfile mismatch) still print.
+# no-op. No doc string → hidden from `make help`. The output is captured and
+# only replayed when the install fails, so the "Scope / Already up to date /
+# Done in Xms" chatter stays out of the verify checklist. Not --reporter=silent:
+# it prints nothing at all, even on failure, so a supply-chain policy violation
+# surfaced as a bare `Error 1`.
 .PHONY: pnpm-install
 pnpm-install:
-	@$(PNPM) install --frozen-lockfile --reporter=silent
+	@out=$$($(PNPM) install --frozen-lockfile 2>&1) || { printf '%s\n' "$$out"; exit 1; }
 
 # install-playwright-docs: hidden helper — fetch the Chromium build the docs
 # site needs (rehype-mermaid build-time SSR is the build's only browser use;

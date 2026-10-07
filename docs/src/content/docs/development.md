@@ -415,6 +415,8 @@ A global copy is never what `make lint` runs, so install one only if you want to
 - **macOS**: `brew install golangci-lint`
 - **Binary**: See [golangci-lint.run/welcome/install/](https://golangci-lint.run/welcome/install/)
 
+The Makefile exports `GOTOOLCHAIN` pinned to `go.mod`'s `go` directive, so local runs and CI use the same Go even when your installed Go is newer (the first run downloads that toolchain once). A bare `go test` outside `make` is not pinned. Bumping the `go` directive also needs a golangci-lint release built with at least that Go, or `make lint-go` panics.
+
 The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control) — that file is the authoritative list of enabled linters. Highlights:
 
 - **errcheck** — Unchecked error returns
