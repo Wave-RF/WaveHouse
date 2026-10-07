@@ -46,8 +46,8 @@ stripped=$(printf '%s' "$cmd" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")
 project_dir="${CLAUDE_PROJECT_DIR:-.}"
 
 # gh pr create requires --draft.
-if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+create\b'; then
-  printf '%s\n' "$stripped" | grep -qE '(^|[[:space:]])(--draft|-d)\b' \
+if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+create\b' <<<"$stripped"; then
+  grep -qE '(^|[[:space:]])(--draft|-d)\b' <<<"$stripped" \
     || block "Agent-opened PRs must use --draft. Only humans publish ready-for-review PRs."
 fi
 
@@ -59,7 +59,7 @@ fi
 # `stripped` copy has quotes removed). Fail-open: if no title is parseable
 # (--fill, interactive, unquoted) or the validator is missing, fall through to
 # the CI check rather than block a create we can't confidently judge.
-if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+(create|edit)\b'; then
+if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+(create|edit)\b' <<<"$stripped"; then
   pr_title=$(printf '%s' "$cmd" | sed -nE 's/.*(--title|-t)[[:space:]]+"([^"]*)".*/\2/p')
   [ -z "$pr_title" ] && pr_title=$(printf '%s' "$cmd" | sed -nE "s/.*(--title|-t)[[:space:]]+'([^']*)'.*/\2/p")
   if [ -n "$pr_title" ] && [ -x "$project_dir/scripts/lint-pr-title.sh" ]; then
@@ -70,28 +70,28 @@ if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:s
 fi
 
 # gh pr ready is humans-only.
-if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+ready\b'; then
+if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+ready\b' <<<"$stripped"; then
   block "Only humans flip drafts to ready-for-review. Ask the user."
 fi
 
 # gh pr edit --add-reviewer / --add-assignee is humans-only.
-if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+edit\b' \
-   && printf '%s\n' "$stripped" | grep -qE '(^|[[:space:]])--(add|remove)-(reviewer|assignee)\b'; then
+if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+edit\b' <<<"$stripped" \
+   && grep -qE '(^|[[:space:]])--(add|remove)-(reviewer|assignee)\b' <<<"$stripped"; then
   block "Adding/removing reviewers is humans-only. Re-trigger bot reviewers via PR comment mention (e.g. @coderabbitai review)."
 fi
 
 # gh api .../requested_reviewers write verbs (API form of --add-reviewer).
-if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+api\b' \
-   && printf '%s\n' "$stripped" | grep -qE 'requested_reviewers' \
-   && printf '%s\n' "$stripped" | grep -qE '(-X[[:space:]]*(POST|PUT|PATCH)|--method[[:space:]]*(POST|PUT|PATCH)|[[:space:]]-f[[:space:]]+reviewers=|[[:space:]]-F[[:space:]]+reviewers=)'; then
+if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+api\b' <<<"$stripped" \
+   && grep -qE 'requested_reviewers' <<<"$stripped" \
+   && grep -qE '(-X[[:space:]]*(POST|PUT|PATCH)|--method[[:space:]]*(POST|PUT|PATCH)|[[:space:]]-f[[:space:]]+reviewers=|[[:space:]]-F[[:space:]]+reviewers=)' <<<"$stripped"; then
   block "Reviewer-write requests are humans-only. Re-trigger bot reviewers via PR comment mention."
 fi
 
 # gh pr review --approve / --request-changes are humans-only.
-if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+review\b'; then
-  printf '%s\n' "$stripped" | grep -qE '(^|[[:space:]])(--approve|-a)\b' \
+if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+review\b' <<<"$stripped"; then
+  grep -qE '(^|[[:space:]])(--approve|-a)\b' <<<"$stripped" \
     && block "Only humans approve PRs."
-  printf '%s\n' "$stripped" | grep -qE '(^|[[:space:]])(--request-changes|-r)\b' \
+  grep -qE '(^|[[:space:]])(--request-changes|-r)\b' <<<"$stripped" \
     && block "Agents post inline review comments instead of --request-changes."
 fi
 
@@ -110,9 +110,13 @@ fi
 # judged on that worktree, not on the one the session started in. A marker for
 # that commit counts from any worktree of the repository: markers are keyed to
 # the commit, which is what was reviewed. When the gate can't tell where a push
-# runs or what it publishes, it blocks and says why. That includes a push that
-# follows a HEAD-moving git command (`git commit … && git push`): the gate runs
+# runs or what it publishes, it blocks and says why. That includes a push in
+# code handed to a shell (`bash -c`, `eval`, a heredoc read by `sh`), and a
+# push that follows a HEAD-moving git command, run directly or not
+# (`git commit … && git push`, `out=$(git commit …) && git push`): the gate runs
 # before the command line does, so it would judge the commit before the move.
+# It reads only the command line, so it catches accidental forms, not
+# deliberate evasion; AGENTS.md lists the forms it doesn't follow.
 #
 # It gates any commit with a delta against the base (local main, else
 # origin/main), NOT only commits on a branch with an open PR: the agent flow is
@@ -128,33 +132,64 @@ reviewers_script="scripts/pre-push-reviewers.sh"
 # redirections, heredocs, $(…) and `…`) without expanding or running anything.
 # A word that carries an expansion is flagged dynamic: its value is unknowable
 # here, so a push that depends on one fails closed. Fills TK_VAL / TK_DYN /
-# TK_OP; returns 1 on an unterminated quote or substitution.
+# TK_OP, TK_IN / TK_IN_AT with each heredoc body and here-string and the token
+# index of the simple command that reads it, and TK_SUBS with the text of every
+# $(…) and `…`, wherever its word went (an argument, a here-string, a redirect
+# target), each quoted part inside a $(…) wrapped in \002…\003; returns 1 on an
+# unterminated quote or substitution.
 
 tk_flush() {
   if [ "$_inw" = 1 ]; then
-    if [ "$_skip" = 0 ]; then
-      TK_VAL+=("$_w"); TK_DYN+=("$_dyn"); TK_OP+=(0)
-    fi
+    # One pass with tr: bash 3.2's ${_w//…} is quadratic in the marker count.
+    case $_w in *$'\002'* | *$'\003'*) _w=$(printf '%s.' "$_w" | tr -d '\002\003'); _w=${_w%.} ;; esac
+    case $_skip in
+      0) TK_VAL+=("$_w"); TK_DYN+=("$_dyn"); TK_OP+=(0) ;;
+      2) TK_IN+=("$_w"); TK_IN_AT+=("$_cmd0") ;;
+    esac
     _skip=0
   fi
   _w=""; _inw=0; _dyn=0
 }
-tk_op() { tk_flush; TK_VAL+=("$1"); TK_DYN+=(0); TK_OP+=(1); }
+# An operator ends any redirection: in `<(…)` and `>(…)` the "(" opens a
+# process substitution, whose first word is a command, not a target.
+tk_op() { tk_flush; _skip=0; TK_VAL+=("$1"); TK_DYN+=(0); TK_OP+=(1); _cmd0=${#TK_VAL[@]}; }
 
 tk_squote() {
   local rest=${_s:_i+1} part
   case $rest in *"'"*) ;; *) return 1 ;; esac
   part=${rest%%"'"*}
-  _w+=$part; _inw=1; _i=$((_i + ${#part} + 2))
+  _inw=1; _i=$((_i + ${#part} + 2))
+  [ "$_insub" = 0 ] || part=$'\002'$part$'\003'
+  _w+=$part
+}
+
+# tk_ansi: a $'…' string, in which \' doesn't end the quote.
+tk_ansi() {
+  local c
+  _inw=1; _i=$((_i + 2))
+  [ "$_insub" = 0 ] || _w+=$'\002'
+  while [ "$_i" -lt "$_n" ]; do
+    c=${_s:_i:1}
+    case $c in
+      "'") _i=$((_i + 1)); [ "$_insub" = 0 ] || _w+=$'\003'; return 0 ;;
+      \\) _w+=${_s:_i:2}; _i=$((_i + 2)) ;;
+      *) _w+=$c; _i=$((_i + 1)) ;;
+    esac
+  done
+  return 1
 }
 
 tk_dquote() {
   local c c2
   _inw=1; _i=$((_i + 1))
+  [ "$_insub" = 0 ] || _w+=$'\002'
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
     case $c in
-      '"') _i=$((_i + 1)); return 0 ;;
+      '"')
+        _i=$((_i + 1))
+        [ "$_insub" = 0 ] || _w+=$'\003'
+        return 0 ;;
       \\)
         c2=${_s:_i+1:1}
         case $c2 in '$' | '`' | '"' | \\) _w+=$c2 ;; $'\n') ;; *) _w+=$c$c2 ;; esac
@@ -168,26 +203,31 @@ tk_dquote() {
 }
 
 tk_dollar() {
-  local rest part
+  local rest part s0=${#_w}
   _inw=1; _dyn=1
   case ${_s:_i+1:1} in
-    '(') _w+='$'; _i=$((_i + 1)); tk_paren ;;
+    '(')
+      _w+='$'; _i=$((_i + 1)); _insub=$((_insub + 1))
+      tk_paren || return 1
+      _insub=$((_insub - 1)); TK_SUBS+=("${_w:s0}") ;;
     '{')
       rest=${_s:_i}
       case $rest in *'}'*) ;; *) return 1 ;; esac
       part=${rest%%'}'*}
+      # shellcheck disable=SC2016 # a literal $( or backtick in ${…:-…}
+      case $part in *'$('* | *'`'*) TK_SUBS+=("$part}") ;; esac
       _w+="$part}"; _i=$((_i + ${#part} + 1)) ;;
     *) _w+='$'; _i=$((_i + 1)) ;;
   esac
 }
 
 tk_backtick() {
-  local c
+  local c s0=${#_w}
   _inw=1; _dyn=1; _w+='`'; _i=$((_i + 1))
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
     case $c in
-      '`') _w+=$c; _i=$((_i + 1)); return 0 ;;
+      '`') _w+=$c; _i=$((_i + 1)); TK_SUBS+=("${_w:s0}"); return 0 ;;
       \\) _w+=${_s:_i:2}; _i=$((_i + 2)) ;;
       *) _w+=$c; _i=$((_i + 1)) ;;
     esac
@@ -211,11 +251,13 @@ tk_paren() {
       "'") tk_squote || return 1 ;;
       '"') tk_dquote || return 1 ;;
       '`') tk_backtick || return 1 ;;
+      '$')
+        if [ "${_s:_i+1:1}" = "'" ]; then tk_ansi || return 1; else _w+=$c; _i=$((_i + 1)); fi ;;
       '<')
         if [ "${_s:_i:3}" = '<<<' ]; then
-          _w+='<<<'; _i=$((_i + 3))
+          _w+='<<< '; _i=$((_i + 3))
         else
-          tk_heredoc_op || { _w+=$c; _i=$((_i + 1)); }
+          tk_heredoc_op -1 || { _w+=$c; _i=$((_i + 1)); }
         fi ;;
       $'\n') _w+=$c; _i=$((_i + 1)); tk_heredoc_bodies ;;
       *) _w+=$c; _i=$((_i + 1)) ;;
@@ -224,8 +266,10 @@ tk_paren() {
   return 1
 }
 
-# tk_heredoc_op: at "<<" or "<<-", register the heredoc's delimiter (its body
-# starts after the next newline). Returns 1, consuming nothing, elsewhere.
+# tk_heredoc_op <at>: at "<<" or "<<-", register the heredoc's delimiter (its
+# body starts after the next newline) and the token index of the command that
+# reads it (-1 inside a substitution: the body isn't kept). Returns 1,
+# consuming nothing, elsewhere.
 tk_heredoc_op() {
   local strip=0 c d=""
   case ${_s:_i:3} in
@@ -244,47 +288,56 @@ tk_heredoc_op() {
     esac
     _i=$((_i + 1))
   done
-  _hd_delim+=("$d"); _hd_strip+=("$strip")
+  _hd_delim+=("$d"); _hd_strip+=("$strip"); _hd_at+=("$1")
 }
 
-# tk_heredoc_bodies: just past a newline, skip the bodies of pending heredocs.
+# tk_heredoc_bodies: just past a newline, step over the bodies of pending
+# heredocs, keeping each top-level one in TK_IN. Inside a $(…), a line that is
+# the delimiter followed by ")" (`EOF)"`) also ends the body, and the ")" closes
+# the substitution.
 tk_heredoc_bodies() {
-  local k rest line
+  local k rest line start
   [ "${#_hd_delim[@]}" -gt 0 ] || return 0
   for ((k = 0; k < ${#_hd_delim[@]}; k++)); do
+    start=$_i
     while [ "$_i" -lt "$_n" ]; do
       rest=${_s:_i}
       line=${rest%%$'\n'*}
       _i=$((_i + ${#line} + 1))
       [ "${_hd_strip[k]}" = 1 ] && line=${line#"${line%%[!$'\t']*}"}
       [ "$line" = "${_hd_delim[k]}" ] && break
+      if [ "${_hd_at[k]}" = -1 ] && [ "${line#"${_hd_delim[k]})"}" != "$line" ]; then
+        _i=$((_i - 1 - ${#line} + ${#_hd_delim[k]})); break
+      fi
     done
+    if [ "${_hd_at[k]}" -ge 0 ]; then
+      TK_IN+=("${_s:start:_i-start}"); TK_IN_AT+=("${_hd_at[k]}")
+    fi
   done
-  _hd_delim=(); _hd_strip=()
+  _hd_delim=(); _hd_strip=(); _hd_at=()
 }
 
 # tk_redirect: at "<" or ">" (or the ">" of "&>"). An fd number glued to the
 # operator (2>&1) belongs to it, and the word after it is a target, not an
-# argument.
+# argument; a here-string's word goes to TK_IN.
 tk_redirect() {
   if [ "$_inw" = 1 ]; then
     case $_w in '' | *[!0-9]*) tk_flush ;; *) _w=""; _inw=0; _dyn=0 ;; esac
   fi
-  tk_heredoc_op && return 0
+  tk_heredoc_op "$_cmd0" && return 0
   if [ "${_s:_i:3}" = '<<<' ]; then
-    _i=$((_i + 3))
+    _i=$((_i + 3)); _skip=2
   else
-    _i=$((_i + 1))
+    _i=$((_i + 1)); _skip=1
     while case ${_s:_i:1} in '>' | '&' | '|') true ;; *) false ;; esac; do _i=$((_i + 1)); done
   fi
-  _skip=1
 }
 
 tokenize() {
   local LC_ALL=C c c2 rest line
   _s=$1; _n=${#1}; _i=0
-  _w=""; _inw=0; _dyn=0; _skip=0
-  TK_VAL=(); TK_DYN=(); TK_OP=(); _hd_delim=(); _hd_strip=()
+  _w=""; _inw=0; _dyn=0; _skip=0; _cmd0=0; _insub=0
+  TK_VAL=(); TK_DYN=(); TK_OP=(); TK_IN=(); TK_IN_AT=(); TK_SUBS=(); _hd_delim=(); _hd_strip=(); _hd_at=()
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
     case $c in
@@ -296,7 +349,8 @@ tokenize() {
         _i=$((_i + 2)) ;;
       "'") tk_squote || return 1 ;;
       '"') tk_dquote || return 1 ;;
-      '$') tk_dollar || return 1 ;;
+      '$')
+        if [ "${_s:_i+1:1}" = "'" ]; then tk_ansi || return 1; else tk_dollar || return 1; fi ;;
       '`') tk_backtick || return 1 ;;
       ';' | '|')
         c2=${_s:_i+1:1}
@@ -344,41 +398,48 @@ is_assignment() {
 }
 
 # walk_commands <dir>: run through the tokens, tracking the directory each
-# simple command runs in (`why` is set once that can't be known), and gate
-# every `git push` found.
+# simple command runs in (`why` is set once that can't be known) and whether
+# GIT_DIR (`gd`) or GIT_WORK_TREE (`gw`) has been set, and gate every
+# `git push` found. A later cd doesn't undo either variable; unset or the end
+# of a subshell does.
 walk_commands() {
-  local dir=$1 why="" i=0 n=${#TK_VAL[@]} top
-  local -a words=() dyns=() sdir=() swhy=()
+  local dir=$1 why="" gd="" gw="" i=0 n=${#TK_VAL[@]} top cstart=0
+  local -a words=() dyns=() sdir=() swhy=() sgd=() sgw=()
   while [ "$i" -le "$n" ]; do
     if [ "$i" -eq "$n" ] || [ "${TK_OP[i]}" = 1 ]; then
       [ "${#words[@]}" -gt 0 ] && run_simple
       words=(); dyns=()
       if [ "$i" -lt "$n" ]; then
         case ${TK_VAL[i]} in
-          '(') sdir+=("$dir"); swhy+=("$why") ;;
+          '(') sdir+=("$dir"); swhy+=("$why"); sgd+=("$gd"); sgw+=("$gw") ;;
           ')')
             if [ "${#sdir[@]}" -gt 0 ]; then
               top=$((${#sdir[@]} - 1))
-              dir=${sdir[top]}; why=${swhy[top]}
-              unset "sdir[top]" "swhy[top]"
+              dir=${sdir[top]}; why=${swhy[top]}; gd=${sgd[top]}; gw=${sgw[top]}
+              unset "sdir[top]" "swhy[top]" "sgd[top]" "sgw[top]"
             fi ;;
         esac
       fi
     else
+      [ "${#words[@]}" -gt 0 ] || cstart=$i
       words+=("${TK_VAL[i]}"); dyns+=("${TK_DYN[i]}")
     fi
     i=$((i + 1))
   done
 }
 
-# run_simple: one simple command (words/dyns of walk_commands); follows a cd
-# and gates a git push.
+# run_simple: one simple command (words/dyns of walk_commands); follows a cd,
+# notes GIT_DIR / GIT_WORK_TREE and HEAD-moving git commands, and gates a git
+# push.
 run_simple() {
-  local k=0 nw=${#words[@]} w a d dwhy sub="" gitenv=""
+  local k=0 j nw=${#words[@]} w a d dwhy ewhy sub="" agd="" agw="" line
   while [ "$k" -lt "$nw" ]; do
     w=${words[k]}
     if is_assignment "$w"; then
-      case ${w%%=*} in GIT_DIR | GIT_WORK_TREE) gitenv="${w%%=*}=" ;; esac
+      case ${w%%=*} in
+        GIT_DIR) agd="\`GIT_DIR=\`" ;;
+        GIT_WORK_TREE) agw="\`GIT_WORK_TREE=\`" ;;
+      esac
     else
       case $w in
         command | builtin | exec | nohup | time | env | '{' | '!') ;;
@@ -388,9 +449,24 @@ run_simple() {
     fi
     k=$((k + 1))
   done
-  [ "$k" -lt "$nw" ] || return 0
+  # A bare assignment sets GIT_DIR / GIT_WORK_TREE for the rest of the line.
+  if [ "$k" -ge "$nw" ]; then
+    gd=${agd:-$gd}; gw=${agw:-$gw}
+    return 0
+  fi
 
   case ${words[k]} in
+    export | declare | typeset)
+      for ((j = k + 1; j < nw; j++)); do
+        case ${words[j]} in
+          GIT_DIR | GIT_DIR=*) gd="\`${words[k]} GIT_DIR\`" ;;
+          GIT_WORK_TREE | GIT_WORK_TREE=*) gw="\`${words[k]} GIT_WORK_TREE\`" ;;
+        esac
+      done ;;
+    unset)
+      for ((j = k + 1; j < nw; j++)); do
+        case ${words[j]} in GIT_DIR) gd="" ;; GIT_WORK_TREE) gw="" ;; esac
+      done ;;
     cd | pushd)
       k=$((k + 1))
       while [ "$k" -lt "$nw" ]; do
@@ -412,9 +488,19 @@ run_simple() {
       esac
       dir=$(join_path "$dir" "$a") ;;
     popd) why="\`popd\`" ;;
+    eval | bash | sh | zsh | dash | ksh | */bash | */sh | */zsh | */dash | */ksh)
+      # Code handed to a shell (`-c '…'`, eval's words, a heredoc or
+      # here-string it reads) isn't followed, so a push in it blocks.
+      line="${words[*]:k+1}"
+      for ((j = 0; j < ${#TK_IN_AT[@]}; j++)); do
+        [ "${TK_IN_AT[j]}" != "$cstart" ] || line="$line
+${TK_IN[j]}"
+      done
+      line=${line//$'\\\n'/}
+      head_move "$line"
+      ! grep -qE "$push_re" <<<"$line" || block "$cant_follow" ;;
     git)
-      d=$dir; dwhy=$why
-      [ -z "$gitenv" ] || dwhy="\`${gitenv}\`"
+      d=$dir; dwhy=$why; ewhy=${agd:-${agw:-${gd:-$gw}}}
       k=$((k + 1))
       while [ "$k" -lt "$nw" ]; do
         w=${words[k]}
@@ -426,12 +512,12 @@ run_simple() {
             if [ "${dyns[k]}" = 1 ]; then
               dwhy="\`git -C $a\`"
             else
-              case $a in /* | \~ | \~/*) [ -n "$gitenv" ] || dwhy="" ;; esac
+              case $a in /* | \~ | \~/*) dwhy="" ;; esac
               d=$(join_path "$d" "$a")
             fi ;;
           -c | --namespace) k=$((k + 1)) ;;
-          --git-dir | --work-tree) dwhy="\`git $w\`"; k=$((k + 1)) ;;
-          --git-dir=* | --work-tree=*) dwhy="\`git ${w%%=*}\`" ;;
+          --git-dir | --work-tree) ewhy="\`git $w\`"; k=$((k + 1)) ;;
+          --git-dir=* | --work-tree=*) ewhy="\`git ${w%%=*}\`" ;;
           -*) ;;
           *) sub=$w; break ;;
         esac
@@ -441,11 +527,26 @@ run_simple() {
         commit | merge | rebase | reset | checkout | switch | cherry-pick | revert | am | pull) HEAD_MOVER=$sub ;;
         push)
           if [ "${dyns[k]}" = 0 ]; then
-            PUSHES=$((PUSHES + 1))
-            gate_push "$d" "$dwhy" $((k + 1))
+            FOLLOWED="$FOLLOWED$cstart "
+            gate_push "$d" "${ewhy:-$dwhy}" $((k + 1))
           fi ;;
       esac ;;
+    *)
+      # A git command behind a wrapper (`timeout 60 git commit`) still moves HEAD.
+      line=""
+      for ((j = k; j < nw; j++)); do
+        w=${words[j]}
+        case $w in *[[:space:]]*) w=Q ;; esac
+        [ "${dyns[j]}" = 0 ] || w=Q
+        line="$line $w"
+      done
+      head_move "$line" ;;
   esac
+}
+
+# head_move <text>: note a HEAD-moving `git …` in text the walk doesn't follow.
+head_move() {
+  if [[ $1 =~ $head_re ]]; then HEAD_MOVER=${BASH_REMATCH[4]}; fi
 }
 
 # gate_push <dir> <why-unknown> <first-arg-index>: resolve what a `git push`
@@ -586,28 +687,71 @@ EOF
   return 0
 }
 
-# `git [global options] push`, as a regex over a line of words.
+# `git [global options] push` and the HEAD-moving subcommands (BASH_REMATCH[4]),
+# as regexes over a line of words.
 # shellcheck disable=SC2016 # the backticks are literal: a push inside `…`
-push_re='(^|[[:space:];|&(`])git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:];|&][^[:space:];|&]*)?)*[[:space:]]+push([[:space:]]|$|[;|&)`])'
+git_re='(^|[[:space:];|&(`])git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:];|&][^[:space:];|&]*)?)*[[:space:]]+'
+# shellcheck disable=SC2016
+end_re='([[:space:]]|$|[;|&)`])'
+push_re=${git_re}push$end_re
+head_re=${git_re}'(commit|merge|rebase|reset|checkout|switch|cherry-pick|revert|am|pull)'$end_re
+# shellcheck disable=SC2016
+shell_re='(^|[[:space:];|&(`])(eval|([^[:space:];|&]*/)?(ba|z|da|k)?sh)([[:space:]<]|$)'
+cant_follow="this command runs \`git push\` in a form the gate can't follow (behind a wrapper such as timeout, sudo or env -C, in a command substitution, or in code handed to a shell or eval). Run \`git push\` directly, or as \`git -C <worktree> push …\`."
 
-# unfollowed_push: true when the tokens hold a `git … push` the walk didn't
-# gate: behind a wrapper it doesn't know (`timeout 60 git push`) or inside a
-# command substitution. A push only mentioned in a quoted string, a heredoc body
-# or a comment is one word or no token at all, so it doesn't count.
+# unquote <text>: UNQ = <text> with each \002…\003 (quoted) part as Q.
+unquote() {
+  local LC_ALL=C t=$1 pre c depth=0
+  UNQ=""
+  while :; do
+    pre=${t%%[$'\002\003']*}
+    [ "$depth" -gt 0 ] || UNQ+=$pre
+    [ "${#pre}" -lt "${#t}" ] || return 0
+    c=${t:${#pre}:1}; t=${t:${#pre}+1}
+    if [ "$c" = $'\002' ]; then
+      [ "$depth" -gt 0 ] || UNQ+=Q
+      depth=$((depth + 1))
+    elif [ "$depth" -gt 0 ]; then
+      depth=$((depth - 1))
+    fi
+  done
+}
+
+# sub_scan: note a HEAD move in any command substitution, and set SUB_PUSH when
+# one holds a `git … push`. Quoted text in it is an argument, not code
+# (`$(grep -c 'git push' f)`), unless the substitution hands it to a shell.
+sub_scan() {
+  local j s
+  SUB_PUSH=0
+  for ((j = 0; j < ${#TK_SUBS[@]}; j++)); do
+    s=${TK_SUBS[j]//$'\\\n'/}
+    unquote "$s"
+    if [[ $UNQ =~ $shell_re ]]; then UNQ=${s//$'\002'/}; UNQ=${UNQ//$'\003'/}; fi
+    head_move "$UNQ"
+    if [[ $UNQ =~ $push_re ]]; then SUB_PUSH=1; fi
+  done
+}
+
+# unfollowed_push: true when a command substitution anywhere holds a
+# `git … push`, or a simple command the walk didn't gate (FOLLOWED holds the
+# first-token index of each one it did) holds one behind a wrapper it doesn't
+# know (`timeout 60 git push`). A push only mentioned in a quoted string, a
+# heredoc body or a comment is one word or no token at all, so it doesn't count.
 unfollowed_push() {
-  local i n=${#TK_VAL[@]} w line=""
+  local i n=${#TK_VAL[@]} w line="" start=0
+  [ "$SUB_PUSH" = 0 ] || return 0
   for ((i = 0; i <= n; i++)); do
     if [ "$i" -eq "$n" ] || [ "${TK_OP[i]}" = 1 ]; then
-      printf '%s\n' "$line" | grep -qE "$push_re" && return 0
-      line=""
+      case $FOLLOWED in
+        *" $start "*) ;;
+        *) grep -qE "$push_re" <<<"$line" && return 0 ;;
+      esac
+      line=""; start=$((i + 1))
       continue
     fi
     w=${TK_VAL[i]}
-    if [ "${TK_DYN[i]}" = 1 ]; then
-      printf '%s\n' "$w" | grep -qE "$push_re" && return 0
-      w=Q
-    fi
     case $w in *[[:space:]]*) w=Q ;; esac
+    [ "${TK_DYN[i]}" = 0 ] || w=Q
     line="$line $w"
   done
   return 1
@@ -616,17 +760,24 @@ unfollowed_push() {
 # Cheap filter first, so most commands are never tokenized: quoted strings on a
 # line become a placeholder word (`git -C "<path>" stash push` reads as a
 # stash). It may still match a push that is only mentioned, say in a heredoc
-# body; the tokenizer then finds no push and lets the command through.
+# body; the tokenizer then finds no push and lets the command through. Code
+# handed to a shell or eval, and a substitution, are often quoted, so a line
+# that has one and mentions git and push anywhere goes through too.
 squashed=$(printf '%s' "${cmd//$'\\\n'/}" | sed -E "s/'[^']*'/Q/g; s/\"[^\"]*\"/Q/g")
-if printf '%s\n' "$squashed" | grep -qE "$push_re"; then
+# shellcheck disable=SC2016 # a literal $( or backtick
+if grep -qE "$push_re" <<<"$squashed" \
+  || { [[ $cmd == *git*push* ]] && { [[ $cmd == *'$('* || $cmd == *'`'* ]] || grep -qE "$shell_re" <<<"$squashed"; }; }; then
   hook_cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
   [ -n "$hook_cwd" ] || block "can't tell which directory this \`git push\` runs in: the hook payload has no cwd."
   tokenize "$cmd" || block "can't parse this command (an unterminated quote or substitution?), so can't tell what it pushes."
-  PUSHES=0
+  FOLLOWED=" "
+  # A substitution runs before the command it's in, so a HEAD move in one
+  # counts against every push on the line.
   HEAD_MOVER=""
+  sub_scan
   walk_commands "$hook_cwd"
-  if [ "$PUSHES" -eq 0 ] && unfollowed_push; then
-    block "this command runs \`git push\` in a form the gate can't follow (behind a wrapper such as timeout, sudo or env -C, or in a command substitution). Run \`git push\` directly, or as \`git -C <worktree> push …\`."
+  if unfollowed_push; then
+    block "$cant_follow"
   fi
 fi
 

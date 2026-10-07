@@ -353,7 +353,7 @@ accounts { A { jetstream: enabled, users: [
 	s, err := natsserver.NewServer(opts)
 	require.NoError(t, err)
 	s.Start()
-	t.Cleanup(s.Shutdown)
+	t.Cleanup(func() { shutdown(t, s, dir) })
 	require.True(t, s.ReadyForConnections(10*time.Second))
 
 	as := func(user, pw string) jetstream.JetStream {

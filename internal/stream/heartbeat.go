@@ -10,9 +10,11 @@ const (
 	// defaultKeepaliveInterval is the effective per-connection keepalive period:
 	// the longest a quiet stream goes unwritten. 30s sits under the common 55–60s
 	// proxy/LB idle timeouts (nginx, ingress-nginx, ALB, Heroku) with ~2× margin.
-	// The settings directory (stream.keepalive_interval) is the operative value
-	// and validation requires it >= 1; these are the library's last-resort
-	// fallbacks for non-positive inputs, not compiled defaults.
+	// The settings directory (stream.keepalive_*) is the operative value, and
+	// validation bounds it: the interval >= 1 second, the bucket count in
+	// 1-settings.MaxKeepaliveBuckets, which bounds the ring and the tick rate
+	// per tenant. These are the library's last-resort fallbacks for
+	// non-positive inputs, not compiled defaults.
 	defaultKeepaliveInterval = 30 * time.Second
 	defaultKeepaliveBuckets  = 3
 )
@@ -151,7 +153,7 @@ func (hb *Heartbeater) Len() int {
 }
 
 // Run drives the wheel until ctx is cancelled. Run it in its own goroutine for
-// the lifetime of the server.
+// as long as its subscribers are to be kept alive.
 func (hb *Heartbeater) Run(ctx context.Context) {
 	hb.mu.Lock()
 	tick := hb.tickInterval

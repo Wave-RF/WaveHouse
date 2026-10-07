@@ -476,6 +476,7 @@ test-tagged-tests:
 .PHONY: test-integration-parts
 test-integration-parts:
 	$(call run,integration-parts test,scripts/ci/integration-parts.test.sh,)
+
 # test-review-gate: feed the pre-push review hooks (.claude/hooks/
 # review-marker.sh and agent-bash-gate.sh) synthetic hook events in a scratch
 # repository with sibling worktrees: a marker must attest to the exact commit a
@@ -486,7 +487,7 @@ test-review-gate:
 	$(call run,review-gate test,.claude/hooks/review-gate.test.sh,)
 
 .PHONY: vulncheck
-vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
+vulncheck: go-mod-download ## Run govulncheck -scan package (V=1: symbol-level scan with example traces)
 ifdef V
 	@echo "$(CYAN)==> Running govulncheck (verbose)...$(RESET)"
 	@$(GOVULNCHECK) ./...
