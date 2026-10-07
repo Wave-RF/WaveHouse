@@ -110,9 +110,8 @@ type Sizes struct {
 }
 
 // max is the larger ask in each dimension: what a pool shared by tenants
-// asking s and o is sized to (the #597 shortest-keepalive precedent,
-// inverted — the pool must hold the largest ask). Every tenant's own
-// open >= idle keeps the result's open >= idle.
+// asking s and o is sized to, since it must hold the largest ask. Every
+// tenant's own open >= idle keeps the result's open >= idle.
 func (s Sizes) max(o Sizes) Sizes {
 	return Sizes{MaxOpenConns: max(s.MaxOpenConns, o.MaxOpenConns), MaxIdleConns: max(s.MaxIdleConns, o.MaxIdleConns)}
 }

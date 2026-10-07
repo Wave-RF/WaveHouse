@@ -28,6 +28,7 @@ Verify after switching:
 ```bash
 git rev-parse HEAD              # should match the PR's head SHA
 gh pr view --json number,state,headRefName --jq .   # confirm we're on PR 120's branch
+git rev-parse --show-toplevel   # the PR worktree's path — name it in every reviewer prompt
 ```
 
 ### 2. Run the relevant reviewers — in parallel
@@ -39,14 +40,14 @@ scripts/pre-push-reviewers.sh        # the reviewer set, one subagent name per l
 git diff --stat main...HEAD          # what the PR changes — guides which reviewers are relevant
 ```
 
-Launch the relevant ones **in a single message** (one `Agent` call each → concurrent), each in **fresh context**; `subagent_type` is the reviewer name. For example:
+Launch the relevant ones **in a single message** (one `Agent` call each → concurrent), each in **fresh context**; `subagent_type` is the reviewer name. Name the PR worktree's path in each prompt: reviewers pin and review the worktree a prompt names, and otherwise their current directory, which may still be your own checkout. For example:
 
 ```js
 // all in one message:
 Agent({ subagent_type: "pre-push-reviewer", description: "Review PR <N> (code)",
-        prompt: "Review the current branch (PR <N>) vs main using .github/prompts/pr-review.md — full diff vs merge-base, latest commit, open PR comments + reviews, CI status. Return [MUST]/[SHOULD]/[MAY] findings + a verdict line." })
+        prompt: "Review PR <N>'s branch in the worktree at <path> vs main using .github/prompts/pr-review.md — full diff vs merge-base, latest commit, open PR comments + reviews, CI status. Return [MUST]/[SHOULD]/[MAY] findings + a verdict line." })
 Agent({ subagent_type: "docs-reviewer", description: "Review PR <N> (docs)",
-        prompt: "Review the current branch (PR <N>) — docs prose + code↔docs sync vs main, default branch scope. Return [MUST]/[SHOULD]/[MAY] findings + a verdict line." })
+        prompt: "Review PR <N>'s branch in the worktree at <path> — docs prose + code↔docs sync vs main, default branch scope. Return [MUST]/[SHOULD]/[MAY] findings + a verdict line." })
 // …plus any other reviewer scripts/pre-push-reviewers.sh lists that's relevant to this PR
 ```
 

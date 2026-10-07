@@ -9,15 +9,20 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // StreamHandler handles GET /v1/stream
 type StreamHandler struct {
-	Hub         *stream.Hub
-	Replayer    mq.Replayer // gap-fill source; nil disables replay
-	Heartbeater *stream.Heartbeater
+	Hub      *stream.Hub
+	Replayer mq.Replayer // gap-fill source; nil disables replay
+	// Heartbeater yields the request tenant's keepalive wheel — its own, at
+	// its own stream.keepalive_* settings (#597) — or nil for a tenant no
+	// longer served, whose streams are ending (Hub.Prune, Served). A nil func
+	// means no keepalive is wired (tests).
+	Heartbeater func(*settings.Store) *stream.Heartbeater
 	Metrics     *stream.Metrics
 	// Closing, when set, is closed as the server begins shutting down, and
 	// every open stream ends at once — mid-replay too: a stream is a
@@ -165,11 +170,14 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		cancelReplay()
 	}
 
-	// Register with the shared keepalive wheel so a quiet stream isn't idle-closed
-	// by a proxy/tunnel between events.
+	// Register with the tenant's keepalive wheel so a quiet stream isn't
+	// idle-closed by a proxy/tunnel between events. Removed from the wheel it
+	// joined: a tenant served again later gets another.
 	if h.Heartbeater != nil {
-		h.Heartbeater.Add(sub)
-		defer h.Heartbeater.Remove(sub)
+		if wheel := h.Heartbeater(store); wheel != nil {
+			wheel.Add(sub)
+			defer wheel.Remove(sub)
+		}
 	}
 
 	for {

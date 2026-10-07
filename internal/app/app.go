@@ -110,7 +110,7 @@ type App struct {
 	coord       coord.Coordinator
 	sseMetrics  *stream.Metrics
 	hub         *stream.Hub
-	heartbeater *stream.Heartbeater
+	keepalives  *keepalives
 	handler     http.Handler
 
 	// components in wiring order; Close walks them backwards.
@@ -178,7 +178,7 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	slog.Info("process roles", "roles", a.cfg.Roles, "instance_id", a.cfg.InstanceID)
 	// What each role wires; config.Validate refused a set these cannot serve.
 	// The API's discovery, dedupe, auth verifiers, hub bridge and keepalive
-	// wheel are per process: every API process runs its own.
+	// wheels are per process: every API process runs its own.
 	apiRole, ingestRole := a.cfg.Has(config.RoleAPI), a.cfg.Has(config.RoleIngest)
 	if apiRole || ingestRole {
 		if err := a.wireClickHouse(); err != nil {
