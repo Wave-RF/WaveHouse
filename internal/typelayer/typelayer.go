@@ -166,8 +166,8 @@ type tenantSet struct {
 func NewEngine(cfg Config) (*Engine, error) {
 	root, systemLayouts := cachePaths(cfg.CacheDir)
 	if cfg.CacheDir != "" {
-		if _, err := os.Stat(root); errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("chtypes: the artifact directory %s does not exist", root)
+		if _, err := os.Stat(cfg.CacheDir); errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("chtypes: the artifact directory %s does not exist", cfg.CacheDir)
 		}
 	}
 	strict := true
@@ -220,10 +220,13 @@ func probeWritable(dir string) error {
 
 // cachePaths is the one place WaveHouse knows chtypes' cache layout: the root
 // the SDK reads for dir, in its own precedence, and the read-only system
-// layouts it searches after it. chtypes go v1.1.0 exposes neither (only the
-// CLI's `chtypes where` does), so this mirrors it; a later SDK that does
-// should replace this function's body and nothing else. The layout version
-// segment ("v1") is the part that changes between SDK generations.
+// layouts it searches after it. chtypes go v1.1.0 exposes neither (its CLI's
+// `chtypes where` prints the root only, not the system dirs), so this mirrors
+// it; a later SDK that does should replace this function's body and nothing
+// else. What changes between SDK generations is the layout version segment
+// ("v1") and, in the v2 dev SDK, a "v2-dev" subroot under an explicit dir;
+// Wave-RF/chtypes#530 tracks the swap. TestCachePaths_MatchesTheSDK pins this
+// to the SDK's own resolution.
 func cachePaths(dir string) (root string, system []string) {
 	const layout = "v1"
 	system = []string{"/usr/local/share/chtypes/" + layout, "/opt/chtypes/" + layout}

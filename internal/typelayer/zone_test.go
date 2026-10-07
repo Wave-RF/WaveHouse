@@ -621,6 +621,7 @@ func TestImageUnset_FailedFetchCommitsNothing(t *testing.T) {
 	u := unavailable(t, unpublished, "fresh")
 	assert.Contains(t, u.Cause, "chtypes could not fetch the artifact for ClickHouse "+testLine)
 	assert.Contains(t, u.Cause, string(chtypes.CodeArtifactMissing))
+	assert.Contains(t, u.Cause, "--offline forbids a network fetch", "the SDK attempted the fetch, so autofetch is on")
 	require.Empty(t, imageZone())
 
 	eng.Bind("utc", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})

@@ -624,3 +624,47 @@ func boundLib(eng *Engine, id tenant.ID) *chtypes.Library {
 	defer set.mu.RUnlock()
 	return set.lib
 }
+
+// TestCachePaths_MatchesTheSDK pins cachePaths to the SDK's own resolution: a
+// mode-000 install record under the root cachePaths names must be the entry
+// the SDK refuses, for each way of choosing the root.
+func TestCachePaths_MatchesTheSDK(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 file")
+	}
+	cases := []struct {
+		name string
+		env  func(t *testing.T) (cfgDir string)
+	}{
+		{"explicit dir", func(t *testing.T) string { return t.TempDir() }},
+		{"CHTYPES_CACHE", func(t *testing.T) string {
+			t.Setenv("CHTYPES_CACHE", t.TempDir())
+			return ""
+		}},
+		{"XDG_CACHE_HOME", func(t *testing.T) string {
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			return ""
+		}},
+		{"HOME", func(t *testing.T) string {
+			t.Setenv("HOME", t.TempDir())
+			return ""
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Not parallel: the cases set environment variables.
+			t.Setenv("CHTYPES_CACHE", "")
+			t.Setenv("XDG_CACHE_HOME", "")
+			dir := tc.env(t)
+			root, _ := cachePaths(dir)
+			entry := filepath.Join(root, "unpacked", "sha256", strings.Repeat("ab", 32))
+			require.NoError(t, os.MkdirAll(entry, 0o750))
+			record := filepath.Join(entry, "verified.json")
+			require.NoError(t, os.WriteFile(record, []byte(`{}`), 0o600))
+			require.NoError(t, os.Chmod(record, 0o000))
+			t.Cleanup(func() { _ = os.Chmod(record, 0o600) })
+			_, err := NewEngine(Config{CacheDir: dir})
+			requireCacheUnusable(t, err, record, "unreadable_entry")
+		})
+	}
+}

@@ -34,10 +34,11 @@ func TestNewEngine_AutofetchNeedsNoInstalledArtifact(t *testing.T) {
 	assert.Empty(t, u.Table, "the cause covers every table of the tenant")
 	assert.Contains(t, u.Cause, "chtypes could not fetch the artifact for ClickHouse "+testLine)
 	assert.Contains(t, u.Cause, string(chtypes.CodeArtifactMissing))
+	assert.Contains(t, u.Cause, "--offline forbids a network fetch", "the SDK attempted the fetch, so autofetch is on")
 }
 
-// TestBind_FailedFetchIsThatTenantsUnavailable: a line the registry cannot
-// supply leaves the tenants on an installed line answering.
+// TestBind_FailedFetchIsThatTenantsUnavailable: a line whose fetch fails (offline)
+// leaves the tenants on an installed line answering.
 func TestBind_FailedFetchIsThatTenantsUnavailable(t *testing.T) {
 	testEngine(t) // installs the test line
 	eng, err := NewEngine(Config{AutoFetch: true, Offline: true})
@@ -49,6 +50,7 @@ func TestBind_FailedFetchIsThatTenantsUnavailable(t *testing.T) {
 	u := unavailable(t, eng, "old")
 	assert.Contains(t, u.Cause, "chtypes could not fetch the artifact for ClickHouse 1.2")
 	assert.Contains(t, u.Cause, string(chtypes.CodeArtifactMissing))
+	assert.Contains(t, u.Cause, "--offline forbids a network fetch", "the SDK attempted the fetch, so autofetch is on")
 	answers(t, eng, "current")
 }
 

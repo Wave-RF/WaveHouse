@@ -207,7 +207,8 @@ runs:
         case "$RUNNER_OS" in Linux) os=linux ;; macOS) os=darwin ;; *) os=unknown ;; esac
         case "$RUNNER_ARCH" in X64) arch=amd64 ;; ARM64) arch=arm64 ;; *) arch=unknown ;; esac
         echo "line=$(scripts/fetch-chtypes.sh --print-line)" >> "$GITHUB_OUTPUT"
-        echo "cache=$(scripts/fetch-chtypes.sh --where)" >> "$GITHUB_OUTPUT"
+        cache="$(scripts/fetch-chtypes.sh --where)"
+        echo "cache=$cache" >> "$GITHUB_OUTPUT"
         if digest="$(scripts/fetch-chtypes.sh --resolve --platform "$os-$arch")"; then
           echo "build=$(printf '%s' "${digest#sha256:}" | cut -c1-16)" >> "$GITHUB_OUTPUT"
         else
