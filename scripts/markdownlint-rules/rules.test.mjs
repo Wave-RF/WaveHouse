@@ -363,12 +363,35 @@ describe("WH001 leaves non-prose alone", () => {
   );
   unchangedBoth("See ![an alt\ntext](x.png) here.\n", "a line ending inside image alt text");
   // An HTML block's interior is HTML to CommonMark, and in <pre> every newline
-  // shows. MDX calls the same text a paragraph, so .mdx asks CommonMark too.
-  unchangedBoth("<pre>\nline one\nline two\n</pre>\n", "the inside of a <pre> block");
-  unchangedBoth("Prose above it.\n<pre>\nline one\nline two\n</pre>\n", "a <pre> under prose");
+  // shows. MDX calls the same text a paragraph, so .mdx tracks the element.
+  const pre = "<pre>\nline one\nline two\n</pre>\n";
+  unchangedBoth(pre, "the inside of a <pre> block");
+  unchangedBoth(`Prose above it.\n${pre}`, "a <pre> under prose");
+  unchangedBoth(`<Aside>\n${pre}</Aside>\n`, "a <pre> directly inside a JSX tag");
+  unchangedBoth(`<div>\n${pre}</div>\n`, "a <pre> directly inside a <div>");
+  unchangedBoth(
+    `<Tabs>\n<TabItem label="a">\n${pre}</TabItem>\n</Tabs>\n`,
+    "a <pre> two tags deep",
+  );
+  unchangedBoth(`- item\n\n${pre.replace(/^(?=.)/gm, "  ")}`, "a <pre> in a list item");
+  unchangedBoth(
+    `- item\n\n${pre.replace(/^(?=.)/gm, "      ")}`,
+    "a <pre> indented as code past a list item, which MDX reads as JSX",
+  );
   unchangedBoth(
     "<script>\nconst a = 1\nconst b = 2\n</script>\n",
     "the inside of a <script> block",
+  );
+  fixesTo(
+    "joins wrapped prose after a closed <pre>",
+    "<pre>x</pre>\nwrapped\nprose\n",
+    "<pre>x</pre>\nwrapped prose\n",
+  );
+  fixesTo(
+    "joins around, but not inside, a <pre> opened mid-line",
+    "Text with <pre>a\nb</pre> inline\nand wrapped.\n",
+    "Text with <pre>a\nb</pre> inline and wrapped.\n",
+    { md: false },
   );
   it("neither reports nor joins a line that opens with a tag", () => {
     const src = "Press\n<kbd>Enter</kbd> to go on.\n";

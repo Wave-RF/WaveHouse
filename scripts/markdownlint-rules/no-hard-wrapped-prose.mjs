@@ -15,13 +15,7 @@
 // is a nit, a corrupted one is data loss. Every case has a fixture in
 // rules.test.mjs.
 
-import {
-  descendants,
-  hasAncestor,
-  parseMdx,
-  unmaskedLines,
-  verbatimHtmlBlocks,
-} from "./lib/mdx.mjs";
+import { descendants, hasAncestor, parseMdx, unmaskedLines } from "./lib/mdx.mjs";
 
 // A line ending inside one of these is not interchangeable with a space: JS
 // (expressions, JSX attributes) can carry a `//` comment, TeX a `%` comment, a
@@ -38,9 +32,12 @@ const VERBATIM_INLINE = new Set([
 ]);
 
 // Blockquote prose would need its `>` markers rewritten, and an HTML block is
-// HTML to CommonMark however much it looks like prose. MDX has no HTML blocks,
-// so for .mdx the verbatim ones (`<pre>` and kin) come in as `verbatim` below.
+// HTML to CommonMark however much it looks like prose.
 const SKIPPED_CONTAINERS = new Set(["blockQuote", "htmlFlow"]);
+
+// Inside these a line break is content: it renders, or ends a statement. MDX
+// calls their text a paragraph, at any depth and even mid-line.
+const PREFORMATTED = new Set(["pre", "script", "style", "textarea"]);
 
 // A line that opens with a tag keeps its own line. Joining it would be
 // render-neutral, but the parser calls `<span>…</span>` lines inside a layout
@@ -72,17 +69,30 @@ function joinableInCode(codeText, line) {
   );
 }
 
-/**
- * Each `[first, last]` (1-based, inclusive) run of lines that should be one,
- * leaving out any paragraph that touches a line of a `verbatim` block.
- */
-function wrappedRuns(tokens, lines, verbatim) {
+/** In an MDX parse, each line whose line ending falls inside a PREFORMATTED element. */
+function preformattedLineEnds(tokens) {
+  const ends = new Set();
+  let depth = 0;
+  let from = 0;
+  for (const tag of descendants(tokens)) {
+    if (tag.type !== "mdxJsxFlowTag" && tag.type !== "mdxJsxTextTag") continue;
+    const child = (suffix) => tag.children.find((t) => t.type === tag.type + suffix);
+    if (!PREFORMATTED.has(child("Name")?.text.trim()) || child("SelfClosingMarker")) continue;
+    if (!child("ClosingMarker")) {
+      if (depth++ === 0) from = tag.endLine;
+    } else if (depth > 0 && --depth === 0) {
+      for (let line = from; line < tag.startLine; line++) ends.add(line);
+    }
+  }
+  return ends;
+}
+
+/** Each `[first, last]` (1-based, inclusive) run of lines that should be one. */
+function wrappedRuns(tokens, lines, preformatted) {
   const runs = [];
   for (const paragraph of descendants(tokens)) {
     if (paragraph.type !== "paragraph" || paragraph.startLine === paragraph.endLine) continue;
     if (hasAncestor(paragraph, SKIPPED_CONTAINERS)) continue;
-    if (verbatim.some((b) => b.startLine <= paragraph.endLine && paragraph.startLine <= b.endLine))
-      continue;
 
     // `breaks` holds line N when line N must not be joined to line N + 1;
     // `verbatimEnd` the subset whose line ending sits inside verbatim inline
@@ -92,6 +102,11 @@ function wrappedRuns(tokens, lines, verbatim) {
     const isolate = (from, to) => {
       for (let line = from - 1; line <= to; line++) breaks.add(line);
     };
+    for (let line = paragraph.startLine; line < paragraph.endLine; line++) {
+      if (!preformatted.has(line)) continue;
+      breaks.add(line);
+      verbatimEnd.add(line);
+    }
     const inner = [...descendants(paragraph.children)];
     for (const token of inner) {
       if (token.type === "hardBreakEscape" || token.type === "hardBreakTrailing") {
@@ -144,7 +159,7 @@ export default {
     const source = unmaskedLines(params);
     const lines = source ?? params.lines;
     let tokens = params.parsers.micromark.tokens;
-    let verbatim = [];
+    let preformatted = new Set();
     if (params.name.endsWith(".mdx")) {
       const mdx = parseMdx(lines);
       if (mdx.error) {
@@ -155,10 +170,10 @@ export default {
         return;
       }
       tokens = mdx.tokens;
-      verbatim = verbatimHtmlBlocks(params.parsers.micromark.tokens);
+      preformatted = preformattedLineEnds(tokens);
     }
 
-    for (const { first, last, keepTrailing } of wrappedRuns(tokens, lines, verbatim)) {
+    for (const { first, last, keepTrailing } of wrappedRuns(tokens, lines, preformatted)) {
       const head = lines[first - 1].replace(/[ \t]+$/, "");
       const parts = [];
       for (let line = first + 1; line <= last; line++) {

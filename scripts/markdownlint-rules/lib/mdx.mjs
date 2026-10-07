@@ -117,16 +117,14 @@ export function hasAncestor(token, types, stop = null) {
   return false;
 }
 
-// CommonMark's first kind of HTML block: it runs to a closing tag, blank lines
-// and all, and a line break inside it is content (in <pre>, what renders; in
-// <script>, a statement boundary).
+// CommonMark's first kind of HTML block, which runs to a closing tag, blank
+// lines and all.
 const VERBATIM_HTML_OPEN = /^[ \t]*<(?:pre|script|style|textarea)(?:[ \t>]|$)/i;
 
 /**
  * The HTML blocks in markdownlint's CommonMark tokens that a blank line does
- * not end: those opened by `<pre>`, `<script>`, `<style>` or `<textarea>`. MDX
- * reads the same tag as JSX and its text as a paragraph, so only this parse
- * knows the text is verbatim.
+ * not end: those opened by `<pre>`, `<script>`, `<style>` or `<textarea>`. A
+ * fence inside one is HTML to CommonMark however much space surrounds it.
  *
  * @param {object[]} tokens `params.parsers.micromark.tokens`
  * @returns {object[]}
