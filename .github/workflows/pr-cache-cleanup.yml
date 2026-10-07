@@ -2,8 +2,8 @@ name: PR cache cleanup
 
 # When a PR closes (merged or not), delete the Actions caches saved under its
 # refs. The Go, pnpm and Playwright caches only save from `main`; what a PR
-# still saves is GitHub's CodeQL dependency cache (~0.6 GiB, only when its Go
-# dependencies differ from main's), the small golangci/Astro entries, and any
+# still saves is GitHub's CodeQL dependency cache (~0.4-0.6 GiB, whenever main
+# has no entry for its key), the small golangci/Astro entries, and any
 # Go caches saved before that change. None is readable by another PR, and they
 # count against the repo's 10 GB cache cap until evicted.
 #
