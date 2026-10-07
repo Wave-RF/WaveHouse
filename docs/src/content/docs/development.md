@@ -13,7 +13,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 
 | Tool | Required version | Why | Install |
 | ---- | ---------------- | --- | ------- |
-| **Go** | 1.26+ (matches `go.mod`) | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
+| **Go** | 1.26+ (matches `go.mod`) | `make` always runs the exact version in `go.mod` (the first run downloads it, so it needs network); to use your own, pass `make GOTOOLCHAIN=local …` (an environment value is ignored). Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
 | **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with BSD Make 3.81, which **will not work** | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse and a Redis via testcontainers (no compose file), the integration suite also dynamodb-local, and the integration suite also runs the shared cache backend against Redis, Valkey, Dragonfly (pulled from `docker.dragonflydb.io`) and a one-node Redis Cluster | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
@@ -415,7 +415,7 @@ A global copy is never what `make lint` runs, so install one only if you want to
 - **macOS**: `brew install golangci-lint`
 - **Binary**: See [golangci-lint.run/welcome/install/](https://golangci-lint.run/welcome/install/)
 
-The Makefile exports `GOTOOLCHAIN` pinned to `go.mod`'s `go` directive, so local runs and CI use the same Go even when your installed Go is newer (the first run downloads that toolchain once). A bare `go test` outside `make` is not pinned. Bumping the `go` directive also needs a golangci-lint release built with at least that Go, or `make lint-go` panics.
+The Makefile exports `GOTOOLCHAIN` pinned to `go.mod`'s `go` directive, so local runs and CI use the same Go even when your installed Go is newer (the first run downloads that toolchain once). A bare `go test` outside `make` is not pinned. Raising the `go` directive to a new minor version (1.27, not a 1.26 patch) also needs a golangci-lint release built with that minor or newer, or `make lint-go` panics type-checking the newer standard library.
 
 The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control) — that file is the authoritative list of enabled linters. Highlights:
 
