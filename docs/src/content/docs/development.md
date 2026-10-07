@@ -13,12 +13,12 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 
 | Tool | Required version | Why | Install |
 | ---- | ---------------- | --- | ------- |
-| **Go** | 1.26+ (matches `go.mod`) | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
+| **Go** | 1.26+ (matches `go.mod`) | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
 | **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with BSD Make 3.81, which **will not work** | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse and a Redis via testcontainers (no compose file), the integration suite also dynamodb-local, and the integration suite also runs the shared cache backend against Redis, Valkey, Dragonfly (pulled from `docker.dragonflydb.io`) and a one-node Redis Cluster | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
-| **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
+| **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make verify`, `make lint`, `make fmt`, `make fix`, `make ci`, `make build-ts`, `make test-ts`, `make test-e2e`, `make test-all`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` (`make verify` is what the pre-commit hook runs, so a Go-only contributor needs pnpm too) | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
 
 ### Auto-installed by `make tools`
@@ -484,6 +484,7 @@ WaveHouse/
 │   └── ts/                 # TypeScript SDK (@wavehouse/sdk, pnpm workspace)
 ├── deployments/
 │   ├── compose/            # Docker Compose files (standalone.yaml, dependencies.yaml)
+│   ├── nats/               # Helm values and JetStream manifests for an external NATS (`mq.backend: nats`)
 │   ├── Dockerfile          # Runtime image
 │   └── Dockerfile.goreleaser  # Release image (built by GoReleaser)
 ├── scripts/                # E2E orchestrator, cov tool, CI/hook helpers
@@ -527,7 +528,7 @@ Run `make help` to see all targets. Key ones:
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
 | `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) + Markdown/MDX (markdownlint) + prose (misspell) |
 | `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
-| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + docs type-check (`astro check` — not a full build, so link validation stays CI's job) (parallel-safe: `make -j verify`) |
+| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + docs type-check (`astro check` — not a full build, so link validation stays CI's job) |
 | `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint `--fix`), MDX (`fix-mdx-fences` only — the generic fixers never run over `.mdx`), and docs-prose spelling (misspell, both) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
