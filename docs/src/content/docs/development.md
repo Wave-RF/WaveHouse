@@ -575,10 +575,11 @@ go mod tidy                             # Remove unused, add missing
 
 ### Vulnerability Scanning
 
-`govulncheck` analyzes your actual call graph — not just the module graph — so it only reports vulnerabilities in code paths you use.
+`make vulncheck` runs `govulncheck -scan package`: it reports every known vulnerability in a package your code imports, without checking whether the vulnerable function is reachable. That is stricter than govulncheck's default call-graph scan, so a hit does not on its own mean the code path is used.
 
 ```bash
-make vulncheck
+make vulncheck       # package-level scan (what make verify and CI run)
+V=1 make vulncheck   # default symbol-level (call-graph) scan, with call stacks
 ```
 
 For a combined security scan, run `make verify` — it runs `vulncheck` alongside `lint`, and `gosec` is one of the linters enabled in `.golangci.yml`. This is also what CI runs on every push and pull request.
