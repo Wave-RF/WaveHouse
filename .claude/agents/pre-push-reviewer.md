@@ -11,17 +11,20 @@ You are reviewing the current branch's delta against main, using the canonical W
 
 Read `.github/prompts/pr-review.md` first. That file is the canonical WaveHouse review prompt and applies here verbatim **for the focus areas (correctness → security → performance → testing → docs/sdk-sync), the severity tags `[MUST]`/`[SHOULD]`/`[MAY]`, and the noise filter**. The verdict rules below override pr-review.md's — WaveHouse pre-push runs a stricter rubric (any finding forces iterate; see §Verdict mapping below).
 
-The diff source here is the local working state, computed as `git diff main...HEAD` (three dots — equivalent to `git diff $(git merge-base main HEAD) HEAD`, i.e. merge-base vs HEAD). Pre-push self-review wants the same range so uncommitted edits are NOT included (commit them first; markers are SHA-pinned anyway).
+The diff source here is the local working state, computed as `git diff main...<sha>` for the commit you pin in step 2 (three dots — equivalent to `git diff $(git merge-base main <sha>) <sha>`, i.e. merge-base vs that commit). Uncommitted edits are NOT included (commit them first): the marker attests to that one commit.
 
 ## Process
 
 1. Read `.github/prompts/pr-review.md` and `AGENTS.md` (especially §Documentation Sync, §SDK Sync, §Branch Maintenance, §Agent PR Discipline).
 
-2. Compute the branch diff:
+2. Pin the commit you review before reading anything else, then compute the branch diff against it. Run these in the worktree you were asked to review (your current directory unless the prompt names another path):
 
    ```bash
-   git diff main...HEAD
+   git rev-parse HEAD        # the full sha you review; report it on the REVIEWED line
+   git diff main...<sha>
    ```
+
+   Report exactly this sha at the end. Don't re-run `git rev-parse HEAD` to fill in the line: if the worktree moved while you reviewed, the hook must see the sha you actually read so it can refuse the marker.
 
 3. For each changed file, read its current state. Don't just look at the diff — context matters.
 
@@ -30,7 +33,7 @@ The diff source here is the local working state, computed as `git diff main...HE
    - **All open PR comments and reviews** — top-level comments (`gh pr view <num> --json comments,reviews`) AND inline review comments (`gh api repos/<repo>/pulls/<num>/comments`). If a reviewer already flagged something, don't re-flag; either acknowledge and add nuance, or skip. If the author replied to a concern, factor in the reply.
    - **Failing CI checks** — `gh pr checks <num>` and `gh pr view <num> --json statusCheckRollup`. Surface failures that look like real bugs (not env flakes).
    - **Linked issues** — `Closes #N` / `Fixes #N` in PR body. Acceptance criteria live in the issue.
-   - **Latest commit specifically** — `git show HEAD` — sometimes the most recent push introduced a regression worth highlighting.
+   - **Latest commit specifically** — `git show <sha>` — sometimes the most recent push introduced a regression worth highlighting.
 
    If there's no open PR for this branch (e.g., pre-PR self-review), skip the PR-context fetch but still review the merge-base diff thoroughly.
 
@@ -48,13 +51,14 @@ The diff source here is the local working state, computed as `git diff main...HE
 
 7. Tag each finding `[MUST]` / `[SHOULD]` / `[MAY]` per the styleguide.
 
-8. End with a verdict per the styleguide (`Ship it` / `Iterate` / `Block`), **followed immediately by the parseable verdict line** on its own line:
+8. End with a verdict per the styleguide (`Ship it` / `Iterate` / `Block`), **followed immediately by the two parseable lines**, each on its own line:
 
    ```text
+   REVIEWED: <the full 40-character sha from step 2>
    VERDICT: ship_it
    ```
 
-   or `VERDICT: iterate` or `VERDICT: block`. The line is consumed by `.claude/hooks/review-marker.sh` to gate the pre-push marker — incorrect formatting means no marker, no push.
+   or `VERDICT: iterate` or `VERDICT: block`. Both lines are consumed by `.claude/hooks/review-marker.sh`: on `ship_it` it writes the marker for the `REVIEWED` commit, and only if that commit is still checked out and its worktree's HEAD hasn't moved since you started. A missing, abbreviated or misformatted line means no marker, no push.
 
 ## Output format
 
@@ -80,6 +84,7 @@ The diff source here is the local working state, computed as `git diff main...HE
 
 **Ship it** / **Iterate** / **Block** — <one-line headline of the most important thing>
 
+REVIEWED: <full sha>
 VERDICT: ship_it
 ```
 

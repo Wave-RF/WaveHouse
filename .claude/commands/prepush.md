@@ -7,7 +7,7 @@ The mandatory pre-push self-review. A push to a PR branch is blocked until a mar
 
 ## Preconditions
 
-1. **Commit your work.** Reviews and markers are keyed to HEAD/tree, so the tree must be settled first.
+1. **Commit your work, and run `/prepush` in the worktree you'll push from.** Each marker is keyed to the commit its reviewer read, so the tree must be settled first.
 2. **`make ci` is green for the current tree** (AGENTS.md → §Local-First Validation → Running `make ci`). The push also needs its `tmp/ci-passed-tree-<TREE>` marker.
 
 ## 1. See the change and the reviewer set
@@ -30,11 +30,13 @@ Rules of thumb for today's reviewers:
 
 ## 3. Run the ones you keep — in parallel
 
-Launch all kept reviewers **in one message** (one `Agent` call each → concurrent), each in **fresh context**, with **no scope argument**; `subagent_type` is the reviewer name. Each returns `[MUST]`/`[SHOULD]`/`[MAY]` findings and a `VERDICT:` line; on `ship_it` the `SubagentStop` hook (`review-marker.sh`) writes its marker.
+Launch all kept reviewers **in one message** (one `Agent` call each → concurrent), each in **fresh context**, with **no scope argument**; `subagent_type` is the reviewer name. To review a worktree other than your current directory, name its path in the prompt. Each returns `[MUST]`/`[SHOULD]`/`[MAY]` findings, then a `REVIEWED: <sha>` line naming the commit it read and a `VERDICT:` line; on `ship_it` the `SubagentStop` hook (`review-marker.sh`) writes its marker into the worktree on that commit.
+
+**Leave HEAD alone until every reviewer has finished.** A commit, checkout or reset in that worktree while a reviewer runs voids its `ship_it`: the hook writes no marker, because the marker must attest to the commit the reviewer read. Work on something that doesn't touch the worktree's HEAD meanwhile. When a `ship_it` writes no marker, `tmp/review-marker.log` says why.
 
 ## 4. Skip the rest — on the record
 
-For each reviewer you're skipping, record it (this writes the marker the gate needs **and** logs the reason for audit):
+For each reviewer you're skipping, record it from the worktree you're pushing (this writes the marker the gate needs **and** logs the reason for audit):
 
 ```bash
 scripts/skip-pre-push-review.sh <name> "<one-line reason>"
@@ -47,7 +49,7 @@ It prints a ⚠️ when the skip looks risky (e.g. skipping docs review when doc
 `ship_it` requires **zero findings at any severity** — a single `[MAY]` forces another round. So:
 
 1. Address **every** finding from **every** reviewer you ran — don't drop one because it's outside another reviewer's lane; fix it or track it in an issue (AGENTS.md §Review Response).
-2. Commit (HEAD changes → all prior markers, run *and* skipped, go stale for the new HEAD).
+2. Commit once every reviewer of the round has finished (HEAD changes → all prior markers, run *and* skipped, go stale for the new HEAD).
 3. Re-run `make ci` **only if** a finding made you edit a tracked file.
 4. Re-decide §2 for the new HEAD, then re-run the kept reviewers in fresh context (parallel) and re-skip the rest.
 5. Repeat until a marker exists for HEAD from every listed reviewer.

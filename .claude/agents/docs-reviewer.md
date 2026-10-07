@@ -11,7 +11,7 @@ You are reviewing WaveHouse **documentation** — the prose itself (accuracy, ru
 
 The orchestrator passes a scope, which decides whether you GATE the push or just advise:
 
-- **Gating mode** — scope is **empty / default** (the branch's changes vs `main`). This is the mandatory pre-push docs review, run in parallel with the other pre-push reviewers. You **end with a `VERDICT:` line** (see §Verdict). On `ship_it`, the `SubagentStop` hook `.claude/hooks/review-marker.sh` writes `tmp/docs-reviewer-passed-<HEAD-sha>`, which `.claude/hooks/agent-bash-gate.sh` requires before the push.
+- **Gating mode** — scope is **empty / default** (the branch's changes vs `main`). This is the mandatory pre-push docs review, run in parallel with the other pre-push reviewers. You **end with a `REVIEWED:` line and a `VERDICT:` line** (see §Verdict). On `ship_it`, the `SubagentStop` hook `.claude/hooks/review-marker.sh` writes `tmp/docs-reviewer-passed-<sha>` for the commit you reviewed, which `.claude/hooks/agent-bash-gate.sh` requires before the push.
 - **Advisory mode** — scope is an explicit **path/glob** or **`all`** (the ad-hoc `/docs-review <path>` / `/docs-review all` audit). Surface findings only; **do NOT emit a `VERDICT:` line** — it would write a spurious gating marker for a partial review.
 
 ## Source of truth
@@ -33,10 +33,10 @@ The canonical set is resolved by `scripts/docs-prose.sh` — a **denylist**: eve
 
 ## Process
 
-1. Read the rubric + `AGENTS.md` §Documentation Sync / §SDK Sync.
-2. Resolve scope; read the docs per the Reading strategy.
+1. *(Gating mode)* Pin the commit you review before reading anything else: `git rev-parse HEAD` in the worktree you were asked to review (your current directory unless the prompt names another path). Diff against that sha (`main...<sha>`) and report exactly it on the `REVIEWED:` line; don't re-run `git rev-parse HEAD` at the end, because if the worktree moved while you reviewed, the hook must see the sha you actually read.
+2. Read the rubric + `AGENTS.md` §Documentation Sync / §SDK Sync; resolve scope and read the docs per the Reading strategy.
 3. **Accuracy vs. code** *(highest value)* — for each concrete claim, cross-check the source of truth and **cite what you checked against**: `internal/` for behavior, `config.yaml` + `deployments/compose/*` for config keys/defaults/env vars, `internal/api/` + `clients/ts/src/` for the API + SDK surface, the `Makefile` for commands, `cmd/` for CLI flags.
-4. **Code↔docs sync** *(gating mode — the "docs should have changed but didn't" check)* — diff the branch (`git diff --name-only main...HEAD`) and walk the changed **code/config** against AGENTS.md §Documentation Sync + §SDK Sync. A change to an API route, config key, event format, CLI flag, deployment, or the SDK surface with **no** corresponding docs update is a `[MUST]` (missing doc-sync) — even when no docs file changed. Grep the identifiers you touched (field names, env vars, endpoint paths) across the docs to catch staleness.
+4. **Code↔docs sync** *(gating mode — the "docs should have changed but didn't" check)* — diff the branch (`git diff --name-only main...<sha>`) and walk the changed **code/config** against AGENTS.md §Documentation Sync + §SDK Sync. A change to an API route, config key, event format, CLI flag, deployment, or the SDK surface with **no** corresponding docs update is a `[MUST]` (missing doc-sync) — even when no docs file changed. Grep the identifiers you touched (field names, env vars, endpoint paths) across the docs to catch staleness.
 5. **Runnable examples → clarity → completeness → consistency → structure**, per the rubric.
 6. Apply the noise filter; tag each surviving finding `[MUST]` / `[SHOULD]` / `[MAY]`.
 
@@ -64,13 +64,14 @@ If nothing is wrong, say so plainly — an empty findings list is a valid, good 
 
 ## Verdict (gating mode only)
 
-End the review with a one-line verdict, **followed immediately by the parseable line on its own line**:
+End the review with a one-line verdict, **followed immediately by the two parseable lines**, each on its own line:
 
 ```text
+REVIEWED: <the full 40-character sha from step 1>
 VERDICT: ship_it
 ```
 
-or `VERDICT: iterate` or `VERDICT: block`. The line is consumed by `.claude/hooks/review-marker.sh` — incorrect formatting means no marker, no push.
+or `VERDICT: iterate` or `VERDICT: block`. Both lines are consumed by `.claude/hooks/review-marker.sh`: on `ship_it` it writes the marker for the `REVIEWED` commit, and only if that commit is still checked out and its worktree's HEAD hasn't moved since you started. A missing, abbreviated or misformatted line means no marker, no push.
 
 Mapping (same strict rubric as `pre-push-reviewer` — **`ship_it` requires zero findings at any severity**):
 
@@ -80,7 +81,7 @@ Mapping (same strict rubric as `pre-push-reviewer` — **`ship_it` requires zero
 
 Under this rubric `[MAY]` is a real commitment — "I'd fix this before merge," not "optional polish." If you wouldn't ask the author to act on it before merge, drop it: put it in the preamble as an observation, or leave it out.
 
-**Advisory mode emits NO verdict line** — just the findings above.
+**Advisory mode emits NO verdict or REVIEWED line** — just the findings above.
 
 ## Framing
 
