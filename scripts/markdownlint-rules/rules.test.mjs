@@ -20,6 +20,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { evaluate } from "@mdx-js/mdx";
+import remarkDirective from "remark-directive";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import { mdxInvariant, splitFrontMatter } from "./lib/mdx.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../..");
@@ -69,6 +74,52 @@ function fixMdx(content, flags = []) {
 
 const count = (stdout, rule) => (stdout.match(new RegExp(rule, "g")) ?? []).length;
 
+// Render MDX the way the docs site parses it (remark-gfm, remark-directive,
+// remark-math), to a string in which whitespace counts only inside code. Equal
+// strings mean a fix changed nothing a reader sees, which no line-level
+// assertion can promise.
+const Fragment = Symbol("Fragment");
+const jsx = (type, props) => ({ type, props });
+const directiveElements = () => (tree) => {
+  const walk = (node) => {
+    if (/Directive$/.test(node.type)) {
+      node.data = { hName: "x-directive", hProperties: { name: node.name, ...node.attributes } };
+    }
+    node.children?.forEach(walk);
+  };
+  walk(tree);
+};
+function serialize(node, verbatim = false) {
+  if (node == null || typeof node === "boolean") return "";
+  if (Array.isArray(node)) return node.map((child) => serialize(child, verbatim)).join("");
+  if (typeof node !== "object") return verbatim ? String(node) : String(node).replace(/\s+/g, " ");
+  const { type, props = {} } = node;
+  if (type === Fragment) return serialize(props.children, verbatim);
+  const attrs = Object.keys(props)
+    .filter((key) => key !== "children")
+    .sort()
+    .map((key) => ` ${key}=${JSON.stringify(props[key])}`)
+    .join("");
+  const inner = serialize(props.children, verbatim || type === "code" || type === "pre");
+  return `<${String(type)}${attrs}>${inner}</${String(type)}>`;
+}
+async function renderMdx(source) {
+  const body = splitFrontMatter(source).body.replace(/^import .*$/gm, "");
+  const names = new Set([...body.matchAll(/<\/?([A-Z]\w*)/g)].map((match) => match[1]));
+  const components = Object.fromEntries(
+    [...names].map((name) => [name, (props) => ({ type: `x-${name}`, props })]),
+  );
+  const { default: Content } = await evaluate(body, {
+    Fragment,
+    jsx,
+    jsxs: jsx,
+    remarkPlugins: [remarkGfm, remarkDirective, remarkMath, directiveElements],
+  });
+  return serialize(Content({ components }));
+}
+const assertSameRender = async (before, after) =>
+  assert.equal(await renderMdx(after), await renderMdx(before));
+
 /** Copy the repo's real markdownlint configs into `dir`, with loadable rule paths. */
 function copyRepoConfig(dir) {
   writeFileSync(
@@ -84,6 +135,24 @@ function copyRepoConfig(dir) {
 
 const unchanged = (name, content, label) =>
   it(label, () => assert.equal(run(name, content, { fix: true }).output, content));
+
+/** `unchanged` in .md and again in .mdx, for constructs both languages share. */
+const unchangedBoth = (content, label) => {
+  unchanged("t.md", content, label);
+  unchanged("t.mdx", content, `${label} (.mdx)`);
+};
+
+/** WH001's fix turns `src` into `expected`; in .mdx it must also render the same. */
+function fixesTo(label, src, expected, { md = true, mdx = true } = {}) {
+  if (md) it(label, () => assert.equal(run("t.md", src, { fix: true }).output, expected));
+  if (mdx) {
+    it(`${label} (.mdx)`, async () => {
+      const { output } = run("t.mdx", src, { fix: true });
+      assert.equal(output, expected);
+      await assertSameRender(src, output);
+    });
+  }
+}
 
 describe("WH001 joins hard-wrapped prose", () => {
   it("joins a wrapped paragraph", () => {
@@ -155,34 +224,85 @@ describe("WH001 joins hard-wrapped prose", () => {
     const { output } = run("t.md", "A paragraph\n    continued here.\n", { fix: true });
     assert.equal(output, "A paragraph continued here.\n");
   });
+
+  // markdownlint masks everything from `<!--` to `-->` in the lines it hands a
+  // rule, inside code spans and across paragraphs too. A fix built from those
+  // lines overwrote real prose with dots.
+  fixesTo(
+    "joins prose between comment markers that sit in code spans",
+    "Type `<!--` to open an HTML comment.\n\nA wrapped paragraph\nthat spans lines.\n\nThen close it with `-->`.\n",
+    "Type `<!--` to open an HTML comment.\n\nA wrapped paragraph that spans lines.\n\nThen close it with `-->`.\n",
+  );
+  fixesTo(
+    "joins a paragraph whose code spans hold both comment markers",
+    "Use `<!--` to open\na comment, and\nthen write the body,\nand `-->` closes it.\n",
+    "Use `<!--` to open a comment, and then write the body, and `-->` closes it.\n",
+  );
+  // A code span turns a line ending into one space but keeps the spaces before it.
+  fixesTo(
+    "keeps the line a code span breaks after trailing spaces",
+    "Run `foo   \nbar` now and\nthen.\n",
+    "Run `foo   \nbar` now and then.\n",
+  );
+  fixesTo(
+    "keeps the line a code span breaks before an indented line",
+    "Run `foo\n     bar` now and\nthen.\n",
+    "Run `foo\n     bar` now and then.\n",
+  );
+  unchangedBoth("Use ``\n    `a` `` here.\n", "a line ending that pads a code span");
+  fixesTo(
+    "joins a code span across a list item's own indent",
+    "- Run `foo\n  bar` now and\n  then.\n",
+    "- Run `foo bar` now and then.\n",
+  );
+  fixesTo(
+    "joins a code span broken at a plain line ending",
+    "Run `foo\nbar` now.\n",
+    "Run `foo bar` now.\n",
+  );
+  fixesTo(
+    "trims only spaces and tabs, never a non-breaking space",
+    "Price: 5\u00a0\nEUR today.\n",
+    "Price: 5\u00a0 EUR today.\n",
+  );
+  fixesTo(
+    "joins a line that opens with a bare `<`",
+    "Values\n<= 5 are fine\nand more.\n",
+    "Values <= 5 are fine and more.\n",
+    { mdx: false },
+  );
+  fixesTo(
+    "keeps a line ending inside a directive's attributes",
+    'Word :abbr[x]{title="a\nb"} and\nmore.\n',
+    'Word :abbr[x]{title="a\nb"} and more.\n',
+    { md: false },
+  );
 });
 
 describe("WH001 leaves non-prose alone", () => {
-  unchanged(
-    "t.md",
+  unchangedBoth(
     "Name | Type | Notes\n---- | ---- | -----\n`a`  | int  | first\n`b`  | str  | second\n",
     "a GFM table written without leading pipes",
   );
-  unchanged(
-    "t.md",
+  unchangedBoth(
     "| Name | Type |\n| ---- | ---- |\n| a    | int  |\n| b    | str  |\n",
     "a pipe-led table",
   );
-  unchanged("t.md", "Section Title\n=\n", "a single-character setext h1 underline");
-  unchanged("t.md", "Section Title\n-\n", "a single-character setext h2 underline");
-  unchanged("t.md", '```go\nfoo := "not\nwrapped"\n```\n', "fenced code");
-  unchanged("t.md", "~~~\ntilde fenced\ncode block\n~~~\n", "tilde-fenced code");
-  unchanged("t.md", "Line one  \nline two.\n", "a two-space hard line break");
-  unchanged("t.md", "Line one\\\nline two.\n", "a backslash hard line break");
-  unchanged("t.md", "> quoted line\n> second quoted line\n", "a blockquote");
-  unchanged("t.md", "# Heading\n\nBody.\n", "a heading followed by a paragraph");
+  unchangedBoth("Section Title\n=\n", "a single-character setext h1 underline");
+  unchangedBoth("Section Title\n-\n", "a single-character setext h2 underline");
+  unchangedBoth('```go\nfoo := "not\nwrapped"\n```\n', "fenced code");
+  unchangedBoth("~~~\ntilde fenced\ncode block\n~~~\n", "tilde-fenced code");
+  unchangedBoth("Line one  \nline two.\n", "a two-space hard line break");
+  unchangedBoth("Line one\\\nline two.\n", "a backslash hard line break");
+  unchangedBoth("> quoted line\n> second quoted line\n", "a blockquote");
+  unchangedBoth("# Heading\n\nBody.\n", "a heading followed by a paragraph");
   unchanged("t.md", "    indented code\n    second line\n", "an indented code block");
-  unchanged("t.md", "$$\nE = mc^2\n\\sum_{i=1}^{n} x_i\n$$\n", "a $$ display-math block");
-  unchanged("t.md", "$$ E = mc^2 $$\n\nA paragraph.\n", "single-line $$ display math");
-  unchanged("t.md", "Prose above it.\n[ref]: https://example.com\n", "a link-reference definition");
-  unchanged("t.md", "Prose above it.\n[^1]: The footnote body.\n", "a footnote definition");
-  unchanged("t.md", "Paragraph.\n***\n", "an asterisk thematic break");
-  unchanged("t.md", "Paragraph.\n___\n", "an underscore thematic break");
+  unchangedBoth("$$\nE = mc^2\n\\sum_{i=1}^{n} x_i\n$$\n", "a $$ display-math block");
+  unchangedBoth("$$ E = mc^2 $$\n\nA paragraph.\n", "single-line $$ display math");
+  unchangedBoth("Prose above it.\n[ref]: https://example.com\n", "a link-reference definition");
+  unchangedBoth("Prose above it.\n[^1]: The footnote body.\n", "a footnote definition");
+  unchangedBoth("Paragraph.\n***\n", "an asterisk thematic break");
+  unchangedBoth("Paragraph.\n___\n", "an underscore thematic break");
   unchanged(
     "t.mdx",
     'export const meta = {\n  // the id used by the demo\n  id: "abc",\n  kind: "demo",\n};\n',
@@ -228,8 +348,7 @@ describe("WH001 leaves non-prose alone", () => {
     "an indented code block inside a list item",
   );
   // A line ending in these is not a space: JS and TeX comments run to it.
-  unchanged(
-    "t.md",
+  unchangedBoth(
     "Inline math $a % a TeX comment\nb$ spans lines.\n",
     "a line ending inside inline math",
   );
@@ -238,11 +357,19 @@ describe("WH001 leaves non-prose alone", () => {
     "Total {a + // a JS comment\n  b} items.\n",
     "a line ending inside an MDX expression",
   );
-  unchanged(
-    "t.md",
+  unchangedBoth(
     'See [the docs](https://example.com "a title\nthat wraps") for more.\n',
     "a line ending inside a link title",
   );
+  unchangedBoth("See ![an alt\ntext](x.png) here.\n", "a line ending inside image alt text");
+  // An HTML block's interior is HTML to CommonMark, and in <pre> every newline shows.
+  unchanged("t.md", "<pre>\nline one\nline two\n</pre>\n", "the inside of an HTML block");
+  it("neither reports nor joins a line that opens with a tag", () => {
+    const src = "Press\n<kbd>Enter</kbd> to go on.\n";
+    const { output, stdout } = run("t.md", src, { fix: true });
+    assert.equal(output, src);
+    assert.doesNotMatch(stdout, /WH001/);
+  });
   // MDX parses inline elements on their own lines inside a layout block as one
   // paragraph; joining them is render-neutral but makes the markup unreadable.
   unchanged(
@@ -253,20 +380,27 @@ describe("WH001 leaves non-prose alone", () => {
 });
 
 describe("WH001 reads .mdx with an MDX parser", () => {
-  it("joins prose inside a JSX block", () => {
-    const src = "<Aside>\n\nProse inside the\naside, wrapped.\n\n</Aside>\n";
-    assert.equal(
-      run("t.mdx", src, { fix: true }).output,
-      "<Aside>\n\nProse inside the aside, wrapped.\n\n</Aside>\n",
-    );
-  });
+  fixesTo(
+    "joins prose inside a JSX block",
+    "<Aside>\n\nProse inside the\naside, wrapped.\n\n</Aside>\n",
+    "<Aside>\n\nProse inside the aside, wrapped.\n\n</Aside>\n",
+    { md: false },
+  );
+  fixesTo(
+    "joins four-space-indented prose, since MDX has no indented code",
+    "<Aside>\n\n    Indented prose\n    wrapped here.\n\n</Aside>\n",
+    "<Aside>\n\n    Indented prose wrapped here.\n\n</Aside>\n",
+    { md: false },
+  );
 
-  it("joins four-space-indented prose, since MDX has no indented code", () => {
-    const src = "<Aside>\n\n    Indented prose\n    wrapped here.\n\n</Aside>\n";
-    assert.equal(
-      run("t.mdx", src, { fix: true }).output,
-      "<Aside>\n\n    Indented prose wrapped here.\n\n</Aside>\n",
-    );
+  it("parses the real text, not markdownlint's comment mask", () => {
+    // Masked, the code spans' `<!--` … `-->` turn everything between them into
+    // dots, and the fence between them disappears from the parse.
+    const src =
+      "Use `<!--` here.\n\n<TabItem>\n```xml\n<a/>\n```\n</TabItem>\n\nand `-->` there.\n";
+    const { stdout } = run("t.mdx", src);
+    assert.doesNotMatch(stdout, /not checked/);
+    assert.equal(count(stdout, "WH002"), 2);
   });
 
   it("reports a file it cannot parse instead of guessing at it", () => {
@@ -483,8 +617,9 @@ describe("fix-mdx.mjs repairs .mdx with the two rules and nothing else", () => {
     "",
   ].join("\n");
 
-  it("unwraps prose and separates fences, leaving every other construct byte-identical", () => {
-    const { output, stderr } = fixMdx(page);
+  it("unwraps prose and separates fences, leaving every other construct byte-identical", async () => {
+    const { output, stderr, status } = fixMdx(page);
+    assert.equal(status, 0);
     assert.equal(stderr, "");
     const expected = page
       .replace("A paragraph that was\nhard-wrapped", "A paragraph that was hard-wrapped")
@@ -494,6 +629,7 @@ describe("fix-mdx.mjs repairs .mdx with the two rules and nothing else", () => {
       .replace("<Aside>\n```yaml", "<Aside>\n\n```yaml")
       .replace("```\n</Aside>", "```\n\n</Aside>");
     assert.equal(output, expected);
+    await assertSameRender(page, output);
   });
 
   it("is a fixpoint — a second run changes nothing", () => {
@@ -501,7 +637,7 @@ describe("fix-mdx.mjs repairs .mdx with the two rules and nothing else", () => {
     assert.equal(fixMdx(once).output, once);
   });
 
-  it("closes the hazard: a glued fence's code is no longer read as Markdown", () => {
+  it("closes the hazard: a glued fence's code is no longer read as Markdown", async () => {
     // Before the fix CommonMark ends the HTML block at the blank line inside the
     // fence and reads `# second` as a heading, which MD022 wants spaced out.
     const src = "<Aside>\nRun this first:\n```yaml\n# first\n\n# second\n```\n</Aside>\n";
@@ -513,23 +649,76 @@ describe("fix-mdx.mjs repairs .mdx with the two rules and nothing else", () => {
       "<Aside>\nRun this first:\n\n```yaml\n# first\n\n# second\n```\n\n</Aside>\n",
     );
     assert.doesNotMatch(run("t.mdx", output, heading).stdout, /MD022/);
+    await assertSameRender(src, output);
   });
 
   it("leaves a fence inside a list item for a human — a blank line there makes the list loose", () => {
     const src = "1. Step:\n   <Foo>\n   ```sh\n   x\n   ```\n   </Foo>\n2. Next\n";
-    const { output, stderr } = fixMdx(src);
+    const { output, stderr, status } = fixMdx(src);
+    assert.equal(status, 0);
     assert.equal(output, src);
     assert.match(stderr, /t\.mdx:3 WH002 not fixed: a blank line would make the list loose/);
     assert.match(stderr, /t\.mdx:6 WH002 not fixed: a blank line would make the list loose/);
   });
 
+  it("leaves a fence inside a blockquote for a human — a blank line there ends the quote", () => {
+    const src = "> <Foo>\n> ```sh\n> x\n> ```\n> </Foo>\n";
+    const { output, stderr, status } = fixMdx(src);
+    assert.equal(status, 0);
+    assert.equal(output, src);
+    assert.match(stderr, /t\.mdx:2 WH002 not fixed: a blank line would end the blockquote/);
+  });
+
+  it("reads the real text, not markdownlint's comment mask", async () => {
+    // The rules used to parse the masked lines, call this file unparseable, and
+    // hand the fixer that report as a place to insert a blank line.
+    const src =
+      "Use `<!--` here.\n\n<TabItem>\n```xml\n<a/>\n```\n</TabItem>\n\nand `-->` there\nwrapped.\n";
+    const { output, stderr, status } = fixMdx(src);
+    assert.equal(status, 0);
+    assert.equal(stderr, "");
+    assert.equal(
+      output,
+      "Use `<!--` here.\n\n<TabItem>\n\n```xml\n<a/>\n```\n\n</TabItem>\n\nand `-->` there wrapped.\n",
+    );
+    await assertSameRender(src, output);
+  });
+
   it("leaves a file it cannot parse untouched", () => {
     const src = "An unclosed {expression\nand wrapped\nprose.\n";
-    const { output, stderr } = fixMdx(src);
+    const { output, stderr, status } = fixMdx(src);
+    assert.equal(status, 0);
+    assert.equal(fixMdx(src, ["--check"]).status, 1);
     assert.equal(output, src);
     assert.match(
       stderr,
       /skipped .*t\.mdx: not valid MDX at line \d+: Unexpected end of file in expression/,
     );
+  });
+});
+
+describe("the invariant fix-mdx.mjs checks before writing", () => {
+  const base = "A paragraph\nwrapped.\n\n```sh\nx  y\n```\n";
+  it("holds across a join and a blank line beside a fence", () => {
+    assert.notEqual(mdxInvariant(base), null);
+    assert.equal(mdxInvariant("A paragraph wrapped.\n\n\n```sh\nx  y\n```\n"), mdxInvariant(base));
+  });
+  it("breaks when a paragraph splits", () => {
+    assert.notEqual(
+      mdxInvariant("A paragraph\n\nwrapped.\n\n```sh\nx  y\n```\n"),
+      mdxInvariant(base),
+    );
+  });
+  it("breaks when only the whitespace inside code changes", () => {
+    assert.notEqual(mdxInvariant("A paragraph\nwrapped.\n\n```sh\nx y\n```\n"), mdxInvariant(base));
+  });
+  it("breaks when a non-breaking space goes", () => {
+    assert.notEqual(mdxInvariant("a\u00a0\nb\n"), mdxInvariant("a b\n"));
+  });
+  it("breaks when the front matter changes", () => {
+    assert.notEqual(mdxInvariant("---\nt: a\n---\n\nx\n"), mdxInvariant("---\nt:  a\n---\n\nx\n"));
+  });
+  it("is null for a file that does not parse", () => {
+    assert.equal(mdxInvariant("{unclosed\n"), null);
   });
 });

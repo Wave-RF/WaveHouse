@@ -44,7 +44,7 @@
 // the symptom while corrupting the code. Reporting only keeps the violation
 // visible for scripts/fix-mdx.mjs to repair.
 
-import { descendants, parseMdx } from "./lib/mdx.mjs";
+import { descendants, parseMdx, unmaskedLines } from "./lib/mdx.mjs";
 
 // What may sit between two flow constructs without separating them the way a
 // blank line (`lineEndingBlank`) does.
@@ -71,14 +71,17 @@ const firstLine = (token) => {
 
 export default {
   names: ["WH002", "mdx-fence-needs-blank-line"],
-  description: "A code fence adjacent to a JSX tag needs a blank line between them",
+  description:
+    "An MDX code fence needs a blank line beside a JSX tag, and wherever CommonMark reads it as HTML",
   tags: ["code", "mdx"],
   parser: "micromark",
   function: (params, onError) => {
     // CommonMark has no JSX, so this only applies to MDX.
     if (!params.name.endsWith(".mdx")) return;
 
-    const mdx = parseMdx(params.lines);
+    // Parse the real text: `params.lines` masks every `<!--` … `-->` span, and
+    // in MDX that can only be inside code, which the mask would turn into prose.
+    const mdx = parseMdx(unmaskedLines(params) ?? params.lines);
     if (mdx.error) {
       onError({
         lineNumber: Math.min(Math.max(mdx.error.line, 1), params.lines.length),

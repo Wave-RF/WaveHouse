@@ -15,16 +15,19 @@
 // is a nit, a corrupted one is data loss. Every case has a fixture in
 // rules.test.mjs.
 
-import { descendants, hasAncestor, parseMdx } from "./lib/mdx.mjs";
+import { descendants, hasAncestor, parseMdx, unmaskedLines } from "./lib/mdx.mjs";
 
 // A line ending inside one of these is not interchangeable with a space: JS
 // (expressions, JSX attributes) can carry a `//` comment, TeX a `%` comment, a
-// link title keeps its newline, and inline HTML passes through verbatim.
+// link title, image alt text or directive attribute keeps its newline, and
+// inline HTML passes through verbatim.
 const VERBATIM_INLINE = new Set([
-  "mdxTextExpression",
-  "mdxJsxTextTag",
-  "mathText",
+  "directiveTextAttributes",
   "htmlText",
+  "image",
+  "mathText",
+  "mdxJsxTextTag",
+  "mdxTextExpression",
   "resource",
 ]);
 
@@ -32,21 +35,35 @@ const VERBATIM_INLINE = new Set([
 // HTML to CommonMark however much it looks like prose.
 const SKIPPED_CONTAINERS = new Set(["blockQuote", "htmlFlow"]);
 
-// markdownlint hands rules a MASKED copy of every HTML comment's interior, and
-// the fix is built from those lines, so joining a line that touches a comment
-// would write the mask back over the comment's text.
-const COMMENT = /<!--|-->/;
-
-// A link reference definition cannot interrupt a paragraph, so one written
-// straight under prose is already broken; joining it would bury it mid-line.
-const DEFINITION = /^\s*\[[^\]]+\]:\s/;
-
 // A line that opens with a tag keeps its own line. Joining it would be
 // render-neutral, but the parser calls `<span>…</span>` lines inside a layout
 // `<div>` a paragraph, and one 300-column line of markup reads worse than five.
-const MARKUP = /^\s*</;
+const TAGS = new Set(["htmlText", "mdxJsxTextTag"]);
 
-const HARD_BREAK = /(\\|\s\s)$/;
+// A link reference definition cannot interrupt a paragraph, so one written
+// straight under prose is already broken; joining it would bury it mid-line.
+const DEFINITION = /^[ \t]*\[[^\]]+\]:[ \t]/;
+
+const HARD_BREAK = /(\\| {2})$/;
+
+// A code span turns a line ending into one space but keeps the spaces around
+// it (the docs' parser keeps the next line's indent too), and a line ending can
+// be its padding. So the only line ending inside one that is ours to join is a
+// plain one with code, not whitespace, on both sides; container prefixes (a list
+// indent, a `>`) are tokens of their own and don't count.
+function joinableInCode(codeText, line) {
+  const children = codeText.children;
+  const i = children.findIndex((t) => t.type === "lineEnding" && t.startLine === line);
+  if (i < 0) return false;
+  const before = children[i - 1];
+  const after = children.slice(i + 1).find((t) => t.type.startsWith("codeText"));
+  return (
+    before?.type === "codeTextData" &&
+    /[^ \t]$/.test(before.text) &&
+    after?.type === "codeTextData" &&
+    /^[^ \t]/.test(after.text)
+  );
+}
 
 /** Each `[first, last]` (1-based, inclusive) run of lines that should be one. */
 function wrappedRuns(tokens, lines) {
@@ -60,23 +77,36 @@ function wrappedRuns(tokens, lines) {
     // content, where even trailing whitespace is not ours to trim.
     const breaks = new Set();
     const verbatimEnd = new Set();
-    for (const token of descendants(paragraph.children)) {
+    const isolate = (from, to) => {
+      for (let line = from - 1; line <= to; line++) breaks.add(line);
+    };
+    const inner = [...descendants(paragraph.children)];
+    for (const token of inner) {
       if (token.type === "hardBreakEscape" || token.type === "hardBreakTrailing") {
         breaks.add(token.startLine);
+      } else if (token.type === "htmlText" && token.text.startsWith("<!--")) {
+        // An inline-config comment governs its own line, so it never moves.
+        isolate(token.startLine, token.endLine);
       } else if (token.type === "lineEnding" && hasAncestor(token, VERBATIM_INLINE, paragraph)) {
         breaks.add(token.startLine);
         verbatimEnd.add(token.startLine);
+      } else if (token.type === "codeText") {
+        for (let line = token.startLine; line < token.endLine; line++) {
+          if (joinableInCode(token, line)) continue;
+          breaks.add(line);
+          verbatimEnd.add(line);
+        }
       }
     }
     for (let line = paragraph.startLine; line <= paragraph.endLine; line++) {
       const text = lines[line - 1];
-      if (
-        COMMENT.test(text) ||
-        MARKUP.test(text) ||
-        (line > paragraph.startLine && DEFINITION.test(text))
-      ) {
-        breaks.add(line - 1);
-        breaks.add(line);
+      const column =
+        line === paragraph.startLine ? paragraph.startColumn : text.search(/[^ \t]/) + 1;
+      const opensWithTag = inner.some(
+        (t) => TAGS.has(t.type) && t.startLine === line && t.startColumn === column,
+      );
+      if (opensWithTag || (line > paragraph.startLine && DEFINITION.test(text))) {
+        isolate(line, line);
       }
     }
 
@@ -96,7 +126,11 @@ export default {
   tags: ["whitespace", "prose"],
   parser: "micromark",
   function: (params, onError) => {
-    const { lines } = params;
+    // The fix is built from these lines, so they must be the real ones: in
+    // `params.lines` everything between `<!--` and `-->` is masked, even inside
+    // code spans and across paragraphs. Unrecoverable text gets reports only.
+    const source = unmaskedLines(params);
+    const lines = source ?? params.lines;
     let tokens = params.parsers.micromark.tokens;
     if (params.name.endsWith(".mdx")) {
       const mdx = parseMdx(lines);
@@ -111,33 +145,34 @@ export default {
     }
 
     for (const { first, last, keepTrailing } of wrappedRuns(tokens, lines)) {
-      const head = lines[first - 1].replace(/\s+$/, "");
+      const head = lines[first - 1].replace(/[ \t]+$/, "");
       const parts = [];
       for (let line = first + 1; line <= last; line++) {
-        const continuation = lines[line - 1].replace(/^\s+/, "");
+        const continuation = lines[line - 1].replace(/^[ \t]+/, "");
         // The run's last line may carry a hard break (`\` or two spaces) or end
         // inside verbatim content; either way its trailing whitespace stays.
         const keep = line === last && (keepTrailing || HARD_BREAK.test(continuation));
-        parts.push(keep ? continuation : continuation.replace(/\s+$/, ""));
+        parts.push(keep ? continuation : continuation.replace(/[ \t]+$/, ""));
       }
 
       // One edit carrying the whole joined remainder, plus a delete per
       // continuation line. Appending each line to its immediate predecessor
       // instead would lose text, since that predecessor is itself deleted.
+      const fix = (fixInfo) => (source ? { fixInfo } : {});
       onError({
         lineNumber: first,
         detail: `paragraph is hard-wrapped across ${parts.length + 1} lines`,
-        fixInfo: {
+        ...fix({
           editColumn: head.length + 1,
           deleteCount: lines[first - 1].length - head.length,
           insertText: ` ${parts.join(" ")}`,
-        },
+        }),
       });
       for (let line = first + 1; line <= last; line++) {
         onError({
           lineNumber: line,
           detail: "continuation of a hard-wrapped paragraph",
-          fixInfo: { deleteCount: -1 },
+          ...fix({ deleteCount: -1 }),
         });
       }
     }

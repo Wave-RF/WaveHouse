@@ -37,41 +37,16 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { applyFixes } from "markdownlint-cli2/markdownlint";
 import helpers from "markdownlint-cli2/markdownlint/helpers";
 import { lint } from "markdownlint-cli2/markdownlint/promise";
-import { descendants, parseMdx } from "./markdownlint-rules/lib/mdx.mjs";
+import {
+  descendants,
+  mdxInvariant,
+  parseMdx,
+  splitFrontMatter,
+} from "./markdownlint-rules/lib/mdx.mjs";
 import wh002 from "./markdownlint-rules/mdx-fence-needs-blank-line.mjs";
 import wh001 from "./markdownlint-rules/no-hard-wrapped-prose.mjs";
 
 const CONTAINERS = new Set(["listOrdered", "listUnordered", "blockQuote"]);
-const BLOCKS = new Set([
-  "atxHeading",
-  "blockQuote",
-  "codeFenced",
-  "definition",
-  "directiveContainer",
-  "directiveContainerFence",
-  "directiveLeaf",
-  "gfmFootnoteDefinition",
-  "listItemPrefix",
-  "listOrdered",
-  "listUnordered",
-  "mathFlow",
-  "mdxFlowExpression",
-  "mdxJsxFlowTag",
-  "mdxjsEsm",
-  "paragraph",
-  "setextHeading",
-  "table",
-  "thematicBreak",
-]);
-const VERBATIM = new Set([
-  "codeFenced",
-  "directiveContainerFence",
-  "mathFlow",
-  "mdxFlowExpression",
-  "mdxJsxFlowTag",
-  "mdxjsEsm",
-  "table",
-]);
 // Each pass either inserts a blank line where there was none or deletes lines,
 // so a file settles in a handful; this only catches a bug.
 const MAX_PASSES = 20;
@@ -89,22 +64,17 @@ if (files.length === 0) {
   files.push(...listed.split("\n").filter(Boolean));
 }
 
-/** Split off front matter exactly as markdownlint does, so line numbers agree. */
-function splitFrontMatter(text) {
-  const match = text.match(helpers.frontMatterRe);
-  const head = match && match.index === 0 ? match[0] : "";
-  const headLines = head ? head.split(helpers.newLineRe) : [];
-  if (headLines.at(-1) === "") headLines.pop();
-  return { head, body: text.slice(head.length), offset: headLines.length };
-}
-
 async function violations(file, text) {
   const results = await lint({
     strings: { [file]: text },
     customRules: [wh001, wh002],
     config: { default: false, WH001: true, WH002: true },
   });
-  return results[file].map((error) => ({ ...error, rule: error.ruleNames[0] }));
+  // A "not checked" report says the rule could not parse the file; it marks no
+  // place to insert a blank line.
+  return results[file]
+    .filter((error) => !error.errorDetail?.startsWith("not checked"))
+    .map((error) => ({ ...error, rule: error.ruleNames[0] }));
 }
 
 /** Why a blank line above `lineNumber` would not be a safe fix, or null. */
@@ -118,17 +88,6 @@ function unsafeInsert(lines, lineNumber, mdx, offset) {
   return container.type === "blockQuote"
     ? "a blank line would end the blockquote"
     : "a blank line would make the list loose";
-}
-
-/** The parts of a document no fix may change: structure, verbatim blocks, characters. */
-function invariant(text) {
-  const { head, body } = splitFrontMatter(text);
-  const mdx = parseMdx(body.split(helpers.newLineRe));
-  if (mdx.error) return null;
-  const blocks = [...descendants(mdx.tokens)]
-    .filter((t) => BLOCKS.has(t.type))
-    .map((t) => (VERBATIM.has(t.type) ? `${t.type}\n${t.text}` : t.type));
-  return JSON.stringify([head, blocks, text.replace(/\s+/g, "")]);
 }
 
 async function fix(file, source) {
@@ -194,7 +153,7 @@ for (const file of files) {
   for (const line of left) console.error(line);
   if (text === source) continue;
 
-  if (invariant(text) !== invariant(source)) {
+  if (mdxInvariant(text) !== mdxInvariant(source)) {
     console.error(
       `refusing to write ${file}: the fix would change more than whitespace around prose`,
     );
