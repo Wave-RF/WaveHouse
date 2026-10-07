@@ -219,10 +219,19 @@ type SchemaConfig struct {
 	RefreshInterval *int `json:"refresh_interval"`
 }
 
-// StreamConfig tunes GET /v1/stream: the SSE keepalive wheel and how much
-// NATS history the Active Sweeper keeps for gap-fill. Keepalives are
-// per-deployment-proxy knobs and the gap window is a per-tenant replay
-// budget, both of which change while the server runs.
+// MaxKeepaliveBuckets caps stream.keepalive_buckets. The wheel ticks once per
+// bucket per keepalive_interval, and holds a subscriber set per bucket, so the
+// count is both a tenant's tick rate and the size of its ring: at the cap, a
+// tenant at the 1-second minimum interval ticks a hundred times a second, and
+// its ring is a hundred empty sets. A hundred buckets already spreads the
+// writes to 1% of the tenant's streams per tick, past which more buckets buy
+// nothing a proxy or client can tell apart.
+const MaxKeepaliveBuckets = 100
+
+// StreamConfig tunes GET /v1/stream: the tenant's SSE keepalive wheel and how
+// much NATS history the Active Sweeper keeps for its gap-fill. Keepalives are
+// set to the proxy in front of the tenant's streams and the gap window is its
+// replay budget, both of which change while the server runs.
 type StreamConfig struct {
 	// KeepaliveInterval is the effective per-connection keepalive period in
 	// seconds — the longest a quiet stream goes unwritten before a ":"
@@ -230,7 +239,7 @@ type StreamConfig struct {
 	// connections keep streaming.
 	KeepaliveInterval *int `json:"keepalive_interval"`
 	// KeepaliveBuckets spreads the keepalive writes across the interval so
-	// each tick nudges ~1/N of live streams. Must be >= 1.
+	// each tick nudges ~1/N of live streams. Must be in 1-MaxKeepaliveBuckets.
 	KeepaliveBuckets *int `json:"keepalive_buckets"`
 	// GapWindowMinutes is how many minutes of ACKed messages the sweeper
 	// keeps in NATS for SSE gap-fill (Last-Event-ID replay). Must be >= 0;
