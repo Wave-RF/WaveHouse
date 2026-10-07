@@ -96,8 +96,8 @@ Cross-cutting habits that keep the codebase reviewable — they apply to every c
 **`make help` is the source of truth — run it for the full annotated list.** The targets agents reach for:
 
 ```bash
-make verify            # Static checks: Go (tidy+fmt+vulncheck+lint) + TS (Biome+tsc)
-make fix               # Auto-fix everything fixable (gofumpt, goimports, lint --fix, Biome)
+make verify            # Static checks, parallelized: Go (tidy, fmt, lint, vulncheck) + TS (Biome, tsc) + Markdown (markdownlint) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + docs type-check + script fixtures
+make fix               # Auto-fix everything fixable (tidy, gofumpt, goimports, lint --fix, Biome, markdownlint, misspell)
 make test              # Go unit tests + coverage gate (alias for test-unit)
 make test-integration  # Go integration tests + gate (Docker; testcontainers)
 make test-e2e          # E2E SDK suite vs the cover binary + gate (Docker; testcontainers)

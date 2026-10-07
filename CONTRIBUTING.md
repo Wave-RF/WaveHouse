@@ -47,7 +47,8 @@ Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?t
    - Settings-directory keys (`config.json` / `roles.json` / `policies.json` / `pipes.json`) → update `docs/src/content/docs/settings-directory.mdx` plus the seed and fixture copies (see AGENTS.md §Documentation Sync)
    - Deployment → update `docs/src/content/docs/deployment.md`
    - Architecture → update `docs/src/content/docs/architecture.md`
-   - Any notable change → add an entry under `[Unreleased]` in `CHANGELOG.md`
+   - Any notable change → add an entry under `## Unreleased` in `CHANGELOG.md`
+   - Build or test process → update `docs/src/content/docs/development.md` and the `Makefile`
 
 4. Follow the commit message format (see below).
 
