@@ -97,11 +97,25 @@ handback() {
       | last // empty' "$transcript" 2>/dev/null
 }
 
-# The report is the final message unless that lacks either parseable line; then
-# it's the hand-back's message. One retry covers a transcript not yet flushed.
+# verdict_of <report>: its VERDICT, lowercased. The LAST matching line wins, in
+# case the agent emits it more than once.
+verdict_of() {
+  printf '%s\n' "$1" \
+    | grep -iE "$verdict_re" \
+    | tail -1 \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/^[[:space:]]*verdict:[[:space:]]*([a-z_]+)[[:space:]]*$/\1/'
+}
+
+# The report is the final message unless that has no VERDICT line, or says
+# ship_it without naming the commit (closing text after a hand-back often
+# repeats only the verdict); then it's the hand-back's message. A final iterate
+# or block stands, whatever an earlier hand-back said. One retry covers a
+# transcript not yet flushed.
 report=$(field .last_assistant_message)
 source="the final message"
-if ! grep -qiE "$verdict_re" <<<"$report" || ! grep -qE "$reviewed_re" <<<"$report"; then
+verdict=$(verdict_of "$report")
+if [ -z "$verdict" ] || { [ "$verdict" = ship_it ] && ! grep -qE "$reviewed_re" <<<"$report"; }; then
   hb=""
   if [ -f "$transcript" ]; then
     hb=$(handback)
@@ -110,17 +124,11 @@ if ! grep -qiE "$verdict_re" <<<"$report" || ! grep -qE "$reviewed_re" <<<"$repo
   if [ -n "$hb" ]; then
     report=$hb
     source="the hand-back"
+    verdict=$(verdict_of "$report")
   else
     source="the final message (the transcript has no hand-back)"
   fi
 fi
-
-# The LAST matching line wins, in case the agent emits it more than once.
-verdict=$(printf '%s\n' "$report" \
-  | grep -iE "$verdict_re" \
-  | tail -1 \
-  | tr '[:upper:]' '[:lower:]' \
-  | sed -E 's/^[[:space:]]*verdict:[[:space:]]*([a-z_]+)[[:space:]]*$/\1/')
 
 if [ -z "$verdict" ]; then
   note "$repo" "no VERDICT line in ${source} (expected only for an advisory review) — no marker written."
