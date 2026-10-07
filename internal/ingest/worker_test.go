@@ -1531,7 +1531,7 @@ func TestRejectPoison_CountedByDisposition(t *testing.T) {
 	// The counter binds to the first global provider, so a later run in the
 	// same process would record into a dead reader: swap the counter itself.
 	reader := sdkmetric.NewManualReader()
-	counter, err := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test").Int64Counter("wavehouse_ingest_poison_total")
+	counter, err := newPoisonCounter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
 	require.NoError(t, err)
 	saved := poisonCounter
 	poisonCounter = counter

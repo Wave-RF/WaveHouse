@@ -1012,24 +1012,18 @@ func TestRedis_ProbeFitsASlowReconnect(t *testing.T) {
 	a := open(t, &server{addr: p.addr, mode: cache.RedisStandalone}, uniquePrefix(), func(c *cache.RedisConfig) {
 		c.Timeout, c.DialTimeout, c.TLS = timeout, dialTimeout, cliTLS
 		c.BreakerThreshold, c.BreakerOpenFor = 1, 200*time.Millisecond
+		// One connection, dialed by NewRedis, so the first lookup is not a
+		// lazy dial under the op timeout; the default spreads commands over
+		// several pipes, each dialed on first use.
+		cache.SetOnePipe(c)
 	})
 	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
-	// The first connection is a cold dial and TLS handshake under the op
-	// timeout, which a loaded host can miss; that is the reconnect case
-	// below, not what is under test, so wait for a connected, closed breaker.
-	for attempt := 1; ; attempt++ {
-		if _, _, err := a.Lookup(ctx, "acme", "q", deps); err == nil && !cache.Bypassed(a) {
-			break
-		} else if attempt == 1 {
-			t.Logf("the cold first lookup missed its %s timeout: %v", timeout, err)
-		}
-		require.Less(t, attempt, 2000, "the first connection never came up")
-		time.Sleep(10 * time.Millisecond)
-	}
+	_, _, err := a.Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
 
 	p.delay.Store(int64(dialTimeout * 7 / 10))
 	p.drop()
-	_, _, err := a.Lookup(ctx, "acme", "q", deps)
+	_, _, err = a.Lookup(ctx, "acme", "q", deps)
 	require.Error(t, err, "the reconnect does not fit in the lookup's timeout")
 	require.True(t, cache.Bypassed(a))
 	require.Eventually(t, func() bool { return !cache.Bypassed(a) }, 20*time.Second, 10*time.Millisecond,

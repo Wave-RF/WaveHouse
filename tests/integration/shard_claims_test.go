@@ -36,19 +36,52 @@ type shardLog struct {
 	mu   sync.Mutex
 	rows map[mq.Topic]map[string]int
 	at   map[mq.Topic]time.Time // the last row's arrival
+	seq  map[mq.Topic][]rowSeen // every row, in arrival order
 }
 
-func (l *shardLog) add(topic mq.Topic, proc string) {
+// rowSeen is one received row: its payload (the publish sequence) and who got it.
+type rowSeen struct {
+	n    int
+	proc string
+}
+
+func (l *shardLog) add(topic mq.Topic, proc string, payload []byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.rows == nil {
-		l.rows, l.at = map[mq.Topic]map[string]int{}, map[mq.Topic]time.Time{}
+		l.rows, l.at, l.seq = map[mq.Topic]map[string]int{}, map[mq.Topic]time.Time{}, map[mq.Topic][]rowSeen{}
 	}
+	n, _ := strconv.Atoi(string(payload))
+	l.seq[topic] = append(l.seq[topic], rowSeen{n, proc})
 	if l.rows[topic] == nil {
 		l.rows[topic] = map[string]int{}
 	}
 	l.rows[topic][proc]++
 	l.at[topic] = time.Now()
+}
+
+// handoffs is how many times topic's rows changed hands, and whether they
+// arrived in publish order.
+func (l *shardLog) handoffs(topic mq.Topic) (changes int, inOrder bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	inOrder = true
+	for i, r := range l.seq[topic] {
+		if i == 0 {
+			continue
+		}
+		prev := l.seq[topic][i-1]
+		changes += btoi(r.proc != prev.proc)
+		inOrder = inOrder && r.n > prev.n
+	}
+	return changes, inOrder
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func (l *shardLog) count(topic mq.Topic) int {
@@ -80,7 +113,7 @@ func (l *shardLog) writers(topic mq.Topic) []string {
 func (l *shardLog) reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.rows, l.at = nil, nil
+	l.rows, l.at, l.seq = nil, nil, nil
 }
 
 // shardProc is one ingest process's claims over a shared NATS, as the
@@ -122,7 +155,7 @@ func startShardProc(t *testing.T, url, id string, lease time.Duration, log *shar
 	cons, err := q.CreateConsumer(ctx, mq.ConsumerConfig{Durable: ingest.BufferConsumerName, AckWait: 60 * time.Second, MaxAckPending: 10_000})
 	require.NoError(t, err)
 	stop, failed, err := cons.Consume(func(m *mq.Message) {
-		log.add(m.Topic(), id)
+		log.add(m.Topic(), id, m.Data)
 		if p.hold.Load() {
 			p.held.Add(1)
 			return
@@ -169,6 +202,9 @@ func everyRowOnce(t *testing.T, b mq.Broker, log *shardLog, topics []mq.Topic, p
 	for _, topic := range topics {
 		assert.Subset(t, procs, log.writers(topic), "%v", topic)
 		assert.Equal(t, 3, log.count(topic), "%v: no row twice", topic)
+		changes, inOrder := log.handoffs(topic)
+		assert.LessOrEqual(t, changes, 1, "%v changed hands more than once: two owners at once", topic)
+		assert.True(t, inOrder, "%v: rows arrived out of order", topic)
 	}
 }
 
