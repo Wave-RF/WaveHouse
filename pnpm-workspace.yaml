@@ -39,3 +39,16 @@ catalog:
   typescript: "^6.0.3"
   vitest: "^4.1.11"
   "@types/node": "^26.4.1"
+
+# Disable the virtual store's hoisted fallback (node_modules/.pnpm/node_modules),
+# so a package that imports something it doesn't declare fails to resolve
+# instead of silently picking up a transitive copy.
+hoist: false
+
+# starlight-image-zoom imports `astro/zod` but only declares its Starlight peer.
+# Adding the missing peer lets pnpm link the docs' astro next to it rather than
+# relying on hoisting.
+packageExtensions:
+  starlight-image-zoom:
+    peerDependencies:
+      astro: "*"
