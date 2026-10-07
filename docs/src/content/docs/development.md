@@ -570,7 +570,7 @@ go get -u ./...        # Update all direct deps to latest minor/patch
 go mod tidy            # Remove unused, add missing
 ```
 
-`go get -u` ignores Dependabot's holds: until [#643](https://github.com/Wave-RF/WaveHouse/issues/643) closes it pulls `google.golang.org/grpc` 1.84.x, and `make vulncheck` fails on GO-2026-6443. Keep gRPC, `go.opentelemetry.io/proto/otlp` and `grpc-gateway/v2` at their `go.mod` versions (see [Dependabot](#dependabot)).
+`go get -u` ignores Dependabot's holds: until [#643](https://github.com/Wave-RF/WaveHouse/issues/643) closes it pulls `google.golang.org/grpc` 1.84.x, and `make vulncheck` fails on GO-2026-6443. After `go get -u ./...`, run `go get google.golang.org/grpc@v1.83.2` (the version `go.mod` pins); Go steps `proto/otlp` and `grpc-gateway/v2` back down with it (see [Dependabot](#dependabot)).
 
 ### Vulnerability Scanning
 

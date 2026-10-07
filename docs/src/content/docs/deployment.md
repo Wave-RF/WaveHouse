@@ -813,9 +813,9 @@ make obs-grafana  # Full Grafana LGTM stack, auto-login enabled
 make obs-front
 ```
 
-All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP) as **plaintext** receivers. If you are running WaveHouse directly on your host (e.g. `make dev`), set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` to reach them — the SDK's unset default dials `localhost:4317` over **TLS**, which a plaintext receiver rejects.
+All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP) as **plaintext** receivers. If you are running WaveHouse directly on your host, enable OTel and point it at them: `WH_OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 make dev` (`make dev` leaves OTel off, and the SDK's unset default dials `localhost:4317` over **TLS**, which a plaintext receiver rejects).
 
-If you are running a containerized WaveHouse (e.g., via `deployments/compose/standalone.yaml`), you must override its environment to reach the host-bound collector: `OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317`.
+If you are running a containerized WaveHouse (e.g., via `deployments/compose/standalone.yaml`), you must override its environment to enable OTel and reach the host-bound collector: `WH_OTEL_ENABLED=true` and `OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317`.
 
 ### Dashboards
 

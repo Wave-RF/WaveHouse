@@ -62,10 +62,10 @@ func TestInitProvider_Shutdown(t *testing.T) {
 // must stay bounded by its context deadline. That needs two things together —
 // fanning the traces/metrics/logs providers out concurrently (so their flushes
 // overlap instead of summing) AND returning when the deadline passes even
-// though the experimental logs SDK's BatchProcessor.Shutdown ignores ctx and
-// blocks for the exporter's full ~10s timeout during gRPC backoff. Drop either
-// and the shutdown overruns the budget: serial stacks the flushes, and a plain
-// wg.Wait blocks on the logs straggler.
+// when the logs SDK's BatchProcessor.Shutdown ignores ctx and blocks for the
+// exporter's full ~10s timeout during gRPC backoff, as it did at sdk/log
+// v0.20.0. Drop either and the shutdown overruns the budget: serial stacks the
+// flushes, and a plain wg.Wait blocks on the logs straggler.
 func TestInitProvider_ShutdownParallelBounded(t *testing.T) {
 	// Pin a definitely-unreachable collector so every exporter spends the
 	// shutdown budget in gRPC retry/backoff. t.Setenv also enforces
