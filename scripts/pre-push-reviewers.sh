@@ -3,9 +3,10 @@
 #
 # Prints one reviewer name per line. Each is a `.claude/agents/<name>.md`
 # subagent that MUST reach `VERDICT: ship_it` before `git push` succeeds on a
-# PR branch. Its marker is `tmp/<name>-passed-<HEAD-sha>`, written by
-# `.claude/hooks/review-marker.sh` on ship_it and required (one per reviewer)
-# by `.claude/hooks/agent-bash-gate.sh`.
+# PR branch. Its marker is `tmp/<name>-passed-<sha>` for the commit named on the
+# reviewer's `REVIEWED:` line, written by `.claude/hooks/review-marker.sh` on
+# ship_it and required (one per reviewer) for the pushed commit by
+# `.claude/hooks/agent-bash-gate.sh`.
 #
 # Consumed by both hooks above and by `/prepush`, which launches every listed
 # reviewer in parallel. The set grows over time (code, docs, security, …) and
