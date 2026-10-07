@@ -15,6 +15,8 @@ gate=$root/.claude/hooks/agent-bash-gate.sh
 marker_hook=$root/.claude/hooks/review-marker.sh
 fails=0
 
+command -v jq >/dev/null 2>&1 || { echo "review-gate test: jq is required (the hooks under test parse JSON with it)." >&2; exit 1; }
+
 scratch=$(mktemp -d) || exit 1
 trap 'rm -rf "$scratch"' EXIT
 scratch=$(cd "$scratch" && pwd -P)
@@ -283,6 +285,90 @@ expect_block "an unresolvable refspec" "$repo" "git push origin no-such-branch" 
 expect_block "a wrapped push" "$repo" "timeout 60 git push" "can't follow"
 expect_block "a push behind sudo" "$repo" "sudo git push origin feat-a" "can't follow"
 expect_block "a push in a command substitution" "$repo" "out=\$(git push origin feat-b 2>&1)" "can't follow"
+# A followed push on the line doesn't excuse an unfollowed one.
+expect_block "a followed push, then a wrapped one" "$repo" "git push origin feat-a && timeout 60 git push origin feat-b" "can't follow"
+expect_block "a followed push, then one in a substitution" "$repo" "git push origin feat-a; out=\$(git -C ../wt-b push 2>&1)" "can't follow"
+expect_block "a followed push, then one behind sudo" "$repo" "git push origin feat-a && sudo git -C ../wt-b push" "can't follow"
+expect_block "push --help, then a wrapped push" "$repo" "git push --help; timeout 5 git push origin feat-b" "can't follow"
+expect_allow "two followed pushes" "$repo" "git push origin feat-a && git push origin feat-a:refs/heads/copy"
+expect_block "export GIT_DIR before the push" "$repo" "export GIT_DIR=$wtb/.git; git push origin HEAD" "can't tell which repository"
+expect_block "declare -x GIT_WORK_TREE before the push" "$repo" "declare -x GIT_WORK_TREE=$wtb; git push" "can't tell which repository"
+expect_block "a bare GIT_DIR assignment before the push" "$repo" "GIT_DIR=$wtb/.git; git push" "can't tell which repository"
+# An exported GIT_DIR or GIT_WORK_TREE outlives a later cd or git -C; only
+# unset or the end of a subshell clears it.
+expect_block "export GIT_DIR, then cd to a reviewed worktree" "$repo" "export GIT_DIR=$wtb/.git; cd $repo && git push" "can't tell which repository"
+expect_block "export GIT_DIR, then git -C a reviewed worktree" "$repo" "export GIT_DIR=$wtb/.git; git -C $repo push" "can't tell which repository"
+expect_block "export GIT_WORK_TREE, then cd" "$repo" "export GIT_WORK_TREE=$wtb; cd $repo; git push" "can't tell which repository"
+expect_block "export GIT_DIR, then pushd" "$repo" "export GIT_DIR=$wtb/.git; pushd $repo >/dev/null; git push" "can't tell which repository"
+expect_block "…and unsetting one of the two leaves the other" "$repo" "export GIT_DIR=$wtb/.git GIT_WORK_TREE=$wtb; unset GIT_DIR; git push" "can't tell which repository"
+expect_block "git --git-dir, then -C a reviewed worktree" "$repo" "git --git-dir=$wtb/.git -C $repo push" "can't tell which repository"
+expect_allow "export GIT_DIR, then unset it" "$repo" "export GIT_DIR=$wtb/.git; unset GIT_DIR; git push"
+expect_allow "export GIT_DIR in a subshell" "$repo" "(export GIT_DIR=$wtb/.git; true) && git push"
+# A HEAD-moving git command the walk doesn't run directly still moves HEAD.
+expect_block "a wrapped commit, then a push" "$repo" "timeout 60 git commit -m x && git push" "separate command"
+expect_block "a commit in a command substitution, then a push" "$repo" "out=\$(git commit --allow-empty -m x 2>&1) && git push" "separate command"
+# Code handed to a shell or eval is not followed; a process substitution is.
+expect_block "a push in bash -c" "$repo" "bash -c \"git push origin feat-b\"" "can't follow"
+expect_block "a push in sh -c, after a cd" "$repo" "sh -c 'cd ../wt-b && git push'" "can't follow"
+expect_block "a push in eval" "$repo" "eval \"git push origin feat-b\"" "can't follow"
+expect_block "a push in a heredoc read by bash" "$repo" "bash <<'EOF'
+cd ../wt-b
+git push origin feat-b
+EOF" "can't follow"
+expect_block "a push in a here-string read by sh" "$repo" "sh <<< 'git -C ../wt-b push'" "can't follow"
+expect_block "a push in an input process substitution" "$repo" "cat <(git push origin feat-b)" "missing pre-push review marker"
+expect_block "a push in an output process substitution" "$repo" "tee >(git -C ../wt-b push)" "missing pre-push review marker"
+expect_block "a push in a here-string read by sh, inside \$(…)" "$repo" "echo \"\$(sh <<<'git -C ../wt-b push')\"" "can't follow"
+expect_block "a push in bash -c, inside \$(…)" "$repo" "out=\$(bash -c 'git -C ../wt-b push')" "can't follow"
+expect_block "a push in eval, inside \$(…)" "$repo" "out=\$(eval 'git -C ../wt-b push')" "can't follow"
+expect_block "a push with a quoted -C path, inside \$(…)" "$repo" "out=\$(git -C \"\$WT\" push)" "can't follow"
+expect_block "a push in bash -c, inside \$'…' inside \$(…)" "$repo" "out=\$(bash -c \$'git -C ../wt-b push')" "can't follow"
+# A substitution's output handed to a shell is code.
+expect_block "a substitution's output handed to eval" "$repo" "eval \"\$(echo 'git -C ../wt-b push')\"" "can't follow"
+expect_block "…to bash -c" "$repo" "bash -c \"\$(echo 'git -C ../wt-b push')\"" "can't follow"
+expect_block "a push continued over a backslash-newline in bash -c" "$repo" "bash -c 'git -C ../wt-b \\
+push'" "can't follow"
+expect_block "…and in a heredoc read by bash" "$repo" "bash <<'EOF'
+git -C ../wt-b \\
+push
+EOF" "can't follow"
+# A substitution in a here-string or a redirect target runs like any other.
+expect_block "a push in a here-string's substitution" "$repo" "grep -q rejected <<< \"\$(git -C ../wt-b push 2>&1)\"" "can't follow"
+expect_block "a push in a redirect target's substitution" "$repo" "echo hi > \"\$(git -C ../wt-b push >/dev/null; echo /dev/null)\"" "can't follow"
+expect_block "a commit in a here-string's substitution, then a push" "$repo" "grep -q x <<< \"\$(git commit --allow-empty -m x)\"; git push" "separate command"
+expect_allow "a mention of git push beside a substitution" "$wtb" "echo \"\$(date): ran git push\""
+# Quoted text inside a substitution is an argument, not code.
+expect_allow "a substitution that greps for git push" "$wtb" "n=\$(grep -c 'git push' AGENTS.md)"
+expect_allow "…looped over" "$wtb" "for f in \$(rg -l 'git push' docs); do echo \$f; done"
+expect_allow "…double-quoted" "$wtb" "wc -l \$(grep -rl \"git push\" .claude)"
+expect_allow "a commit message from a substitution that mentions git push" "$wtb" "git commit -m \"\$(echo 'docs: explain the git push gate')\""
+expect_allow "a PR comment from printf that mentions git push" "$wtb" "gh pr comment 1 --body \"\$(printf 'Fixed; run git push to update.\\n')\""
+expect_allow "a push, then a substitution that greps for git commit" "$repo" "git push origin feat-a; n=\$(grep -c 'git commit' AGENTS.md)"
+expect_allow "a PR body heredoc that mentions github and pushed" "$wtb" "gh pr create --draft --title \"fix: x\" --body \"\$(cat <<'EOF'
+The branch on github was pushed; it's ready.
+EOF
+)\""
+expect_block "a push after an \$'…' string holding \\'" "$repo" "echo \$'it\\'s' && git push origin feat-b" "missing pre-push review marker"
+expect_allow "…and the same push of a reviewed branch" "$repo" "echo \$'it\\'s' && git push origin feat-a"
+expect_allow "…with the \$'…' string inside \$(…)" "$repo" "out=\$(printf \$'it\\'s pushed\\n') && git push origin feat-a"
+expect_allow "…closed with EOF)\" on one line" "$wtb" "gh pr create --draft --title \"fix: x\" --body \"\$(cat <<'EOF'
+The branch on github was pushed; it's ready.
+EOF)\""
+expect_allow "a script run by bash, then a push" "$repo" "bash scripts/pre-push-reviewers.sh && git push"
+expect_allow "a heredoc read by bash that doesn't push, then a push" "$repo" "bash <<'EOF'
+echo hi
+EOF
+git push"
+# A command longer than a pipe buffer (64 KB) is checked like any other.
+big=$(printf 'line %05d of a long body\n' $(seq 1 4000))
+expect_block "a push ahead of a 100 KB body" "$repo" "git push origin feat-b && gh pr create --draft --body \"\$(cat <<'EOF'
+$big
+EOF
+)\"" "missing pre-push review marker"
+expect_block "a 100 KB gh pr create without --draft" "$repo" "gh pr create --title \"fix: x\" --body \"\$(cat <<'EOF'
+$big
+EOF
+)\"" "--draft"
 expect_block "the matching refspec ':'" "$repo" "git push origin :" "every branch that exists on both sides"
 expect_block "…and '+:'" "$repo" "git push origin +:" "every branch that exists on both sides"
 expect_block "an unterminated quote" "$repo" "git push origin 'feat-a" "can't parse"

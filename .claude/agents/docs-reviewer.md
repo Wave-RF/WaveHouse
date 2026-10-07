@@ -71,7 +71,7 @@ REVIEWED: <the full 40-character sha from step 1>
 VERDICT: ship_it
 ```
 
-or `VERDICT: iterate` or `VERDICT: block`. Both lines are consumed by `.claude/hooks/review-marker.sh`: on `ship_it` it writes the marker for the `REVIEWED` commit, and only if that commit is still checked out and its worktree's HEAD hasn't moved since you started. A missing, abbreviated or misformatted line means no marker, no push.
+or `VERDICT: iterate` or `VERDICT: block`. Both lines are consumed by `.claude/hooks/review-marker.sh`: on `ship_it` it writes the marker for the `REVIEWED` commit, and only if that commit is still checked out and its worktree's HEAD hasn't moved since you started. A missing or misformatted line, or a sha that doesn't name exactly one commit, means no marker, no push.
 
 Mapping (same strict rubric as `pre-push-reviewer` — **`ship_it` requires zero findings at any severity**):
 

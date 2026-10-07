@@ -15,6 +15,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/stream"
 )
 
 // testStore stands in for the store TenantMW resolves. It holds no document:
@@ -68,6 +69,11 @@ func schemaHandlerOver(reg *discovery.SchemaRegistry, tenants *settings.Registry
 // fixedConn is a connection source fixed to conn, whatever the tenant.
 func fixedConn(conn driver.Conn) func(*settings.Store) driver.Conn {
 	return func(*settings.Store) driver.Conn { return conn }
+}
+
+// fixedWheel is a StreamHandler.Heartbeater fixed to hb, whatever the tenant.
+func fixedWheel(hb *stream.Heartbeater) func(*settings.Store) *stream.Heartbeater {
+	return func(*settings.Store) *stream.Heartbeater { return hb }
 }
 
 // staticPolicy is a PolicySource fixed to p, whatever the tenant.

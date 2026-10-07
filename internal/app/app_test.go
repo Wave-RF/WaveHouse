@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -20,6 +21,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -36,6 +38,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
@@ -864,52 +867,350 @@ func keepalive(interval, buckets int) map[string]any {
 	return map[string]any{"stream": map[string]any{"keepalive_interval": interval, "keepalive_buckets": buckets, "gap_window_minutes": 15}}
 }
 
-// One wheel keeps every tenant's streams alive, so it runs at the shortest
-// keepalive_interval among the tenants being served — an upper bound the
-// longer ones are inside of (#597 tracks honoring each tenant's own). A flat
-// directory's single tenant gets exactly its own pair.
-func TestShortestKeepalive(t *testing.T) {
-	open := func(t *testing.T, dir string) *settings.Registry {
-		t.Helper()
-		guardGlobals(t)
-		tenants, findings := settings.Open(dir)
-		require.NotNil(t, tenants, "findings: %v", findings)
-		return tenants
+// hookedKeepalives opens the settings directory dir and builds its tenants'
+// wheels, reconciled after every reload as wireStreaming hooks them.
+func hookedKeepalives(t *testing.T, dir string) (*settings.Registry, *keepalives) {
+	t.Helper()
+	tenants, findings := settings.Open(dir)
+	require.NotNil(t, tenants, "findings: %v", findings)
+	k := newKeepalives(tenants, (*settings.Store).Keepalive)
+	tenants.AfterAdopt(func([]tenant.ID) { k.reconcile() })
+	k.reconcile()
+	return tenants, k
+}
+
+// nudges waits for every wheel to come to rest, then counts the keepalives
+// sub has been sent since the last count.
+func nudges(sub *stream.Subscriber) int {
+	synctest.Wait()
+	n := 0
+	for {
+		select {
+		case <-sub.Frames():
+			n++
+		default:
+			return n
+		}
 	}
+}
 
-	t.Run("flat directory", func(t *testing.T) {
-		period, buckets := shortestKeepalive(open(t, writeSettings(t, keepalive(45, 5))))
-		assert.Equal(t, 45*time.Second, period)
-		assert.Equal(t, 5, buckets)
+// Each tenant's streams are nudged at that tenant's own
+// stream.keepalive_interval (#597), to the second: the clock is synctest's,
+// so the intervals are ones a settings directory spells. A reload that
+// shortens one tenant's interval — the tenant asking for one second, which
+// used to set every tenant's cadence — leaves the other's next keepalive
+// where it was due, and a reload of a tenant's own interval reshapes its
+// wheel in place with its open stream still on it.
+func TestKeepalives_EachTenantAtItsOwnInterval(t *testing.T) {
+	guardGlobals(t)
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": keepalive(30, 3), "globex": keepalive(10, 2)})
+	synctest.Test(t, func(t *testing.T) {
+		tenants, k := hookedKeepalives(t, root)
+		reload := func(id tenant.ID, patch map[string]any) {
+			t.Helper()
+			rewriteSettings(t, filepath.Join(root, id.String()), patch)
+			_, adopted, known := tenants.ReloadTenant(id, "test")
+			require.True(t, known)
+			require.True(t, adopted)
+		}
+		// A stream that opens before Run turns the wheels waits on its
+		// tenant's, and its first period starts with Run.
+		acme, globex := stream.NewSubscriber(nil, nil), stream.NewSubscriber(nil, nil)
+		acmeWheel, globexWheel := k.For("acme"), k.For("globex")
+		acmeWheel.Add(acme)
+		globexWheel.Add(globex)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go k.run(ctx)
+
+		time.Sleep(29 * time.Second)
+		assert.Equal(t, 2, nudges(globex), "globex's stream every 10 seconds")
+		assert.Zero(t, nudges(acme), "acme's not before its own 30")
+		time.Sleep(time.Second)
+		assert.Equal(t, 1, nudges(acme))
+		assert.Equal(t, 1, nudges(globex))
+
+		// 0:45 — globex asks for one second, halfway through acme's period.
+		time.Sleep(15 * time.Second)
+		assert.Equal(t, 1, nudges(globex))
+		reload("globex", keepalive(1, 1))
+		time.Sleep(14 * time.Second)
+		assert.Equal(t, 14, nudges(globex), "globex's stream every second from its reload on")
+		assert.Zero(t, nudges(acme), "acme's cadence is not globex's")
+		time.Sleep(time.Second)
+		assert.Equal(t, 1, nudges(acme), "acme's keepalive lands where it was due, a minute in")
+		assert.Equal(t, 1, nudges(globex))
+
+		// 1:02 — acme's own interval goes to five seconds.
+		time.Sleep(2 * time.Second)
+		reload("acme", keepalive(5, 1))
+		assert.Same(t, acmeWheel, k.For("acme"), "reshaped in place")
+		assert.Equal(t, 1, acmeWheel.Len(), "its stream carried over")
+		time.Sleep(4 * time.Second)
+		assert.Zero(t, nudges(acme), "up to one new period before its next keepalive")
+		time.Sleep(6 * time.Second)
+		assert.Equal(t, 2, nudges(acme), "then every five seconds")
+		assert.Equal(t, 12, nudges(globex), "globex's cadence is not acme's either")
+		assert.Same(t, globexWheel, k.For("globex"))
 	})
+}
 
-	t.Run("nested directory", func(t *testing.T) {
-		root := writeNestedSettings(t, map[string]map[string]any{"acme": keepalive(30, 3), "globex": keepalive(10, 2), "initech": keepalive(10, 7)})
-		tenants := open(t, root)
-		period, buckets := shortestKeepalive(tenants)
-		assert.Equal(t, 10*time.Second, period)
-		assert.Equal(t, 2, buckets, "tenants tied on the interval resolve to the first in id order")
+// A flat directory's one tenant is kept alive as it always was: nudged at the
+// directory's interval, its wheel reshaped in place by a reload that changes
+// the pair, and left as it is by a reload the directory rejects.
+func TestKeepalives_FlatDirectory(t *testing.T) {
+	guardGlobals(t)
+	dir := writeSettings(t, keepalive(30, 3))
+	synctest.Test(t, func(t *testing.T) {
+		tenants, k := hookedKeepalives(t, dir)
+		only := stream.NewSubscriber(nil, nil)
+		wheel := k.For(tenant.Default)
+		wheel.Add(only)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go k.run(ctx)
 
-		// A rejected tenant is not being served, so its setting is not weighed.
-		rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
-		rewriteSettings(t, filepath.Join(root, "initech"), invalidQuery)
+		time.Sleep(29 * time.Second)
+		assert.Zero(t, nudges(only))
+		time.Sleep(time.Second)
+		assert.Equal(t, 1, nudges(only), "every 30 seconds")
+
+		rewriteSettings(t, dir, keepalive(10, 2))
+		_, adopted := tenants.Reload("test")
+		require.True(t, adopted)
+		assert.Same(t, wheel, k.For(tenant.Default), "reshaped in place")
+		time.Sleep(20 * time.Second)
+		assert.Equal(t, 2, nudges(only), "every 10 from the reload on")
+
+		rewriteSettings(t, dir, invalidQuery)
+		_, adopted = tenants.Reload("test")
+		require.False(t, adopted)
+		time.Sleep(20 * time.Second)
+		assert.Equal(t, 2, nudges(only), "a rejected reload keeps the previous settings, and the cadence")
+		assert.Same(t, wheel, k.For(tenant.Default))
+	})
+}
+
+// The wheels follow the tenants being served: a tenant a reload removes or
+// rejects has its wheel stopped by the time the reload returns, and starts
+// over on another when it is served again; the component's stop leaves no
+// wheel turning, and none starts after it.
+func TestKeepalives_FollowTheTenantsServed(t *testing.T) {
+	guardGlobals(t)
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": keepalive(5, 1), "globex": keepalive(5, 1)})
+	synctest.Test(t, func(t *testing.T) {
+		tenants, k := hookedKeepalives(t, root)
+		stopped := func(tw *tenantWheel) bool {
+			select {
+			case <-tw.done:
+				return true
+			default:
+				return false
+			}
+		}
+		for id, tw := range *k.cur.Load() {
+			assert.Nil(t, tw.done, "tenant %s: no wheel turns before Run", id)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		ran := make(chan struct{})
+		go func() {
+			defer close(ran)
+			k.run(ctx)
+		}()
+		synctest.Wait()
+		loops := *k.cur.Load()
+		acme, globex := stream.NewSubscriber(nil, nil), stream.NewSubscriber(nil, nil)
+		acmeWheel := k.For("acme")
+		acmeWheel.Add(acme)
+		k.For("globex").Add(globex)
+		assert.Nil(t, k.For("initech"), "a tenant the directory does not hold has no wheel")
+
+		require.NoError(t, os.RemoveAll(filepath.Join(root, "globex")))
 		tenants.Reload("test")
-		period, buckets = shortestKeepalive(tenants)
-		assert.Equal(t, 30*time.Second, period)
-		assert.Equal(t, 3, buckets)
-	})
-
-	// Only a reload reaches this: boot refuses a nested directory with no
-	// tenant to serve.
-	t.Run("no tenant served falls back to the wheel's defaults", func(t *testing.T) {
-		root := writeNestedSettings(t, map[string]map[string]any{"acme": keepalive(30, 3)})
-		tenants := open(t, root)
+		assert.Nil(t, k.For("globex"), "a removed tenant has no wheel")
+		assert.True(t, stopped(loops["globex"]), "and no loop turning one")
 		rewriteSettings(t, filepath.Join(root, "acme"), invalidQuery)
 		tenants.Reload("test")
-		period, buckets := shortestKeepalive(tenants)
-		assert.Zero(t, period)
-		assert.Zero(t, buckets)
+		assert.Nil(t, k.For("acme"), "nor has a rejected one")
+		assert.True(t, stopped(loops["acme"]))
+		time.Sleep(time.Minute)
+		assert.Zero(t, nudges(acme)+nudges(globex), "nothing nudges the streams the hub is ending")
+
+		rewriteSettings(t, filepath.Join(root, "acme"), keepalive(5, 1))
+		tenants.Reload("test")
+		again := k.For("acme")
+		require.NotNil(t, again, "served again")
+		assert.NotSame(t, acmeWheel, again, "on a wheel of its own")
+		back := stream.NewSubscriber(nil, nil)
+		again.Add(back)
+		time.Sleep(5 * time.Second)
+		assert.Equal(t, 1, nudges(back), "turning since the reload that adopted it")
+
+		loops = *k.cur.Load()
+		cancel()
+		<-ran
+		assert.True(t, stopped(loops["acme"]), "run returns with no wheel turning")
+		require.NoError(t, os.Rename(writeSettings(t, keepalive(5, 1)), filepath.Join(root, "globex")))
+		tenants.Reload("test")
+		late := (*k.cur.Load())["globex"]
+		require.NotNil(t, late)
+		assert.Nil(t, late.done, "and a tenant adopted after the stop waits on one that never does")
 	})
+}
+
+// A stream admitted the moment a reload adopts its tenant asks for the wheel
+// before the keepalive hook has run: the hooks wired ahead of it run first,
+// and some of them wait on a queue or a cache. It is handed a wheel all the
+// same, the one the hook then keeps.
+func TestKeepalives_LookupAheadOfTheReloadHook(t *testing.T) {
+	guardGlobals(t)
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": keepalive(30, 3)})
+	tenants, findings := settings.Open(root)
+	require.NotNil(t, tenants, "findings: %v", findings)
+	// No hook: every lookup below is one that lands ahead of it.
+	k := newKeepalives(tenants, (*settings.Store).Keepalive)
+	k.reconcile()
+
+	require.NoError(t, os.Rename(writeSettings(t, keepalive(10, 2)), filepath.Join(root, "globex")))
+	_, adopted := tenants.Reload("test")
+	require.True(t, adopted)
+	wheel := k.For("globex")
+	require.NotNil(t, wheel, "a served tenant always has a wheel")
+	k.reconcile()
+	assert.Same(t, wheel, k.For("globex"))
+}
+
+// quickKeepalives has a's wheels read each tenant's keepalive_interval in
+// hundredths of a second, so a test over real connections sees several
+// periods of the smallest interval a settings directory can spell (1) within
+// tens of milliseconds.
+func quickKeepalives(a *App) {
+	a.keepalives.shape = func(s *settings.Store) (time.Duration, int) {
+		period, buckets := s.Keepalive()
+		return period / 100, buckets
+	}
+	a.keepalives.reconcile()
+}
+
+// streamWatch reads an open stream in the background, counting the keepalive
+// comments that arrive; ended receives how the stream ended, nil for the
+// clean end of the response.
+type streamWatch struct {
+	keepalives atomic.Int64
+	ended      chan error
+}
+
+func watchStream(stream io.Reader) *streamWatch {
+	w := &streamWatch{ended: make(chan error, 1)}
+	go func() {
+		lines := bufio.NewReader(stream)
+		for {
+			line, err := lines.ReadString('\n')
+			if line == ":\n" {
+				w.keepalives.Add(1)
+			}
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					err = nil
+				}
+				w.ended <- err
+				return
+			}
+		}
+	}()
+	return w
+}
+
+// keptAlive fails unless three more keepalives arrive on the stream.
+func (w *streamWatch) keptAlive(t *testing.T, msg string) {
+	t.Helper()
+	from := w.keepalives.Load()
+	require.Eventually(t, func() bool { return w.keepalives.Load() >= from+3 }, 5*time.Second, time.Millisecond, msg)
+}
+
+// turningWheel is tenant id's wheel and its loop, once Run has started it.
+func turningWheel(t *testing.T, a *App, id tenant.ID) *tenantWheel {
+	t.Helper()
+	var tw *tenantWheel
+	require.Eventually(t, func() bool {
+		tw = (*a.keepalives.cur.Load())[id]
+		return tw != nil && tw.done != nil
+	}, 5*time.Second, time.Millisecond, "tenant %s has no wheel turning", id)
+	return tw
+}
+
+// The same through the real wiring, over open GET /v1/stream connections
+// (#597): each tenant's stream is kept alive by its own tenant's wheel, a
+// reload of one tenant's interval is felt by that tenant's open stream and
+// no other's, and a tenant no longer served leaves no wheel turning. The
+// intervals are real time here, so the assertions are one-sided, the exact
+// cadences being the tests' above: keepalives keep arriving, within a
+// generous bound, on a stream whose tenant asks for a short interval, and
+// none ever arrives on one whose tenant asks for a day, which only another
+// tenant's cadence could send.
+func TestRun_KeepsEachTenantsStreamsAliveAtItsOwnInterval(t *testing.T) {
+	const day = 24 * 60 * 60
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": keepalive(2, 1), "globex": keepalive(day, 1)})
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	a := newApp(t, testConfig(t, root), Options{Listener: ln})
+	quickKeepalives(a)
+	baseURL, stop := runApp(t, a, ln)
+	// open returns tenant id's stream once it is on its tenant's wheel.
+	open := func(id tenant.ID) *streamWatch {
+		t.Helper()
+		w := watchStream(openStream(t, baseURL, id.String()))
+		require.Eventually(t, func() bool { return a.keepalives.For(id).Len() == 1 }, 5*time.Second, time.Millisecond)
+		return w
+	}
+	reload := func(id tenant.ID, patch map[string]any) {
+		t.Helper()
+		rewriteSettings(t, filepath.Join(root, id.String()), patch)
+		_, adopted, known := a.tenants.ReloadTenant(id, "test")
+		require.True(t, known)
+		require.True(t, adopted)
+	}
+	acme, globex := open("acme"), open("globex")
+	globexWheel := a.keepalives.For("globex")
+
+	acme.keptAlive(t, "acme's stream is nudged at acme's interval")
+	assert.Zero(t, globex.keepalives.Load(), "and globex's is not")
+
+	reload("acme", keepalive(1, 1))
+	acme.keptAlive(t, "acme's stream is still nudged after acme's own reload")
+	assert.Zero(t, globex.keepalives.Load(), "a reload shortening acme's interval leaves globex's cadence alone")
+	assert.Same(t, globexWheel, a.keepalives.For("globex"))
+
+	reload("globex", keepalive(1, 3))
+	globex.keptAlive(t, "globex's own reload reshapes its wheel under its open stream")
+	assert.Same(t, globexWheel, a.keepalives.For("globex"), "in place")
+
+	acmeLoop := turningWheel(t, a, "acme")
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	a.tenants.Reload("test")
+	assert.Nil(t, a.keepalives.For("acme"), "a removed tenant has no wheel")
+	select {
+	case <-acmeLoop.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the removed tenant's wheel is still turning")
+	}
+	select {
+	case err := <-acme.ended:
+		assert.NoError(t, err, "its stream is ended cleanly")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the removed tenant's stream is still open")
+	}
+	globex.keptAlive(t, "globex's wheel turns on")
+
+	globexLoop := turningWheel(t, a, "globex")
+	require.NoError(t, stop())
+	select {
+	case <-globexLoop.done:
+	default:
+		t.Fatal("Run returned with a wheel still turning")
+	}
 }
 
 func gapWindow(minutes int) map[string]any {

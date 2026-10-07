@@ -470,7 +470,7 @@ test-review-gate:
 	$(call run,review-gate test,.claude/hooks/review-gate.test.sh,)
 
 .PHONY: vulncheck
-vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
+vulncheck: go-mod-download ## Run govulncheck -scan package (V=1: symbol-level scan with example traces)
 ifdef V
 	@echo "$(CYAN)==> Running govulncheck (verbose)...$(RESET)"
 	@$(GOVULNCHECK) ./...
