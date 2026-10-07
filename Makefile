@@ -459,6 +459,7 @@ test-tagged-tests:
 .PHONY: test-integration-parts
 test-integration-parts:
 	$(call run,integration-parts test,scripts/ci/integration-parts.test.sh,)
+
 # test-review-gate: feed the pre-push review hooks (.claude/hooks/
 # review-marker.sh and agent-bash-gate.sh) synthetic hook events in a scratch
 # repository with sibling worktrees: a marker must attest to the exact commit a
