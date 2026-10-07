@@ -14,7 +14,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | Tool | Required version | Why | Install |
 | ---- | ---------------- | --- | ------- |
 | **Go** | Any Go ≥ 1.21; `make` runs `go.mod`'s exact version (currently 1.26.6), downloading it once if yours differs (needs network). `make GOTOOLCHAIN=local …` uses yours instead (an environment value is ignored): it needs a Go ≥ `go.mod`'s version, and `make lint-go` needs `go.mod`'s minor | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
-| **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with GNU Make 3.81, which **will not work**: it interleaves parallel output and warns `-jN forced in submake` | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
+| **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with GNU Make 3.81, which is **not supported**: it silently ignores `--output-sync`, so the parallel output of `make verify` / `make ci` interleaves line by line and a failure can scroll away behind other jobs' output | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse and a Redis via testcontainers (no compose file), the integration suite also dynamodb-local, and the integration suite also runs the shared cache backend against Redis, Valkey, Dragonfly (pulled from `docker.dragonflydb.io`) and a one-node Redis Cluster | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
@@ -34,14 +34,14 @@ Run `make tools` once after cloning to populate everything that doesn't have to 
 ### Verify your setup
 
 ```bash
-go version          # go1.26+
+go version          # go1.21+ (make runs go.mod's version itself)
 make --version      # GNU Make 4.x
 docker compose version
 node --version      # v22.x (matches .nvmrc and CI)
 pnpm --version      # 11.21+
 ```
 
-If any of those are wrong/missing, the Makefile recipes will fail with confusing errors (e.g. interleaved parallel output on Make 3.81; `pnpm: command not found` on `make tools`).
+If any of those are wrong/missing, the Makefile recipes will fail or misbehave confusingly (e.g. a failure buried in interleaved parallel output on Make 3.81; `pnpm: command not found` on `make tools`).
 
 ### Optional but recommended
 
@@ -415,7 +415,7 @@ A global copy is never what `make lint` runs, so install one only if you want to
 - **macOS**: `brew install golangci-lint`
 - **Binary**: See [golangci-lint.run/welcome/install/](https://golangci-lint.run/welcome/install/)
 
-The Makefile exports `GOTOOLCHAIN` pinned to `go.mod`'s `go` directive, so local runs and CI use the same Go even when your installed Go is newer (the first run downloads that toolchain once). A bare `go test` outside `make` is not pinned. Raising the `go` directive to a new minor version (1.27, not a 1.26 patch) also needs a golangci-lint release built with that minor or newer: otherwise `make lint-go` refuses with `can't load config: the Go language version (go1.26) used to build golangci-lint is lower than the targeted Go version (1.27.1)`. Bump the directive with `go get go@1.N.P`, because `go mod edit -go=1.27` writes a version `make` cannot pin.
+The Makefile exports `GOTOOLCHAIN` pinned to `go.mod`'s `toolchain` line if it has one, else its `go` directive, so local runs and CI use the same Go even when your installed Go is newer (the first run downloads that toolchain once). A bare `go test` outside `make` is not pinned. Raising the `go` directive to a new minor version (1.27, not a 1.26 patch) also needs a golangci-lint release built with that minor or newer: otherwise `make lint-go` refuses with `can't load config: the Go language version (go1.26) used to build golangci-lint is lower than the targeted Go version (1.27.1)`. Bump the directive with `go get go@1.N.P`, because `go mod edit -go=1.27` writes a version `make` cannot pin.
 
 The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control) — that file is the authoritative list of enabled linters. Highlights:
 
@@ -530,7 +530,7 @@ Run `make help` to see all targets. Key ones:
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
 | `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) + Markdown/MDX (markdownlint) + prose (misspell) |
 | `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
-| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + tagged-test selector and integration-parts fixtures + review-gate hook tests + docs type-check (`astro check` — not a full build, so link validation is left to `make build-docs`, which `make ci` runs); a bare `make verify` runs these in parallel |
+| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + go-toolchain fixtures + tagged-test selector and integration-parts fixtures + review-gate hook tests + docs type-check (`astro check` — not a full build, so link validation is left to `make build-docs`, which `make ci` runs); a bare `make verify` runs these in parallel |
 | `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint `--fix`), MDX (`fix-mdx` — WH001 + WH002 only; the generic fixers never run over `.mdx`), and docs-prose spelling (misspell, both) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |

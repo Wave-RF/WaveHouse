@@ -120,7 +120,7 @@ Tooling notes (the non-obvious bits `make help` won't tell you):
 - `make` exports `GOTOOLCHAIN` pinned to `go.mod`'s Go version, so a newer local Go is not used; a bare `go` outside `make` is not pinned, and the override is `make GOTOOLCHAIN=local ...` (an environment value is ignored).
 - `golangci-lint` is pinned in the Makefile (v2.11.4), auto-installed to `.bin/` on first `make lint` — kept out of `go.mod` (its deps conflict with the main module).
 - `pnpm` (≥ 11.21) + `Node 22 LTS` (`.nvmrc`, matches CI) must be on PATH; `make tools` runs one root `pnpm install --frozen-lockfile` across the three workspaces (SDK `clients/ts/`, E2E `tests/e2e/sdk/`, docs `docs/`).
-- **GNU Make 4+** required (uses `--output-sync=target`); macOS BSD Make 3.81 won't parse it. Full setup: `docs/src/content/docs/development.md` § Prerequisites.
+- **GNU Make 4+** required (uses `--output-sync=target`); macOS ships GNU Make 3.81, which ignores it, so parallel output interleaves. Full setup: `docs/src/content/docs/development.md` § Prerequisites.
 - **Lint split**: Biome owns JS/TS/JSON, markdownlint owns Markdown *and MDX* style — including two repo-local rules, WH001 (no hard-wrapped prose) and WH002 (an MDX fence beside a JSX tag, or inside what CommonMark reads as an HTML block) in `scripts/markdownlint-rules/` — misspell owns spelling (all under `make lint`/`make fix`); accuracy/clarity/doc-sync is the `docs-reviewer` gate (§Docs review). See §Markdown authoring rules.
 - **Worktrunk** (`wt`, `.config/wt.toml`): `wt switch --create` seeds `.bin/` + `node_modules/` from main, then runs `make tools`.
 
@@ -453,7 +453,7 @@ internal/testutil/      → Shared test helpers (mocks, JWT + schema helpers; lo
 tests/                  → Integration & E2E tests
 tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer, Redis for shared_cache_test.go, and NATS for the `mq.backend: nats` end-to-end test). A package tested against its own external server keeps them beside it: internal/cache/redis_integration_test.go (Redis, Valkey, Dragonfly, Redis Cluster testcontainers). `make test-integration` also runs `internal/mq/natsspike` (nats-server semantics, under `internal/mq` for the NATS import boundary) and `internal/mq`'s integration-tagged external-NATS broker tests, picked by the tag rather than by name (`scripts/ci/tagged-tests.sh`); it runs in two parts, `test-integration-app` (this directory) and `test-integration-backends` (the rest), one CI job each
 tests/e2e/              → E2E test stack (scripts/orchestrator boots ClickHouse and Redis testcontainers + the wavehouse-cov binary)
-tests/e2e/fixtures/     → Idempotent ClickHouse DDL scripts for test tables
+tests/e2e/fixtures/     → E2E server config + settings-directory fixtures
 tests/e2e/sdk/          → E2E integration tests via TypeScript SDK (Vitest)
 deployments/compose/    → Docker Compose files (standalone.yaml, dependencies.yaml)
 deployments/Dockerfile  → Runtime image (+ Dockerfile.goreleaser for release builds)
