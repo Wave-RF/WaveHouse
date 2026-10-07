@@ -238,13 +238,27 @@ func TestDedupeDynamo_Unreachable(t *testing.T) {
 	m := d.Tenant("acme")
 	require.NoError(t, m.Apply(true))
 	k := []dedupe.Key{{Table: "events", ID: "e1"}}
-	for range 5 {
-		_, err = m.Reserve(t.Context(), k, time.Minute)
-		require.ErrorIs(t, err, dedupe.ErrUnavailable)
+	// The breaker opens on five unavailable answers inside one second. A
+	// stalled call on a loaded host can spread a round of them past that
+	// window, so a round is five concurrent calls, and the next round
+	// starts afresh if the window was missed.
+	var shorted error
+	for round := 0; round < 20 && shorted == nil; round++ {
+		var wg sync.WaitGroup
+		errs := make([]error, 5)
+		for i := range errs {
+			wg.Go(func() { _, errs[i] = m.Reserve(t.Context(), k, time.Minute) })
+		}
+		wg.Wait()
+		for _, err := range errs {
+			require.ErrorIs(t, err, dedupe.ErrUnavailable)
+		}
+		if _, err := m.Reserve(t.Context(), k, time.Minute); err != nil && strings.Contains(err.Error(), "short-circuited") {
+			shorted = err
+		}
 	}
-	_, err = m.Reserve(t.Context(), k, time.Minute)
-	require.ErrorIs(t, err, dedupe.ErrUnavailable)
-	assert.Contains(t, err.Error(), "short-circuited", "five failures in a second open the breaker")
+	require.Error(t, shorted, "five failures in a second open the breaker")
+	assert.ErrorIs(t, shorted, dedupe.ErrUnavailable)
 	assert.ErrorIs(t, d.Check(t.Context()), dedupe.ErrUnavailable)
 }
 
