@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,9 +27,20 @@ var (
 	coordSpec   = NATSTopology{Partitions: 4, Shards: 8, CoordBucket: natstest.CoordBucket}
 )
 
+// withoutVersionAdvisory drops the finding that the server is not on the
+// recommended line, which depends on the nats-server the module pins and not
+// on the topology under test. TestVerifyNATSTopology_ServerVersionFinding
+// holds it to the server's own version.
+func withoutVersionAdvisory(findings []Finding) []Finding {
+	return slices.DeleteFunc(slices.Clone(findings), func(f Finding) bool {
+		return f.Severity == FindingRecommended && f.Object == "server" && f.Field == "version"
+	})
+}
+
 // replicaWarnings are what the shipped manifests at one replica leave: one
 // num_replicas recommendation per partition, the history and the DLQ.
 func replicaWarnings(findings []Finding) bool {
+	findings = withoutVersionAdvisory(findings)
 	for _, f := range findings {
 		if f.Severity != FindingRecommended || f.Field != "num_replicas" {
 			return false
@@ -51,14 +63,18 @@ func TestVerifyNATSTopology_ShippedManifestsPass(t *testing.T) {
 	// With the lease bucket checked too: one more replica warning, its own.
 	findings, err = verifyNATSTopology(t.Context(), js, coordSpec, nil)
 	require.NoError(t, err)
+	findings = withoutVersionAdvisory(findings)
 	require.Len(t, findings, shippedSpec.Partitions+3, "findings: %v", findings)
 	last := findings[len(findings)-1]
 	assert.Equal(t, "kv bucket wh_coord", last.Object)
 	assert.Equal(t, "num_replicas", last.Field)
 }
 
+// findingsServers is how many servers the Findings cases share.
+const findingsServers = 4
+
 // Every rule the verifier holds the operator to, one mutation each.
-func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its cases share one server, so they run in turn
+func TestVerifyNATSTopology_Findings(t *testing.T) {
 	t.Parallel()
 	const (
 		p0      = "WH_INGEST_0"
@@ -215,12 +231,24 @@ func TestVerifyNATSTopology_Findings(t *testing.T) { //nolint:tparallel // its c
 		{"dlq persist_mode async", stream(dlq, func(s *jetstream.StreamConfig) { s.PersistMode = jetstream.AsyncPersistMode }), spec, rec(dlq, "persist_mode")},
 		{"dlq per-subject cap", stream(dlq, func(s *jetstream.StreamConfig) { s.MaxMsgsPerSubject = 0 }), spec, rec(dlq, "max_msgs_per_subject")},
 	}
-	// One server for every case, emptied between them: a server per case
-	// costs more than the unit suite's per-package timeout can spare.
-	f := newNATSFixture(t)
-	js := f.connect(t, "wavehouse")
+	// A few servers, each emptied between the cases that borrow it: a server
+	// per case costs more than the unit suite's per-package timeout can spare,
+	// and one server for all of them runs the cases one after another.
+	type pooled struct {
+		f  *natsFixture
+		js jetstream.JetStream
+	}
+	free := make(chan pooled, findingsServers)
+	for range findingsServers {
+		f := newNATSFixture(t)
+		free <- pooled{f, f.connect(t, "wavehouse")}
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := <-free
+			defer func() { free <- srv }()
+			f, js := srv.f, srv.js
 			f.reset(t)
 			tp := smallTopology(t)
 			tp.KeyValues = nil // no case here checks the lease bucket
@@ -296,9 +324,10 @@ func TestAwaitNATSTopology_WaitsForTheOperator(t *testing.T) {
 	f := newNATSFixture(t)
 	js := f.connect(t, "wavehouse")
 	tp := shippedTopology(t)
+	const delay = 300 * time.Millisecond
 	created := make(chan error, 1)
 	go func() {
-		time.Sleep(time.Second)
+		time.Sleep(delay)
 		created <- f.create(t.Context(), tp)
 	}()
 	start := time.Now()
@@ -306,7 +335,7 @@ func TestAwaitNATSTopology_WaitsForTheOperator(t *testing.T) {
 	require.NoError(t, <-created)
 	require.NoError(t, err)
 	assert.True(t, replicaWarnings(findings), "findings: %v", findings)
-	assert.GreaterOrEqual(t, time.Since(start), time.Second)
+	assert.GreaterOrEqual(t, time.Since(start), delay)
 }
 
 // When the wait runs out, one error lists every finding at once.
@@ -376,6 +405,31 @@ func TestVerifyNATSTopology_ServerVersion(t *testing.T) {
 	}
 }
 
+// Against the real server, the version finding is there exactly when the
+// server is off the recommended line, and is only ever a recommendation.
+func TestVerifyNATSTopology_ServerVersionFinding(t *testing.T) {
+	t.Parallel()
+	f := newNATSFixture(t)
+	f.apply(t, shippedTopology(t))
+	findings, err := verifyNATSTopology(t.Context(), f.connect(t, "wavehouse"), shippedSpec, nil)
+	require.NoError(t, err)
+	var got []Finding
+	for _, fi := range findings {
+		if fi.Object == "server" && fi.Field == "version" {
+			got = append(got, fi)
+		}
+	}
+	version := natsserver.VERSION
+	if strings.HasPrefix(version, recommendedNATSMinor) {
+		assert.Empty(t, got, "server %s is on the recommended line", version)
+		return
+	}
+	require.Len(t, got, 1, "server %s", version)
+	assert.Equal(t, FindingRecommended, got[0].Severity)
+	assert.Contains(t, got[0].Problem, version)
+	assert.Len(t, withoutVersionAdvisory(findings), len(findings)-1)
+}
+
 func TestVerifyNATSTopology_RefusesAnImpossibleSpec(t *testing.T) {
 	t.Parallel()
 	f := newNATSFixture(t)
@@ -439,7 +493,7 @@ func TestWriteNATSManifests_RoundTrip(t *testing.T) {
 	spec.CoordBucket = DefaultNATSCoordBucket(spec.Prefix)
 	findings, err := verifyNATSTopology(t.Context(), f.admin, spec, nil)
 	require.NoError(t, err)
-	for _, got := range findings {
+	for _, got := range withoutVersionAdvisory(findings) {
 		assert.Equal(t, "num_replicas", got.Field, "unexpected finding %v", got)
 	}
 }

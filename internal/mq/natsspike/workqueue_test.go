@@ -33,7 +33,7 @@ func server(t *testing.T) *natsserver.Server {
 	require.NoError(t, err)
 	s.Start()
 	require.True(t, s.ReadyForConnections(10*time.Second), "server not ready")
-	t.Cleanup(s.Shutdown)
+	t.Cleanup(func() { s.Shutdown(); s.WaitForShutdown() })
 	return s
 }
 
