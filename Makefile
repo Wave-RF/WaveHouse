@@ -459,6 +459,14 @@ test-tagged-tests:
 .PHONY: test-integration-parts
 test-integration-parts:
 	$(call run,integration-parts test,scripts/ci/integration-parts.test.sh,)
+# test-review-gate: feed the pre-push review hooks (.claude/hooks/
+# review-marker.sh and agent-bash-gate.sh) synthetic hook events in a scratch
+# repository with sibling worktrees: a marker must attest to the exact commit a
+# reviewer read, and the push gate must judge the worktree and commits a push
+# actually targets. A verify leaf, same as test-classify-paths.
+.PHONY: test-review-gate
+test-review-gate:
+	$(call run,review-gate test,.claude/hooks/review-gate.test.sh,)
 
 .PHONY: vulncheck
 vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
@@ -550,11 +558,12 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (14): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# Leaves (17): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
 # for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
-# test-classify-paths and test-release-channel for the tooling;
+# test-classify-paths, test-release-channel, test-tagged-tests,
+# test-integration-parts and test-review-gate for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
 # nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
 # (`biome check`) but NOT fmt-ts (`biome format`) — check already covers
@@ -568,7 +577,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-tagged-tests test-integration-parts vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-tagged-tests test-integration-parts test-review-gate vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.
