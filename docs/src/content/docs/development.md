@@ -565,7 +565,7 @@ All test targets accept `ARGS="..."` for pass-through `go test` flags. Build tar
 
 ### Updating Dependencies
 
-pnpm's hoisted fallback is off (`hoist: false` in `pnpm-workspace.yaml`), so after adding or bumping an npm dependency, one that imports something it doesn't declare fails with `Cannot find package 'X' imported from …/node_modules/.pnpm/…` (ESM) or `Cannot find module 'X'` plus a require stack (CJS). Fix it with a `packageExtensions` entry in `pnpm-workspace.yaml`: a dependency entry for a plain missing package, a peer entry when the package must share the app's instance (as `astro` does for `starlight-image-zoom`).
+pnpm's hoisted fallback is off (`hoist: false` in `pnpm-workspace.yaml`), so after adding or bumping an npm dependency, one that imports something it doesn't declare fails with `Cannot find package 'X' imported from …/node_modules/.pnpm/…` (ESM) or `Cannot find module 'X'` plus a require stack (CJS) when the importing module loads (in a build, test or dev server), not at install time; an undeclared type-only import isn't caught at all, since with `skipLibCheck` on it silently degrades to `any`. Fix a runtime one with a `packageExtensions` entry in `pnpm-workspace.yaml`: a dependency entry for a plain missing package, a peer entry when the package must share the app's instance (as `astro` does for `starlight-image-zoom`).
 
 For Go modules:
 

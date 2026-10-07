@@ -53,6 +53,7 @@ confirmModulesPurge: false
 # Declaring the astro peer (not a dependency) makes pnpm link the docs' own
 # astro next to it, keeping one shared astro instance.
 # Remove once starlight-image-zoom declares astro as a peer (0.16.0 does not).
+# Tracked in #746.
 packageExtensions:
   starlight-image-zoom:
     peerDependencies:
