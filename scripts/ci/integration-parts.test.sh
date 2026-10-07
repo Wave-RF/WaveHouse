@@ -9,6 +9,7 @@ set -uo pipefail
 script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/integration-parts.sh"
 fails=0
 
+root="$(cd "$(dirname "$script")/../.." && pwd)"
 dir="$(mktemp -d)"
 trap 'rm -rf "$dir"' EXIT
 cd "$dir" || exit 1
@@ -53,9 +54,16 @@ check() {
   fi
 }
 
-reads plain '["app","backends"]' 'INTEGRATION_PARTS := app backends' 'X := 1'
-reads trailing-comment '["app"]' 'INTEGRATION_PARTS := app # the wired app'
-reads extra-spaces '["a","b"]' 'INTEGRATION_PARTS   :=   a    b  '
+# Targets as the Makefile defines them, beside the .PHONY line that names them
+# (not a target) and the fixtures' own test-integration-parts (not a part).
+tgt() { printf 'test-integration-%s: x\n' "$@"; }
+reads plain '["app","backends"]' 'INTEGRATION_PARTS := app backends' "$(tgt app backends)" 'X := 1'
+reads phony-and-fixtures '["app"]' 'INTEGRATION_PARTS := app' '.PHONY: test-integration-other' "$(tgt app parts)"
+reads trailing-comment '["app"]' 'INTEGRATION_PARTS := app # the wired app' "$(tgt app)"
+reads extra-spaces '["a","b"]' 'INTEGRATION_PARTS   :=   a    b  ' "$(tgt a b)"
+refuses target-not-listed 'INTEGRATION_PARTS := app' "$(tgt app backends)"
+refuses listed-without-target 'INTEGRATION_PARTS := app backends' "$(tgt app)"
+refuses no-targets 'INTEGRATION_PARTS := app'
 refuses none 'X := 1'
 refuses empty 'INTEGRATION_PARTS :='
 refuses appended 'INTEGRATION_PARTS := app' 'INTEGRATION_PARTS += extra'
@@ -67,11 +75,28 @@ refuses override 'override INTEGRATION_PARTS := app'
 refuses indented '  INTEGRATION_PARTS := app'
 refuses bad-name 'INTEGRATION_PARTS := App'
 
-printf '%s\n' 'INTEGRATION_PARTS := app backends' >Makefile
+printf '%s\n' 'INTEGRATION_PARTS := app backends' "$(tgt app backends)" >Makefile
 check ok app backends
 check fail app
 check fail app backends extra
 check fail backends app
+
+# The repository's own Makefile: its list and targets agree, and the packages
+# check-integration-parts hands tagged-tests.sh follow the parts listed.
+if (cd "$root" && "$script" >/dev/null 2>&1); then
+  printf '  ok   %-28s agrees\n' "real Makefile"
+else
+  printf '  FAIL %-28s lists and targets differ\n' "real Makefile" >&2
+  fails=$((fails + 1))
+fi
+all="$(make -C "$root" -n check-integration-parts 2>&1 | grep 'tagged-tests.sh check')"
+one="$(make -C "$root" -n check-integration-parts INTEGRATION_PARTS=app 2>&1 | grep 'tagged-tests.sh check')"
+if [[ "$all" == *./internal/mq* && "$one" != *./internal/mq* && "$one" == *./tests/integration* ]]; then
+  printf '  ok   %-28s packages follow the parts\n' "real Makefile"
+else
+  printf '  FAIL %-28s packages do not follow the parts: %s | %s\n' "real Makefile" "$all" "$one" >&2
+  fails=$((fails + 1))
+fi
 
 if [ "$fails" -gt 0 ]; then
   printf '%d case(s) failed\n' "$fails" >&2

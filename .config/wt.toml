@@ -1,9 +1,12 @@
 # Project config — committed; per-user overrides in ~/.config/worktrunk/config.toml.
 # `.worktreeinclude` (repo root) controls which gitignored paths get seeded.
 
-[post-start]
+# Ordered steps: install after the copy, or the copy brings back main's old node_modules layout.
+[[post-start]]
 copy-caches = "wt step copy-ignored"
-tools       = "make tools"
+
+[[post-start]]
+tools = "make tools"
 
 [pre-merge]
 verify = "make verify"

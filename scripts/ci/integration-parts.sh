@@ -11,6 +11,11 @@
 # The last two are what the coverage job waits for, so they must match the
 # integration job's artifact `name:` and job `name:` in ci.yml.
 #
+# The list must also match the Makefile's test-integration-<part> targets, one
+# for one (test-integration-parts, the fixtures' own target, is not a part): a
+# target left out of the list would run in no CI job, and a part without one
+# would fail every run.
+#
 #   scripts/ci/integration-parts.sh --check <part>...
 #       Fail unless the parts read here are exactly <part>..., make's own
 #       $(INTEGRATION_PARTS) as check-integration-parts passes it, so a list
@@ -33,6 +38,22 @@ if [ "${#list[@]}" -eq 0 ]; then
   exit 1
 fi
 
+for part in "${list[@]}"; do
+  if ! [[ "$part" =~ ^[a-z0-9-]+$ ]]; then
+    echo "integration-parts: part '$part' is not lowercase letters, digits and dashes" >&2
+    exit 1
+  fi
+done
+
+targets="$(grep -oE '^test-integration-[a-z0-9-]+:' Makefile | sed 's/^test-integration-//; s/:$//' | grep -vx parts | sort -u || true)"
+listed="$(printf '%s\n' "${list[@]}" | sort -u)"
+if [ "$targets" != "$listed" ]; then
+  echo "integration-parts: INTEGRATION_PARTS and the test-integration-<part> targets differ:" >&2
+  echo "  in INTEGRATION_PARTS only: $(comm -13 <(echo "$targets") <(echo "$listed") | paste -sd' ' -)" >&2
+  echo "  targets only (run by no CI job): $(comm -23 <(echo "$targets") <(echo "$listed") | paste -sd' ' -)" >&2
+  exit 1
+fi
+
 if [ "${1:-}" = --check ]; then
   shift
   if [ "${list[*]}" != "$*" ]; then
@@ -44,10 +65,6 @@ fi
 
 json="" fragments="" producers=""
 for part in "${list[@]}"; do
-  if ! [[ "$part" =~ ^[a-z0-9-]+$ ]]; then
-    echo "integration-parts: part '$part' is not lowercase letters, digits and dashes" >&2
-    exit 1
-  fi
   json+="${json:+,}\"$part\""
   fragments+="${fragments:+,}coverage-integration-$part"
   producers+="${producers:+,}Integration tests ($part)"
