@@ -19,7 +19,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse and a Redis via testcontainers (no compose file), the integration suite also dynamodb-local, and the integration suite also runs the shared cache backend against Redis, Valkey, Dragonfly (pulled from `docker.dragonflydb.io`) and a one-node Redis Cluster | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
 | **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
-| **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` and `shellcheck` binaries into `.bin/` and, for `make build-ts`, the oldest Node that `engines.node` admits | usually preinstalled |
+| **git** + **curl** + **jq** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` and `shellcheck` binaries into `.bin/` and, for `make build-ts`, the oldest Node that `engines.node` admits; `jq` is needed by `make verify` (the review-gate hook tests) and by the Claude Code hooks | usually preinstalled (`jq` ships with macOS 15+); otherwise `apt install jq` / `brew install jq` |
 
 ### Auto-installed by `make tools`
 
@@ -39,6 +39,7 @@ make --version      # GNU Make 4.x
 docker compose version
 node --version      # v22.x (matches .nvmrc and CI)
 pnpm --version      # 11.21+
+jq --version
 ```
 
 If any of those are wrong/missing, the Makefile recipes will fail with confusing errors (e.g. `--output-sync` is unrecognized on Make 3.81; `pnpm: command not found` on `make test-ts`).
@@ -527,7 +528,7 @@ Run `make help` to see all targets. Key ones:
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
 | `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) + Markdown/MDX (markdownlint) + prose (misspell) |
 | `make vulncheck` | Run `govulncheck -scan package` (`V=1`: the default symbol-level scan, with example traces) |
-| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + docs type-check (`astro check` — not a full build, so link validation stays CI's job) (parallel-safe: `make -j verify`) |
+| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + review-gate hook tests + docs type-check (`astro check` — not a full build, so link validation stays CI's job) (parallel-safe: `make -j verify`) |
 | `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint `--fix`), MDX (`fix-mdx-fences` only — the generic fixers never run over `.mdx`), and docs-prose spelling (misspell, both) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
