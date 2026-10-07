@@ -164,6 +164,10 @@ npm run test:watch     # watch mode
 npm run test:coverage  # coverage report
 ```
 
+### Built Package Smoke Check
+
+`make smoke-ts-dist` (run by `make build-ts`) loads the built ESM, CJS and IIFE entry points by package name at the oldest Node that `engines.node` admits, and checks that they export the same names. It downloads that Node once into `.bin/`. `pnpm run smoke:dist` runs the same check on the Node you are running.
+
 ### E2E Integration Tests
 
 E2E tests live in `tests/e2e/sdk/` (repo root) and exercise the full pipeline through the SDK. See `make test-e2e` in the [Development Guide](https://wavehouse.dev/development#e2e-tests-via-sdk).

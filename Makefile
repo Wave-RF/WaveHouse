@@ -621,9 +621,10 @@ build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
 	@$(MAKE) -j $(JOBS) build build-ts build-docs
 	@echo "$(GREEN)$(BOLD)✔ All artifacts built$(RESET)"
 
-# build-ts: pnpm-driven SDK build → clients/ts/dist/ (ESM + CJS + .d.ts + the IIFE
-# bundle), then smoke-loads each entry point (smoke-ts-dist). Required by test-e2e (e2e tests import the built artifact) and by
-# build-all. Standalone via `make build-ts`.
+# build-ts: pnpm-driven SDK build → clients/ts/dist/ (ESM + CJS + .d.ts + the
+# IIFE bundle), then smoke-loads each entry point (smoke-ts-dist). Required by
+# test-e2e (e2e tests import the built artifact) and by build-all. Standalone
+# via `make build-ts`.
 .PHONY: build-ts
 build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/ and smoke-load each entry point
 	@$(PNPM) --filter $(SDK_NAME) run build
@@ -632,12 +633,15 @@ build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/ and smoke-lo
 # smoke-ts-dist: load the built ESM, CJS and IIFE entry points like a consumer
 # and compare their export surfaces. Runs at the OLDEST Node `engines.node`
 # admits, because an ESM-only dependency only breaks `require()` before 22.12
-# and the floating .nvmrc Node hides it. `node@runtime:x.y.z` is the official
-# Node runtime; a bare `node@x.y.z` is the unrelated `node` npm package on pnpm 11.
+# and the floating .nvmrc Node hides it. That Node is fetched once from
+# nodejs.org into .bin/ (checksum-verified, like golangci-lint) rather than
+# through pnpm, which on pnpm 11 asks nodejs.org on every run. No pnpm-install
+# prereq: it only needs a built dist/ and the system node for --min-node.
 .PHONY: smoke-ts-dist
 smoke-ts-dist: ## Smoke-load the built SDK entry points at the oldest Node engines.node admits
 	@v=$$(node clients/ts/scripts/smoke-dist.mjs --min-node) && \
-		$(PNPM) dlx node@runtime:$$v clients/ts/scripts/smoke-dist.mjs --expect-node $$v
+		n=$$(clients/ts/scripts/fetch-node.sh $$v $(LOCAL_BIN)) && \
+		"$$n" clients/ts/scripts/smoke-dist.mjs --expect-node $$v
 
 # check-docs: astro check — type-checks .astro/.mdx, content-collection frontmatter
 # schemas, and config TS. Catches what `astro build` does NOT (the build strips
@@ -687,7 +691,8 @@ branding-docs: ## Regenerate docs logo/favicon/OG assets from docs/src/assets/br
 #
 # Not exposed as targets: ts fmt/lint/fix/verify (Biome is workspace-wide — see
 # Code Quality); ts typecheck (runs inline inside `verify` via `tsc --noEmit`,
-# the way Go's golangci-lint implicitly type-checks); ts codegen (the SDK's own
+# the way Go's golangci-lint implicitly type-checks); the built-SDK smoke
+# check (smoke-ts-dist, run by build-ts; needs only dist/ and no install); ts codegen (the SDK's own
 # published CLI, clients/ts/src/cli/codegen.ts — not a dev build step).
 PNPM        ?= pnpm
 DOCS_DIR    := docs

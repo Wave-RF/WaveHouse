@@ -2,10 +2,10 @@
 // Run it at the oldest Node the package supports (`make smoke-ts-dist`):
 // a dependency that is ESM-only breaks `require()` there but not on a current Node.
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -46,12 +46,26 @@ check("package.json entry points agree", () => {
   if (pkg.module !== exp.import)
     throw new Error(`module ${pkg.module} != exports.import ${exp.import}`);
   if (pkg.jsdelivr !== pkg.unpkg) throw new Error(`jsdelivr ${pkg.jsdelivr} != unpkg ${pkg.unpkg}`);
+  if (pkg.types !== exp.types) throw new Error(`types ${pkg.types} != exports.types ${exp.types}`);
+  if (!existsSync(resolve(root, exp.types))) throw new Error(`${exp.types} does not exist`);
+});
+
+// Entry points are loaded by package name, through the exports map, so a broken
+// map fails here; the resolved file must also be the one the map names.
+const requireFromPkg = createRequire(resolve(root, "package.json"));
+check("exports map resolves to the declared files", () => {
+  const same = (got, want, cond) => {
+    if (resolve(got) !== resolve(root, want))
+      throw new Error(`${cond} resolved to ${got}, want ${want}`);
+  };
+  same(fileURLToPath(import.meta.resolve(pkg.name)), exp.import, "import");
+  same(requireFromPkg.resolve(pkg.name), exp.require, "require");
 });
 
 // The ESM build is the reference surface; CJS and IIFE must match it exactly.
 let expected = [];
 try {
-  const esm = await import(pathToFileURL(resolve(root, exp.import)).href);
+  const esm = await import(pkg.name);
   expected = names(esm);
   if (expected.length === 0 || typeof esm.createClient !== "function") {
     throw new Error("empty export surface or missing createClient");
@@ -70,18 +84,19 @@ const sameSurface = (mod) => {
 };
 
 check(`cjs (${exp.require}) via require()`, () => {
-  sameSurface(createRequire(import.meta.url)(resolve(root, exp.require)));
+  sameSurface(requireFromPkg(pkg.name));
 });
 
 check(`iife (${pkg.unpkg}) as a classic script`, () => {
-  // A browser-like global: the host's web-standard globals minus Node-only ones.
-  const nodeOnly = new Set(["process", "Buffer", "require", "global", "module", "exports"]);
-  const sandbox = {};
+  // A browser-like global: a fresh context plus the host's web-standard globals
+  // (fetch, URL, TextDecoder, console, timers...), minus what only Node has.
+  const ctx = vm.createContext({});
+  const own = new Set(Object.getOwnPropertyNames(vm.runInContext("globalThis", ctx)));
+  const nodeOnly = new Set(["process", "Buffer", "global", "setImmediate", "clearImmediate"]);
   for (const k of Object.getOwnPropertyNames(globalThis)) {
-    if (!nodeOnly.has(k) && /^[A-Z]/.test(k)) sandbox[k] = globalThis[k];
+    if (!own.has(k) && !nodeOnly.has(k)) ctx[k] = globalThis[k];
   }
-  sandbox.fetch = globalThis.fetch;
-  const ctx = vm.createContext(sandbox);
+  ctx.window = ctx.self = ctx;
   vm.runInContext(readFileSync(resolve(root, pkg.unpkg), "utf8"), ctx, { filename: pkg.unpkg });
   const g = ctx.WaveHouse;
   if (!g) throw new Error("script did not define the WaveHouse global");
@@ -100,5 +115,5 @@ if (failures.length) {
   process.exit(1);
 }
 console.log(
-  `dist smoke ok on node ${process.version}: ${expected.length} exports across esm, cjs, iife`,
+  `dist smoke ok on node ${process.version}: ${expected.length} exports across esm, cjs, iife; exports map, bin and package.json fields ok`,
 );
