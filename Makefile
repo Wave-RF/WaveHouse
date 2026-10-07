@@ -625,8 +625,18 @@ build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
 # Required by test-e2e (e2e tests import the built artifact) and by
 # build-all. Standalone via `make build-ts`.
 .PHONY: build-ts
-build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/
+build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/ and smoke-load each entry point
 	@$(PNPM) --filter $(SDK_NAME) run build
+	@$(MAKE) --no-print-directory smoke-ts-dist
+
+# smoke-ts-dist: load the built ESM, CJS and IIFE entry points like a consumer
+# and compare their export surfaces. Runs at the OLDEST Node `engines.node`
+# admits (fetched with `pnpm dlx node@x.y.z`), because an ESM-only dependency
+# only breaks `require()` before 22.12 and the floating .nvmrc Node hides it.
+.PHONY: smoke-ts-dist
+smoke-ts-dist:
+	@v=$$(node clients/ts/scripts/smoke-dist.mjs --min-node) && \
+		$(PNPM) dlx node@$$v clients/ts/scripts/smoke-dist.mjs
 
 # check-docs: astro check — type-checks .astro/.mdx, content-collection frontmatter
 # schemas, and config TS. Catches what `astro build` does NOT (the build strips
