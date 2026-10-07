@@ -15,7 +15,8 @@
 # between a `main` bump and `main`'s save), and that set evicted `main`'s
 # warm entries. Two consequences to know about:
 #   - saves happen at the END of the job (post steps), and only when the
-#     job SUCCEEDED — a failed run rebuilds from restore-keys next time;
+#     job SUCCEEDED — a failed run rebuilds from restore-keys next time
+#     (except `gomod-v1` on `main`, which has none: see below);
 #   - when several jobs miss the same key in one `main` run (e.g. a
 #     lockfile bump), each saves; the backend keeps the first and the rest
 #     log a benign "already exists" warning.
@@ -117,8 +118,9 @@ runs:
     # five entries of ~0.9-1.2 GB stored each, ~5.2 GB per generation.
     # Against a 10 GB repo cap that means two live generations overflowed
     # it, and GitHub started LRU-evicting warm entries mid-run. Split out,
-    # it is stored once and a measured generation is 1.05 GB — 0.48 module
-    # plus 0.57 across the five build entries (#443). Sizes here are
+    # it is stored once and a generation measured 1.05 GB when #443 split it —
+    # 0.48 module plus 0.57 across the five build entries (1.62 GiB on
+    # 2026-10-07). Sizes here are
     # stored-archive bytes / 2^30, the unit the README's usage check
     # prints.
     #
@@ -129,8 +131,9 @@ runs:
     # `main` saves; every other ref restores only (see the header). `main`
     # also omits restore-keys: starting from nothing on a dependency bump
     # stores a clean generation, so superseded module versions don't
-    # accumulate through a restore -> save chain. The cost is one cold
-    # `go mod download` per bump, on `main` only.
+    # accumulate through a restore -> save chain. The cost is a cold
+    # `go mod download` in each Go job (they run in parallel), per bump,
+    # on `main` only.
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: ${{ inputs.go == 'true' && github.ref == 'refs/heads/main' }}
       id: gomod-cache

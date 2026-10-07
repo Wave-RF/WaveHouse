@@ -1,0 +1,38 @@
+name: PR cache cleanup
+
+# When a PR closes (merged or not), delete the Actions caches saved under its
+# refs. The Go, pnpm and Playwright caches only save from `main`; what a PR
+# still saves is GitHub's CodeQL dependency cache (~0.6 GiB, only when its Go
+# dependencies differ from main's), the small golangci/Astro entries, and any
+# Go caches saved before that change. None is readable by another PR, and they
+# count against the repo's 10 GB cache cap until evicted.
+#
+# No checkout and nothing from the PR is executed: the only PR-derived input is
+# the number, passed through the environment.
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  actions: write
+
+jobs:
+  cache-cleanup:
+    name: Delete PR caches
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Delete the caches saved by this PR's refs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # Try both refs, then fail if either did: a permission or CLI
+          # regression must not pass as a quiet cleanup.
+          rc=0
+          for ref in "refs/pull/$PR_NUMBER/merge" "refs/pull/$PR_NUMBER/head"; do
+            gh cache delete --all --ref "$ref" --succeed-on-no-caches || rc=1
+          done
+          exit "$rc"

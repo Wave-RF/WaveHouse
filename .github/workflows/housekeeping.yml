@@ -19,16 +19,10 @@ name: PR housekeeping
 #
 # Labeling failures are non-fatal so a flaky API call can't block the
 # title mirror.
-#
-# A second job runs when a PR closes (merged or not) and deletes the Actions
-# caches that PR's refs saved. The Go, pnpm and Playwright caches only save
-# from `main` (a PR saves them only when its key misses `main`'s), and GitHub's
-# own CodeQL setup saves ~0.6 GB per PR ref, readable by nobody else, against
-# the repo's 10 GB cache cap.
 
 on:
   pull_request_target:
-    types: [opened, edited, reopened, synchronize, ready_for_review, closed]
+    types: [opened, edited, reopened, synchronize, ready_for_review]
 
 permissions:
   # `issues: write` is required for the sticky-comment endpoint
@@ -41,14 +35,12 @@ permissions:
   actions: write
 
 concurrency:
-  # `closed` gets its own group so a later edited/reopened event can't cancel the cleanup.
-  group: pr-housekeeping-${{ github.event.pull_request.number }}-${{ github.event.action == 'closed' }}
+  group: pr-housekeeping-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   housekeeping:
     name: PR housekeeping
-    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -205,25 +197,3 @@ jobs:
         # the regex result, independent of comment/review-assign I/O.
         if: steps.check.outputs.passed == 'false'
         run: exit 1
-
-  # No checkout and nothing from the PR is executed: the only PR-derived
-  # input is the number, passed through the environment. `actions: write`
-  # is all the deletion needs, so the workflow-level grants are dropped.
-  cache-cleanup:
-    name: Delete PR caches
-    if: github.event.action == 'closed'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - name: Delete the caches saved by this PR's refs
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          for ref in "refs/pull/$PR_NUMBER/merge" "refs/pull/$PR_NUMBER/head"; do
-            gh cache delete --all --ref "$ref" --succeed-on-no-caches \
-              || echo "::warning::deleting caches for $ref failed"
-          done
