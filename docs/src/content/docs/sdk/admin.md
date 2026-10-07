@@ -57,12 +57,12 @@ const { data, error } = await wh.settings.reload({ tenant: 'acme' });
 Dead Letter Queue operations. Requires the admin gate — the admin role (`policy.admin_role`) or the [operator key](/api#authentication).
 
 ```ts
-// Get DLQ statistics
+// Get DLQ statistics: a table appears once it has a parked row
 const { data } = await wh.dlq.list();
-// data: { tables: { "clicks": 3, "users": 0 }, total: 3 }
+// data: { tables: { "clicks": 3 }, total: 3 }
 
-// Stats for a specific table
-const { data } = await wh.dlq.table('clicks');
+// Stats for one table; total stays the tenant's whole parked count
+const { data: clicks } = await wh.dlq.table('clicks');
 ```
 
 Each tenant has a dead-letter queue of its own, and the calls read tenant `0`'s without `tenant`. Over [a nested settings directory](/deployment#the-nested-settings-directory), pass `tenant` to read another's — a tenant whose folder was rejected or removed included, since its queue is kept — with the [operator key](/api#authentication), as for the schema reads above. A tenant with no dead-letter queue is a `404`:
