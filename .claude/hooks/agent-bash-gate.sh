@@ -118,12 +118,15 @@ fi
 # It reads only the command line, so it catches accidental forms, not
 # deliberate evasion; AGENTS.md lists the forms it doesn't follow.
 #
-# It gates any commit with a delta against the base (local main, else
-# origin/main), NOT only commits on a branch with an open PR: the agent flow is
-# push-the-branch THEN open the draft PR, so keying on PR state would let the
-# first push — the one that publishes the diff — skip review. A commit already
-# on the base (pushing main itself) has nothing for the reviewers. The universal
-# .githooks/pre-push handles ci-passed for everyone.
+# It gates any commit with a delta against the base (origin/main, else local
+# main when there is no remote-tracking ref), NOT only commits on a branch with
+# an open PR: the agent flow is push-the-branch THEN open the draft PR, so
+# keying on PR state would let the first push — the one that publishes the
+# diff — skip review. A commit already on the base (pushing main itself) has
+# nothing for the reviewers. Local main would count commits made on it by
+# mistake (commit, then `git switch -c feat`) as already on the base; a stale
+# origin/main only gates more. The universal .githooks/pre-push handles
+# ci-passed for everyone.
 
 reviewers_script="scripts/pre-push-reviewers.sh"
 
@@ -611,7 +614,7 @@ gate_push() {
 # for <sha> in some worktree of the repository.
 gate_commit() {
   local top=$1 label=$2 sha=$3 base="" ref branch reviewers_list worktrees r wt found missing="" shown=0
-  for ref in main origin/main; do
+  for ref in origin/main main; do
     if git -C "$top" rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then base=$ref; break; fi
   done
   # No base resolvable → fail safe and gate.
