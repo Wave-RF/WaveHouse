@@ -78,10 +78,17 @@ while [ "$i" -lt 5000 ]; do printf 'docs/file%05d.md\n' "$i" >> "$big"; i=$((i +
 big_out="$(env "$classify" < "$big")"
 big_rc=$?
 rm -f "$big"
-if [ "$big_rc" -eq 0 ] && printf '%s' "$big_out" | grep -qx 'docs=true' && printf '%s' "$big_out" | grep -qx 'code=false'; then
+# Matched with [[ ]] on the captured string, so no pipeline or grep exec sits
+# in the assertion, and each condition is reported on its own.
+big_why=""
+[ "$big_rc" -eq 0 ] || big_why="$big_why exit=$big_rc;"
+[[ $'\n'"$big_out"$'\n' == *$'\ndocs=true\n'* ]] || big_why="$big_why docs=true line missing;"
+[[ $'\n'"$big_out"$'\n' == *$'\ncode=false\n'* ]] || big_why="$big_why code=false line missing;"
+if [ -z "$big_why" ]; then
   printf '  ok   %-18s classifies without SIGPIPE\n' "large-input"
 else
-  printf '  FAIL %-18s want exit 0 + code=false/docs=true, got exit %s: %s\n' "large-input" "$big_rc" "$(printf '%s' "$big_out" | tr '\n' ' ')" >&2
+  printf '  FAIL %-18s want exit 0 + code=false/docs=true, failed:%s\n' "large-input" "$big_why" >&2
+  printf '       output (%d bytes) between the markers:\n<<<\n%s\n>>>\n' "${#big_out}" "$big_out" >&2
   fails=$((fails + 1))
 fi
 
