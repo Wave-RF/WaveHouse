@@ -76,10 +76,10 @@
     // below for MDX, running exactly the generic fixers the config globs keep
     // away from .mdx (see the note below).
     //
-    // WH002's autofix is owned by scripts/fix-mdx-fences.mjs, not by fix-on-save:
+    // MDX autofixes are owned by scripts/fix-mdx.mjs, not by fix-on-save:
     // the generic markdownlint fixers are never run over .mdx, because where
     // their CommonMark parse disagrees with MDX they rewrite the inside of a
-    // code block. `make fix` (or the markdown-on-save hook) repairs it instead.
+    // code block. `make fix` (or the markdown-on-save hook) repairs MDX instead.
     "editor.codeActionsOnSave": {
       "source.fixAll.markdownlint": "explicit"
     }

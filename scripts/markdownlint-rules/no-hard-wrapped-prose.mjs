@@ -5,14 +5,15 @@
 // diff. AI-authored docs arrive wrapped by default, which is what motivated
 // this rule; the fix is mechanical, so it autofixes rather than nagging.
 //
-// It joins only what a parser calls a paragraph, never a guess from line shape:
-// markdownlint's own micromark tokens for .md, and an MDX parse (./lib/mdx.mjs)
-// for .mdx, where CommonMark's reading is wrong. So tables, code, headings,
-// setext underlines, math, asides, JSX, ESM and indented code are untouched by
-// construction, and a nested list item indented four spaces is joined like any
-// other (an earlier line-shape version read it as indented code and skipped it).
-// Anything the parser cannot settle is left wrapped: a paragraph left wrapped is
-// a nit, a joined table is data loss. Every case has a fixture in rules.test.mjs.
+// Paragraphs come from a parser, not from line shape: markdownlint's own
+// micromark tokens for .md, and an MDX parse (./lib/mdx.mjs) for .mdx, where
+// CommonMark's reading is wrong. So tables, code, headings, setext underlines,
+// math, asides, JSX, ESM and indented code are untouched by construction, and a
+// nested list item indented four spaces is joined like any other (an earlier
+// line-shape version read it as indented code and skipped it). Within a
+// paragraph, the few lines below are still kept apart: a paragraph left wrapped
+// is a nit, a corrupted one is data loss. Every case has a fixture in
+// rules.test.mjs.
 
 import { descendants, hasAncestor, parseMdx } from "./lib/mdx.mjs";
 

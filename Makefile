@@ -425,10 +425,10 @@ lint-gha: $(ACTIONLINT) $(SHELLCHECK)
 # classifier behind CI's `changes` job and the local git hooks) against the
 # canonical change shapes — fast, dependency-free, so the allowlists can't
 # silently regress. A verify leaf so CI's lint job runs it.
-# test-md-rules: fixtures for the repo-local markdownlint rules. They rewrite
-# every .md/.mdx on every agent write, and they classify by line shape with no
-# parse tree, so an unrecognized construct is corrupted rather than skipped —
-# cheap fixtures are the only thing that catches the next shape regression.
+# test-md-rules: fixtures for the repo-local markdownlint rules and the MDX
+# fixer. They rewrite every .md/.mdx on every agent write, so each construct they
+# must leave alone is pinned here — cheap fixtures are what catches a parser
+# that disagrees with the one the docs render with.
 .PHONY: test-md-rules
 test-md-rules: pnpm-install
 	$(call run,markdownlint rule tests,node --test scripts/markdownlint-rules/rules.test.mjs,)
@@ -507,11 +507,11 @@ fix-ts: pnpm-install
 # comments it reads as headings, autolinking bare URLs. Reporting on that
 # disagreement is useful (lint-md still checks .mdx); acting on it is not.
 #
-# .mdx therefore gets exactly one STRUCTURAL fixer, our own
-# scripts/fix-mdx-fences.mjs — misspell still corrects spelling there, since its
-# curated list needs no parse. That fixer only ever inserts a blank line next to
-# a JSX tag, so its worst failure is a render-neutral blank line rather than
-# rewritten code.
+# .mdx therefore gets exactly one STRUCTURAL fixer, our own scripts/fix-mdx.mjs
+# — misspell still corrects spelling there, since its curated list needs no
+# parse. It runs only WH002 (a blank line beside a fence) and WH001 (joining
+# what an MDX parse calls a paragraph), and refuses to write a result whose
+# block structure, verbatim blocks or non-whitespace text differ from the input.
 #
 # The md pass runs twice because it is not a fixpoint in one: WH001's insert
 # carries the pre-fix text of the lines it joins, so another rule's fix for a

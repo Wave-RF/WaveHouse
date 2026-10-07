@@ -1,18 +1,20 @@
 #!/usr/bin/env node --test
-// Fixtures for the repo-local markdownlint rules (WH001, WH002) and the WH002
-// autofix pass. Run by `make test-md-rules`, a `make verify` leaf.
+// Fixtures for the repo-local markdownlint rules (WH001, WH002) and the MDX
+// fixer, scripts/fix-mdx.mjs. Run by `make test-md-rules`, a `make verify` leaf.
 //
 // These drive the REAL markdownlint-cli2 binary rather than calling the rule
 // functions directly, because the defects worth guarding against live in the
 // interaction — how markdownlint's fix applier combines one rule's line-delete
 // with another rule's edit on the same line — not in the rule's return value.
 //
-// Every construct classify() recognizes has a fixture here — keep it that way. Two
-// corrupting bugs (pipe-less tables, single-character setext underlines) got
-// through review because nothing exercised those shapes.
+// Every construct the rules must leave alone has a fixture here — keep it that
+// way. The rules used to classify lines by shape, and two corrupting bugs
+// (pipe-less tables, single-character setext underlines) got through review
+// because nothing exercised those shapes. They read a parse tree now; the
+// fixtures are what proves the parse is the one the docs actually render with.
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -53,6 +55,19 @@ function run(name, content, { fix = false, config } = {}) {
   }
   return { output: readFileSync(file, "utf8"), stdout };
 }
+
+/** Run scripts/fix-mdx.mjs over `content` saved as t.mdx; return the file and stderr. */
+function fixMdx(content, flags = []) {
+  const dir = mkdtempSync(path.join(workdir, "fixer-"));
+  const file = path.join(dir, "t.mdx");
+  writeFileSync(file, content);
+  const result = spawnSync("node", [path.join(repoRoot, "scripts/fix-mdx.mjs"), ...flags, file], {
+    encoding: "utf8",
+  });
+  return { output: readFileSync(file, "utf8"), stderr: result.stderr, status: result.status };
+}
+
+const count = (stdout, rule) => (stdout.match(new RegExp(rule, "g")) ?? []).length;
 
 /** Copy the repo's real markdownlint configs into `dir`, with loadable rule paths. */
 function copyRepoConfig(dir) {
@@ -114,6 +129,31 @@ describe("WH001 joins hard-wrapped prose", () => {
       fix: true,
     });
     assert.equal(output, "---\n\nA paragraph that is hard wrapped here.\n");
+  });
+
+  // Four spaces is an ordinary list indent, and the line-shape rule read every
+  // such line as indented code — so none of these was ever reported or fixed.
+  it("joins a nested list item indented four spaces", () => {
+    const { output } = run("t.md", "- top\n    - nested item\n      wrapped here\n", { fix: true });
+    assert.equal(output, "- top\n    - nested item wrapped here\n");
+  });
+
+  it("joins a list item whose continuation is indented four spaces", () => {
+    const { output } = run("t.md", "- item wrapped\n    across lines\n", { fix: true });
+    assert.equal(output, "- item wrapped across lines\n");
+  });
+
+  it("joins an item three levels deep", () => {
+    const src = "1. step\n   - sub\n     - leaf item\n       wrapped twice\n       over here\n";
+    assert.equal(
+      run("t.md", src, { fix: true }).output,
+      "1. step\n   - sub\n     - leaf item wrapped twice over here\n",
+    );
+  });
+
+  it("joins a paragraph continued at four spaces, which cannot open indented code", () => {
+    const { output } = run("t.md", "A paragraph\n    continued here.\n", { fix: true });
+    assert.equal(output, "A paragraph continued here.\n");
   });
 });
 
@@ -182,6 +222,63 @@ describe("WH001 leaves non-prose alone", () => {
     '<Cta\n  variant="band"\n  title="Managed"\n/>\n',
     "a JSX tag with attributes across lines",
   );
+  unchanged(
+    "t.md",
+    "- item\n\n      code inside the item\n      second line\n",
+    "an indented code block inside a list item",
+  );
+  // A line ending in these is not a space: JS and TeX comments run to it.
+  unchanged(
+    "t.md",
+    "Inline math $a % a TeX comment\nb$ spans lines.\n",
+    "a line ending inside inline math",
+  );
+  unchanged(
+    "t.mdx",
+    "Total {a + // a JS comment\n  b} items.\n",
+    "a line ending inside an MDX expression",
+  );
+  unchanged(
+    "t.md",
+    'See [the docs](https://example.com "a title\nthat wraps") for more.\n',
+    "a line ending inside a link title",
+  );
+  // MDX parses inline elements on their own lines inside a layout block as one
+  // paragraph; joining them is render-neutral but makes the markup unreadable.
+  unchanged(
+    "t.mdx",
+    '<div class="stat">\n  <span class="value">1</span>\n  <span class="unit">binary</span>\n</div>\n',
+    "lines of inline markup that MDX calls a paragraph",
+  );
+});
+
+describe("WH001 reads .mdx with an MDX parser", () => {
+  it("joins prose inside a JSX block", () => {
+    const src = "<Aside>\n\nProse inside the\naside, wrapped.\n\n</Aside>\n";
+    assert.equal(
+      run("t.mdx", src, { fix: true }).output,
+      "<Aside>\n\nProse inside the aside, wrapped.\n\n</Aside>\n",
+    );
+  });
+
+  it("joins four-space-indented prose, since MDX has no indented code", () => {
+    const src = "<Aside>\n\n    Indented prose\n    wrapped here.\n\n</Aside>\n";
+    assert.equal(
+      run("t.mdx", src, { fix: true }).output,
+      "<Aside>\n\n    Indented prose wrapped here.\n\n</Aside>\n",
+    );
+  });
+
+  it("reports a file it cannot parse instead of guessing at it", () => {
+    const src = "An unclosed {expression\nand wrapped\nprose.\n";
+    const { output, stdout } = run("t.mdx", src, { fix: true });
+    assert.equal(output, src);
+    assert.match(
+      stdout,
+      /WH001\/no-hard-wrapped-prose .*not checked: the file does not parse as MDX/,
+    );
+    assert.match(stdout, /WH002\/mdx-fence-needs-blank-line .*not checked/);
+  });
 });
 
 describe("WH002 flags an MDX fence glued to a JSX tag", () => {
@@ -254,6 +351,27 @@ describe("WH002 flags an MDX fence glued to a JSX tag", () => {
     const src = "<div onClick={() => open({tab: 1})}>\n```yaml\nkey: value\n```\n</div>\n";
     assert.equal((run("t.mdx", src).stdout.match(/WH002/g) ?? []).length, 2);
   });
+
+  it("reports both sides of a fence glued to prose inside an open block", () => {
+    // The line-shape detector saw only the closing side here, so its fixer
+    // inserted one blank line and left the fence inside the HTML block.
+    const src = "<Aside>\nRun this first:\n```sh\nmake tools\n```\n</Aside>\n";
+    const { stdout } = run("t.mdx", src);
+    assert.equal(count(stdout, "WH002"), 2);
+    assert.match(stdout, /t\.mdx:3 .*inside the HTML block CommonMark starts at <Aside>/);
+    assert.match(stdout, /t\.mdx:6 .*<\/Aside> follows a fence directly/);
+  });
+
+  it("sees the HTML block a self-closing tag opens", () => {
+    const { stdout } = run("t.mdx", "<Badge />\n```yaml\nkey: value\n```\n");
+    assert.equal(count(stdout, "WH002"), 1);
+    assert.match(stdout, /t\.mdx:2 .*inside the HTML block CommonMark starts at <Badge \/>/);
+  });
+
+  it("is silent when prose, not a tag, sits on the fence", () => {
+    // A fence interrupts a paragraph in both parsers, so they agree.
+    assert.doesNotMatch(run("t.mdx", "Run this:\n```sh\nmake\n```\n").stdout, /WH002/);
+  });
 });
 
 describe("the repo config keeps a bare --fix away from MDX", () => {
@@ -295,7 +413,7 @@ describe("the repo config keeps a bare --fix away from MDX", () => {
   });
 });
 
-describe("fix-mdx-fences.mjs repairs the structure", () => {
+describe("fix-mdx.mjs repairs .mdx with the two rules and nothing else", () => {
   it("inserts the blank lines on both sides", () => {
     const dir = mkdtempSync(path.join(workdir, "fixer-"));
     const file = path.join(dir, "t.mdx");
@@ -320,5 +438,98 @@ describe("fix-mdx-fences.mjs repairs the structure", () => {
       }),
     );
     assert.equal(readFileSync(file, "utf8"), glued);
+  });
+
+  const page = [
+    "---",
+    'title: "A page"',
+    "---",
+    "",
+    "import { Aside } from '@astrojs/starlight/components';",
+    "",
+    "export const meta = {",
+    "  // keep this comment",
+    '  id: "x",',
+    "};",
+    "",
+    "A paragraph that was",
+    "hard-wrapped by a tool.",
+    "",
+    "- A list item that",
+    "    wraps with four spaces",
+    "  - and a nested item",
+    "    that wraps too",
+    "",
+    "Name | Type",
+    "---- | ----",
+    "a    | int",
+    "",
+    ":::note[Heads up]",
+    "Aside body that",
+    "wraps.",
+    ":::",
+    "",
+    "$$",
+    "E = mc^2",
+    "$$",
+    "",
+    "<Aside>",
+    "```yaml",
+    "# a comment",
+    "",
+    "key: value",
+    "```",
+    "</Aside>",
+    "",
+  ].join("\n");
+
+  it("unwraps prose and separates fences, leaving every other construct byte-identical", () => {
+    const { output, stderr } = fixMdx(page);
+    assert.equal(stderr, "");
+    const expected = page
+      .replace("A paragraph that was\nhard-wrapped", "A paragraph that was hard-wrapped")
+      .replace("that\n    wraps with", "that wraps with")
+      .replace("item\n    that wraps", "item that wraps")
+      .replace("Aside body that\nwraps.", "Aside body that wraps.")
+      .replace("<Aside>\n```yaml", "<Aside>\n\n```yaml")
+      .replace("```\n</Aside>", "```\n\n</Aside>");
+    assert.equal(output, expected);
+  });
+
+  it("is a fixpoint — a second run changes nothing", () => {
+    const once = fixMdx(page).output;
+    assert.equal(fixMdx(once).output, once);
+  });
+
+  it("closes the hazard: a glued fence's code is no longer read as Markdown", () => {
+    // Before the fix CommonMark ends the HTML block at the blank line inside the
+    // fence and reads `# second` as a heading, which MD022 wants spaced out.
+    const src = "<Aside>\nRun this first:\n```yaml\n# first\n\n# second\n```\n</Aside>\n";
+    const heading = { config: { default: false, MD022: true } };
+    assert.match(run("t.mdx", src, heading).stdout, /MD022/);
+    const { output } = fixMdx(src);
+    assert.equal(
+      output,
+      "<Aside>\nRun this first:\n\n```yaml\n# first\n\n# second\n```\n\n</Aside>\n",
+    );
+    assert.doesNotMatch(run("t.mdx", output, heading).stdout, /MD022/);
+  });
+
+  it("leaves a fence inside a list item for a human — a blank line there makes the list loose", () => {
+    const src = "1. Step:\n   <Foo>\n   ```sh\n   x\n   ```\n   </Foo>\n2. Next\n";
+    const { output, stderr } = fixMdx(src);
+    assert.equal(output, src);
+    assert.match(stderr, /t\.mdx:3 WH002 not fixed: a blank line would make the list loose/);
+    assert.match(stderr, /t\.mdx:6 WH002 not fixed: a blank line would make the list loose/);
+  });
+
+  it("leaves a file it cannot parse untouched", () => {
+    const src = "An unclosed {expression\nand wrapped\nprose.\n";
+    const { output, stderr } = fixMdx(src);
+    assert.equal(output, src);
+    assert.match(
+      stderr,
+      /skipped .*t\.mdx: not valid MDX at line \d+: Unexpected end of file in expression/,
+    );
   });
 });
