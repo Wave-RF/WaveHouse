@@ -318,7 +318,10 @@ EOF" "can't follow"
 expect_block "a push in a here-string read by sh" "$repo" "sh <<< 'git -C ../wt-b push'" "can't follow"
 expect_block "a push in an input process substitution" "$repo" "cat <(git push origin feat-b)" "missing pre-push review marker"
 expect_block "a push in an output process substitution" "$repo" "tee >(git -C ../wt-b push)" "missing pre-push review marker"
-expect_block "a push in a here-string read by sh, inside \$(…)" "$repo" "echo \"\$(sh <<< 'git -C ../wt-b push')\"" "can't follow"
+expect_block "a push in a here-string read by sh, inside \$(…)" "$repo" "echo \"\$(sh <<<'git -C ../wt-b push')\"" "can't follow"
+expect_block "a push in bash -c, inside \$(…)" "$repo" "out=\$(bash -c 'git -C ../wt-b push')" "can't follow"
+expect_block "a push in eval, inside \$(…)" "$repo" "out=\$(eval 'git -C ../wt-b push')" "can't follow"
+expect_block "a push with a quoted -C path, inside \$(…)" "$repo" "out=\$(git -C \"\$WT\" push)" "can't follow"
 expect_block "a push continued over a backslash-newline in bash -c" "$repo" "bash -c 'git -C ../wt-b \\
 push'" "can't follow"
 expect_block "…and in a heredoc read by bash" "$repo" "bash <<'EOF'
@@ -330,6 +333,22 @@ expect_block "a push in a here-string's substitution" "$repo" "grep -q rejected 
 expect_block "a push in a redirect target's substitution" "$repo" "echo hi > \"\$(git -C ../wt-b push >/dev/null; echo /dev/null)\"" "can't follow"
 expect_block "a commit in a here-string's substitution, then a push" "$repo" "grep -q x <<< \"\$(git commit --allow-empty -m x)\"; git push" "separate command"
 expect_allow "a mention of git push beside a substitution" "$wtb" "echo \"\$(date): ran git push\""
+# Quoted text inside a substitution is an argument, not code.
+expect_allow "a substitution that greps for git push" "$wtb" "n=\$(grep -c 'git push' AGENTS.md)"
+expect_allow "…looped over" "$wtb" "for f in \$(rg -l 'git push' docs); do echo \$f; done"
+expect_allow "…double-quoted" "$wtb" "wc -l \$(grep -rl \"git push\" .claude)"
+expect_allow "a commit message from a substitution that mentions git push" "$wtb" "git commit -m \"\$(echo 'docs: explain the git push gate')\""
+expect_allow "a PR comment from printf that mentions git push" "$wtb" "gh pr comment 1 --body \"\$(printf 'Fixed; run git push to update.\\n')\""
+expect_allow "a push, then a substitution that greps for git commit" "$repo" "git push origin feat-a; n=\$(grep -c 'git commit' AGENTS.md)"
+expect_allow "a PR body heredoc that mentions github and pushed" "$wtb" "gh pr create --draft --title \"fix: x\" --body \"\$(cat <<'EOF'
+The branch on github was pushed; it's ready.
+EOF
+)\""
+expect_block "a push after an \$'…' string holding \\'" "$repo" "echo \$'it\\'s' && git push origin feat-b" "missing pre-push review marker"
+expect_allow "…and the same push of a reviewed branch" "$repo" "echo \$'it\\'s' && git push origin feat-a"
+expect_allow "…closed with EOF)\" on one line" "$wtb" "gh pr create --draft --title \"fix: x\" --body \"\$(cat <<'EOF'
+The branch on github was pushed; it's ready.
+EOF)\""
 expect_allow "a script run by bash, then a push" "$repo" "bash scripts/pre-push-reviewers.sh && git push"
 expect_allow "a heredoc read by bash that doesn't push, then a push" "$repo" "bash <<'EOF'
 echo hi

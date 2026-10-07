@@ -133,20 +133,21 @@ reviewers_script="scripts/pre-push-reviewers.sh"
 # A word that carries an expansion is flagged dynamic: its value is unknowable
 # here, so a push that depends on one fails closed. Fills TK_VAL / TK_DYN /
 # TK_OP, TK_IN / TK_IN_AT with each heredoc body and here-string and the token
-# index of the simple command that reads it, and TK_SUB with the text of every
+# index of the simple command that reads it, and TK_SUBS with the text of every
 # $(…) and `…`, wherever its word went (an argument, a here-string, a redirect
-# target); returns 1 on an unterminated quote or substitution.
+# target), each quoted part inside a $(…) wrapped in \002…\003; returns 1 on an
+# unterminated quote or substitution.
 
 tk_flush() {
   if [ "$_inw" = 1 ]; then
+    case $_w in *$'\002'* | *$'\003'*) _w=${_w//$'\002'/}; _w=${_w//$'\003'/} ;; esac
     case $_skip in
       0) TK_VAL+=("$_w"); TK_DYN+=("$_dyn"); TK_OP+=(0) ;;
       2) TK_IN+=("$_w"); TK_IN_AT+=("$_cmd0") ;;
     esac
     _skip=0
   fi
-  TK_SUB+=$_sub
-  _w=""; _inw=0; _dyn=0; _sub=""
+  _w=""; _inw=0; _dyn=0
 }
 # An operator ends any redirection: in `<(…)` and `>(…)` the "(" opens a
 # process substitution, whose first word is a command, not a target.
@@ -156,16 +157,38 @@ tk_squote() {
   local rest=${_s:_i+1} part
   case $rest in *"'"*) ;; *) return 1 ;; esac
   part=${rest%%"'"*}
-  _w+=$part; _inw=1; _i=$((_i + ${#part} + 2))
+  _inw=1; _i=$((_i + ${#part} + 2))
+  [ "$_insub" = 0 ] || part=$'\002'$part$'\003'
+  _w+=$part
+}
+
+# tk_ansi: a $'…' string, in which \' doesn't end the quote.
+tk_ansi() {
+  local c
+  _inw=1; _i=$((_i + 2))
+  [ "$_insub" = 0 ] || _w+=$'\002'
+  while [ "$_i" -lt "$_n" ]; do
+    c=${_s:_i:1}
+    case $c in
+      "'") _i=$((_i + 1)); [ "$_insub" = 0 ] || _w+=$'\003'; return 0 ;;
+      \\) _w+=${_s:_i:2}; _i=$((_i + 2)) ;;
+      *) _w+=$c; _i=$((_i + 1)) ;;
+    esac
+  done
+  return 1
 }
 
 tk_dquote() {
   local c c2
   _inw=1; _i=$((_i + 1))
+  [ "$_insub" = 0 ] || _w+=$'\002'
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
     case $c in
-      '"') _i=$((_i + 1)); return 0 ;;
+      '"')
+        _i=$((_i + 1))
+        [ "$_insub" = 0 ] || _w+=$'\003'
+        return 0 ;;
       \\)
         c2=${_s:_i+1:1}
         case $c2 in '$' | '`' | '"' | \\) _w+=$c2 ;; $'\n') ;; *) _w+=$c$c2 ;; esac
@@ -182,13 +205,16 @@ tk_dollar() {
   local rest part s0=${#_w}
   _inw=1; _dyn=1
   case ${_s:_i+1:1} in
-    '(') _w+='$'; _i=$((_i + 1)); tk_paren || return 1; _sub+="${_w:s0}"$'\n' ;;
+    '(')
+      _w+='$'; _i=$((_i + 1)); _insub=$((_insub + 1))
+      tk_paren || return 1
+      _insub=$((_insub - 1)); TK_SUBS+=("${_w:s0}") ;;
     '{')
       rest=${_s:_i}
       case $rest in *'}'*) ;; *) return 1 ;; esac
       part=${rest%%'}'*}
       # shellcheck disable=SC2016 # a literal $( or backtick in ${…:-…}
-      case $part in *'$('* | *'`'*) _sub+="$part}"$'\n' ;; esac
+      case $part in *'$('* | *'`'*) TK_SUBS+=("$part}") ;; esac
       _w+="$part}"; _i=$((_i + ${#part} + 1)) ;;
     *) _w+='$'; _i=$((_i + 1)) ;;
   esac
@@ -200,7 +226,7 @@ tk_backtick() {
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
     case $c in
-      '`') _w+=$c; _i=$((_i + 1)); _sub+="${_w:s0}"$'\n'; return 0 ;;
+      '`') _w+=$c; _i=$((_i + 1)); TK_SUBS+=("${_w:s0}"); return 0 ;;
       \\) _w+=${_s:_i:2}; _i=$((_i + 2)) ;;
       *) _w+=$c; _i=$((_i + 1)) ;;
     esac
@@ -224,6 +250,8 @@ tk_paren() {
       "'") tk_squote || return 1 ;;
       '"') tk_dquote || return 1 ;;
       '`') tk_backtick || return 1 ;;
+      '$')
+        if [ "${_s:_i+1:1}" = "'" ]; then tk_ansi || return 1; else _w+=$c; _i=$((_i + 1)); fi ;;
       '<')
         if [ "${_s:_i:3}" = '<<<' ]; then
           _w+='<<< '; _i=$((_i + 3))
@@ -263,7 +291,9 @@ tk_heredoc_op() {
 }
 
 # tk_heredoc_bodies: just past a newline, step over the bodies of pending
-# heredocs, keeping each top-level one in TK_IN.
+# heredocs, keeping each top-level one in TK_IN. Inside a $(…), a line that is
+# the delimiter followed by ")" (`EOF)"`) also ends the body, and the ")" closes
+# the substitution.
 tk_heredoc_bodies() {
   local k rest line start
   [ "${#_hd_delim[@]}" -gt 0 ] || return 0
@@ -275,6 +305,9 @@ tk_heredoc_bodies() {
       _i=$((_i + ${#line} + 1))
       [ "${_hd_strip[k]}" = 1 ] && line=${line#"${line%%[!$'\t']*}"}
       [ "$line" = "${_hd_delim[k]}" ] && break
+      if [ "${_hd_at[k]}" = -1 ] && [ "${line#"${_hd_delim[k]})"}" != "$line" ]; then
+        _i=$((_i - 1 - ${#line} + ${#_hd_delim[k]})); break
+      fi
     done
     if [ "${_hd_at[k]}" -ge 0 ]; then
       TK_IN+=("${_s:start:_i-start}"); TK_IN_AT+=("${_hd_at[k]}")
@@ -302,8 +335,8 @@ tk_redirect() {
 tokenize() {
   local LC_ALL=C c c2 rest line
   _s=$1; _n=${#1}; _i=0
-  _w=""; _inw=0; _dyn=0; _skip=0; _cmd0=0; _sub=""; TK_SUB=""
-  TK_VAL=(); TK_DYN=(); TK_OP=(); TK_IN=(); TK_IN_AT=(); _hd_delim=(); _hd_strip=(); _hd_at=()
+  _w=""; _inw=0; _dyn=0; _skip=0; _cmd0=0; _insub=0
+  TK_VAL=(); TK_DYN=(); TK_OP=(); TK_IN=(); TK_IN_AT=(); TK_SUBS=(); _hd_delim=(); _hd_strip=(); _hd_at=()
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
     case $c in
@@ -315,7 +348,8 @@ tokenize() {
         _i=$((_i + 2)) ;;
       "'") tk_squote || return 1 ;;
       '"') tk_dquote || return 1 ;;
-      '$') tk_dollar || return 1 ;;
+      '$')
+        if [ "${_s:_i+1:1}" = "'" ]; then tk_ansi || return 1; else tk_dollar || return 1; fi ;;
       '`') tk_backtick || return 1 ;;
       ';' | '|')
         c2=${_s:_i+1:1}
@@ -664,6 +698,39 @@ head_re=${git_re}'(commit|merge|rebase|reset|checkout|switch|cherry-pick|revert|
 shell_re='(^|[[:space:];|&(`])(eval|([^[:space:];|&]*/)?(ba|z|da|k)?sh)([[:space:]<]|$)'
 cant_follow="this command runs \`git push\` in a form the gate can't follow (behind a wrapper such as timeout, sudo or env -C, in a command substitution, or in code handed to a shell or eval). Run \`git push\` directly, or as \`git -C <worktree> push …\`."
 
+# unquote <text>: UNQ = <text> with each \002…\003 (quoted) part as Q.
+unquote() {
+  local LC_ALL=C t=$1 pre c depth=0
+  UNQ=""
+  while :; do
+    pre=${t%%[$'\002\003']*}
+    [ "$depth" -gt 0 ] || UNQ+=$pre
+    [ "${#pre}" -lt "${#t}" ] || return 0
+    c=${t:${#pre}:1}; t=${t:${#pre}+1}
+    if [ "$c" = $'\002' ]; then
+      [ "$depth" -gt 0 ] || UNQ+=Q
+      depth=$((depth + 1))
+    elif [ "$depth" -gt 0 ]; then
+      depth=$((depth - 1))
+    fi
+  done
+}
+
+# sub_scan: note a HEAD move in any command substitution, and set SUB_PUSH when
+# one holds a `git … push`. Quoted text in it is an argument, not code
+# (`$(grep -c 'git push' f)`), unless the substitution hands it to a shell.
+sub_scan() {
+  local j s
+  SUB_PUSH=0
+  for ((j = 0; j < ${#TK_SUBS[@]}; j++)); do
+    s=${TK_SUBS[j]//$'\\\n'/}
+    unquote "$s"
+    if [[ $UNQ =~ $shell_re ]]; then UNQ=${s//$'\002'/}; UNQ=${UNQ//$'\003'/}; fi
+    head_move "$UNQ"
+    if [[ $UNQ =~ $push_re ]]; then SUB_PUSH=1; fi
+  done
+}
+
 # unfollowed_push: true when a command substitution anywhere holds a
 # `git … push`, or a simple command the walk didn't gate (FOLLOWED holds the
 # first-token index of each one it did) holds one behind a wrapper it doesn't
@@ -671,7 +738,7 @@ cant_follow="this command runs \`git push\` in a form the gate can't follow (beh
 # heredoc body or a comment is one word or no token at all, so it doesn't count.
 unfollowed_push() {
   local i n=${#TK_VAL[@]} w line="" start=0
-  ! grep -qE "$push_re" <<<"$TK_SUB" || return 0
+  [ "$SUB_PUSH" = 0 ] || return 0
   for ((i = 0; i <= n; i++)); do
     if [ "$i" -eq "$n" ] || [ "${TK_OP[i]}" = 1 ]; then
       case $FOLLOWED in
@@ -702,12 +769,11 @@ if grep -qE "$push_re" <<<"$squashed" \
   hook_cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
   [ -n "$hook_cwd" ] || block "can't tell which directory this \`git push\` runs in: the hook payload has no cwd."
   tokenize "$cmd" || block "can't parse this command (an unterminated quote or substitution?), so can't tell what it pushes."
-  TK_SUB=${TK_SUB//$'\\\n'/}
   FOLLOWED=" "
   # A substitution runs before the command it's in, so a HEAD move in one
   # counts against every push on the line.
   HEAD_MOVER=""
-  head_move "$TK_SUB"
+  sub_scan
   walk_commands "$hook_cwd"
   if unfollowed_push; then
     block "$cant_follow"
