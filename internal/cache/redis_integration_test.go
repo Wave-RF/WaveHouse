@@ -999,9 +999,8 @@ func TestRedis_RestoredSnapshotIsARollback(t *testing.T) {
 // reconnect, completes it and closes the breaker. rueidis bounds the dial,
 // TLS included, by the dial timeout and then the handshake by it again, so
 // here each takes most of it: together they outlast one dial timeout plus
-// the op timeout. Only the connection the probe lands on reconnects:
-// rueidis spreads commands over several, and the rest still reconnect under
-// the op timeout.
+// the op timeout. This test uses one connection (SetOnePipe); with the
+// default several, the others still reconnect under the op timeout (#664).
 func TestRedis_ProbeFitsASlowReconnect(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1012,14 +1011,21 @@ func TestRedis_ProbeFitsASlowReconnect(t *testing.T) {
 	a := open(t, &server{addr: p.addr, mode: cache.RedisStandalone}, uniquePrefix(), func(c *cache.RedisConfig) {
 		c.Timeout, c.DialTimeout, c.TLS = timeout, dialTimeout, cliTLS
 		c.BreakerThreshold, c.BreakerOpenFor = 1, 200*time.Millisecond
+		// NewRedis dials the first connection itself; the default's others
+		// (up to four) are dialed on first use, under the op timeout.
+		cache.SetOnePipe(c)
 	})
 	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
-	_, _, err := a.Lookup(ctx, "acme", "q", deps)
-	require.NoError(t, err)
+	// Even the warm first lookup, through the proxy, can miss a 100 ms op
+	// timeout on a loaded host; wait for a connected cache, breaker closed.
+	require.Eventually(t, func() bool {
+		_, _, err := a.Lookup(ctx, "acme", "q", deps)
+		return err == nil && !cache.Bypassed(a)
+	}, 20*time.Second, 10*time.Millisecond, "the cache connects before the delay is injected")
 
 	p.delay.Store(int64(dialTimeout * 7 / 10))
 	p.drop()
-	_, _, err = a.Lookup(ctx, "acme", "q", deps)
+	_, _, err := a.Lookup(ctx, "acme", "q", deps)
 	require.Error(t, err, "the reconnect does not fit in the lookup's timeout")
 	require.True(t, cache.Bypassed(a))
 	require.Eventually(t, func() bool { return !cache.Bypassed(a) }, 20*time.Second, 10*time.Millisecond,

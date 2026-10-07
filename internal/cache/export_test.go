@@ -25,8 +25,9 @@ func Bypassed(r *RedisCache) bool { return r.bypassed() }
 func SetConnLifetime(c *RedisConfig, d time.Duration) { c.connLifetime = d }
 
 // SetOnePipe gives c's client one connection per node. rueidis otherwise
-// keeps up to four by GOMAXPROCS, dialing each on first use, so one first
-// used after a failover reaches the new primary without being replaced.
+// keeps up to four by GOMAXPROCS, dialing all but the first on first use, so
+// one first used after a failover reaches the new primary without being
+// replaced, and one first used on a slow link dials under the op timeout.
 func SetOnePipe(c *RedisConfig) { c.onePipe = true }
 
 // KeyPrefix is the prefix every key r writes leads with.

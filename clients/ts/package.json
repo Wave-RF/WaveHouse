@@ -36,6 +36,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist",
+    "smoke:dist": "node scripts/smoke-dist.mjs",
     "prepare": "pnpm run build",
     "prepublishOnly": "pnpm run typecheck && pnpm run build",
     "codegen": "tsx src/cli/codegen.ts"
