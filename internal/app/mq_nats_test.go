@@ -38,6 +38,7 @@ func natsConfig(t *testing.T, url string) *config.Config {
 // consumes the operator's durable; the operator deleting it ends the worker,
 // and with it Run, naming the component.
 func TestNew_NATSBackend(t *testing.T) {
+	t.Parallel()
 	srv := natstest.Start(t)
 	cfg := natsConfig(t, srv.URL())
 	cfg.Roles = []config.Role{config.RoleAPI, config.RoleIngest}
@@ -46,7 +47,7 @@ func TestNew_NATSBackend(t *testing.T) {
 	_, ok := a.MQ().(*mq.ExternalNATS)
 	require.True(t, ok, "mq.backend: nats wires mq.ExternalNATS, got %T", a.MQ())
 	assert.Equal(t, []string{
-		"clickhouse", "schema discovery", "dedupe", "mq", "cache", "coord",
+		"clickhouse", "type layer", "schema discovery", "dedupe", "mq", "cache", "coord",
 		"hub bridge", "keepalive", "ingest worker",
 		"auth", "sighup", "settings watcher", "http server",
 	}, componentNames(a))
@@ -99,22 +100,24 @@ func TestNew_NATSWiresNoSweeper(t *testing.T) { //nolint:paralleltest // capture
 
 // A cluster never reached within topology_wait refuses boot as unavailable.
 func TestNew_NATSUnreachable(t *testing.T) {
+	t.Parallel()
 	guardGlobals(t)
 	cfg := natsConfig(t, "nats://"+closedAddr(t))
 	cfg.MQ.NATS.TopologyWait = time.Millisecond
-	_, err := New(t.Context(), Options{Config: cfg})
+	_, err := newForTest(t.Context(), t, Options{Config: cfg})
 	require.ErrorIs(t, err, mq.ErrUnavailable)
 	assert.ErrorContains(t, err, "mq open")
 }
 
 // The operator's topology missing a piece refuses boot with the finding.
 func TestNew_NATSTopologyMissing(t *testing.T) {
+	t.Parallel()
 	srv := natstest.Start(t)
 	require.NoError(t, srv.Operator.JetStream().DeleteStream(t.Context(), "WH_DLQ"))
 	guardGlobals(t)
 	cfg := natsConfig(t, srv.URL())
 	cfg.MQ.NATS.TopologyWait = time.Millisecond
-	_, err := New(t.Context(), Options{Config: cfg})
+	_, err := newForTest(t.Context(), t, Options{Config: cfg})
 	require.ErrorIs(t, err, mq.ErrTopology)
 	assert.ErrorContains(t, err, "dead-letter stream")
 }

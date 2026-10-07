@@ -30,10 +30,10 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
-	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,22 +70,41 @@ func makeEnvelope(t *testing.T, tableName, scope string, data map[string]any) []
 // that publish two different schemas for one table.
 func makeEnvelopeCols(t *testing.T, tableName, scope string, cols []string, data map[string]any) []byte {
 	t.Helper()
-	schema := make([]discovery.Column, len(cols))
-	for i, c := range cols {
-		schema[i] = discovery.Column{Name: c, Position: uint64(i + 1)}
-	}
-	row, err := EncodeCompactRow(schema, data)
-	require.NoError(t, err)
 	out, err := json.Marshal(EventMessage{
 		TableName:         tableName,
 		Scope:             scope,
 		ReceivedTimestamp: "2026-01-01T00:00:00Z",
 		Format:            FormatJSONCompactEachRow,
 		Columns:           cols,
-		Row:               row,
+		Row:               compactRow(t, cols, data),
 	})
 	require.NoError(t, err)
 	return out
+}
+
+// compactRow renders data as one JSONCompactEachRow row in cols order, a
+// column the record omits encoding as null. Production rows are ClickHouse's
+// own export (internal/typelayer) and the worker only forwards bytes, so a
+// hand-built row is the right fixture here.
+func compactRow(t *testing.T, cols []string, data map[string]any) json.RawMessage {
+	t.Helper()
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	for i, c := range cols {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		v, ok := data[c]
+		if !ok {
+			buf.WriteString("null")
+			continue
+		}
+		b, err := json.Marshal(v)
+		require.NoError(t, err)
+		buf.Write(b)
+	}
+	buf.WriteByte(']')
+	return json.RawMessage(buf.Bytes())
 }
 
 // newIngestMsg builds a MockMessage shaped exactly the way the
@@ -328,13 +347,24 @@ func TestInsertToClickHouse_BuildsCorrectRequest(t *testing.T) {
 			assert.Equal(t, "test_db", q.Get("database"))
 			assert.Equal(t, "events", q.Get("param_target_table"))
 			assert.Equal(t, "INSERT INTO {target_table:Identifier} (`id`) FORMAT JSONCompactEachRow", q.Get("query"))
-			// #372: the insert pins best_effort — the server default since
-			// ClickHouse 26.5; older 'basic' defaults reject the canonical
-			// form's zone suffix.
-			assert.Equal(t, "best_effort", q.Get("date_time_input_format"))
-			// A field the record omitted rides as null in its column's slot;
-			// this is what turns it back into the column's default.
-			assert.Equal(t, "1", q.Get("input_format_null_as_default"))
+			// The parsing settings are exactly the ones the API judged the
+			// rows under, plus wait_for_async_insert=1, and nothing else (async_insert
+			// is left to the server).
+			want := map[string]string{
+				"database":              "test_db",
+				"param_target_table":    "events",
+				"query":                 q.Get("query"),
+				"wait_for_async_insert": "1",
+			}
+			for k, v := range typelayer.InsertSettings() {
+				want[k] = v
+			}
+			got := map[string]string{}
+			for k := range q {
+				got[k] = q.Get(k)
+			}
+			assert.Equal(t, want, got)
+			assert.Equal(t, "best_effort", q.Get("date_time_input_format"), "#372: older 'basic' defaults reject a zone suffix")
 
 			assert.Equal(t, "application/json", req.Header.Get("Content-Type"))
 			assert.Equal(t, "test_user", req.Header.Get("X-ClickHouse-User"))
@@ -900,6 +930,37 @@ func TestFlushTable_BulkFails_FallsBackToOneByOne(t *testing.T) {
 
 	// Nothing went to the DLQ — every row inserted cleanly on its own.
 	assert.Empty(t, pub.Published(), "no DLQ publishes when 1-by-1 retries all succeed")
+}
+
+// TestFlushTable_IsolatedRowsInsertSynchronously: the batch leaves async_insert
+// to the server, and each isolated row turns it off, so its verdict is its own
+// rather than that of an async flush it shared with another writer's rows.
+func TestFlushTable_IsolatedRowsInsertSynchronously(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var seen []string // "<rows>:<async_insert>" per request
+	rt := &testutil.MockRoundTripper{
+		Fn: func(req *http.Request) (*http.Response, error) {
+			body, _ := io.ReadAll(req.Body)
+			rows := strings.Count(string(body), "\n")
+			mu.Lock()
+			seen = append(seen, fmt.Sprintf("%d:%s", rows, req.URL.Query().Get("async_insert")))
+			mu.Unlock()
+			assert.Equal(t, "1", req.URL.Query().Get("wait_for_async_insert"))
+			if rows > 1 {
+				return chAnswer(http.StatusInternalServerError, 469, "Constraint `c` is violated at row 2"), nil
+			}
+			return okAnswer(), nil
+		},
+	}
+	w, _, _, wait := newTestWorker(rt)
+
+	w.flushTable(context.Background(), "events", parseAll(t, w,
+		newIngestMsg(t, "events", "", map[string]any{"id": 1}),
+		newIngestMsg(t, "events", "", map[string]any{"id": 2})))
+	wait()
+
+	assert.Equal(t, []string{"2:", "1:0", "1:0"}, seen)
 }
 
 func TestFlushTable_BadRow_Isolated_GoesToDLQ(t *testing.T) {

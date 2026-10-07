@@ -13,7 +13,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 
 | Tool | Required version | Why | Install |
 | ---- | ---------------- | --- | ------- |
-| **Go** | 1.26+ (matches `go.mod`) | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
+| **Go** | 1.27+ (matches `go.mod`) | Compiles `cmd/wavehouse` with cgo enabled (needed by chtypes' dlopen shim — a C toolchain must be present; on Linux the binary links against the build host's glibc, where the prebuilt release binaries need 2.34 or later); also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
 | **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with BSD Make 3.81, which **will not work** | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse and a Redis via testcontainers (no compose file), the integration suite also dynamodb-local, and the integration suite also runs the shared cache backend against Redis, Valkey, Dragonfly (pulled from `docker.dragonflydb.io`) and a one-node Redis Cluster | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
@@ -21,11 +21,21 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
 
+### The chtypes artifact — fetched on first use
+
+`internal/typelayer` uses a per-ClickHouse-version shared library, opened the first time a tenant on that ClickHouse line is bound, to run ingest validation and row-level security through ClickHouse's own parser (see [Deployment → chtypes artifacts](/deployment#chtypes-artifacts)). It is not source code, and you do not have to fetch it: an API process (`make dev`, `make test-e2e`, the app `make test-integration` and `make ci` start) and the unit tests that need the engine fetch it into the shared per-user cache (`~/.cache/chtypes/v1`, or `$CHTYPES_CACHE`) the first time they need it, and every checkout and worktree on the machine reuses it. `make test-unit`, `make test-integration` and `make test-e2e` (and so `make ci`) first make sure it is there with a single process, so that a suite's parallel test binaries do not each download it on a cold cache; a cached build costs them no request. To fetch it ahead, for example before going offline:
+
+```bash
+scripts/fetch-chtypes.sh   # the newest build for the line of the pinned test ClickHouse (internal/chversion), 26.8
+```
+
+That runs the chtypes CLI at the SDK version `go.mod` requires. It is a 40–50 MB download that unpacks to roughly 300–340 MB; on a warm cache it makes two small requests and installs nothing unless a newer build of the line was published. `--offline` makes no request and succeeds only when the cache already holds a build; name other lines as arguments. When the artifact cannot be had, the unit tests that need the engine skip, naming the cause; set `WAVEHOUSE_TEST_REQUIRE_CHTYPES=1` (CI does) to make that fail those tests instead. A running process answers ingest with `503`, and withholds row-filtered stream rows, for a ClickHouse line it cannot fetch (chtypes 1.0 publishes 26.3, 26.7, 26.8 and 26.9); that cause and the others are listed in [Deployment → chtypes artifacts](/deployment#chtypes-artifacts).
+
 ### Auto-installed by `make tools`
 
 Run `make tools` once after cloning to populate everything that doesn't have to be on your PATH:
 
-- **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
+- **`golangci-lint` v2.13.2** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
 - **`misspell` v0.8.0, `shellcheck` v0.11.0, `actionlint` v1.7.12** → installed to `.bin/<os>_<arch>/`; they back `make lint-prose`, `make lint-sh`, and `make lint-gha`. `make tools` also points `core.hooksPath` at `.githooks/`, which is what installs the pre-commit and pre-push gates.
 - **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
 - **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
@@ -34,7 +44,7 @@ Run `make tools` once after cloning to populate everything that doesn't have to 
 ### Verify your setup
 
 ```bash
-go version          # go1.26+
+go version          # go1.27+
 make --version      # GNU Make 4.x
 docker compose version
 node --version      # v22.x (matches .nvmrc and CI)
@@ -59,9 +69,10 @@ This is the fastest way to get a fully functional local environment:
 git clone https://github.com/Wave-RF/WaveHouse.git
 cd WaveHouse
 make tools
+scripts/fetch-chtypes.sh   # optional: prefetch the chtypes artifact (see above)
 
-# 2. Start ClickHouse (the only external dependency)
-docker compose -f deployments/compose/dependencies.yaml up -d clickhouse
+# 2. Start ClickHouse (the only external service)
+docker compose -f deployments/compose/dependencies.yaml up -d --wait clickhouse
 
 # 3. Create a table in ClickHouse
 docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
@@ -91,7 +102,7 @@ WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 On first run `make dev` seeds the gitignored `./settings` directory with `wavehouse bootstrap` and copies in the compose stack's trial policy (`deployments/compose/settings/policies.json` + `roles.json` — the `public` role: read/write `clicks`/`events`, no token). WaveHouse is otherwise fail-closed (the bootstrap seed ships no policy), so a `./settings` you emptied by hand denies every request until you put a policy back. Edits to any file in `./settings` hot-reload without a restart.
 
-The tokenless data-plane calls work (create a `clicks` table first — see the [Getting Started](/getting-started) walkthrough):
+The tokenless data-plane calls work (against the `clicks` table from step 3 of the [Quick Start](#quick-start) above):
 
 ```bash
 # Ingest an event
@@ -156,13 +167,13 @@ These are the small targets behind `make dev` — useful directly when you want 
 | `make deps-logs` | `docker compose logs -f clickhouse` (Ctrl+C detaches; container keeps running). |
 | `make deps-shell` | Drop into a `clickhouse-client` REPL on the running container. |
 | `make deps-wipe` | Stop ClickHouse **and destroy its data volume**. Use when you want a clean schema. |
-| `make clean-all` | Nuclear option — every `make` artifact + dev/E2E containers + volumes + `data/`. |
+| `make clean-all` | Nuclear option — every `make` artifact + the dev Compose containers and volumes + `data/`. |
 
 **Stopping `make dev`**: `Ctrl+C` stops air, which propagates SIGINT to WaveHouse for a graceful shutdown (NATS JetStream flush, etc.). ClickHouse stays up — re-running `make dev` is fast because the volume is preserved. Use `make deps-down` or `make deps-wipe` to stop ClickHouse explicitly.
 
 ### Running with observability
 
-WaveHouse natively exports standard OpenTelemetry (OTLP) data to `127.0.0.1:4317`. Rather than coupling a heavy observability database stack to the dev server, we provide three lightweight, single-container dashboard options.
+WaveHouse natively exports standard OpenTelemetry (OTLP) data. These dashboards listen for plaintext OTLP on `localhost:4317`; the OpenTelemetry SDK's unset default dials that port over TLS, which they reject, so point it there explicitly with `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317`. Export is off by default (`otel.enabled: false` in `config.yaml`): the E2E fixture turns it on and the orchestrator behind `make test-e2e` sets that endpoint, so `make test-e2e` needs nothing (a server you start yourself with the fixture config, below, needs `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` like `make dev`), while `make dev` needs both — `otel.enabled: true` in `.config.local.yaml` (or `WH_OTEL_ENABLED=true`) plus the endpoint variable, as in `WH_OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 make dev`. Rather than coupling a heavy observability database stack to the dev server, we provide three lightweight, single-container dashboard options.
 
 You run these in a separate terminal tab alongside `make dev` or your test suites (`make test-e2e`).
 
@@ -177,7 +188,7 @@ They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear
 **Typical Workflow:**
 
 1. Open Tab 1: run `make obs-aspire` (UI opens automatically)
-2. Open Tab 2: run `make dev` (or `make test-e2e`)
+2. Open Tab 2: run `WH_OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 make dev` (or `make test-e2e`)
 3. View traces, metrics, and logs flowing into the UI instantly. No accounts or auth tokens required.
 
 ### Using the SDK against `make dev`
@@ -235,9 +246,16 @@ curl -s -X POST http://localhost:8080/v1/ops/query \
 # set "enabled": true under "dedupe" in ./settings/config.json
 ```
 
-The key hot-reloads, so once the server is running you can toggle it by editing `config.json` — no restart. Records dedupe on their `event_id` field by default; the same file overrides the field globally or per table (see [Settings Directory — Deduplication](/settings-directory#deduplication)).
+The key hot-reloads, so once the server is running you can toggle it by editing `config.json` — no restart. Records dedupe on their `event_id` column by default; the same file overrides the column globally or per table (see [Settings Directory — Deduplication](/settings-directory#deduplication)).
 
-Then include the dedup field in your ingest body:
+The Quick Start `clicks` table has no `event_id` column, and a record naming a column the table lacks is refused (code 117), so add one first; ingest sees it after the next schema refresh (60 seconds by default):
+
+```bash
+docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
+  clickhouse-client --query "ALTER TABLE clicks ADD COLUMN IF NOT EXISTS event_id String"
+```
+
+Then include it in your ingest body:
 
 ```bash
 curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
@@ -343,18 +361,18 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 | -------- | -------- | ------- | ------- |
 | Unit tests | `internal/*/_test.go` | No | `make test` |
 | SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-ts` (always includes coverage + gate) |
-| Integration tests (Go) | `tests/integration/*_test.go`, `internal/cache/*_integration_test.go`, plus `internal/mq/natsspike` and `internal/mq`'s integration-tagged tests | Yes | `make test-integration` |
+| Integration tests (Go) | `tests/integration/*_test.go`, `internal/cache/*_integration_test.go`, plus `internal/mq/natsspike`, and `internal/mq`'s and `internal/api`'s integration-tagged tests | Yes | `make test-integration` |
 | E2E tests (SDK) | `tests/e2e/sdk/*.test.ts` | Yes | `make test-e2e` |
 
 - **Unit tests** live beside the code they test (e.g., `internal/discovery/discovery_test.go`). They use mocks or embedded NATS (in-process, no Docker needed).
-- **Integration tests** use the `//go:build integration` build tag. In `tests/integration`, `TestMain` starts one ClickHouse testcontainer and a dynamodb-local one (for the DynamoDB dedupe backend's tests), and boots the production wiring against it through `app.New` (embedded NATS, ingest worker, sweeper, hub, the API server on a random loopback port); tests reach it via `env(t)` and create their own tables. `TestNATSBackend_EndToEnd` also starts a NATS container configured from `deployments/nats/values.yaml`, applies `deployments/nats/jetstream.yaml` to it through `internal/mq/natstest`, and boots two processes on `mq.backend: nats` against it. `TestMain` also builds the `wavehouse` binary while the containers start, so the build is not charged to the `-timeout`: the `TestRoles_*` tests run it as separate OS processes (two API, two then three ingest, one killed with `SIGKILL`) over NATS, Redis and dynamodb-local, and read each ingest process's shard ownership from its `/metrics`. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second ingest worker batch window. `internal/cache`'s integration tests start their own containers instead — Redis, Valkey, Dragonfly and a one-node Redis Cluster — for the shared backend. `shared_cache_test.go` starts its own Redis testcontainer per test (`startRedis`) and boots extra, independent `cache.backend: redis` instances over that same ClickHouse (`bootRedisApp`), to exercise the cache shared across processes rather than one package in isolation. The same target also runs `internal/mq/natsspike`. That package pins the nats-server behavior the external-NATS topology depends on, against an in-process server with no Docker. It lives under `internal/mq` because only that tree may import NATS, and it runs here rather than in the unit suite because each test takes seconds and the unit suite has a 15-second limit per package. For the same reason the external NATS broker's tests (`internal/mq/external*_test.go`, including its run of the `mqtest` conformance suite) and the NATS KV lease tests (`internal/mq/lease_test.go`, including their run of the `coordtest` conformance suite) carry the `integration` tag inside `internal/mq`, and the target runs them by name, so the package's untagged tests stay in the unit suite alone.
+- **Integration tests** use the `//go:build integration` build tag. In `tests/integration`, `TestMain` starts one ClickHouse testcontainer and a dynamodb-local one (for the DynamoDB dedupe backend's tests), and boots the production wiring against it through `app.New` (embedded NATS, ingest worker, sweeper, hub, the API server on a random loopback port); tests reach it via `env(t)` and create their own tables. `TestNATSBackend_EndToEnd` also starts a NATS container configured from `deployments/nats/values.yaml`, applies `deployments/nats/jetstream.yaml` to it through `internal/mq/natstest`, and boots two processes on `mq.backend: nats` against it. `TestMain` also builds the `wavehouse` binary while the containers start, so the build is not charged to the `-timeout`: the `TestRoles_*` tests run it as separate OS processes (two API, two then three ingest, one killed with `SIGKILL`) over NATS, Redis and dynamodb-local, and read each ingest process's shard ownership from its `/metrics`. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second ingest worker batch window. `internal/cache`'s integration tests start their own containers instead — Redis, Valkey, Dragonfly and a one-node Redis Cluster — for the shared backend. `shared_cache_test.go` starts its own Redis testcontainer per test (`startRedis`) and boots extra, independent `cache.backend: redis` instances over that same ClickHouse (`bootRedisApp`), to exercise the cache shared across processes rather than one package in isolation. The same target also runs `internal/mq/natsspike`. That package pins the nats-server behavior the external-NATS topology depends on, against an in-process server with no Docker. It lives under `internal/mq` because only that tree may import NATS, and it runs here rather than in the unit suite because each test takes seconds and the unit suite has a 15-second limit per package. For the same reason the external NATS broker's tests (`internal/mq/external*_test.go`, including its run of the `mqtest` conformance suite) and the NATS KV lease tests (`internal/mq/lease_test.go`, including their run of the `coordtest` conformance suite) carry the `integration` tag inside `internal/mq`, and the target runs them by name, so the package's untagged tests stay in the unit suite alone. `internal/api`'s `TestIntegration_*` tests (the read path's filters against a ClickHouse in a non-UTC zone) are run by name the same way.
 
-Shared test utilities live in `internal/testutil/`. The packages log through `slog.Default()`, so tests reach log output through `internal/testutil/logtest`: `logtest.Silence()` in a package's `TestMain` discards it, and `logtest.Capture(t, level)` routes it to a buffer for a test that asserts on log lines — such a test must not call `t.Parallel()`, because the default logger is process-wide. A test that starts the embedded broker keeps its store in `internal/testutil/storedir`'s `storedir.New(t)` rather than a bare `t.TempDir()` (`testutil.NewEmbeddedMQ` does): the NATS server can finish writing a consumer's state after `Close` returns, which fails `t.TempDir`'s one-shot removal, and `storedir` removes the store again until those writes have landed ([#442](https://github.com/Wave-RF/WaveHouse/issues/442)).
+Shared test utilities live in `internal/testutil/`. The packages log through `slog.Default()`, so tests reach log output through `internal/testutil/logtest`: `logtest.Silence()` in a package's `TestMain` discards it, and `logtest.Capture(t, level)` routes it to a buffer for a test that asserts on log lines — such a test must not call `t.Parallel()`, because the default logger is process-wide. A test that needs the chtypes artifact takes its engine from `internal/typelayer/typelayertest` (`typelayertest.TestEngine`, and `typelayertest.SkipWithoutArtifact` to skip when the artifact is not installed — set `WAVEHOUSE_TEST_REQUIRE_CHTYPES=1` to fail instead); `internal/typelayer`'s own tests use an in-package copy of that helper. A test that starts the embedded broker keeps its store in `internal/testutil/storedir`'s `storedir.New(t)` rather than a bare `t.TempDir()` (`testutil.NewEmbeddedMQ` does): the NATS server can finish writing a consumer's state after `Close` returns, which fails `t.TempDir`'s one-shot removal, and `storedir` removes the store again until those writes have landed ([#442](https://github.com/Wave-RF/WaveHouse/issues/442)).
 
 ### Adding New Tests
 
 - **Unit test for `internal/foo/`** → create `internal/foo/foo_test.go` (same package).
-- **Integration test needing Docker** → add a subtest under `tests/integration/` (e.g. a new file with `//go:build integration`). A test of one package against its own external server — the shared cache backend against Redis, Valkey and Dragonfly containers — lives beside the package instead (`internal/cache/redis_integration_test.go`, same build tag), and the package is listed in the `test-integration` target.
+- **Integration test needing Docker** → add a subtest under `tests/integration/` (e.g. a new file with `//go:build integration`). A test of one package against its own external server — the shared cache backend against Redis, Valkey and Dragonfly containers — lives beside the package instead (`internal/cache/redis_integration_test.go`, same build tag), and the package is listed in the `test-integration` target. In `internal/api` and `internal/mq` that target picks tagged tests by name (`-run '^Test(ExternalNATS|NewNATS|NATSPermissions_Refuse|Leases|Integration_)'`), so name a new one `TestIntegration_*` in `internal/api`, or extend the pattern.
 - **E2E test via SDK** → add a `tests/e2e/sdk/*.test.ts` file. These tests exercise the full pipeline (ingest → ClickHouse → query) through the TypeScript SDK. Run with `make test-e2e`.
 - **Test helpers** → add to `internal/testutil/` (Go) or `tests/e2e/sdk/helpers.ts` (E2E).
 
@@ -381,14 +399,15 @@ The orchestrator always provisions its own stack — fresh ClickHouse and Redis 
 
 ```bash
 docker compose -f deployments/compose/dependencies.yaml --profile redis up -d
-WH_CONFIG=tests/e2e/fixtures/config.yaml WH_CACHE_REDIS_ADDRS=localhost:6379 go run ./cmd/wavehouse
+mkdir -p tmp/e2e-settings && cp tests/e2e/fixtures/settings/*.json tmp/e2e-settings/
+WH_CONFIG=tests/e2e/fixtures/config.yaml WH_SETTINGS_DIR=tmp/e2e-settings WH_CACHE_REDIS_ADDRS=localhost:6379 go run ./cmd/wavehouse
 ```
 
-The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the fixture's `settings.dir` is relative to the working directory. The fixture's settings directory (policy, pipes, and tunables) points at ClickHouse on `localhost:9000`; if yours isn't there, edit `clickhouse.addr` / `http_port` in `tests/e2e/fixtures/settings/config.json` (the orchestrator patches them itself for its testcontainer).
+The suite writes policy and pipes into the server's settings directory, so give it a scratch copy, never the tracked fixture. The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the relative paths above resolve against the working directory. The fixture's settings (policy, pipes, and tunables) point at ClickHouse on `localhost:9000`; if yours isn't there, edit `clickhouse.addr` / `http_port` in the copy's `config.json` (the orchestrator patches its own copy for its testcontainer).
 
 Prefixing the variable to `make dev` does **not** work: that recipe pins `WH_CONFIG=.config.local.yaml` inline, which overrides anything inherited from the environment.
 
-Then set `CLICKHOUSE_URL` / `WAVEHOUSE_URL` and run `pnpm test` from `tests/e2e/sdk/`; teardown is a no-op on that path, so your stack survives between iterations.
+Then, from `tests/e2e/sdk/`, run `CLICKHOUSE_URL=http://localhost:8123 WAVEHOUSE_URL=http://localhost:8080 WAVEHOUSE_SETTINGS_DIR=$(git rev-parse --show-toplevel)/tmp/e2e-settings pnpm test`; teardown is a no-op on that path, so your stack survives between iterations.
 
 If a previous run was killed (harness timeout, stop button, `SIGKILL`), it can leave a `wavehouse-cov` behind. That process shares `tmp/data` and `tmp/wavehouse-cov.log` with the next run and will corrupt it, so the orchestrator kills any leftover before starting and says so.
 
@@ -459,11 +478,12 @@ WaveHouse/
 │   ├── auth/               # JWT/JWKS authentication middleware
 │   ├── cache/              # Query cache: Ristretto L1 + the tenant-led version index; the Redis-compatible shared backend
 │   ├── chconn/             # ClickHouse pools, one per connection tuple (reconciled on settings reload)
-│   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
+│   ├── chsql/              # Shared ClickHouse SQL helpers (identifier quoting, bind-safety, {p:String} value encoding, the strict integer-claim cast)
+│   ├── chversion/          # The ClickHouse version the suites run, and so the chtypes line CI fetches
 │   ├── config/             # YAML + env var configuration
 │   ├── coord/              # Leases with fencing tokens (in-process Local, RunElected, coordtest suite)
 │   ├── dedupe/             # Optional deduplication (Reserve/Commit/Release; Pebble or DynamoDB)
-│   ├── discovery/          # ClickHouse schema introspection + validation
+│   ├── discovery/          # ClickHouse schema introspection (system.columns/system.tables, server version + timezone)
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper + shard claims
 │   ├── keyenc/             # One escaping for composite keys (NATS subject tokens, cache keys, dedupe keys)
 │   ├── mq/                 # MQ boundary: the only NATS/JetStream importer
@@ -474,19 +494,21 @@ WaveHouse/
 │   ├── settings/           # Settings directory: validate, adopted snapshot, reload
 │   ├── stream/             # SSE fan-out: Hub, Subscriber queue, Bucket, keepalive wheel
 │   ├── tenant/             # Tenant id: type, grammar, reserved default, request header name
-│   └── testutil/           # Shared test helpers and mocks (cachetest suite)
+│   ├── testutil/           # Shared test helpers and mocks (cachetest suite)
+│   └── typelayer/          # In-process ClickHouse parser (chtypes): ingest validation, insert checks, row-filter compilation
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)
 │   └── e2e/                # E2E suite (orchestrator + ClickHouse and Redis testcontainers)
-│       ├── fixtures/       # ClickHouse DDL + config and settings-directory fixtures
+│       ├── fixtures/       # Server config + settings-directory fixtures (tables come from sdk/tables.ts)
 │       └── sdk/            # E2E specs driven through the TypeScript SDK (Vitest)
 ├── clients/                # Client SDKs
 │   └── ts/                 # TypeScript SDK (@wavehouse/sdk, pnpm workspace)
 ├── deployments/
-│   ├── compose/            # Docker Compose files (standalone.yaml, dependencies.yaml)
+│   ├── compose/            # Docker Compose files (standalone.yaml, dependencies.yaml) + settings/ (trial settings directory)
+│   ├── nats/               # External NATS JetStream topology (nack CRs + Helm values)
 │   ├── Dockerfile          # Runtime image
 │   └── Dockerfile.goreleaser  # Release image (built by GoReleaser)
-├── scripts/                # E2E orchestrator, cov tool, CI/hook helpers
+├── scripts/                # E2E orchestrator, cov tool, chtypes fetcher, CI/hook helpers
 ├── docs/                   # Documentation
 ├── config.yaml             # Default configuration file
 ├── Makefile                # Build, test, lint, deploy targets
@@ -497,7 +519,7 @@ WaveHouse/
 
 ## Code Conventions
 
-- **Strict Go formatting**: Use `gofumpt` (a stricter superset of `gofmt`, enforced by CI). Run `make fmt` to format.
+- **Strict Go formatting**: Use `gofumpt` (a stricter superset of `gofmt`, enforced by CI). `make fmt` checks it; `make fix` applies it.
 - **Interface-first design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) are defined as interfaces so implementations can be swapped behind a stable contract.
 - **Package boundaries**: The `internal/` directory ensures packages are private to this module.
 - **Error handling**: Return errors to callers. Use `slog` for structured logging, through the default logger (`slog.InfoContext(ctx, …)` and its siblings) — constructors don't take a `*slog.Logger`; tests silence or capture it with `internal/testutil/logtest`.
@@ -549,14 +571,13 @@ Run `make help` to see all targets. Key ones:
 | `make release-sdk-go VERSION=X.Y.Z` | Tag a Go SDK release — `go get` (pending [#434](https://github.com/Wave-RF/WaveHouse/pull/434)) |
 | **Analysis** (informational, not in CI) | |
 | `make size` | Binary size analysis → `tmp/analysis/` (text + SVG + interactive HTML) |
-| `make audit-cgo` | Audit dependency tree for C files (builds use `CGO_ENABLED=0`) |
 | `make deadcode` | Find unreachable functions |
 | `make dep-cut` | Top cuttable deps by transitive weight (`LIMIT=N` to override) |
-| `make binary-analysis` | Combined: `size` + `audit-cgo` + `deadcode` |
+| `make binary-analysis` | Combined: `size` + `deadcode` |
 | **Cleanup** (tiered — compose explicitly for partial resets) | |
 | `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`, `docs/.dev-dist/`) |
 | `make clean-test` | Test outputs only (`tmp/` — coverage data, logs, NATS state) |
-| `make clean-tools` | Installed tools and pnpm deps (`.bin/`, `node_modules/`) |
+| `make clean-tools` | Installed tools and the workspace members' pnpm deps (`.bin/`, `clients/ts`, `tests/e2e/sdk` and `docs` `node_modules/`) |
 | `make clean-all` | Full reset: above + `data/` + Docker volumes |
 
 All test targets accept `ARGS="..."` for pass-through `go test` flags. Build targets accept `TAGS="..."` for Go build tags. `V=1` switches to verbose `gotestsum` output.
@@ -592,7 +613,7 @@ PRs are grouped per config to reduce noise. The npm config is pointed at the wor
 
 The GitHub Actions config names **two** directories. `directory: /` reaches `.github/workflows/` but does not descend into `.github/actions/*/action.yml`, so the `setup-env` composite action — which owns every cache in `ci.yml` — was invisible to Dependabot, and its pins went stale against upstream and diverged from `publish-npm.yml`, which Dependabot *does* track and which doesn't call `setup-env`. Listing its directory under `directories:` brings it into the same weekly group; **adding a composite action means adding its directory there**, because nothing else catches the drift.
 
-`typescript` majors are held back (`ignore: version-update:semver-major`) because `tsup` vendors a `rollup-plugin-dts` that crashes on TypeScript 7 during `clients/ts`'s `prepare` script — i.e. inside `pnpm install`, which takes every Node job down at once. See the comment in `.github/dependabot.yml` for the condition that lets it be removed.
+`typescript` majors are held back (`ignore: version-update:semver-major`) because `tsup` vendors a `rollup-plugin-dts` that crashes on TypeScript 7 during `clients/ts`'s `prepare` script — i.e. inside `pnpm install`, which takes every Node job down at once. See the comment in `.github/dependabot.yml` for the condition that lets it be removed. `eventsource-parser` majors are held back too: v4 drops the CJS build the SDK's `require` entry needs ([#492](https://github.com/Wave-RF/WaveHouse/issues/492)).
 
 **No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
 
@@ -621,7 +642,7 @@ The **tag is the version**, everywhere:
 
 | Component | Where the version comes from |
 | --- | --- |
-| Server | GoReleaser's `-ldflags` at build time, from the tag |
+| Server | GoReleaser's `-ldflags` at build time, from the tag (`goreleaser build --single-target`, once per platform) |
 | Go SDK | The tag itself — a Go module has no version file |
 | TypeScript SDK | `publish-npm.yml` stamps `clients/ts/package.json` from the tag before publishing |
 
@@ -641,7 +662,7 @@ Tag globs are anchored at the start of the ref name, so `v*` never matches a `cl
 
 ### What a release publishes
 
-- **Server —** a **GitHub Release** with the cross-compiled archives (linux/darwin/windows/freebsd × amd64/arm64; `.zip` on Windows, `.tar.gz` elsewhere) and `checksums.txt`. A tag carrying a prerelease suffix (`v0.1.0-alpha.1`) is marked as a GitHub pre-release, so it never takes the "Latest release" badge from a shipped stable version.
+- **Server —** a **GitHub Release** with archives for the three supported platforms (linux/amd64, linux/arm64, darwin/arm64 — cgo's dlopen requirement and the lack of a chtypes artifact elsewhere dropped Windows, FreeBSD, and darwin/amd64; see [Deployment → Supported Platforms](/deployment#supported-platforms)), each `.tar.gz`, and `checksums.txt`. A tag carrying a prerelease suffix (`v0.1.0-alpha.1`) is marked as a GitHub pre-release, so it never takes the "Latest release" badge from a shipped stable version.
 - **Both —** **release notes generated by GitHub** from the PRs merged since the previous tag *in the same family* — one line per PR, since `main` is squash-merged, grouped into the categories defined in [`.github/release.yml`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/release.yml). Grouping is by **PR label**: `github_actions` / `documentation` are applied automatically by `actions/labeler`, but `breaking-change`, `security`, `bug`, and `enhancement` are applied by hand — an unlabelled PR lands in "Other changes". Dependabot is split out by **author** rather than by label, because the labels `actions/labeler` applies by path — `github_actions`, `documentation` — mark our own PRs too; our CI work gets its own "CI & build" section — ordered above Documentation, since a CI PR here nearly always updates docs too — and Dependencies is pure Dependabot residue. **Any category keyed on a label a Dependabot PR can carry needs that author exclude** — labeler's path labels *and* the ecosystem labels Dependabot applies itself (`dependencies`, `javascript`, `go`, `github_actions`; `javascript` is in neither `labeler.yml` nor our categories) — or that category intercepts bumps before they reach the `📦 Dependencies` catch-all. `CHANGELOG.md` is *not* the source of the release body; it is the longer-form record of why each change was made.
 - **Server —** a **GHCR image** at `ghcr.io/wave-rf/wavehouse`, with two tags: the immutable `:vX.Y.Z`, and one moving *channel* pointer. A stable release moves `:latest`; a prerelease moves `:alpha` / `:beta` / `:rc` / `:next` instead, matching the npm dist-tag it would get. The channel comes from the **first** prerelease identifier, matched **exactly**: `v0.2.0-rc.1` → `:rc`, while `-alpha1`, `-preview.1`, or any other form → `:next`. `scripts/ci/release-channel.sh` is the single rule every publisher uses, so `ghcr.io/wave-rf/wavehouse:rc` and `@wavehouse/sdk@rc` can't drift apart. **A prerelease-only project therefore has no `:latest` tag** — that is deliberate; `:latest` starts existing when the first stable release ships.
 - **TypeScript SDK —** an **npm publish** of `@wavehouse/sdk` under `latest` (stable) or `alpha`/`beta`/`rc`/`next` (prerelease), plus its own GitHub Release.
@@ -665,14 +686,32 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:v0.1.0 \
 `--signer-workflow` is not optional garnish: `--repo` alone accepts an attestation produced by *any* workflow in the repo. Same point, and the `:dev` equivalent, in [Deployment → Registry](/deployment#registry) and `SECURITY.md`.
 
 :::note[Releasing from the GitHub UI instead]
-Publishing a release from **Releases → Draft a new release** creates the tag, which fires the same workflow — so it works, and GoReleaser's default `mode: keep-existing` (the key is not set in `.goreleaser.yaml`) means it will not overwrite notes you wrote. Two things the `make` targets do for you and the UI does not: none of the preflight checks run, and you must click **Generate release notes** yourself, because a body you publish empty stays empty.
+Publishing a release from **Releases → Draft a new release** creates the tag, which fires the same workflow — so it works, and it will not overwrite notes you wrote: `release.yml` checks `gh release view` first and, when the release already exists, only uploads the assets. (That check also makes the job re-runnable, which is why it is not conditional on how the release was created.) Two things the `make` targets do for you and the UI does not: none of the preflight checks run, and you must click **Generate release notes** yourself, because a body you publish empty stays empty.
 :::
+
+### How the server release is built
+
+Since the switch to cgo the three binaries are built on **three native runners**, not cross-compiled from one:
+
+| Target | Runner |
+| --- | --- |
+| `linux/amd64` | `ubuntu-latest` |
+| `linux/arm64` | `ubuntu-24.04-arm` |
+| `darwin/arm64` | `macos-latest` |
+
+All three are free for public repositories. Each runs `goreleaser build --single-target --output dist/wavehouse` — so `.goreleaser.yaml` is still the one place the build's `-ldflags`, binary name and supported platform set are declared — and uploads the binary as a run artifact. A final `ubuntu-latest` job assembles everything: the three `.tar.gz` archives, `checksums.txt`, the multi-arch GHCR image via `docker buildx build` over [`deployments/Dockerfile.goreleaser`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/Dockerfile.goreleaser), the GitHub Release, and the provenance attestations.
+
+**Why not one runner and cross-compilers?** cgo needs a C toolchain per target, and for darwin that means real Apple SDK headers. `zig cc -target aarch64-macos` cross-compiles most Go programs happily, but not this one: `prometheus/client_golang`'s darwin process collector is a C file that `#include`s `<mach/mach_vm.h>`, which zig does not ship and which cannot legally be fetched onto a GitHub-hosted Linux runner. Measured, with and without `-tags netgo,osusergo`; the two GoReleaser features that would solve it — split/merge and `builder: prebuilt` — are Pro-only, and OSS `goreleaser release` has no `--skip=build`, so there is no way to have GoReleaser assemble a release from binaries built elsewhere. The two Linux targets *can* be cross-compiled (`gcc-aarch64-linux-gnu` works), but building them natively alongside darwin costs nothing extra and keeps one rule instead of two.
+
+A consequence worth knowing when you file a bug: the released Linux binaries are **dynamically linked against glibc**, minimum `GLIBC_2.34` (measured on `ubuntu-24.04`, both architectures) — Debian 12, Ubuntu 22.04 and RHEL 9 or newer. The pre-cgo builds were static and ran anywhere. The container images are unaffected; their `distroless/cc-debian12` base is glibc 2.36.
+
+`goreleaser-validate.yml` is the PR-time proof of all of this. On a change to `.goreleaser.yaml`, `go.mod`/`go.sum` (which also name the chtypes CLI version the image bundles), `deployments/Dockerfile.goreleaser` or the release workflows it runs `goreleaser check`, the same three-runner matrix in `--snapshot` mode, and a real multi-arch image build (to `--output type=cacheonly`, so nothing is pushed). It is advisory, not a required check.
 
 ## The `dev` channel
 
 Between releases, every push to `main` republishes both artifacts so `@dev` always means "current `main`":
 
-- **`ghcr.io/wave-rf/wavehouse:dev`** — a rolling pointer, plus an immutable `:dev-<sha>` (pruned after 30 days by `cleanup-ghcr.yml`, newest 5 always kept). Built by the same GoReleaser pipeline with `WAVEHOUSE_DEV=1`, which suppresses the GitHub Release. Note a Docker tag is only a pointer: `docker run …:dev` reuses a stale local image unless you `docker pull` first or pass `--pull=always`.
+- **`ghcr.io/wave-rf/wavehouse:dev`** — a rolling pointer, plus an immutable `:dev-<sha>` (pruned after 30 days by `cleanup-ghcr.yml`, newest 5 always kept). Built by `publish-dev.yml`, the same shape as a real release minus everything that isn't the image: two native Linux build jobs and one push job, no archives and no GitHub Release. Note a Docker tag is only a pointer: `docker run …:dev` reuses a stale local image unless you `docker pull` first or pass `--pull=always`.
 - **`@wavehouse/sdk@dev`** — `0.0.1-dev.<utc-stamp>.h<build-hash>`, published only when the published package actually changes. The trailing hash covers every file `npm pack` would ship — the built `dist/`, `package.json` minus its `version`, and the bundled `README`/`LICENSE` — so a push whose package would be byte-identical to the current `dev` publish is skipped, while a change to `exports`, `files`, `bin`, or `engines` republishes even though `dist/` is untouched.
 
   The `<utc-stamp>` is load-bearing, not decoration. `npm install …@dev` records a *range* in your `package.json`, not the dist-tag, so what you get on the next install is the highest version matching that range. Under the old `0.0.0-dev.h<hash>` scheme, semver's lexical ordering of alphanumeric prerelease identifiers meant the newest publish routinely wasn't the highest one, and a range could resolve *backwards* — an `@dev` install landed on a two-month-old build ([#475](https://github.com/Wave-RF/WaveHouse/issues/475)). A numeric identifier compares numerically, so the channel now orders by publish time. The `0.0.1` base keeps the channel below every real release (so a dev build can never satisfy `^0.1.0`) and above the legacy `0.0.0-dev.*` publishes, which npm's 72-hour unpublish window makes permanent.

@@ -32,11 +32,9 @@ import (
 // Why a proxy instead of clickhouse-go's native Query/Exec:
 //   - ClickHouse classifies statements natively, so any single statement
 //     (arbitrary DDL/DML verbs, current and future) and inline FORMAT
-//     directives all just work without WaveHouse-side parsing.
-//     Multi-statement input (`SELECT 1; TRUNCATE t`) also works when
-//     the upstream ClickHouse has multi-query enabled, which is the
-//     default in recent versions; older or restrictively-configured
-//     servers may reject the second statement with a clear error.
+//     directives all just work without WaveHouse-side parsing. The HTTP
+//     interface takes one statement per request: `SELECT 1; TRUNCATE t` is
+//     refused with code 62 (measured on 26.8.15.10).
 //   - There is no IsMutation heuristic to maintain — no leading-verb table,
 //     no comment stripper, no CTE-aware paren scanner, no class of bug
 //     where a future ClickHouse verb routes the wrong way.
@@ -50,7 +48,8 @@ type QueryHandler struct {
 	// target resolves the tenant's ClickHouse HTTP wiring per request
 	// (chconn.Pools.Target in production): the base URL (e.g.
 	// `http://localhost:8123`) the handler appends query-string params
-	// (`default_format`, `database`, `date_time_output_format`) to and POSTs
+	// (`default_format`, `database`, `date_time_output_format`,
+	// `output_format_json_escape_forward_slashes`) to and POSTs
 	// the SQL against, plus the credentials and database; the zero Target is
 	// a tenant on no pool, a 503. queryTimeout bounds each proxied query.
 	// Funcs, not values, so a settings reload applies to the next request.
@@ -80,7 +79,10 @@ const (
 	// genuinely-large results, or the structured query endpoint with its
 	// DefaultMaxRows cap). The cap is here as a safety net against a
 	// runaway SELECT exhausting the API server's RAM; admin-only doesn't
-	// mean operators won't accidentally OOM themselves.
+	// mean operators won't accidentally OOM themselves. The structured query
+	// and pipes buffer under the same cap (chReader), and a pipe has no row
+	// limit to keep it under: past it, every path answers 502
+	// clickhouse.response_too_large.
 	maxCHResponseBytes = 64 << 20 // 64 MiB
 
 	// maxRequestBodyBytes caps the inbound SQL request body. 16 MiB is well
@@ -225,6 +227,10 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// re-parse ClickHouse's default `YYYY-MM-DD HH:MM:SS`. Matches the prior
 	// handler's RFC3339Nano output close enough for downstream callers.
 	q.Set("date_time_output_format", "iso")
+	// `/` as `/`, as /v1/query and pipes spell it (chReadSettingsFixed), not
+	// ClickHouse's default `\/`. A SETTINGS clause in the SQL still wins over
+	// the URL (measured on 26.8.15.10).
+	q.Set("output_format_json_escape_forward_slashes", "0")
 	if target.Database != "" {
 		q.Set("database", target.Database)
 	}
@@ -292,10 +298,10 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		// ClickHouse answers most errors with HTTP 500 — bad SQL, a missing
-		// grant, an unknown table alike — so the status says nothing; the
-		// exception code it sends with it does (#403). The message is
-		// ClickHouse's own text, verbatim.
+		// The status ClickHouse sends does not say which kind of failure it
+		// was (on 26.8 a syntax error is 400, an unknown table 404, a
+		// TIMEOUT_EXCEEDED 408); the exception code it sends with it does
+		// (#403). The message is ClickHouse's own text, verbatim.
 		chErr := chconn.NewHTTPError(&http.Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: io.NopCloser(bytes.NewReader(body))})
 		msg := strings.TrimSpace(string(body))
 		if msg == "" {

@@ -5,13 +5,13 @@ sidebar:
   order: 2
 ---
 
-Run WaveHouse locally in under five minutes. WaveHouse ships as a single binary with ClickHouse as the only external dependency; this walkthrough covers ingest, query, and real-time streaming.
+Run WaveHouse locally in under five minutes. WaveHouse ships as one binary plus the per-ClickHouse-version [chtypes artifact](/deployment#chtypes-artifacts) it opens for your server's line, with ClickHouse as the only external network dependency once the artifact is cached; this walkthrough covers ingest, query, and real-time streaming.
 
 ## Prerequisites
 
 - **Docker** — for running ClickHouse (and optionally WaveHouse itself).
 - **curl** and **jq** (optional) — for poking the API.
-- **Go 1.26+** — only required if you want to build from source; skip it for the Docker path below.
+- **Go 1.27+** — only required if you want to build from source; skip it for the Docker path below. Building from source also requires cgo (a C toolchain; on Linux the binary links against the build host's glibc, where the prebuilt binaries need 2.34 or later) — see [Deployment → Supported Platforms](/deployment#supported-platforms).
 
 ## 1. Start WaveHouse
 
@@ -22,6 +22,8 @@ git clone https://github.com/Wave-RF/WaveHouse.git
 cd WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 ```
+
+The first `up` builds the WaveHouse image from source (a cgo compile), so expect several minutes once. The image carries no artifact: on its first start WaveHouse fetches the chtypes artifact for your ClickHouse line (about 45 MB; it needs the chtypes registry, or a mirror you configure, until the line is cached) into the `chtypes-cache` volume at the first tenant bind, and later starts reuse both. You can prefetch it with the bundled `chtypes` CLI, and [Deployment](/deployment#chtypes-artifacts) covers air-gapped hosts.
 
 The stack bind-mounts `deployments/compose/settings/` as WaveHouse's [settings directory](/settings-directory) — the hot-reloadable configuration, ClickHouse address included — so there is nothing to seed; edit those files and the running container picks the change up.
 
@@ -62,7 +64,7 @@ curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
 # → {"ok":true}
 ```
 
-WaveHouse validates the body against the ClickHouse schema before acknowledging. Unknown fields, type mismatches, and missing required columns are rejected with a `400`.
+WaveHouse validates the body against the ClickHouse schema before acknowledging — using ClickHouse's own parser, running in-process (`internal/typelayer`, via [chtypes](/deployment#chtypes-artifacts)), so a record ClickHouse refuses is rejected with a `400` carrying ClickHouse's own code and message: a value the column cannot read, such as `"score": "high"` (code 72), or a field the table lacks (code 117 — stricter than a native `INSERT`, which skips unknown fields by default). Values ClickHouse coerces are stored as a native `INSERT` would store them: `"42.5"` or `true` into `score` stores `42.5` or `1`.
 
 ## 4. Query
 
@@ -93,7 +95,7 @@ curl -N "http://localhost:8080/v1/stream?table=clicks"
 curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z"
 ```
 
-Rows arrive **positionally**, so raw `curl` output looks like `"row":["/home","signup"]` rather than named fields. The stream sends an `event: schema` frame before the first row and again when the column list changes, and a raw client must pair each row against the **most recent** frame rather than the first.
+Rows arrive **positionally**, so raw `curl` output looks like `"row":["/home","signup",42.5,"2026-03-24T11:59:58.512Z"]` rather than named fields. The stream sends an `event: schema` frame before the first row and again when the column list changes, and a raw client must pair each row against the **most recent** frame rather than the first.
 
 That re-announcement is not guaranteed in one case: after a gap-fill across a column change, live rows can arrive without a fresh frame ([#543](https://github.com/Wave-RF/WaveHouse/issues/543)). Drop a row whose length disagrees with the last announced list rather than zipping it, and reconnect to resynchronize — an arity check cannot see a same-length change such as a `RENAME COLUMN`. See [the wire format](/api#get-v1stream--server-sent-events-stream) for the frame sequence and the full rule; the [TypeScript SDK](/sdk/streaming) does all of this for you.
 
@@ -119,4 +121,4 @@ The handful of things that most often trip up a first session — each is expect
 ## Going further
 
 - **Validate JWTs**: set `WH_AUTH_JWT_SECRET=<secret>` (the middleware always runs; without a secret every request is the policy `default_role`) and replace the shipped trial policy (`deployments/compose/settings/policies.json`) with a least-privilege one — see [API Reference — Authentication](/api#authentication) and [Access Control](/access-control).
-- **Enable deduplication**: set `dedupe.enabled` to `true` in the settings directory's `config.json` (it hot-reloads, no restart) — records dedupe on their `event_id` field by default; pick a different field (globally or per table) in the same file — see [Settings Directory — Deduplication](/settings-directory#deduplication).
+- **Enable deduplication**: set `dedupe.enabled` to `true` in the settings directory's `config.json` (it hot-reloads, no restart) — records dedupe on their `event_id` column by default (add one to the table); pick a different column (globally or per table) in the same file — see [Settings Directory — Deduplication](/settings-directory#deduplication).

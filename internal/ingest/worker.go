@@ -20,6 +20,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -766,7 +767,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 	// sink the whole batch.
 	// TODO: potentially could try a binary search or something eventually maybe? unclear if faster...
 	for i, pm := range group {
-		singleErr := w.insertToClickHouse(ctx, tableName, cols, []parsedMsg{pm})
+		singleErr := w.insertIsolated(ctx, tableName, cols, pm)
 		switch {
 		case singleErr == nil:
 			w.handleSuccess(ctx, tableName, []parsedMsg{pm})
@@ -812,6 +813,19 @@ func (w *IngestWorker) retryLater(ctx context.Context, tableName string, msgs []
 // explicitly, so the positional rows land in the right slots. Callers group by
 // column list first: a batch spanning two lists cannot share one statement.
 func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, columns []string, msgs []parsedMsg) error {
+	return w.insert(ctx, tableName, columns, msgs, false)
+}
+
+// insertIsolated inserts one row of a batch being isolated, synchronously. An
+// async flush merges concurrent INSERTs of the same statement into one block,
+// and a CHECK constraint one row violates fails every INSERT in it: a good row
+// isolated beside another writer's bad one would be parked with it. Sync skips
+// the async flush wait too, about 55 ms per isolated row on 26.8.
+func (w *IngestWorker) insertIsolated(ctx context.Context, tableName string, columns []string, pm parsedMsg) error {
+	return w.insert(ctx, tableName, columns, []parsedMsg{pm}, true)
+}
+
+func (w *IngestWorker) insert(ctx context.Context, tableName string, columns []string, msgs []parsedMsg, isolated bool) error {
 	var buf bytes.Buffer
 	for _, m := range msgs {
 		buf.Write(m.row)
@@ -838,20 +852,25 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	q.Set("database", t.Database)
 	q.Set("param_target_table", tableName)
 	q.Set("query", fmt.Sprintf("INSERT INTO {target_table:Identifier} (%s) FORMAT JSONCompactEachRow", strings.Join(quoted, ", ")))
-	q.Set("date_time_input_format", "best_effort")
-	// A field the record omitted rides as an explicit null in its column's slot,
-	// because a positional row has one value per column and no way to say
-	// "absent". For a NON-nullable column with a default this setting turns that
-	// null back into the default, matching what omitting the key did under
-	// JSONEachRow. It is already the server default (verified on 26.6.3), so
-	// this is belt-and-braces for a server configured otherwise.
-	//
-	// TRANSITIONAL DIVERGENCE, and it is NOT what this setting controls: on a
-	// NULLABLE column an explicit null is stored as NULL whatever the setting
-	// says — only an ABSENT key ever took the default. So a `Nullable(T) DEFAULT
-	// …` column now stores NULL where it previously took its default. Verified
-	// on 26.6.3: omitted key → default; explicit null → NULL at both settings.
-	q.Set("input_format_null_as_default", "1")
+	// The parsing settings are the ones the API judged these rows under
+	// (typelayer), not literals of the worker's own: a setting the two did not
+	// share would ask the server a question chtypes never answered. Each row
+	// is ClickHouse's own export of its record, DEFAULTs already evaluated, so
+	// parsing it again under the same settings stores the values judged.
+	for k, v := range typelayer.InsertSettings() {
+		q.Set(k, v)
+	}
+	// A batch leaves async_insert at the server's default (an isolated row
+	// turns it off); wait_for_async_insert=1 makes an async INSERT return only
+	// once stored, so a message is acked only then even if the profile sets it
+	// to 0. Not parsing settings, so chtypes never sees them.
+	// insert_deduplicate stays at the server default: idempotency is the
+	// gateway's (internal/dedupe), and a Replicated engine's block-hash dedupe
+	// is the operator's choice for their engine.
+	q.Set("wait_for_async_insert", "1")
+	if isolated {
+		q.Set("async_insert", "0")
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", t.URL+"?"+q.Encode(), &buf)
 	if err != nil {

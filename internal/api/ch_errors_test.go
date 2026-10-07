@@ -3,11 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,7 +24,8 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
-// failingConn answers every query with err, as the driver would.
+// failingConn answers every query with err, as the driver would — schema
+// discovery's connection, which still speaks the native protocol.
 type failingConn struct {
 	driver.Conn
 	err error
@@ -56,43 +56,72 @@ func refusedDial(t *testing.T) error {
 	return err
 }
 
+// chErrorCase is one way ClickHouse, or the way to it, fails a query: the
+// answer the fake gives (or the transport failure it meets), and the
+// response that must come of it.
 type chErrorCase struct {
-	name          string
-	err           error
-	caps          policy.SelectPermissions
+	name string
+	// answer is what ClickHouse sends; transport, when set, is the failure
+	// the request meets instead.
+	answer    func(http.ResponseWriter, *chSeen)
+	transport error
+	// maxResponse, when set, caps the response buffer.
+	maxResponse int64
+	caps        policy.SelectPermissions
+	// readOnly marks a case that only a read meets: ClickHouse refusing
+	// readonly=2, which a write is never sent under.
+	readOnly      bool
 	wantStatus    int
 	wantCode      string
 	wantRetryable bool
 }
 
+// refused is ClickHouse refusing a statement with code at status.
+func refused(status int, code int32, msg string) func(http.ResponseWriter, *chSeen) {
+	return answerException(status, code, chExceptionBody(code, msg))
+}
+
 func chErrorCases(t *testing.T) []chErrorCase {
 	t.Helper()
 	return []chErrorCase{
-		{name: "syntax error", err: chException(62, "DB::Exception", "Syntax error"), wantStatus: 400, wantCode: codeCHRejected},
-		{name: "unknown identifier (#271)", err: chException(47, "DB::Exception", "Unknown expression identifier `received_timestamp`"), wantStatus: 400, wantCode: codeCHRejected},
-		{name: "type mismatch", err: chException(53, "DB::Exception", "Type mismatch"), wantStatus: 400, wantCode: codeCHRejected},
-		{name: "unknown table", err: chException(60, "DB::Exception", "Table default.gone does not exist"), wantStatus: 400, wantCode: codeCHRejected},
-		{name: "rows read cap", err: chException(158, "DB::Exception", "Limit for rows exceeded"), wantStatus: 400, wantCode: codeCHLimitExceeded},
-		{name: "time cap of the role", err: chException(159, "DB::Exception", "Timeout exceeded"), caps: policy.SelectPermissions{MaxExecutionTime: 1}, wantStatus: 400, wantCode: codeCHLimitExceeded},
-		// A bare deadline is a pool wait or a dial timeout under a capped
-		// role, not the cap: ClickHouse reports the cap itself as 159.
-		{name: "pool wait under a time cap", err: fmt.Errorf("clickhouse query: %w", context.DeadlineExceeded), caps: policy.SelectPermissions{MaxExecutionTime: 1}, wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
-		{name: "backstop cancel under a time cap", err: fmt.Errorf("clickhouse query: %w", context.Canceled), caps: policy.SelectPermissions{MaxExecutionTime: 1}, wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
+		{name: "syntax error", answer: refused(400, 62, "Syntax error"), wantStatus: 400, wantCode: codeCHRejected},
+		{name: "unknown identifier (#271)", answer: refused(404, 47, "Unknown expression identifier `received_timestamp`"), wantStatus: 400, wantCode: codeCHRejected},
+		{name: "type mismatch", answer: refused(400, 53, "Cannot convert string '2026-01-15T10:30:00Z' to type DateTime"), wantStatus: 400, wantCode: codeCHRejected},
+		{name: "unknown table", answer: refused(404, 60, "Table default.gone does not exist"), wantStatus: 400, wantCode: codeCHRejected},
+		{name: "rows read cap", answer: refused(500, 158, "Limit for rows exceeded"), wantStatus: 400, wantCode: codeCHLimitExceeded},
+		{name: "time cap of the role", answer: refused(408, 159, "Timeout exceeded"), caps: policy.SelectPermissions{MaxExecutionTime: 1}, wantStatus: 400, wantCode: codeCHLimitExceeded},
+		// A dropped connection under a capped role is not the cap: ClickHouse
+		// reports the cap itself as 159.
+		{name: "deadline under a time cap", transport: context.DeadlineExceeded, caps: policy.SelectPermissions{MaxExecutionTime: 1}, wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
+		{name: "cancel under a time cap", transport: context.Canceled, caps: policy.SelectPermissions{MaxExecutionTime: 1}, wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
 		// A cap longer than the handler's 5s query_timeout is not what
 		// stopped the query: the timeout reads as it does with no cap.
-		{name: "query_timeout under a longer time cap", err: chException(159, "DB::Exception", "Timeout exceeded"), caps: policy.SelectPermissions{MaxExecutionTime: 10000}, wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
-		{name: "memory cap of the role", err: chException(241, "DB::Exception", "Memory limit (for query) exceeded"), caps: policy.SelectPermissions{MaxMemoryUsage: 1}, wantStatus: 400, wantCode: codeCHLimitExceeded},
-		{name: "server timeout, no role cap", err: chException(159, "DB::Exception", "Timeout exceeded"), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
-		{name: "server memory, no role cap", err: chException(241, "DB::Exception", "Memory limit (total) exceeded"), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
-		{name: "missing grant", err: chException(497, "DB::Exception", "default: Not enough privileges"), wantStatus: 403, wantCode: codeCHAccessDenied},
-		{name: "wrong password", err: chException(516, "DB::Exception", "Authentication failed"), wantStatus: 502, wantCode: codeCHMisconfigured},
-		{name: "overloaded", err: chException(202, "DB::Exception", "Too many simultaneous queries"), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
-		{name: "connection refused", err: fmt.Errorf("clickhouse query: %w", refusedDial(t)), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
-		{name: "pool exhausted", err: fmt.Errorf("clickhouse query: %w", clickhouse.ErrAcquireConnTimeout), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
-		{name: "codeless 404 on the way", err: fmt.Errorf("clickhouse query: %w", &clickhouse.HTTPError{StatusCode: 404, Err: errors.New("There is no handle /nope")}), wantStatus: 502, wantCode: codeCHMisconfigured},
-		{name: "codeless 500 on the way", err: fmt.Errorf("clickhouse query: %w", &clickhouse.HTTPError{StatusCode: 500, Err: errors.New("upstream exploded")}), wantStatus: 500, wantCode: codeCHUnknown, wantRetryable: true},
-		{name: "no verdict", err: errors.New("scan clickhouse row: something odd"), wantStatus: 500, wantCode: codeCHUnknown, wantRetryable: true},
+		{name: "query_timeout under a longer time cap", answer: refused(408, 159, "Timeout exceeded"), caps: policy.SelectPermissions{MaxExecutionTime: 10000}, wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
+		{name: "memory cap of the role", answer: refused(500, 241, "Memory limit (for query) exceeded"), caps: policy.SelectPermissions{MaxMemoryUsage: 1}, wantStatus: 400, wantCode: codeCHLimitExceeded},
+		{name: "server timeout, no role cap", answer: refused(408, 159, "Timeout exceeded"), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
+		{name: "server memory, no role cap", answer: refused(500, 241, "Memory limit (total) exceeded"), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
+		{name: "missing grant", answer: refused(403, 497, "default: Not enough privileges"), wantStatus: 403, wantCode: codeCHAccessDenied},
+		{name: "wrong password", answer: refused(403, 516, "Authentication failed"), wantStatus: 502, wantCode: codeCHMisconfigured},
+		{name: "overloaded", answer: refused(500, 202, "Too many simultaneous queries"), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
+		// A statement that writes, refused by the readonly=2 every read
+		// carries, or a readonly=1 profile refusing the settings every read
+		// sends: configuration, the same on a retry.
+		{name: "read-only refusal of a read", answer: refused(500, 164, "default: Cannot execute query in readonly mode"), readOnly: true, wantStatus: 502, wantCode: codeCHMisconfigured},
+		{name: "connection refused", transport: refusedDial(t), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
+		{name: "codeless 404 on the way", answer: answerException(404, 0, "There is no handle /nope"), wantStatus: 502, wantCode: codeCHMisconfigured},
+		{name: "codeless 500 on the way", answer: answerException(500, 0, "upstream exploded"), wantStatus: 500, wantCode: codeCHUnknown, wantRetryable: true},
+		{name: "exception after the rows", answer: answerRows("{\"page\":\"/\"}\n" + chExceptionBody(241, "Memory limit (total) exceeded")), wantStatus: 503, wantCode: codeCHUnavailable, wantRetryable: true},
+		{name: "no verdict", answer: answerRows("{\"page\":\"/\"}\nsomething odd\n"), wantStatus: 500, wantCode: codeCHUnknown, wantRetryable: true},
+		{name: "response too large", answer: answerRows(strings.Repeat("{\"page\":\"/\"}\n", 10)), maxResponse: 16, wantStatus: 502, wantCode: codeCHResponseTooLarge},
 	}
+}
+
+// fake is the fakeCH tc answers through, and its reader.
+func (tc chErrorCase) fake() (*fakeCH, *chReader) {
+	f := &fakeCH{answer: tc.answer, err: tc.transport}
+	r := f.reader()
+	r.maxResponseBytes = tc.maxResponse
+	return f, r
 }
 
 func assertCHError(t *testing.T, w *httptest.ResponseRecorder, tc chErrorCase) {
@@ -120,7 +149,9 @@ func TestStructuredQuery_ClickHouseErrors(t *testing.T) {
 			t.Parallel()
 			perms := tc.caps
 			perms.AllowColumns = []string{"*"}
-			h := newCapturingHandler(t, &failingConn{err: tc.err}, policyWithViewer(perms))
+			f, r := tc.fake()
+			h := newCapturingHandler(t, f, policyWithViewer(perms))
+			h.ch = r
 			w := httptest.NewRecorder()
 			h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{Columns: []string{"page"}})))
 			assertCHError(t, w, tc)
@@ -138,12 +169,14 @@ func TestPipes_ClickHouseErrors(t *testing.T) {
 		}
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			f, r := tc.fake()
 			store := staticPipes(&pipes.NamedQuery{Name: "p", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}})
-			h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), fixedConn(&failingConn{err: tc.err}), nil, func(*settings.Store) time.Duration { return time.Second })
-			r := pipesRequest(t, http.MethodGet, "/v1/pipes/p", "p", nil)
-			r = r.WithContext(auth.WithRole(r.Context(), "viewer"))
+			h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), f.target, nil, func(*settings.Store) time.Duration { return time.Second })
+			h.ch = r
+			req := pipesRequest(t, http.MethodGet, "/v1/pipes/p", "p", nil)
+			req = req.WithContext(auth.WithRole(req.Context(), "viewer"))
 			w := httptest.NewRecorder()
-			h.Execute(w, withTenant(r))
+			h.Execute(w, withTenant(req))
 			assertCHError(t, w, tc)
 		})
 	}
@@ -155,13 +188,14 @@ func TestPipes_ClickHouseErrors(t *testing.T) {
 func TestPipes_WriteClickHouseErrors(t *testing.T) {
 	t.Parallel()
 	for _, tc := range chErrorCases(t) {
-		if tc.caps.MaxExecutionTime > 0 || tc.caps.MaxMemoryUsage > 0 {
+		if tc.caps.MaxExecutionTime > 0 || tc.caps.MaxMemoryUsage > 0 || tc.readOnly {
 			continue
 		}
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			conn := &writeConn{err: tc.err}
-			h := writerPipesHandler(t, conn, nil, &pipes.NamedQuery{Name: "log", SQL: "INSERT INTO audit_log VALUES ({{msg}}, now())"})
+			f, r := tc.fake()
+			h := writerPipesHandler(t, f, nil, &pipes.NamedQuery{Name: "log", SQL: "INSERT INTO audit_log VALUES ({{msg}}, now())"})
+			h.ch = r
 			w := pipeCallAs(t, h, "log")
 			require.Equal(t, tc.wantStatus, w.Code, w.Body.String())
 			var got errorBody
@@ -170,9 +204,22 @@ func TestPipes_WriteClickHouseErrors(t *testing.T) {
 			require.NotNil(t, got.Retryable)
 			assert.False(t, *got.Retryable)
 			assert.Empty(t, w.Header().Get("Retry-After"))
-			assert.Equal(t, int32(1), conn.execs.Load())
+			assert.Equal(t, int32(1), f.writes.Load())
 		})
 	}
+}
+
+// TestCHErrors_MessageIsClickHousesOwn: the caller reads ClickHouse's own
+// refusal text, verbatim, as the proxy forwards it — not a wrapper around it.
+func TestCHErrors_MessageIsClickHousesOwn(t *testing.T) {
+	t.Parallel()
+	f := &fakeCH{answer: refused(400, 62, "Syntax error")}
+	h := newCapturingHandler(t, f, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{Columns: []string{"page"}})))
+	var got errorBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, strings.TrimSpace(chExceptionBody(62, "Syntax error")), got.Error)
 }
 
 type errRow struct{ err error }
@@ -199,56 +246,4 @@ func TestSchemaRefresh_ClickHouseDown(t *testing.T) {
 	assertUnavailable(t, refresh(refusedDial(t)), "refresh failed", retryAfterClickHouse)
 	w := refresh(chException(62, "DB::Exception", "Syntax error"))
 	require.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
-}
-
-// deadlineConn records whether the query context carried a deadline.
-type deadlineConn struct {
-	driver.Conn
-	hasDeadline bool
-}
-
-func (c *deadlineConn) Query(ctx context.Context, _ string, _ ...any) (driver.Rows, error) {
-	_, c.hasDeadline = ctx.Deadline()
-	return &chainEmptyRows{}, nil
-}
-
-// TestStructuredQuery_TimeCapLeavesNoDeadline: under a role's time cap the
-// query context has no deadline, so clickhouse-go keeps the cap's
-// max_execution_time and an overrun comes back as TIMEOUT_EXCEEDED rather
-// than a bare DeadlineExceeded. Without a cap, the query timeout is a
-// deadline as before.
-func TestStructuredQuery_TimeCapLeavesNoDeadline(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name         string
-		perms        policy.SelectPermissions
-		wantDeadline bool
-	}{
-		{"time cap", policy.SelectPermissions{AllowColumns: []string{"*"}, MaxExecutionTime: 5000}, false},
-		{"no time cap", policy.SelectPermissions{AllowColumns: []string{"*"}}, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			conn := &deadlineConn{}
-			h := newCapturingHandler(t, conn, policyWithViewer(tc.perms))
-			w := httptest.NewRecorder()
-			h.Handle(w, withTenant(viewerRequest(t, query.StructuredQuery{Columns: []string{"page"}})))
-			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-			assert.Equal(t, tc.wantDeadline, conn.hasDeadline)
-		})
-	}
-}
-
-func TestCancelAfter(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := cancelAfter(t.Context(), 10*time.Millisecond)
-	defer cancel()
-	_, has := ctx.Deadline()
-	assert.False(t, has)
-	select {
-	case <-ctx.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("cancelAfter never cancelled")
-	}
-	assert.ErrorIs(t, ctx.Err(), context.Canceled)
 }

@@ -292,9 +292,9 @@ export type Schemas = Record<string, TableSchema>;
 // --- Insert result ---
 
 /**
- * A per-record outcome from a batch (array / NDJSON) insert. Mirrors the
- * single-object response shape plus the record's position. Exactly one of
- * `ok` / `duplicate` / `error` is set.
+ * A per-record outcome from a batch (array / NDJSON / CSV / TSV) insert.
+ * Mirrors the single-object response shape plus the record's position. Exactly
+ * one of `ok` / `duplicate` / `error` is set.
  */
 export interface InsertRecordResult {
   /** 1-based index of the record within the submitted batch. */
@@ -305,6 +305,25 @@ export interface InsertRecordResult {
   duplicate?: boolean;
   /** Set (with `ok`/`duplicate` absent) when the record was rejected. */
   error?: string;
+  /**
+   * Not set by the current server. A record ClickHouse's parser refuses (117
+   * unknown field, 27 or 26 input it cannot parse, or a type-specific code
+   * such as 41 for a `DateTime`) refuses the whole request, as a ClickHouse
+   * `INSERT` does: a `400` whose `error.code` is `"clickhouse.rejected"`,
+   * whose message names the record (`record 2: …`), and whose
+   * `error.details.exception_code` is this code. Per-record parse verdicts may
+   * return through
+   * Wave-RF/chtypes#497, and would carry their code here. The per-record
+   * rejections a batch reports today (a failed policy check, a missing dedupe
+   * id, a `422` decline) are the gateway's and carry none.
+   *
+   * 117 also covers **a column the caller's role may not write**. Column policy
+   * is enforced by compiling the role's own schema, where a denied column is
+   * re-declared as computed (`MATERIALIZED` of its default), so naming one is an
+   * unknown field to the parser rather than a separate gateway refusal. The
+   * message is ClickHouse's own and does not reveal whether the column exists.
+   */
+  exception_code?: number;
 }
 
 export interface InsertResult {

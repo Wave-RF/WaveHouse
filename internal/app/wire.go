@@ -36,6 +36,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
 const (
@@ -290,7 +291,8 @@ func (a *App) wireObservability(ctx context.Context) {
 // had, or on none when they had none; both logged, and retried by the next
 // reload. Reachability surfaces
 // where it already does (schema discovery retries, /readyz, query errors).
-// Every consumer resolves its tenant's pool per call (chConn, chTargetFor).
+// Every consumer resolves its tenant's pool per call (chTargetFor,
+// discoverySource).
 func (a *App) wireClickHouse() error {
 	members := func() []chconn.Member {
 		var ms []chconn.Member
@@ -341,24 +343,15 @@ func (a *App) wireClickHouse() error {
 	return nil
 }
 
-// chConn is the connection of tenant id, or an untyped nil when the tenant
-// is on no pool — never a nil *Manager inside a non-nil driver.Conn, which
-// would pass a nil check and panic on use.
-func (a *App) chConn(id tenant.ID) driver.Conn {
-	m := a.pools.For(id)
-	if m == nil {
-		return nil
-	}
-	return m
-}
-
 // discoverySource is what tenant id's schema registry discovers from, read
 // per refresh so a reload that repoints the tenant applies to the next one
 // (a move to another address or database starts the tenant over on a fresh
 // registry, see wireClickHouse): its pool's connection and the database that
 // pool was opened for — never the adopted document's, which a refused move
 // would pair with the pool the tenant kept, discovering a database its
-// queries and inserts do not use.
+// queries and inserts do not use. A tenant on no pool yields an untyped nil
+// connection — never a nil *Manager inside a non-nil driver.Conn, which
+// would pass a nil check and panic on use.
 func (a *App) discoverySource(id tenant.ID) discovery.Source {
 	return func() (driver.Conn, string) {
 		m := a.pools.For(id)
@@ -373,8 +366,6 @@ func (a *App) discoverySource(id tenant.ID) discovery.Source {
 // tenant's pool or registry per call, so a reload that repoints the tenant
 // applies to the next request.
 
-func (a *App) chConnFor(s *settings.Store) driver.Conn { return a.chConn(s.Tenant()) }
-
 func (a *App) chTargetFor(s *settings.Store) chconn.Target { return a.pools.Target(s.Tenant()) }
 
 func (a *App) registryFor(s *settings.Store) *discovery.SchemaRegistry {
@@ -384,6 +375,46 @@ func (a *App) registryFor(s *settings.Store) *discovery.SchemaRegistry {
 // queryTimeout is the tenant's deadline for a call on the query paths, a
 // per-call setting rather than a property of the pool it shares.
 func queryTimeout(s *settings.Store) time.Duration { return s.ClickHouse().QueryTimeout }
+
+// readConns caps the HTTP connections the pipes and structured queries of the
+// tenants on one pool hold between them: the pool's size, the largest
+// clickhouse.max_open_conns among them (as the native pool is sized), or the
+// tenant's own when it is on no pool.
+func (a *App) readConns(s *settings.Store) int {
+	if m := a.pools.For(s.Tenant()); m != nil {
+		return m.Sizes().MaxOpenConns
+	}
+	return s.ClickHouse().MaxOpenConns
+}
+
+// wireTypes opens the type layer: the process's one chtypes registry, which
+// ingest judges every record with and the stream hub evaluates row filters
+// with. Both are API work, so only an API process opens it — an ingest-only
+// or sweeper-only process boots with no artifact installed, the worker
+// needing only the static typelayer.InsertSettings. With autofetch off, no
+// artifact installed for this host refuses boot: an API process could judge
+// nothing. Opening reads the fetch layer's install records only; a ClickHouse
+// line's library is opened (and, with autofetch, fetched) by the first tenant
+// bound to it, from that tenant's discovery (wireDiscovery), and a tenant or
+// table this process cannot serve is unavailable on its own
+// (typelayer.Unavailable lists why). Released after schema discovery, whose
+// loops bind it, and so after the HTTP drain.
+func (a *App) wireTypes() error {
+	ch := a.cfg.ClickHouse
+	eng, err := typelayer.NewEngine(typelayer.Config{
+		CacheDir: ch.ChtypesCache, AutoFetch: ch.ChtypesAutofetch, Bases: ch.ChtypesBases(),
+	})
+	if err != nil {
+		return fmt.Errorf("type layer: %w — an api-role process judges ingest and row filters with a chtypes artifact: "+
+			"turn clickhouse.chtypes_autofetch on, or install one (`chtypes fetch <line>`) into clickhouse.chtypes_cache", err)
+	}
+	a.types, a.bindings = eng, newTypeBindings(eng)
+	a.add(component{name: "type layer", close: func(context.Context) error {
+		eng.Close()
+		return nil
+	}})
+	return nil
+}
 
 // wireDiscovery builds one schema registry per served tenant, each with a
 // refresh loop of its own (discoveries), and the boot state /livez reports:
@@ -423,7 +454,10 @@ func (a *App) wireDiscovery(ctx context.Context) {
 	}
 	d := newDiscoveries(a.stopCtx,
 		func(id tenant.ID, _ *settings.Store) *discovery.SchemaRegistry {
-			return discovery.NewSchemaRegistry(a.discoverySource(id), id, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval))
+			reg := discovery.NewSchemaRegistry(a.discoverySource(id), id, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval))
+			// Before the first refresh, so "loaded" implies "bound".
+			a.bindings.attach(id, reg)
+			return reg
 		},
 		func(id tenant.ID, err error) {
 			slog.Warn("schema discovery retry failed", "tenant", id, "error", err)
@@ -446,7 +480,8 @@ func (a *App) wireDiscovery(ctx context.Context) {
 			loaded = true
 			slog.Info("schema discovery succeeded after retry, /livez now 200", "tenant", id)
 			a.bootState.Set(nil)
-		})
+		},
+		a.bindings.detach)
 	a.discoveries = d
 	if nested {
 		a.bootState.Set(noTenantLoaded)
@@ -771,6 +806,9 @@ func (a *App) wireSweeper() {
 func (a *App) wireStreaming() {
 	a.sseMetrics = stream.NewMetrics()
 	a.hub = stream.NewHub(perTenant(a.tenants, (*settings.Store).Policy), a.discoveries.For, a.sseMetrics)
+	// Row filters are evaluated by ClickHouse's own parser and expression
+	// engine over the published row, the answer the query path gives.
+	a.hub.RowEvaluator = stream.NewRowEvaluator(a.types)
 	a.tenants.AfterAdopt(func([]tenant.ID) { a.hub.Prune(a.served) })
 
 	// Hub bridge: MQ → broadcast to connected SSE clients. The Hub decodes and
@@ -997,6 +1035,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	ingestHandler.Dedup = func(s *settings.Store) dedupe.Deduplicator { return a.dedup.For(s.Tenant()) }
 	ingestHandler.DedupeSettings = (*settings.Store).DedupeFor
 	ingestHandler.DedupeLease = a.cfg.Dedupe.Lease
+	ingestHandler.Types = a.types
 
 	// Readiness pings every open pool at once and is ready at the first
 	// answer: one tenant's ClickHouse outage is not the process's.
@@ -1012,8 +1051,17 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	closing := make(chan struct{})
 	streamHandler.Closing = closing
 
-	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.chConnFor, a.cache, queryTimeout)
+	// Pipes and structured queries run over the tenant's HTTP target, where
+	// ClickHouse renders the rows itself, holding at most its pool's size in
+	// connections between them.
+	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.chTargetFor, a.cache, queryTimeout)
 	pipesHandler.Tenants = a.tenants
+	pipesHandler.MaxConns = a.readConns
+	chReader := api.NewCHReader()
+	pipesHandler.SetReader(chReader)
+	structuredQueryHandler := api.NewStructuredQueryHandler(a.chTargetFor, a.cache, a.registryFor, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, queryTimeout, (*settings.Store).DefaultMaxRows)
+	structuredQueryHandler.MaxConns = a.readConns
+	structuredQueryHandler.SetReader(chReader)
 
 	schemaHandler := api.NewSchemaHandler(a.registryFor)
 	schemaHandler.Tenants = a.tenants
@@ -1033,7 +1081,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		Schema:          schemaHandler,
 		DLQ:             api.NewDLQHandler(a.mq),
 		Pipes:           pipesHandler,
-		StructuredQuery: api.NewStructuredQueryHandler(a.chConnFor, a.cache, a.registryFor, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, queryTimeout, (*settings.Store).DefaultMaxRows),
+		StructuredQuery: structuredQueryHandler,
 
 		AuthMW:       authMW,
 		Tenants:      a.tenants,

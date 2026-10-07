@@ -14,7 +14,7 @@
 <p align="center">
   The open-source real-time API gateway for ClickHouse: schema-aware ingest, async batching, real-time SSE streaming, and tiered query caching.
   <strong>
-  All in a single binary.
+  All in one binary, plus the per-ClickHouse-version artifact it loads for your server's line.
   </strong>
 </p>
 
@@ -25,7 +25,7 @@
 
 <p align="center">
   <a href="https://wavehouse.dev"><strong>Docs</strong></a> ·
-  <a href="#-quick-start"><strong>Quick start</strong></a> ·
+  <a href="#quick-start-guide"><strong>Quick start</strong></a> ·
   <a href="https://wavehouse.dev/why-wavehouse"><strong>Why WaveHouse</strong></a> ·
   <a href="https://github.com/Wave-RF/WaveHouse/discussions"><strong>Discussions</strong></a>
 </p>
@@ -67,7 +67,7 @@ Full walkthrough at **[wavehouse.dev/getting-started](https://wavehouse.dev/gett
 
 ## Why WaveHouse?
 
-ClickHouse is a phenomenal OLAP database, but pointing a frontend right at it leaves a lot to be desired: one-row inserts trigger `Too many parts`, there's no backpressure or edge validation, no real-time push, and no row/column security. You end up building custom APIs, a Kafka queue, a batch consumer, a cache tier, and an auth service. **WaveHouse is that whole stack as one binary** — the only external dependency is ClickHouse.
+ClickHouse is a phenomenal OLAP database, but pointing a frontend right at it leaves a lot to be desired: one-row inserts trigger `Too many parts`, there's no backpressure or edge validation, no real-time push, and no row/column security. You end up building custom APIs, a Kafka queue, a batch consumer, a cache tier, and an auth service. **WaveHouse is that whole stack as one binary** (plus a per-ClickHouse-version artifact it fetches and loads for your server's line, for ClickHouse-native ingest validation and row-level security) — the only external network dependency is ClickHouse, and the artifact registry until your line is cached.
 
 If you're building user-facing analytics, WaveHouse is like **Supabase for ClickHouse**. Or an **open-source Tinybird** that pushes data to the frontend in real time over SSE, not just pull-based REST.
 
@@ -81,7 +81,7 @@ If you're building user-facing analytics, WaveHouse is like **Supabase for Click
 
 |                               | Direct ClickHouse | Kafka + CH (DIY) |   Tinybird    | **WaveHouse**  |
 | ----------------------------- | :---------------: | :--------------: | :-----------: | :------------: |
-| Self-hosted, single binary    |         —         |        —         |   ✗ (SaaS)    |       ✓        |
+| Self-hosted, one binary       |         —         |        —         |   ✗ (SaaS)    |       ✓        |
 | Safe high-rate inserts        |         ✗         |  ✓ (via Kafka)   |       ✓       |       ✓        |
 | Schema validation at the edge |         ✗         |      custom      |       ✓       |       ✓        |
 | Real-time push (SSE)          |         ✗         |  custom service  |       ✗       |    ✓ native    |
@@ -121,11 +121,21 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:dev \
 
 Swap in `:vX.Y.Z` and `release.yml` for a release image. Pin the signer either way. `--repo` alone accepts an attestation from any workflow in the repo.
 
+The images carry no chtypes artifact: WaveHouse fetches the one for your ClickHouse line (chtypes 1.0 publishes 26.3, 26.7, 26.8 and 26.9; any other line is unavailable) when it first binds a tenant on it, verifying chtypes' signature, into `/var/cache/chtypes`. Mount a volume there (`-v chtypes-cache:/var/cache/chtypes`) so a restart or a new image does not fetch again; the bundled `chtypes` CLI (`--entrypoint /app/chtypes`) prefetches into it, and a mirror or an air-gapped setup is a setting away (see [chtypes artifacts](https://wavehouse.dev/deployment#chtypes-artifacts)).
+
 ### C. `go install` (binary, no Docker)
 
 ```bash
 go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 ```
+
+`go install` compiles from source with cgo enabled (requires a C toolchain — Linux amd64/arm64 or macOS arm64; on Linux it links against the build host's glibc, where the prebuilt binaries need 2.34 or later) and carries no [chtypes artifact](https://wavehouse.dev/deployment#chtypes-artifacts): the server fetches the one for your ClickHouse line when it first binds a tenant on it. To fetch it ahead (for an air-gapped host, see [Air-gapped deployments](https://wavehouse.dev/deployment#air-gapped-deployments)):
+
+```bash
+go run github.com/wave-rf/chtypes/go/cmd/chtypes@v1.1.0 fetch <your-clickhouse-minor-version>
+```
+
+(From a checkout, `scripts/fetch-chtypes.sh` fetches the line of the ClickHouse the repository tests against.) Either way it is a 40–50 MB download that unpacks to roughly 300–340 MB (303 MiB measured on darwin-arm64) in the default local cache (`~/.cache/chtypes/v1`, or `$CHTYPES_CACHE`); point `WH_CHTYPES_CACHE` at the layout directory if you keep it somewhere else.
 
 ```bash
 wavehouse bootstrap ./settings   # starter settings directory, every key at its default
@@ -144,10 +154,11 @@ Track what's shipped, in progress, and planned on the [**project board**](https:
 
 ## Local Development
 
-You'll need **Go 1.26+, GNU Make 4+, Docker (Compose v2), Node.js 22 LTS, and pnpm 11.21+**. See [development docs](https://wavehouse.dev/development) for the authoritative source of truth with the full list, version requirements, and gotchas.
+You'll need **Go 1.27+, GNU Make 4+, Docker (Compose v2), Node.js 22 LTS, and pnpm 11.21+**. See [development docs](https://wavehouse.dev/development) for the authoritative source of truth with the full list, version requirements, and gotchas.
 
 ```bash
 make tools    # one-time bootstrap
+scripts/fetch-chtypes.sh   # optional: prefetch the chtypes artifact (a 40–50 MB download, roughly 300–340 MB on disk); otherwise fetched on first use
 docker compose -f deployments/compose/dependencies.yaml up -d clickhouse
 make dev      # hot-reload on .go save
 ```

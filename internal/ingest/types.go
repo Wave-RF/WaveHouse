@@ -15,11 +15,14 @@ const FormatJSONCompactEachRow = "JSONCompactEachRow"
 // EventMessage is the wire format published to the MQ.
 //
 // Row data travels POSITIONALLY: Row is one JSONCompactEachRow line (a JSON
-// array, no trailing newline) and Columns names its positions in the table's
+// array, no trailing newline) as ClickHouse's own writer produced it — the
+// envelope's json.Marshal only compacts it and escapes <, > and &, which
+// changes no decoded value — and Columns names its positions: the table's wire
+// columns, or the narrower list a column-restricted role writes, in
 // declaration order. The two are only meaningful together — a reader that
 // cannot pair them (a length mismatch, an undecodable row, a repeated column
-// name) has no way to map a value to a column and must fail closed rather than
-// guess.
+// name) has no way to map a value to a column and must fail closed rather
+// than guess.
 type EventMessage struct {
 	TableName         string          `json:"table_name"`
 	Scope             string          `json:"scope"`

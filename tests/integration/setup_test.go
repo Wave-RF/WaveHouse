@@ -16,12 +16,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,17 +35,31 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/Wave-RF/WaveHouse/internal/app"
+	"github.com/Wave-RF/WaveHouse/internal/chversion"
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/mq/natstest"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
 const (
 	testCHPassword = "test"
 	testCHDatabase = "default"
 	testCHUser     = "default"
+	// testOperatorKey is the shared app's operator key: the settings reload
+	// route takes it whatever policy is adopted.
+	testOperatorKey = "it-shared-operator-key"
+)
+
+// The suite's default roles.json and policies.json: default_role is the admin
+// role, so a plain unauthenticated request runs as a privileged caller.
+var (
+	defaultRoles    = []byte(`{"roles": ["admin"]}`)
+	defaultPolicies = []byte(`{"default_role": "admin"}`)
 )
 
 // testEnv holds the shared infrastructure available to every test.
@@ -53,6 +70,12 @@ type testEnv struct {
 	embeddedMQ mq.Broker
 	baseURL    string // the wired API server, e.g. http://127.0.0.1:41234
 	registry   *discovery.SchemaRegistry
+	// types is the wired app's type layer, bound from the default tenant's
+	// discovery by the app's own refresh hook.
+	types *typelayer.Engine
+	// settingsDir is the shared app's settings directory, which withPolicy
+	// rewrites and reloads.
+	settingsDir string
 	// dynamoEndpoint is dynamodb-local, for the DynamoDB dedupe backend's
 	// tests; the wired app does not use it.
 	dynamoEndpoint string
@@ -77,6 +100,8 @@ var tableCounter atomic.Uint64
 // createTable creates a uniquely-named ClickHouse table for the calling test
 // and registers cleanup to drop it. The schema registry is refreshed after
 // creation so the API discovers the new table. Returns the table name.
+// Parallel tests create tables concurrently: the registry never lets a
+// refresh that started before this one replace what this one published.
 //
 // Pass the column DDL fragment without the wrapping `()` — for example:
 //
@@ -158,7 +183,7 @@ func setup() (int, func()) {
 		fmt.Fprintf(os.Stderr, "integration setup: settings: %v\n", err)
 		return 1, cleanup
 	}
-	cleanups.push(func() { _ = os.RemoveAll(settingsDir) })
+	cleanups.push(func() { removeTestSettings(settingsDir) })
 
 	// The wired app on a harness listener: the same construction the binary
 	// uses (embedded NATS in-process, the ingest worker, sweeper, hub bridge,
@@ -174,16 +199,23 @@ func setup() (int, func()) {
 	dataDir := mustTempDir()
 	cleanups.push(func() { _ = os.RemoveAll(dataDir) })
 	cfg := &config.Config{
-		DataDir:    dataDir,
-		Server:     config.Server{ShutdownTimeout: 10},
-		ClickHouse: config.ClickHouse{Password: testCHPassword},
-		MQ:         config.MQ{Backend: config.MQEmbedded},
-		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 30}, // 1 GB
-		Dedupe:     config.Dedupe{Backend: config.DedupePebble},
-		Coord:      config.Coord{Backend: config.CoordLocal},
-		Roles:      config.AllRoles(),
-		Settings:   config.Settings{Dir: settingsDir},
+		DataDir: dataDir,
+		Server:  config.Server{ShutdownTimeout: 10},
+		// Autofetch into the per-user cache, as a fresh checkout needs.
+		ClickHouse: config.ClickHouse{Password: testCHPassword, ChtypesAutofetch: true},
+		// The JWT secret the suite mints tokens with (bearer), for the tests
+		// that run as a restricted role under a policy of their own.
+		Auth:     config.Auth{JWTSecret: testutil.TestJWTSecret, OperatorKey: testOperatorKey},
+		MQ:       config.MQ{Backend: config.MQEmbedded},
+		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 30}, // 1 GB
+		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
+		Coord:    config.Coord{Backend: config.CoordLocal},
+		Roles:    config.AllRoles(),
+		Settings: config.Settings{Dir: settingsDir},
 	}
+	// The api role opens the type layer, which fetches the chtypes artifact
+	// for the container's ClickHouse line when the first tenant binds, unless
+	// the per-user cache already holds it.
 	a, err := app.New(ctx, app.Options{Config: cfg, Listener: ln})
 	if err != nil {
 		_ = ln.Close()
@@ -219,6 +251,9 @@ func setup() (int, func()) {
 		embeddedMQ: a.MQ(),
 		baseURL:    baseURL,
 		registry:   a.Registry(),
+		types:      a.Types(),
+
+		settingsDir: settingsDir,
 
 		dynamoEndpoint: endpoint,
 	}
@@ -229,19 +264,31 @@ func setup() (int, func()) {
 // pointed at the testcontainer and a dev-style policy: default_role is the
 // admin role, so the suite's plain unauthenticated requests exercise
 // functionality as a privileged caller and can hit admin-gated endpoints
-// without minting JWTs. Auth enforcement is covered by the internal/auth
-// unit tests and the e2e SDK suite. The stream budget is shrunk to 1 GiB
-// like the e2e fixture so the scratch directory stays small.
+// without minting JWTs. A test that needs a restricted role adopts a policy
+// of its own (withPolicy) and sends a token for the role (bearer). The stream
+// budget is shrunk to 1 GiB like the e2e fixture so the scratch directory
+// stays small.
+//
+// The directory sits in a scratch parent of its own, removed with it
+// (removeTestSettings): the settings watcher watches the parent too, and
+// where fsnotify is kqueue (macOS) watching the shared temp directory opens
+// and rescans every entry in it, on every change any process makes there.
 func writeTestSettings(ch *chInstance) (string, error) {
 	files, err := tenantSettings(ch, testCHDatabase)
 	if err != nil {
 		return "", err
 	}
-	dir := mustTempDir()
+	dir := filepath.Join(mustTempDir(), "settings")
 	if err := writeSettingsFiles(dir, files); err != nil {
 		return "", err
 	}
 	return dir, nil
+}
+
+// removeTestSettings removes a directory writeTestSettings made, with its
+// scratch parent.
+func removeTestSettings(dir string) {
+	_ = os.RemoveAll(filepath.Dir(dir)) //nolint:gosec // G703: dir is <os.MkdirTemp>/settings from writeTestSettings
 }
 
 // tenantSettings is one tenant's four files: the seed with the ClickHouse
@@ -272,9 +319,130 @@ func tenantSettings(ch *chInstance, database string) (map[string][]byte, error) 
 	if files[settings.FileConfig], err = json.MarshalIndent(doc, "", "  "); err != nil {
 		return nil, err
 	}
-	files[settings.FileRoles] = []byte(`{"roles": ["admin"]}`)
-	files[settings.FilePolicies] = []byte(`{"default_role": "admin"}`)
+	files[settings.FileRoles] = defaultRoles
+	files[settings.FilePolicies] = defaultPolicies
 	return files, nil
+}
+
+// withPolicy adds p's table grants to the shared app's access-control policy
+// for the calling test, the way an operator changes one: policies.json
+// rewritten, with roles.json declaring every role it grants, then a reload
+// through the ops route. The grants come out again when the test ends.
+// default_role and admin_role stay the admin role, so unauthenticated
+// requests keep running as a privileged caller and a restricted role is
+// reached with a token for it (bearer).
+//
+// Only p.Tables is adopted, and its tables must be the test's own: the
+// adopted policy is the union of the grants every running test holds, so
+// parallel tests can each hold some without replacing another's.
+func withPolicy(t *testing.T, p policy.Policy) {
+	t.Helper()
+	policyMu.Lock()
+	defer policyMu.Unlock()
+	for holder, grants := range heldGrants {
+		for table := range p.Tables {
+			if _, taken := grants[table]; taken && holder != t {
+				t.Fatalf("withPolicy: %s already holds grants on %s", holder.Name(), table)
+			}
+		}
+	}
+	heldGrants[t] = p.Tables
+	adoptHeldGrants(t, true)
+	t.Cleanup(func() {
+		policyMu.Lock()
+		defer policyMu.Unlock()
+		delete(heldGrants, t)
+		adoptHeldGrants(t, false)
+	})
+}
+
+// heldGrants is each running test's withPolicy grants; policyMu serializes
+// the adoptions of their union.
+var (
+	policyMu   sync.Mutex
+	heldGrants = map[*testing.T]map[string]policy.TablePolicy{}
+)
+
+// adoptHeldGrants adopts the union of heldGrants, or the suite's default
+// policy when none is held. Under policyMu. A role goes in before the policy
+// granting it and comes out after it (grow says which this is), so the
+// directory watcher, which may reload between the two files, only ever sees
+// a valid pair.
+func adoptHeldGrants(t *testing.T, grow bool) {
+	t.Helper()
+	rolesDoc, policyDoc := defaultRoles, defaultPolicies
+	if len(heldGrants) > 0 {
+		p := policy.Policy{DefaultRole: "admin", AdminRole: "admin", Tables: map[string]policy.TablePolicy{}}
+		roles := map[string]bool{"admin": true}
+		for _, grants := range heldGrants {
+			for table, perms := range grants {
+				p.Tables[table] = perms
+				for role := range perms {
+					roles[role] = true
+				}
+			}
+		}
+		var err error
+		if rolesDoc, err = json.Marshal(settings.RolesFile{Roles: slices.Sorted(maps.Keys(roles))}); err != nil {
+			t.Fatalf("roles.json: %v", err)
+		}
+		if policyDoc, err = json.Marshal(p); err != nil {
+			t.Fatalf("policies.json: %v", err)
+		}
+	}
+	rolesFile, policyFile := settingsFile{settings.FileRoles, rolesDoc}, settingsFile{settings.FilePolicies, policyDoc}
+	if grow {
+		adoptSettings(t, rolesFile, policyFile)
+	} else {
+		adoptSettings(t, policyFile, rolesFile)
+	}
+}
+
+// settingsFile is one file of the settings directory and its new content.
+type settingsFile struct {
+	name string
+	data []byte
+}
+
+// adoptSettings writes files, in order, into the shared app's settings
+// directory and reloads it, failing the test unless the reload adopts them.
+// Each file is renamed into place, so the directory watcher never reads one
+// half-written.
+func adoptSettings(t *testing.T, files ...settingsFile) {
+	t.Helper()
+	e := env(t)
+	for _, f := range files {
+		tmp := filepath.Join(filepath.Dir(e.settingsDir), filepath.Base(e.settingsDir)+"."+f.name+".tmp")
+		if err := os.WriteFile(tmp, f.data, 0o600); err != nil {
+			t.Fatalf("write %s: %v", f.name, err)
+		}
+		if err := os.Rename(tmp, filepath.Join(e.settingsDir, f.name)); err != nil {
+			t.Fatalf("install %s: %v", f.name, err)
+		}
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, e.baseURL+"/v1/ops/settings/reload", nil)
+	if err != nil {
+		t.Fatalf("reload request: %v", err)
+	}
+	req.Header.Set("X-Operator-Key", testOperatorKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("settings reload not adopted: %d %s", resp.StatusCode, body)
+	}
+}
+
+// bearer is an Authorization header value carrying a token for role, signed
+// with the shared app's JWT secret, with claims beside the role claim.
+func bearer(t *testing.T, role string, claims map[string]any) string {
+	t.Helper()
+	all := map[string]any{"role": role}
+	maps.Copy(all, claims)
+	return "Bearer " + testutil.MakeJWT(t, all)
 }
 
 // writeSettingsFiles writes one tenant's files into dir.
@@ -350,13 +518,22 @@ func (c *chInstance) httpURL() string    { return fmt.Sprintf("http://%s:%s", c.
 // race; the dominant flake mode tracked in #70.
 func startClickHouse(ctx context.Context) (*chInstance, error) {
 	chReq := testcontainers.ContainerRequest{
-		// Pinned: 26.8 reads bare numbers in DateTime64 columns as epoch seconds,
-		// not ticks at column precision — CanonicalizeTimestamps still models the
-		// pre-26.8 rule (TestTimestampCanonicalization_DifferentialAgainstClickHouse
-		// catches the divergence). Bump the pin together with the canonicalizer (#536).
-		Image:        "clickhouse/clickhouse-server:26.6.3.62",
+		// The pinned test ClickHouse: the type layer answers with the
+		// artifact for the server's own line (#536).
+		Image:        chversion.TestImage,
 		ExposedPorts: []string{"9000/tcp", "8123/tcp"},
 		Env:          map[string]string{"CLICKHOUSE_PASSWORD": testCHPassword},
+		// The tests that stop ClickHouse mid-run stop it as an outage, and the
+		// server would otherwise outlast their stop timeout: on SIGTERM, 26.8
+		// waits for its idle client connections to close, which takes a
+		// native one its 10 s poll interval and an HTTP keep-alive one its
+		// 30 s keep-alive timeout. Measured with one idle native connection, a
+		// stop took 13 s (5 s on 26.6) and with this setting 1 s.
+		Files: []testcontainers.ContainerFile{{
+			Reader:            strings.NewReader("<clickhouse><shutdown_wait_unfinished>1</shutdown_wait_unfinished></clickhouse>"),
+			ContainerFilePath: "/etc/clickhouse-server/config.d/test_shutdown.xml",
+			FileMode:          0o644,
+		}},
 		WaitingFor: wait.ForAll(
 			wait.ForListeningPort("9000/tcp"),
 			wait.ForHTTP("/ping").WithPort("8123/tcp").WithStatusCodeMatcher(func(status int) bool {

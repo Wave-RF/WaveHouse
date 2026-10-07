@@ -1,6 +1,8 @@
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:26.6.3.62
+    # The ClickHouse this repository tests against (internal/chversion); its
+    # line's chtypes artifact is fetched into chtypes-cache at first bind.
+    image: clickhouse/clickhouse-server:26.8.15.10
     ports:
       - "8123:8123"
       - "9000:9000"
@@ -24,17 +26,29 @@ services:
       WH_DATA_DIR: /app/data
       # ClickHouse wiring (addr, ports, database, user, tls, headers, pool
       # sizes) is in ./settings/config.json — the settings directory below —
-      # where it hot-reloads. Only the password (a secret) and the connection
-      # ceiling are env; the bundled ClickHouse has no password.
+      # where it hot-reloads. Only the password (a secret), the connection
+      # ceiling and the chtypes artifact keys (below) are env; the bundled
+      # ClickHouse has no password.
       # WH_CH_PASSWORD: ""
       # WH_CH_MAX_TOTAL_CONNS: "0"
+      # The image bakes no chtypes artifact: the first tenant bind fetches its
+      # ClickHouse line's (~45 MB) into the image's cache, /var/cache/chtypes
+      # (CHTYPES_CACHE), which the chtypes-cache volume below keeps across
+      # restarts and image pulls. A mirror or pull-through proxy, tried in
+      # order (comma-separated):
+      # WH_CHTYPES_ARTIFACTS_URL: "https://mirror.example/chtypes/v1"
+      # Air-gapped: prefetch into the volume with the bundled CLI
+      # (`docker compose run --rm --no-deps --entrypoint /app/chtypes wavehouse fetch 26.8`)
+      # and turn autofetch off:
+      # WH_CHTYPES_AUTOFETCH: "false"
       # No auth on/off switch: set WH_AUTH_JWT_SECRET to validate tokens;
       # without it, every request resolves to the policy default_role.
       # WH_AUTH_JWT_SECRET: "change-me"
       #
       # Optional non-JWT operator credential: a request presenting it
-      # (Authorization: Operator <key>, or the X-Operator-Key alias) gets
-      # full-access admin, works even if the policy is wiped (break-glass).
+      # (Authorization: Operator <key>, or the X-Operator-Key alias) reaches
+      # /v1/ops/* always, even with the policy wiped (break-glass), and the
+      # whole data plane while a policy is adopted.
       # Treat it as an admin secret.
       # WH_AUTH_OPERATOR_KEY: "change-me-operator-key"
       #
@@ -53,6 +67,7 @@ services:
     volumes:
       - wavehouse-data:/app/data
       - ./settings:/app/settings    # checked-in seed + trial policy, clickhouse.addr=clickhouse:9000; hot-reloads on edit
+      - chtypes-cache:/var/cache/chtypes # fetched chtypes artifacts; or a host dir, e.g. ~/.cache/chtypes/v1
     # A stop is server.shutdown_timeout (10s) of drain, then a fixed 5s to
     # release NATS/Pebble and 3s to flush telemetry: up to 18s. Docker's
     # default 10s grace would SIGKILL the release; cover it with headroom.
@@ -63,4 +78,5 @@ services:
 volumes:
   clickhouse-data:
   wavehouse-data:
+  chtypes-cache:
 

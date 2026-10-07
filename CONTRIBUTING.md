@@ -34,12 +34,12 @@ Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?t
 1. Ensure your changes pass all checks:
 
    ```bash
-   make ci         # full local pipeline: verify + builds + all test suites (Docker required)
+   make ci         # full local pipeline: verify + builds + all test suites (Docker required; the chtypes artifact is fetched on first use)
    ```
 
-   The pre-push hook (installed by `make tools`) blocks a push until the tree has been validated locally: a code change needs `make ci`, a docs/prose-only change needs only `make verify` (the same split CI makes). `make lint` / `make test` / `make build` are fast inner-loop subsets.
+   `make ci` needs the chtypes artifact, which the suites fetch into the per-user cache the first time (`scripts/fetch-chtypes.sh` fetches it ahead; see the [Development Guide](https://wavehouse.dev/development#the-chtypes-artifact--fetched-on-first-use)). The pre-push hook (installed by `make tools`) blocks a push until the tree has been validated locally: a code change needs `make ci`, a docs/prose-only change needs only `make verify` (the same split CI makes). `make lint` / `make test` / `make build` are fast inner-loop subsets.
 
-2. Write tests for new functionality. Unit tests go alongside the code in `internal/`. Integration tests carry the `//go:build integration` tag and go in `tests/integration/`, or beside the package when they test one package against its own external server (e.g. `internal/cache/redis_integration_test.go`), with the package added to the `test-integration` target. A test that must import NATS, which only `internal/mq` may do, goes in `internal/mq/natsspike`, or in `internal/mq` itself with the `integration` tag when it needs the package's internals (the external NATS broker's tests, which `make test-integration` selects by name).
+2. Write tests for new functionality. Unit tests go alongside the code in `internal/`. Integration tests carry the `//go:build integration` tag and go in `tests/integration/`, or beside the package when they test one package against its own external server (e.g. `internal/cache/redis_integration_test.go`), with the package added to the `test-integration` target. A test that must import NATS, which only `internal/mq` may do, goes in `internal/mq/natsspike`, or in `internal/mq` itself with the `integration` tag when it needs the package's internals (the external NATS broker's tests); a test elsewhere that only needs a running NATS server uses `internal/mq/natstest`. In `internal/mq` and `internal/api` the `test-integration` target selects tagged tests by name, so match its `-run` pattern (`TestIntegration_*` in `internal/api`).
 
 3. Update documentation if your change affects:
    - API endpoints → update `docs/src/content/docs/api.md`

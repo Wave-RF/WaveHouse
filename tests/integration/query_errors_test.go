@@ -10,25 +10,25 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/app"
-	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 )
 
-// queryError is the error envelope a failed ClickHouse query answers with.
+// queryError is a query's answer: the status and raw body, and the error
+// envelope a failed ClickHouse query answers with.
 type queryError struct {
 	status     int
 	retryAfter string
+	raw        string
 	Error      string `json:"error"`
 	Code       string `json:"code"`
 	Retryable  *bool  `json:"retryable"`
@@ -36,15 +36,25 @@ type queryError struct {
 
 func postJSON(t *testing.T, url, body string) queryError {
 	t.Helper()
+	return postJSONAs(t, url, body, "")
+}
+
+// postJSONAs is postJSON as the role an Authorization value names (bearer);
+// "" is the suite's default caller.
+func postJSONAs(t *testing.T, url, body, authorization string) queryError {
+	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, strings.NewReader(body))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	got := queryError{status: resp.StatusCode, retryAfter: resp.Header.Get("Retry-After")}
+	got := queryError{status: resp.StatusCode, retryAfter: resp.Header.Get("Retry-After"), raw: string(raw)}
 	if resp.StatusCode != http.StatusOK {
 		require.NoError(t, json.Unmarshal(raw, &got), string(raw))
 	}
@@ -86,7 +96,7 @@ func TestQueryErrors_CallerFault(t *testing.T) {
 		require.NoError(t, e.chConn.Exec(context.Background(), fmt.Sprintf("ALTER TABLE %s DROP COLUMN page", table)))
 		got := postJSON(t, e.baseURL+"/v1/query?table="+url.QueryEscape(table), `{"columns":["page"]}`)
 		assertQueryError(t, got, http.StatusBadRequest, "clickhouse.rejected", false)
-		assert.Contains(t, got.Error, "code: 47")
+		assert.Contains(t, strings.ToLower(got.Error), "code: 47")
 	})
 }
 
@@ -110,7 +120,7 @@ func TestQueryErrors_ClickHouseDown(t *testing.T) {
 
 	settingsDir, err := writeTestSettings(ch)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(settingsDir) })
+	t.Cleanup(func() { removeTestSettings(settingsDir) })
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
@@ -162,27 +172,25 @@ func TestQueryErrors_ClickHouseDown(t *testing.T) {
 	}
 }
 
-// TestQueryErrors_TimeCapReachesClickHouse pins the driver behaviour the
-// role time cap depends on: with a context deadline over 1s, clickhouse-go
-// overwrites max_execution_time with deadline+5s, so an overrun ends as a
-// bare DeadlineExceeded; with no deadline the cap reaches ClickHouse, which
-// reports TIMEOUT_EXCEEDED — the code /v1/query answers as the caller's.
-func TestQueryErrors_TimeCapReachesClickHouse(t *testing.T) {
+// TestQueryErrors_RoleTimeCapIsTheCallers: a role's max_execution_time
+// reaches ClickHouse as the query's own setting — the HTTP reader sends one on
+// every read — and a query that outruns it is the caller's: 400
+// clickhouse.limit_exceeded, not retryable, where an overrun of the tenant's
+// query_timeout alone would read as ClickHouse's state. The slow table is a
+// view that sleeps half a second per row; measured on 26.8, a 1 s cap ends it
+// with TIMEOUT_EXCEEDED (159) where the uncapped query returns its four rows.
+func TestQueryErrors_RoleTimeCapIsTheCallers(t *testing.T) {
 	e := env(t)
-	capped := clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{"max_execution_time": 1}))
-	const slow = "SELECT sleep(2) SETTINGS function_sleep_max_microseconds_per_block = 3000000"
+	ctx := context.Background()
+	view := fmt.Sprintf("it_slow_view_%d", tableCounter.Add(1))
+	require.NoError(t, e.chConn.Exec(ctx, "CREATE VIEW "+view+" AS SELECT number + sleepEachRow(0.5) AS n FROM numbers(4)"))
+	t.Cleanup(func() { _ = e.chConn.Exec(context.Background(), "DROP VIEW IF EXISTS "+view) })
+	require.NoError(t, e.registry.Refresh(ctx))
+	withPolicy(t, policy.Policy{Tables: map[string]policy.TablePolicy{view: {
+		"capped": {Select: &policy.SelectPermissions{AllowColumns: []string{"*"}, MaxExecutionTime: 1000 /* ms */}},
+	}}})
 
-	withDeadline, cancel := context.WithTimeout(capped, 1500*time.Millisecond)
-	defer cancel()
-	err := e.chConn.Exec(withDeadline, slow)
-	require.Error(t, err)
-	_, hasCode := chconn.ExceptionCode(err)
-	assert.False(t, hasCode, "a deadline over 1s must still override the cap: %v", err)
-
-	noDeadline, cancel2 := context.WithCancel(capped)
-	defer cancel2()
-	err = e.chConn.Exec(noDeadline, slow)
-	require.Error(t, err)
-	code, _ := chconn.ExceptionCode(err)
-	assert.Equal(t, int32(159), code, "%v", err)
+	got := postJSONAs(t, e.baseURL+"/v1/query?table="+view, `{"columns":["n"]}`, bearer(t, "capped", nil))
+	assertQueryError(t, got, http.StatusBadRequest, "clickhouse.limit_exceeded", false)
+	assert.Contains(t, got.Error, "TIMEOUT_EXCEEDED")
 }

@@ -54,6 +54,13 @@
     - any-glob-to-any-file:
       - "internal/pipes/**"
 
+"area/typelayer":
+  - changed-files:
+    - any-glob-to-any-file:
+      - "internal/typelayer/**"
+      - "internal/chversion/**"
+      - "scripts/fetch-chtypes.sh"
+
 "area/sdk":
   - changed-files:
     - any-glob-to-any-file:

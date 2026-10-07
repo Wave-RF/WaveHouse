@@ -1,9 +1,10 @@
 package api
 
 import (
-	"context"
+	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
@@ -31,7 +32,8 @@ const (
 	// query now. 503 with Retry-After — without it for a write pipe, which
 	// may have run and is never retryable.
 	codeCHUnavailable = "clickhouse.unavailable"
-	// codeCHResponseTooLarge: the raw-SQL proxy's response cap. 502.
+	// codeCHResponseTooLarge: the response outgrew the buffer every query
+	// path caps it at. 502, not retryable.
 	codeCHResponseTooLarge = "clickhouse.response_too_large"
 	// codeCHUnknown: a failure with no verdict. 5xx, retryable unless a
 	// write pipe's.
@@ -48,29 +50,31 @@ const (
 	chTooManyRows       int32 = 158
 	chTimeoutExceeded   int32 = 159
 	chTooSlow           int32 = 160
+	chReadonly          int32 = 164
 	chMemoryLimit       int32 = 241
 	chTooManyBytes      int32 = 307
 	chTooManyRowsOrByte int32 = 396
 	chAccessDenied      int32 = 497
 )
 
-// capBackstop is how long past a role's time cap the client waits for
-// ClickHouse's own TIMEOUT_EXCEEDED before giving up on the query.
+// capBackstop is how long past the max_execution_time a read sends the
+// client waits for ClickHouse's own TIMEOUT_EXCEEDED before giving up on the
+// query: the server checks its budget between blocks, so it overshoots a
+// little, and its answer says which limit stopped the query where a dropped
+// connection says nothing.
 const capBackstop = 2 * time.Second
 
-// cancelAfter is parent cancelled after d, with no deadline on it: the
-// driver derives max_execution_time from a deadline, overriding the one
-// the role's cap sends.
-func cancelAfter(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(parent)
-	t := time.AfterFunc(d, cancel)
-	return ctx, func() { t.Stop(); cancel() }
-}
-
-// queryCaps says which of the role's own resource caps a query ran under,
-// so exceeding one reads as the query's cost rather than an outage.
+// queryCaps says what a query ran under: which of the role's own resource
+// caps, so exceeding one reads as the query's cost rather than an outage,
+// and whether it ran as a read under readonly=2.
 type queryCaps struct {
 	time, memory bool
+	// readonly marks a read sent with readonly=2. ClickHouse refusing it
+	// as READONLY means the statement writes — a pipe IsMutation reads as a
+	// read — or the user's profile is readonly=1 and refuses the settings
+	// every read sends: either way the configuration, not the caller, and
+	// the same again on a retry.
+	readonly bool
 }
 
 // chFailure is how one failed ClickHouse call answers.
@@ -82,10 +86,16 @@ type chFailure struct {
 
 // chFailureOf maps a failed ClickHouse call onto the response, by the class
 // chconn.Classify gives it. unknownStatus is the status of a failure with no
-// verdict: 502 on the proxy, whose upstream answered with something it
-// could not class, 500 on the native paths.
+// verdict: 502 on the proxy, which forwards whatever its upstream answered,
+// 500 on the structured query and pipes.
 func chFailureOf(err error, unknownStatus int, caps queryCaps) chFailure {
+	if _, ok := errors.AsType[*chResponseTooLargeError](err); ok {
+		return chFailure{http.StatusBadGateway, codeCHResponseTooLarge, false}
+	}
 	code, hasCode := chconn.ExceptionCode(err)
+	if caps.readonly && hasCode && code == chReadonly {
+		return chFailure{http.StatusBadGateway, codeCHMisconfigured, false}
+	}
 	switch {
 	case hasCode && (code == chTooManyRows || code == chTooManyBytes || code == chTooManyRowsOrByte),
 		caps.time && hasCode && (code == chTimeoutExceeded || code == chTooSlow),
@@ -131,6 +141,18 @@ func writeCHWriteError(w http.ResponseWriter, r *http.Request, err error, messag
 	f := chFailureOf(err, http.StatusInternalServerError, queryCaps{})
 	f.retryable = false
 	writeCHFailure(w, r, err, message, f)
+}
+
+// chErrorMessage is what a failed ClickHouse call tells the caller:
+// ClickHouse's own text, verbatim, for a refusal it answered, as the proxy
+// forwards it; the error itself for anything else.
+func chErrorMessage(err error) string {
+	if he, ok := errors.AsType[*chconn.HTTPError](err); ok {
+		if msg := strings.TrimSpace(he.Body); msg != "" {
+			return msg
+		}
+	}
+	return err.Error()
 }
 
 func writeCHFailure(w http.ResponseWriter, r *http.Request, err error, message string, f chFailure) {

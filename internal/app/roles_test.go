@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +21,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
 // Each role wires its own components and nothing else; the settings registry,
@@ -26,18 +29,19 @@ import (
 // process's. New does not validate, so the embedded MQ stands in for the
 // shared one a split needs (config.Validate refuses it outside tests).
 func TestNew_RolesChooseTheComponents(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		roles []config.Role
 		want  []string
 	}{
 		{"every role", config.AllRoles(), []string{
-			"clickhouse", "schema discovery", "dedupe", "mq", "cache", "coord",
+			"clickhouse", "type layer", "schema discovery", "dedupe", "mq", "cache", "coord",
 			"sweeper", "hub bridge", "keepalive", "ingest worker",
 			"auth", "sighup", "settings watcher", "http server",
 		}},
 		{"api", []config.Role{config.RoleAPI}, []string{
-			"clickhouse", "schema discovery", "dedupe", "mq", "cache", "coord",
+			"clickhouse", "type layer", "schema discovery", "dedupe", "mq", "cache", "coord",
 			"hub bridge", "keepalive",
 			"auth", "sighup", "settings watcher", "http server",
 		}},
@@ -58,6 +62,7 @@ func TestNew_RolesChooseTheComponents(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			cfg := testConfig(t, writeSettings(t, nil))
 			cfg.Roles = tc.roles
 			a := newApp(t, cfg, Options{})
@@ -66,11 +71,63 @@ func TestNew_RolesChooseTheComponents(t *testing.T) {
 	}
 }
 
+// Only the api role opens the type layer. Over a search path holding no
+// chtypes artifact, with autofetch off, a process without it boots — the
+// ingest worker needs only the static insert settings — and an API process
+// refuses to start, naming where it looked.
+func TestNew_OnlyTheAPIRoleNeedsTheArtifact(t *testing.T) {
+	// No explicit directory, no $CHTYPES_CACHE, an empty per-user cache, and
+	// no fetch on demand.
+	t.Setenv("CHTYPES_CACHE", "")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if _, err := typelayer.NewEngine(typelayer.Config{}); err == nil {
+		t.Skip("a chtypes artifact is installed in a system directory, so this host has no search path without one")
+	}
+
+	for _, roles := range [][]config.Role{
+		{config.RoleIngest},
+		{config.RoleSweeper},
+		{config.RoleIngest, config.RoleSweeper},
+	} {
+		t.Run(fmt.Sprint(roles), func(t *testing.T) {
+			cfg := testConfig(t, writeSettings(t, nil))
+			cfg.Roles = roles
+			a := newApp(t, cfg, Options{})
+			assert.Nil(t, a.Types())
+			assert.NotContains(t, componentNames(a), "type layer")
+		})
+	}
+
+	t.Run("api", func(t *testing.T) {
+		guardGlobals(t)
+		cfg := testConfig(t, writeSettings(t, nil))
+		cfg.Roles = []config.Role{config.RoleAPI}
+		a, err := New(t.Context(), Options{Config: cfg})
+		require.ErrorContains(t, err, "type layer: chtypes: no artifact installed for")
+		assert.Nil(t, a)
+	})
+
+	// With autofetch on, nothing installed is not a boot failure: a tenant's
+	// line is fetched when it first binds.
+	t.Run("api with autofetch", func(t *testing.T) {
+		guardGlobals(t)
+		cfg := testConfig(t, writeSettings(t, nil))
+		cfg.Roles = []config.Role{config.RoleAPI}
+		cfg.ClickHouse.ChtypesAutofetch = true
+		cfg.ClickHouse.ChtypesArtifactsURL = "file://" + t.TempDir() // publishes nothing
+		a, err := New(t.Context(), Options{Config: cfg})
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, a.Close(context.Background())) })
+		assert.NotNil(t, a.Types())
+	})
+}
+
 func TestNew_RefusesAConfigWithoutRoles(t *testing.T) {
+	t.Parallel()
 	guardGlobals(t)
 	cfg := testConfig(t, writeSettings(t, nil))
 	cfg.Roles = nil
-	_, err := New(t.Context(), Options{Config: cfg})
+	_, err := newForTest(t.Context(), t, Options{Config: cfg})
 	require.ErrorContains(t, err, "roles is empty")
 }
 
@@ -88,6 +145,7 @@ func hs256(t *testing.T, secret, role string) string {
 // token verifier runs there, so even an admin token the API would admit is
 // refused. Every tenant route, and the rest of /v1/ops, is not there.
 func TestNew_OpsOnlyRouter(t *testing.T) {
+	t.Parallel()
 	dir := writeSettings(t, nil)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileRoles), []byte(`{"roles": ["admin"]}`), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FilePolicies), []byte(`{"admin_role": "admin", "tables": {}}`), 0o600))
@@ -147,6 +205,7 @@ func TestNew_OpsOnlyRouter(t *testing.T) {
 // ClickHouse pool answers (here none can), a sweeper-only one once booted.
 // Liveness never waits on schema discovery, which only the API runs.
 func TestNew_OpsOnlyReadiness(t *testing.T) {
+	t.Parallel()
 	cfg := testConfig(t, writeSettings(t, nil))
 	cfg.Roles = []config.Role{config.RoleIngest}
 	a := newApp(t, cfg, Options{})
@@ -159,6 +218,7 @@ func TestNew_OpsOnlyReadiness(t *testing.T) {
 // A reload that moves the tenant repoints the pool of a process without the
 // api role, which has no schema registry to start over.
 func TestReload_OpsOnlyMovedTenant(t *testing.T) {
+	t.Parallel()
 	addr := closedAddr(t)
 	dir := writeSettings(t, databaseSettings(addr, "default"))
 	cfg := testConfig(t, dir)
@@ -185,6 +245,7 @@ func TestNew_OpsOnlyPrometheusInline(t *testing.T) {
 // A sweeper-only process serves its listener and runs the sweeper under the
 // lease, as the all-roles one does.
 func TestRun_SweeperOnlyProcess(t *testing.T) {
+	t.Parallel()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)

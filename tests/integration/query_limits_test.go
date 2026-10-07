@@ -5,21 +5,14 @@ package tests
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Wave-RF/WaveHouse/internal/api"
-	"github.com/Wave-RF/WaveHouse/internal/auth"
-	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
-	"github.com/Wave-RF/WaveHouse/internal/settings"
 )
 
 // TestStructuredQuery_ResourceCapsEnforcedServerSide is the executable proof
@@ -31,12 +24,11 @@ import (
 // so a rejection in the capped cases is attributable to the cap, not a broken
 // query.
 //
-// It drives the real StructuredQueryHandler (not the shared admin-stamped
-// server, which bypasses all policy) against the package's real ClickHouse, as
-// a non-admin `viewer` whose policy carries the cap under test. (Server-wide
-// resource backstops are ClickHouse's job — its settings profiles / quotas —
-// not WaveHouse's, so there's nothing global to assert here; this proves the
-// per-role caps that ARE WaveHouse's to enforce.)
+// It runs through the production /v1/query, as roles whose policy carries the
+// cap under test, with tokens for them. (Server-wide resource backstops are
+// ClickHouse's job — its settings profiles / quotas — not WaveHouse's, so
+// there's nothing global to assert here; this proves the per-role caps that
+// ARE WaveHouse's to enforce.)
 func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 	e := env(t)
 
@@ -54,74 +46,42 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		perms       policy.SelectPermissions // viewer's per-table select caps
-		wantStatus  int
-		wantBodyHas string // substring required in the response body
+		role        string
+		perms       policy.SelectPermissions // the role's per-table select caps
+		wantBodyHas string                   // substring required in the response body
 	}{
-		{
-			// Control: identical query, no resource cap → full result set.
-			name:        "no cap returns all rows",
-			perms:       policy.SelectPermissions{AllowColumns: []string{"*"}},
-			wantStatus:  http.StatusOK,
-			wantBodyHas: `"row-24"`,
-		},
-		{
-			// max_rows_to_read bounds rows SCANNED — the lever that stops a
-			// full-table scan. A 25-row scan blows past a cap of 1. ClickHouse
-			// error code 158 == TOO_MANY_ROWS (the native driver surfaces the
-			// numeric code, not the HTTP interface's symbolic suffix).
-			name:        "per-role max_rows_to_read is enforced (code 158 TOO_MANY_ROWS)",
-			perms:       policy.SelectPermissions{AllowColumns: []string{"*"}, MaxRowsToRead: 1},
-			wantStatus:  http.StatusBadRequest,
-			wantBodyHas: "code: 158",
-		},
-		{
-			// max_memory_usage bounds peak query memory — the lever that stops
-			// a heavy aggregation from exhausting the box. A 1-byte cap is below
-			// the floor any query allocates. Code 241 == MEMORY_LIMIT_EXCEEDED.
-			// (ByteSize literal 1 == 1 byte.)
-			name:        "per-role max_memory_usage is enforced (code 241 MEMORY_LIMIT_EXCEEDED)",
-			perms:       policy.SelectPermissions{AllowColumns: []string{"*"}, MaxMemoryUsage: 1},
-			wantStatus:  http.StatusBadRequest,
-			wantBodyHas: "code: 241",
-		},
+		// Control: identical query, no resource cap → full result set.
+		{role: "uncapped", perms: policy.SelectPermissions{AllowColumns: []string{"*"}}, wantBodyHas: `"row-24"`},
+		// max_rows_to_read bounds rows SCANNED — the lever that stops a
+		// full-table scan. A 25-row scan blows past a cap of 1. ClickHouse
+		// error code 158 == TOO_MANY_ROWS.
+		{role: "rows_capped", perms: policy.SelectPermissions{AllowColumns: []string{"*"}, MaxRowsToRead: 1}, wantBodyHas: "code: 158"},
+		// max_memory_usage bounds peak query memory — the lever that stops a
+		// heavy aggregation from exhausting the box. A 1-byte cap is below the
+		// floor any query allocates. Code 241 == MEMORY_LIMIT_EXCEEDED.
+		{role: "memory_capped", perms: policy.SelectPermissions{AllowColumns: []string{"*"}, MaxMemoryUsage: 1}, wantBodyHas: "code: 241"},
 	}
+	grants := policy.TablePolicy{}
+	for _, tt := range tests {
+		grants[tt.role] = policy.RolePermissions{Select: &tt.perms}
+	}
+	withPolicy(t, policy.Policy{Tables: map[string]policy.TablePolicy{table: grants}})
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Fresh handler + policy per case. Cache is nil so every case
-			// actually executes against ClickHouse (no cross-case cache hit
-			// masking enforcement). defaultMaxRows 0 falls back to the builder's
-			// constant. singleflight's zero value is ready to use.
-			p := &policy.Policy{
-				AdminRole: "admin",
-				Tables: map[string]policy.TablePolicy{
-					table: {"viewer": {Select: &tt.perms}},
-				},
+		t.Run(tt.role, func(t *testing.T) {
+			// A filter per role keeps the query text distinct, so no case is
+			// answered from the cache another case filled.
+			body := fmt.Sprintf(`{"select_all":true,"filters":[{"column":"page","op":"neq","value":%q}]}`, tt.role)
+			got := postJSONAs(t, e.baseURL+"/v1/query?table="+table, body, bearer(t, tt.role, nil))
+			if tt.role == "uncapped" {
+				require.Equal(t, 200, got.status, got.Error)
+				assert.Contains(t, got.raw, tt.wantBodyHas)
+				return
 			}
-			h := api.NewStructuredQueryHandler(
-				func(*settings.Store) driver.Conn { return e.chConn }, nil, func(*settings.Store) *discovery.SchemaRegistry { return e.registry }, func(*settings.Store) *policy.Policy { return p }, func(*settings.Store) int { return 60 }, func(*settings.Store) time.Duration { return 30 * time.Second }, nil,
-			)
-
-			req := httptest.NewRequest(http.MethodPost,
-				"/v1/query?table="+table, strings.NewReader(`{"select_all":true}`))
-			req = req.WithContext(auth.WithRole(req.Context(), "viewer"))
-			// The handler is served without the router, so the test stands in
-			// for TenantMW; the fixed getters above never read the store.
-			req = req.WithContext(api.WithStore(req.Context(), &settings.Store{}))
-			rec := httptest.NewRecorder()
-
-			h.Handle(rec, req)
-
-			body := rec.Body.String()
-			require.Equal(t, tt.wantStatus, rec.Code,
-				"unexpected status; body: %s", body)
-			assert.Contains(t, body, tt.wantBodyHas)
-			if tt.wantStatus != http.StatusOK {
-				// The role's own cap: the caller's, and not retried.
-				assert.Contains(t, body, `"code":"clickhouse.limit_exceeded","retryable":false`)
-			}
+			// The role's own cap: the caller's, and not retried. ClickHouse's
+			// message spells the code "Code: N." over HTTP.
+			assertQueryError(t, got, 400, "clickhouse.limit_exceeded", false)
+			assert.Contains(t, strings.ToLower(got.Error), tt.wantBodyHas)
 		})
 	}
 }

@@ -4,8 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
-	"fmt"
+	"hash"
 
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
@@ -25,44 +24,38 @@ import (
 // answer one tenant with another's rows now that each tenant reads its own
 // ClickHouse (story 6).
 //
-// Every section is framed with a 1-byte type marker (0x01 for sql, 0x00 for
-// param) plus an 8-byte big-endian length, then the payload. Without
-// length-prefixing the sql itself, a SQL string crafted to end with the
-// exact bytes of a param frame (`\x00` + 8 length bytes + payload) would
-// hash identically to a shorter SQL plus a real param — distinct
-// `(sql, params)` tuples, same digest. Per-param framing also kept its
-// own length prefix so embedded `\x00` inside a string param can't be
-// confused for a frame boundary, and the JSON `{type, value}` payload
-// shape additionally separates `"42"` (string) from `42` (int) so the
-// cache can't serve a string-typed row to an int-typed lookup.
-func queryCacheKey(id tenant.ID, sql string, params []any) string {
+// The hash opens with chRendering, the response contract the cached bytes
+// were rendered under, so a build that renders rows differently never serves
+// another's entries from a shared cache — even for a pipe or a query without
+// parameters, whose SQL is the same under both.
+//
+// params are the ClickHouse query-parameter values, positionally, exactly as
+// they go on the wire: already rendered as text and encoded for ClickHouse's
+// parameter reader. Two reads whose parameters reach ClickHouse as the same
+// bytes are the same query, and two that do not are not.
+//
+// Every section is framed with a 1-byte type marker (0x02 for the rendering,
+// 0x01 for sql, 0x00 for a param) plus an 8-byte big-endian length, then the
+// payload. Without length-prefixing the sql itself, a SQL string crafted to
+// end with the exact bytes of a param frame (`\x00` + 8 length bytes +
+// payload) would hash identically to a shorter SQL plus a real param —
+// distinct `(sql, params)` tuples, same digest. Per-param framing keeps its
+// own length prefix so an embedded `\x00` inside a value can't be confused
+// for a frame boundary.
+func queryCacheKey(id tenant.ID, sql string, params []string) string {
 	h := sha256.New()
-	var sqlLen [8]byte
-	binary.BigEndian.PutUint64(sqlLen[:], uint64(len(sql)))
-	_, _ = h.Write([]byte{1}) // sql frame marker
-	_, _ = h.Write(sqlLen[:])
-	_, _ = h.Write([]byte(sql))
+	writeFrame(h, 2, chRendering)
+	writeFrame(h, 1, sql)
 	for _, p := range params {
-		payload, err := json.Marshal(struct {
-			Type  string `json:"type"`
-			Value any    `json:"value"`
-		}{
-			Type:  fmt.Sprintf("%T", p),
-			Value: p,
-		})
-		if err != nil {
-			// Marshal can only fail on unserialisable types (channels,
-			// funcs, cyclic structures) that shouldn't reach this path —
-			// pipes/structured-query params are scalars from JSON. Fall
-			// back to a type+%v rendering so we still produce a key and
-			// don't take down the request path.
-			payload = fmt.Appendf(nil, "%T:%v", p, p)
-		}
-		var n [8]byte
-		binary.BigEndian.PutUint64(n[:], uint64(len(payload)))
-		_, _ = h.Write([]byte{0}) // param frame marker
-		_, _ = h.Write(n[:])
-		_, _ = h.Write(payload)
+		writeFrame(h, 0, p)
 	}
 	return id.String() + ":query:" + hex.EncodeToString(h.Sum(nil))
+}
+
+func writeFrame(h hash.Hash, marker byte, payload string) {
+	var n [8]byte
+	binary.BigEndian.PutUint64(n[:], uint64(len(payload)))
+	_, _ = h.Write([]byte{marker})
+	_, _ = h.Write(n[:])
+	_, _ = h.Write([]byte(payload))
 }

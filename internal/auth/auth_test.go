@@ -182,15 +182,16 @@ func TestMiddleware_LargeIntegerClaim_ExactThroughPolicy(t *testing.T) {
 	}}
 	perms := policy.Evaluate(p, "viewer", "clicks", "select", c.claims)
 	require.True(t, perms.Allowed)
-	assert.Equal(t, "`tenant_id` = ?", perms.Select.WhereClause)
-	assert.Equal(t, []any{"1234567890123456789"}, perms.Select.WhereParams)
+	where, whereParams := perms.Select.WhereSQL(nil)
+	assert.Equal(t, "`tenant_id` = ?", where)
+	assert.Equal(t, []any{"1234567890123456789"}, whereParams)
 }
 
 // TestMiddleware_NumericClaimSpelling_BindsCanonically: json.Number keeps the
 // token's literal spelling, so without normalization the bound filter value
-// would depend on how the IdP spelled the number — and a numeric ClickHouse
-// column rejects '1.0'/'1e3' as a TYPE_MISMATCH error on every query for that
-// role. The claims ride a real signed token (a json.Number claim value
+// would depend on how the IdP spelled the number — and an integer column
+// reads only the canonical spelling, so '1.0'/'1e3' would match nothing for
+// that role. The claims ride a real signed token (a json.Number claim value
 // marshals verbatim into the payload) so the exact parser configuration is
 // what's under test, per the note on the large-integer test above.
 func TestMiddleware_NumericClaimSpelling_BindsCanonically(t *testing.T) {
@@ -216,7 +217,8 @@ func TestMiddleware_NumericClaimSpelling_BindsCanonically(t *testing.T) {
 			}}
 			perms := policy.Evaluate(p, "viewer", "clicks", "select", c.claims)
 			require.True(t, perms.Allowed)
-			assert.Equal(t, []any{tt.want}, perms.Select.WhereParams)
+			_, whereParams := perms.Select.WhereSQL(nil)
+			assert.Equal(t, []any{tt.want}, whereParams)
 		})
 	}
 }
