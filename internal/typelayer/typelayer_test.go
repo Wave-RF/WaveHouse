@@ -652,9 +652,12 @@ func TestCachePaths_MatchesTheSDK(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Not parallel: the cases set environment variables.
+			// Not parallel: the cases set environment variables. HOME is a
+			// temp dir in every case, so a resolution that falls through
+			// never plants this unreadable entry in the real cache.
 			t.Setenv("CHTYPES_CACHE", "")
 			t.Setenv("XDG_CACHE_HOME", "")
+			t.Setenv("HOME", t.TempDir())
 			dir := tc.env(t)
 			root, _ := cachePaths(dir)
 			entry := filepath.Join(root, "unpacked", "sha256", strings.Repeat("ab", 32))
