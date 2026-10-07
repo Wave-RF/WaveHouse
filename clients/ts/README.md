@@ -166,7 +166,7 @@ npm run test:coverage  # coverage report
 
 ### Built Package Smoke Check
 
-`make smoke-ts-dist` (run by `make build-ts`) loads the built ESM, CJS and IIFE entry points by package name at the oldest Node that `engines.node` admits, and checks that they export the same names. It downloads that Node once into `.bin/`. `pnpm run smoke:dist` runs the same check on the Node you are running.
+`make smoke-ts-dist` (run by `make build-ts`) imports and `require()`s the built package by name (through its `exports` map) and runs the IIFE bundle as a classic script, at the oldest Node that `engines.node` admits, and checks that all three export the same names. It downloads that Node once into `.bin/`. `pnpm run smoke:dist` runs the same check on the Node you are running.
 
 ### E2E Integration Tests
 
