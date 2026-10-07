@@ -788,14 +788,13 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317   # plaintext gRPC; DD_
 
 The Grafana stack typically wants Prometheus-style scraping for metrics, stdout scraping for logs, and OTLP push for traces. Wire it like this:
 
-- **Logs**: Alloy scrapes stdout via the Docker socket / file tail / k8s logs API — stdout always emits 100%. If traces also go via OTLP (`otel.enabled: true`), set `otel.logs.enabled: false`, or WaveHouse pushes its logs over OTLP as well.
+- **Logs**: Alloy scrapes stdout via the Docker socket / file tail / k8s logs API — stdout always emits 100%. If traces also go via OTLP (`otel.enabled: true`), keep `otel.logs.enabled` on: it is what puts `trace_id`/`span_id` on the stdout lines, so Loki-to-Tempo links resolve. It also pushes logs over OTLP, so drop that stream in Alloy, or ship logs over OTLP instead of scraping stdout.
 - **Traces**: Set `OTEL_EXPORTER_OTLP_ENDPOINT` to Alloy's `otelcol.receiver.otlp` listener (`http://alloy:4317`). Alloy forwards to Tempo.
 - **Metrics**: Set `prometheus.enabled: true`. Alloy's `prometheus.scrape` reads `http://wavehouse:8080/metrics` (or whatever port you configured). The `prometheus` block is independent of `otel.*` — you can leave `otel.enabled: false` if Alloy is only scraping (no OTLP push at all), or combine the two if traces still go via OTLP, with `otel.metrics.enabled: false` so metrics aren't also pushed.
 
 ```bash
 export WH_OTEL_ENABLED=true            # traces go via OTLP
 export WH_OTEL_METRICS_ENABLED=false   # Alloy scrapes /metrics instead
-export WH_OTEL_LOGS_ENABLED=false      # Alloy scrapes stdout instead
 export WH_PROMETHEUS_ENABLED=true
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
 ```

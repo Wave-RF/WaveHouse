@@ -297,7 +297,7 @@ The master switch is `otel.enabled`. When `true`, each signal (traces/metrics/lo
 | `otel.traces.enabled` | `WH_OTEL_TRACES_ENABLED` | `true` | Export traces via OTLP gRPC. |
 | `otel.traces.sample_rate` | `WH_OTEL_TRACES_SAMPLE_RATE` | `1.0` | Head-based trace sampling rate in `[0.0, 1.0]`. `1.0` exports every trace; `0.0` exports none. Defaults to 100% (matches the OpenTelemetry SDK default); lower it for high-QPS production services where collector or backend cost is a concern. Best practice is "100% at the source, downsample at the collector" via tail-based sampling. Validated at config load. |
 | `otel.metrics.enabled` | `WH_OTEL_METRICS_ENABLED` | `true` | Export metrics + Go runtime metrics via OTLP gRPC. Periodic reader interval is fixed at 15s. Metrics are pre-aggregated so there is no sampling knob. |
-| `otel.logs.enabled` | `WH_OTEL_LOGS_ENABLED` | `true` | Export logs via OTLP gRPC. Disabling this leaves stdout logging untouched — the OTel logger provider is simply not registered. |
+| `otel.logs.enabled` | `WH_OTEL_LOGS_ENABLED` | `true` | Export logs via OTLP gRPC. Disabling it leaves stdout with 100% of records, but from the plain boot logger: lines lose `trace_id`/`span_id`, `component`, `source` and the build fields. |
 | `otel.logs.sample_rate` | `WH_OTEL_LOGS_SAMPLE_RATE` | `1.0` | OTLP export rate for `DEBUG`/`INFO` records, in `[0.0, 1.0]`. Validated at config load. `WARN` and `ERROR` records always export at 100% — dropping them silently during incidents is too dangerous to expose as a knob. **Stdout always receives 100% of records regardless of this rate** (see the scraper note above). |
 
 ### Prometheus

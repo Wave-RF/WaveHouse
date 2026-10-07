@@ -447,7 +447,7 @@ test-release-channel:
 	$(call run,release-channel test,scripts/ci/release-channel.test.sh,)
 
 .PHONY: vulncheck
-vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
+vulncheck: go-mod-download ## Run govulncheck -scan package (V=1: symbol-level scan with example traces)
 ifdef V
 	@echo "$(CYAN)==> Running govulncheck (verbose)...$(RESET)"
 	@$(GOVULNCHECK) ./...

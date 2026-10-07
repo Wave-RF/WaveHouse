@@ -526,7 +526,7 @@ Run `make help` to see all targets. Key ones:
 | `make fmt` | Check formatting across Go (`gofumpt`) + TS (Biome). Run `make fix` to apply. |
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
 | `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) + Markdown/MDX (markdownlint) + prose (misspell) |
-| `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
+| `make vulncheck` | Run `govulncheck -scan package` (`V=1`: the default symbol-level scan, with example traces) |
 | `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + docs type-check (`astro check` — not a full build, so link validation stays CI's job) (parallel-safe: `make -j verify`) |
 | `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint `--fix`), MDX (`fix-mdx-fences` only — the generic fixers never run over `.mdx`), and docs-prose spelling (misspell, both) |
 | **Build** | |
@@ -579,7 +579,7 @@ go mod tidy                             # Remove unused, add missing
 
 ```bash
 make vulncheck       # package-level scan (what make verify and CI run)
-V=1 make vulncheck   # default symbol-level (call-graph) scan, with call stacks
+V=1 make vulncheck   # default symbol-level (call-graph) scan, with example call traces
 ```
 
 For a combined security scan, run `make verify` — it runs `vulncheck` alongside `lint`, and `gosec` is one of the linters enabled in `.golangci.yml`. This is also what CI runs on every push and pull request.
