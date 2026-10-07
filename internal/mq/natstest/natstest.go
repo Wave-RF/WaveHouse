@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -374,18 +375,29 @@ func (m *Manifests) SingleReplica() {
 	}
 }
 
-// Create creates m's streams and each one's consumers, in order, then its
-// KV buckets the way nack does (CreateKeyValue), without waiting for anything.
+// Create creates m's streams in order, each one's consumers (concurrently,
+// since one round trip each dominates a boot of the shipped topology), then
+// its KV buckets the way nack does (CreateKeyValue), without waiting for
+// anything.
 func (m *Manifests) Create(ctx context.Context, js jetstream.JetStream) error {
 	for _, cfg := range m.Streams {
 		s, err := js.CreateStream(ctx, cfg)
 		if err != nil {
 			return fmt.Errorf("create stream %s: %w", cfg.Name, err)
 		}
-		for _, c := range m.Consumers[cfg.Name] {
-			if _, err := s.CreateConsumer(ctx, c); err != nil {
-				return fmt.Errorf("create consumer %s/%s: %w", cfg.Name, c.Durable, err)
-			}
+		consumers := m.Consumers[cfg.Name]
+		errs := make([]error, len(consumers))
+		var wg sync.WaitGroup
+		for i, c := range consumers {
+			wg.Go(func() {
+				if _, err := s.CreateConsumer(ctx, c); err != nil {
+					errs[i] = fmt.Errorf("create consumer %s/%s: %w", cfg.Name, c.Durable, err)
+				}
+			})
+		}
+		wg.Wait()
+		if err := errors.Join(errs...); err != nil {
+			return err
 		}
 	}
 	for _, cfg := range m.KeyValues {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -78,7 +79,7 @@ func TestSSE_EmitsHeartbeatsWhenIdle(t *testing.T) {
 	hb := stream.NewHeartbeater(20*time.Millisecond, 1)
 	go hb.Run(t.Context())
 
-	h := &StreamHandler{Hub: stream.NewHub(nil, nil, nil), Heartbeater: hb}
+	h := &StreamHandler{Hub: stream.NewHub(nil, nil, nil), Heartbeater: fixedWheel(hb)}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)
@@ -117,7 +118,7 @@ func TestSSE_WheelTickRacesHandlerTeardown(t *testing.T) {
 	defer cancel()
 	go hb.Run(ctx)
 
-	h := &StreamHandler{Hub: stream.NewHub(nil, nil, nil), Heartbeater: hb}
+	h := &StreamHandler{Hub: stream.NewHub(nil, nil, nil), Heartbeater: fixedWheel(hb)}
 
 	const conns = 40
 	var wg sync.WaitGroup
@@ -176,6 +177,72 @@ func TestSSE_SubscribesUnderTheRequestTenant(t *testing.T) {
 	cancel()
 	wg.Wait()
 	assert.Equal(t, 0, hub.Len(mq.Topic{Tenant: "acme", Table: "clicks"}), "every subscriber is removed")
+}
+
+// A stream is kept alive by its own tenant's wheel (#597): the handler asks
+// for the wheel of the request's tenant, so one tenant's interval is never
+// another's cadence. A tenant with no wheel is one no longer served, whose
+// stream is ending anyway: it opens, and goes without.
+func TestSSE_KeptAliveByItsTenantsWheel(t *testing.T) {
+	t.Parallel()
+	tenants := nestedTenants(t, map[string]string{"acme": fullConfig(100), "globex": fullConfig(200), "initech": fullConfig(300)})
+	// acme's wheel nudges many times within the test and globex's never does.
+	wheels := map[tenant.ID]*stream.Heartbeater{
+		"acme":   stream.NewHeartbeater(10*time.Millisecond, 1),
+		"globex": stream.NewHeartbeater(time.Hour, 1),
+	}
+	for _, hb := range wheels {
+		go hb.Run(t.Context())
+	}
+	hub := stream.NewHub(nil, nil, nil)
+	h := &StreamHandler{Hub: hub, Heartbeater: func(s *settings.Store) *stream.Heartbeater { return wheels[s.Tenant()] }}
+
+	// One context for every connection: cancelling it is the clients going away.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	bodies := map[tenant.ID]*streamRecorder{}
+	for _, id := range []tenant.ID{"acme", "globex", "initech"} {
+		store, ok := tenants.For(id)
+		require.True(t, ok)
+		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)
+		req = req.WithContext(WithStore(req.Context(), store))
+		w := &streamRecorder{ResponseRecorder: httptest.NewRecorder()}
+		bodies[id] = w
+		wg.Go(func() { h.Handle(w, req) })
+	}
+	keepalives := func(id tenant.ID) int { return strings.Count(bodies[id].written(), ":\n\n") }
+	require.Eventually(t, func() bool {
+		return wheels["acme"].Len() == 1 && wheels["globex"].Len() == 1 && hub.Len(mq.Topic{Tenant: "initech", Table: "clicks"}) == 1
+	}, 5*time.Second, 5*time.Millisecond, "each stream joins its own tenant's wheel")
+	require.Eventually(t, func() bool { return keepalives("acme") >= 3 }, 5*time.Second, 5*time.Millisecond,
+		"acme's stream is nudged by acme's wheel")
+	cancel()
+	wg.Wait()
+
+	assert.Zero(t, keepalives("globex"), "globex's stream is not nudged at acme's interval")
+	assert.Zero(t, keepalives("initech"), "a stream with no wheel is not kept alive")
+	assert.Contains(t, bodies["initech"].written(), ": connected", "but it is open")
+	assert.Zero(t, wheels["acme"].Len()+wheels["globex"].Len(), "each stream leaves the wheel it joined")
+}
+
+// streamRecorder is a ResponseRecorder whose body a test may read while the
+// handler is still writing the stream.
+type streamRecorder struct {
+	*httptest.ResponseRecorder
+	mu sync.Mutex
+}
+
+func (r *streamRecorder) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ResponseRecorder.Write(p)
+}
+
+func (r *streamRecorder) written() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.Body.String()
 }
 
 // blockingReplayer is a gap-fill that never catches up: it signals once it
@@ -249,7 +316,7 @@ func TestSSE_EndsWhenItsTenantIsNoLongerServed(t *testing.T) {
 		t.Parallel()
 		hub := stream.NewHub(nil, nil, nil)
 		hb := stream.NewHeartbeater(time.Hour, 1)
-		done, w := handle(t, &StreamHandler{Hub: hub, Heartbeater: hb, Served: unserved}, "")
+		done, w := handle(t, &StreamHandler{Hub: hub, Heartbeater: fixedWheel(hb), Served: unserved}, "")
 		ended(t, done)
 		assert.Zero(t, hub.Len(topic), "the deferred Remove ran")
 		assert.Zero(t, hb.Len(), "it never reached the keepalive wheel")
