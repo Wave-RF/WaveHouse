@@ -140,7 +140,8 @@ reviewers_script="scripts/pre-push-reviewers.sh"
 
 tk_flush() {
   if [ "$_inw" = 1 ]; then
-    case $_w in *$'\002'* | *$'\003'*) _w=${_w//$'\002'/}; _w=${_w//$'\003'/} ;; esac
+    # One pass with tr: bash 3.2's ${_w//…} is quadratic in the marker count.
+    case $_w in *$'\002'* | *$'\003'*) _w=$(printf '%s.' "$_w" | tr -d '\002\003'); _w=${_w%.} ;; esac
     case $_skip in
       0) TK_VAL+=("$_w"); TK_DYN+=("$_dyn"); TK_OP+=(0) ;;
       2) TK_IN+=("$_w"); TK_IN_AT+=("$_cmd0") ;;

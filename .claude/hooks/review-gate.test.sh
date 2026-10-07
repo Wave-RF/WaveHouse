@@ -322,6 +322,10 @@ expect_block "a push in a here-string read by sh, inside \$(…)" "$repo" "echo 
 expect_block "a push in bash -c, inside \$(…)" "$repo" "out=\$(bash -c 'git -C ../wt-b push')" "can't follow"
 expect_block "a push in eval, inside \$(…)" "$repo" "out=\$(eval 'git -C ../wt-b push')" "can't follow"
 expect_block "a push with a quoted -C path, inside \$(…)" "$repo" "out=\$(git -C \"\$WT\" push)" "can't follow"
+expect_block "a push in bash -c, inside \$'…' inside \$(…)" "$repo" "out=\$(bash -c \$'git -C ../wt-b push')" "can't follow"
+# A substitution's output handed to a shell is code.
+expect_block "a substitution's output handed to eval" "$repo" "eval \"\$(echo 'git -C ../wt-b push')\"" "can't follow"
+expect_block "…to bash -c" "$repo" "bash -c \"\$(echo 'git -C ../wt-b push')\"" "can't follow"
 expect_block "a push continued over a backslash-newline in bash -c" "$repo" "bash -c 'git -C ../wt-b \\
 push'" "can't follow"
 expect_block "…and in a heredoc read by bash" "$repo" "bash <<'EOF'
@@ -346,6 +350,7 @@ EOF
 )\""
 expect_block "a push after an \$'…' string holding \\'" "$repo" "echo \$'it\\'s' && git push origin feat-b" "missing pre-push review marker"
 expect_allow "…and the same push of a reviewed branch" "$repo" "echo \$'it\\'s' && git push origin feat-a"
+expect_allow "…with the \$'…' string inside \$(…)" "$repo" "out=\$(printf \$'it\\'s pushed\\n') && git push origin feat-a"
 expect_allow "…closed with EOF)\" on one line" "$wtb" "gh pr create --draft --title \"fix: x\" --body \"\$(cat <<'EOF'
 The branch on github was pushed; it's ready.
 EOF)\""
