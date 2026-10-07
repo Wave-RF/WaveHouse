@@ -3,7 +3,9 @@
 #   tmp/ci-passed-tree-<TREE>      — full `make ci` passed
 #   tmp/verify-passed-tree-<TREE>  — just `make verify` passed (subset of ci)
 # `make ci` writes both (it runs verify); `make verify` writes only the verify
-# marker. Pre-commit skips re-running verify when the marker is current;
+# marker; `make ci-remote` (scripts/ci/remote-ci.sh) writes both, with a
+# provenance file beside the ci marker, after `make ci` passes on another
+# machine. Pre-commit skips re-running verify when the marker is current;
 # pre-push consults the ci marker. Skipped on CI runners.
 
 set -euo pipefail

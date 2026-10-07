@@ -96,6 +96,7 @@ ARCH := $(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 #   LDFLAGS="-s -w"              extra ldflags (e.g. force-strip a local build)
 #   LIMIT=50                     top-N for `make dep-cut`
 #   JOBS=4                       parallel slots for the -j fan-outs (default: CPU count)
+#   HOST=box KEEP=1 REMOTE_DIR=d where `make ci-remote` runs (see that target)
 #
 # Add binaries here as the project grows (e.g., wavehouse-api, wavehouse-worker).
 BINARIES := wavehouse
@@ -455,6 +456,15 @@ test-release-channel:
 test-review-gate:
 	$(call run,review-gate test,.claude/hooks/review-gate.test.sh,)
 
+# test-remote-ci: drive scripts/ci/remote-ci.sh through stand-in ssh and docker
+# commands in a scratch repository: only a passing run of exactly HEAD's tree,
+# on a worktree still clean afterwards, may write the make-ci marker. Also
+# checks the pre-push hook's line for that marker. A verify leaf, same as
+# test-classify-paths.
+.PHONY: test-remote-ci
+test-remote-ci:
+	$(call run,remote-ci test,scripts/ci/remote-ci.test.sh,)
+
 .PHONY: vulncheck
 vulncheck: go-mod-download ## Run govulncheck -scan package (V=1: symbol-level scan with example traces)
 ifdef V
@@ -545,11 +555,12 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (15): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# Leaves (16): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
 # for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
-# test-classify-paths, test-release-channel and test-review-gate for the tooling;
+# test-classify-paths, test-release-channel, test-review-gate and test-remote-ci
+# for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
 # nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
 # (`biome check`) but NOT fmt-ts (`biome format`) — check already covers
@@ -563,7 +574,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-review-gate vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-review-gate test-remote-ci vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.
@@ -907,6 +918,16 @@ ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverag
 	@$(MAKE) cov
 	@scripts/ci-marker.sh write
 	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
+
+# ci-remote: run `make ci` for HEAD on another machine, an ssh destination or
+# docker:<container>, and write the same markers here if it passed there for
+# exactly this tree. Host requirements and the checks: scripts/ci/remote-ci.sh.
+HOST ?=
+KEEP ?=
+REMOTE_DIR ?=
+.PHONY: ci-remote
+ci-remote: ## Run `make ci` for HEAD on HOST=<ssh destination> or HOST=docker:<container> (KEEP=1, REMOTE_DIR=…)
+	@KEEP='$(KEEP)' REMOTE_DIR='$(REMOTE_DIR)' scripts/ci/remote-ci.sh '$(HOST)'
 
 ##@ Release
 

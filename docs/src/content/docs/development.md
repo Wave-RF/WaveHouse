@@ -338,6 +338,22 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 
 **Note on timing**: gotestsum's `DONE ... in X.XXXs` reports pure test execution time. The total wall time includes Go compiling all packages — the first run compiles everything (~15s), subsequent runs use the build cache (~1s).
 
+### Running `make ci` on another machine
+
+`make ci-remote HOST=<host>` runs `make ci` for your `HEAD` commit on another machine and streams its output back, so the heavy suites can run off your laptop, or on another OS or architecture than yours (CI runs on Linux amd64).
+
+```bash
+make ci-remote HOST=build-box                  # any ssh destination: user@host, a ~/.ssh/config alias
+make ci-remote HOST=docker:wavehouse-dev       # a running local container or devcontainer
+make ci-remote HOST=build-box KEEP=1 REMOTE_DIR=/scratch/wavehouse-ci
+```
+
+Only the commit travels, so the worktree must be clean: `HEAD` is streamed as a `git bundle` over the ssh or `docker exec` connection, and nothing is pushed. The host checks it out in a fresh directory under `REMOTE_DIR` (default `.cache/wavehouse-ci`; a relative path is under the host's home), runs `make tools && make ci` there, and removes the directory afterwards unless `KEEP=1`. The host's `uname -sm` is the first line of the output, and a copy of the log is kept in `tmp/ci-remote-<tree>.log`.
+
+The host needs what a local `make ci` needs: bash, git, GNU Make 4+, Go, Node and pnpm from [Prerequisites](#prerequisites), network access for `make tools`, and a Docker daemon for the integration and e2e suites. Over ssh the commands run in a non-interactive login shell, so the tools must be on the `PATH` the host's profile sets; in a container they must be on the container's own `PATH`, and the container must reach a Docker daemon (a mounted socket or Docker-in-Docker).
+
+**How the pre-push gate treats it.** The gate's meaning doesn't change: a code push still needs `tmp/ci-passed-tree-<tree>`, which says `make ci` passed for exactly that tree. `make ci-remote` writes it (and the verify marker) only if the host exits 0, the tree the host reports having checked out equals your `HEAD^{tree}`, `make ci` left the host's checkout clean, and your worktree is still clean and on that tree when the run ends; otherwise it writes nothing. Beside the marker, `tmp/ci-passed-tree-<tree>.provenance` records the host, its OS and architecture, the start and end times and the log path, and the pre-push hook prints `make ci passed on <host> (<os>/<arch>)` from it. A marker from a local `make ci` has no provenance file and works exactly as before.
+
 ### Test Structure
 
 | Category | Location | Docker? | Command |
@@ -544,6 +560,7 @@ Run `make help` to see all targets. Key ones:
 | `make test-e2e` | E2E SDK suite against `bin/wavehouse-cov` + coverage gate |
 | `make test-all` | All four suites sequentially + merged coverage gate |
 | `make ci` | Full pipeline: parallel `verify` + builds + unit/SDK tests, then integration + E2E + cov |
+| `make ci-remote HOST=<host>` | `make ci` for `HEAD` on an ssh host or `docker:<container>`; writes the same marker if it passes there for this exact tree ([details](#running-make-ci-on-another-machine)) |
 | **Release** (see [Cutting a release](#cutting-a-release)) | |
 | `make release-server VERSION=X.Y.Z` | Tag a server release — binaries + container image |
 | `make release-sdk-ts VERSION=X.Y.Z` | Tag a TypeScript SDK release — npm |
