@@ -115,6 +115,8 @@ fi
 # push that follows a HEAD-moving git command, run directly or not
 # (`git commit … && git push`, `out=$(git commit …) && git push`): the gate runs
 # before the command line does, so it would judge the commit before the move.
+# It reads only the command line, so it catches accidental forms, not
+# deliberate evasion; AGENTS.md lists the forms it doesn't follow.
 #
 # It gates any commit with a delta against the base (local main, else
 # origin/main), NOT only commits on a branch with an open PR: the agent flow is
@@ -130,9 +132,10 @@ reviewers_script="scripts/pre-push-reviewers.sh"
 # redirections, heredocs, $(…) and `…`) without expanding or running anything.
 # A word that carries an expansion is flagged dynamic: its value is unknowable
 # here, so a push that depends on one fails closed. Fills TK_VAL / TK_DYN /
-# TK_OP, and TK_IN / TK_IN_AT with each heredoc body and here-string and the
-# token index of the simple command that reads it; returns 1 on an unterminated
-# quote or substitution.
+# TK_OP, TK_IN / TK_IN_AT with each heredoc body and here-string and the token
+# index of the simple command that reads it, and TK_SUB with the text of every
+# $(…) and `…`, wherever its word went (an argument, a here-string, a redirect
+# target); returns 1 on an unterminated quote or substitution.
 
 tk_flush() {
   if [ "$_inw" = 1 ]; then
@@ -142,7 +145,8 @@ tk_flush() {
     esac
     _skip=0
   fi
-  _w=""; _inw=0; _dyn=0
+  TK_SUB+=$_sub
+  _w=""; _inw=0; _dyn=0; _sub=""
 }
 # An operator ends any redirection: in `<(…)` and `>(…)` the "(" opens a
 # process substitution, whose first word is a command, not a target.
@@ -175,26 +179,28 @@ tk_dquote() {
 }
 
 tk_dollar() {
-  local rest part
+  local rest part s0=${#_w}
   _inw=1; _dyn=1
   case ${_s:_i+1:1} in
-    '(') _w+='$'; _i=$((_i + 1)); tk_paren ;;
+    '(') _w+='$'; _i=$((_i + 1)); tk_paren || return 1; _sub+="${_w:s0}"$'\n' ;;
     '{')
       rest=${_s:_i}
       case $rest in *'}'*) ;; *) return 1 ;; esac
       part=${rest%%'}'*}
+      # shellcheck disable=SC2016 # a literal $( or backtick in ${…:-…}
+      case $part in *'$('* | *'`'*) _sub+="$part}"$'\n' ;; esac
       _w+="$part}"; _i=$((_i + ${#part} + 1)) ;;
     *) _w+='$'; _i=$((_i + 1)) ;;
   esac
 }
 
 tk_backtick() {
-  local c
+  local c s0=${#_w}
   _inw=1; _dyn=1; _w+='`'; _i=$((_i + 1))
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
     case $c in
-      '`') _w+=$c; _i=$((_i + 1)); return 0 ;;
+      '`') _w+=$c; _i=$((_i + 1)); _sub+="${_w:s0}"$'\n'; return 0 ;;
       \\) _w+=${_s:_i:2}; _i=$((_i + 2)) ;;
       *) _w+=$c; _i=$((_i + 1)) ;;
     esac
@@ -220,7 +226,7 @@ tk_paren() {
       '`') tk_backtick || return 1 ;;
       '<')
         if [ "${_s:_i:3}" = '<<<' ]; then
-          _w+='<<<'; _i=$((_i + 3))
+          _w+='<<< '; _i=$((_i + 3))
         else
           tk_heredoc_op -1 || { _w+=$c; _i=$((_i + 1)); }
         fi ;;
@@ -296,7 +302,7 @@ tk_redirect() {
 tokenize() {
   local LC_ALL=C c c2 rest line
   _s=$1; _n=${#1}; _i=0
-  _w=""; _inw=0; _dyn=0; _skip=0; _cmd0=0
+  _w=""; _inw=0; _dyn=0; _skip=0; _cmd0=0; _sub=""; TK_SUB=""
   TK_VAL=(); TK_DYN=(); TK_OP=(); TK_IN=(); TK_IN_AT=(); _hd_delim=(); _hd_strip=(); _hd_at=()
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
@@ -392,9 +398,6 @@ walk_commands() {
 # push.
 run_simple() {
   local k=0 j nw=${#words[@]} w a d dwhy ewhy sub="" agd="" agw="" line
-  for ((j = 0; j < nw; j++)); do
-    [ "${dyns[j]}" = 0 ] || head_move "${words[j]}"
-  done
   while [ "$k" -lt "$nw" ]; do
     w=${words[k]}
     if is_assignment "$w"; then
@@ -458,6 +461,7 @@ run_simple() {
         [ "${TK_IN_AT[j]}" != "$cstart" ] || line="$line
 ${TK_IN[j]}"
       done
+      line=${line//$'\\\n'/}
       head_move "$line"
       ! grep -qE "$push_re" <<<"$line" || block "$cant_follow" ;;
     git)
@@ -660,30 +664,26 @@ head_re=${git_re}'(commit|merge|rebase|reset|checkout|switch|cherry-pick|revert|
 shell_re='(^|[[:space:];|&(`])(eval|([^[:space:];|&]*/)?(ba|z|da|k)?sh)([[:space:]<]|$)'
 cant_follow="this command runs \`git push\` in a form the gate can't follow (behind a wrapper such as timeout, sudo or env -C, in a command substitution, or in code handed to a shell or eval). Run \`git push\` directly, or as \`git -C <worktree> push …\`."
 
-# unfollowed_push: true when a simple command the walk didn't gate (FOLLOWED
-# holds the first-token index of each one it did) holds a `git … push`: behind
-# a wrapper it doesn't know (`timeout 60 git push`) or inside a command
-# substitution. A push only mentioned in a quoted string, a heredoc body or a
-# comment is one word or no token at all, so it doesn't count.
+# unfollowed_push: true when a command substitution anywhere holds a
+# `git … push`, or a simple command the walk didn't gate (FOLLOWED holds the
+# first-token index of each one it did) holds one behind a wrapper it doesn't
+# know (`timeout 60 git push`). A push only mentioned in a quoted string, a
+# heredoc body or a comment is one word or no token at all, so it doesn't count.
 unfollowed_push() {
-  local i n=${#TK_VAL[@]} w line="" dyn="" start=0
+  local i n=${#TK_VAL[@]} w line="" start=0
+  ! grep -qE "$push_re" <<<"$TK_SUB" || return 0
   for ((i = 0; i <= n; i++)); do
     if [ "$i" -eq "$n" ] || [ "${TK_OP[i]}" = 1 ]; then
       case $FOLLOWED in
         *" $start "*) ;;
-        *) grep -qE "$push_re" <<<"$line
-$dyn" && return 0 ;;
+        *) grep -qE "$push_re" <<<"$line" && return 0 ;;
       esac
-      line=""; dyn=""; start=$((i + 1))
+      line=""; start=$((i + 1))
       continue
     fi
     w=${TK_VAL[i]}
-    if [ "${TK_DYN[i]}" = 1 ]; then
-      dyn="$dyn$w
-"
-      w=Q
-    fi
     case $w in *[[:space:]]*) w=Q ;; esac
+    [ "${TK_DYN[i]}" = 0 ] || w=Q
     line="$line $w"
   done
   return 1
@@ -693,16 +693,21 @@ $dyn" && return 0 ;;
 # line become a placeholder word (`git -C "<path>" stash push` reads as a
 # stash). It may still match a push that is only mentioned, say in a heredoc
 # body; the tokenizer then finds no push and lets the command through. Code
-# handed to a shell or eval is usually quoted, so a line that runs one and
-# mentions git and push anywhere goes through too.
+# handed to a shell or eval, and a substitution, are often quoted, so a line
+# that has one and mentions git and push anywhere goes through too.
 squashed=$(printf '%s' "${cmd//$'\\\n'/}" | sed -E "s/'[^']*'/Q/g; s/\"[^\"]*\"/Q/g")
+# shellcheck disable=SC2016 # a literal $( or backtick
 if grep -qE "$push_re" <<<"$squashed" \
-  || { [[ $cmd == *git*push* ]] && grep -qE "$shell_re" <<<"$squashed"; }; then
+  || { [[ $cmd == *git*push* ]] && { [[ $cmd == *'$('* || $cmd == *'`'* ]] || grep -qE "$shell_re" <<<"$squashed"; }; }; then
   hook_cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
   [ -n "$hook_cwd" ] || block "can't tell which directory this \`git push\` runs in: the hook payload has no cwd."
   tokenize "$cmd" || block "can't parse this command (an unterminated quote or substitution?), so can't tell what it pushes."
+  TK_SUB=${TK_SUB//$'\\\n'/}
   FOLLOWED=" "
+  # A substitution runs before the command it's in, so a HEAD move in one
+  # counts against every push on the line.
   HEAD_MOVER=""
+  head_move "$TK_SUB"
   walk_commands "$hook_cwd"
   if unfollowed_push; then
     block "$cant_follow"

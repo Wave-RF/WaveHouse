@@ -318,6 +318,18 @@ EOF" "can't follow"
 expect_block "a push in a here-string read by sh" "$repo" "sh <<< 'git -C ../wt-b push'" "can't follow"
 expect_block "a push in an input process substitution" "$repo" "cat <(git push origin feat-b)" "missing pre-push review marker"
 expect_block "a push in an output process substitution" "$repo" "tee >(git -C ../wt-b push)" "missing pre-push review marker"
+expect_block "a push in a here-string read by sh, inside \$(…)" "$repo" "echo \"\$(sh <<< 'git -C ../wt-b push')\"" "can't follow"
+expect_block "a push continued over a backslash-newline in bash -c" "$repo" "bash -c 'git -C ../wt-b \\
+push'" "can't follow"
+expect_block "…and in a heredoc read by bash" "$repo" "bash <<'EOF'
+git -C ../wt-b \\
+push
+EOF" "can't follow"
+# A substitution in a here-string or a redirect target runs like any other.
+expect_block "a push in a here-string's substitution" "$repo" "grep -q rejected <<< \"\$(git -C ../wt-b push 2>&1)\"" "can't follow"
+expect_block "a push in a redirect target's substitution" "$repo" "echo hi > \"\$(git -C ../wt-b push >/dev/null; echo /dev/null)\"" "can't follow"
+expect_block "a commit in a here-string's substitution, then a push" "$repo" "grep -q x <<< \"\$(git commit --allow-empty -m x)\"; git push" "separate command"
+expect_allow "a mention of git push beside a substitution" "$wtb" "echo \"\$(date): ran git push\""
 expect_allow "a script run by bash, then a push" "$repo" "bash scripts/pre-push-reviewers.sh && git push"
 expect_allow "a heredoc read by bash that doesn't push, then a push" "$repo" "bash <<'EOF'
 echo hi
