@@ -662,12 +662,28 @@ build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
 	@$(MAKE) -j $(JOBS) build build-ts build-docs
 	@echo "$(GREEN)$(BOLD)✔ All artifacts built$(RESET)"
 
-# build-ts: pnpm-driven SDK build → clients/ts/dist/ (ESM + CJS + .d.ts).
-# Required by test-e2e (e2e tests import the built artifact) and by
-# build-all. Standalone via `make build-ts`.
+# build-ts: pnpm-driven SDK build → clients/ts/dist/ (ESM + CJS + .d.ts + the
+# IIFE bundle), then smoke-loads each entry point (smoke-ts-dist). Required by
+# test-e2e (e2e tests import the built artifact) and by build-all. Standalone
+# via `make build-ts`.
 .PHONY: build-ts
-build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/
+build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/ and smoke-load each entry point
 	@$(PNPM) --filter $(SDK_NAME) run build
+	@$(MAKE) --no-print-directory smoke-ts-dist
+
+# smoke-ts-dist: load the built ESM, CJS and IIFE entry points like a consumer
+# and compare their export surfaces. Runs at the OLDEST Node `engines.node`
+# admits, because an ESM-only dependency only breaks `require()` before 22.12
+# and the floating .nvmrc Node hides it. That Node is fetched once from
+# nodejs.org into .bin/ against a pinned sha256 (fetch-node.sh, like
+# shellcheck) rather than through pnpm, which on pnpm 11 asks nodejs.org on
+# every run. No pnpm-install prereq of its own: build-ts has already installed
+# the SDK's runtime deps, which dist/ loads from node_modules.
+.PHONY: smoke-ts-dist
+smoke-ts-dist: ## Smoke-load the built SDK entry points at the oldest Node engines.node admits
+	@v=$$(node clients/ts/scripts/smoke-dist.mjs --min-node) && \
+		n=$$(clients/ts/scripts/fetch-node.sh $$v $(LOCAL_BIN)) && \
+		"$$n" clients/ts/scripts/smoke-dist.mjs --expect-node $$v
 
 # check-docs: astro check — type-checks .astro/.mdx, content-collection frontmatter
 # schemas, and config TS. Catches what `astro build` does NOT (the build strips
@@ -833,7 +849,8 @@ test: test-unit
 # them all at once. A part only collects coverage into $(COV_INT)/data, which
 # test-integration clears first and renders and gates after. Every package
 # with integration-tagged tests belongs to a part: check-integration-parts,
-# which each part runs first, fails on one left out.
+# which each part runs first, fails on one left out, and on a part listed
+# without a target or a target left out of the list.
 INTEGRATION_PARTS := app backends
 INTEGRATION_APP_PKGS     := ./tests/integration/...
 # natsspike pins the nats-server behavior the external NATS topology rests on,
@@ -844,6 +861,11 @@ INTEGRATION_BACKEND_PKGS := ./internal/cache/... ./internal/mq/natsspike/...
 # untagged tests are the unit suite's, so it runs only the ones the tag adds,
 # in a run of its own.
 INTEGRATION_MQ_PKG := ./internal/mq
+# The packages each part runs, which check-integration-parts holds against the
+# packages with tagged tests: a part dropped from INTEGRATION_PARTS drops its
+# packages from that check too.
+INTEGRATION_PKGS_app      = $(INTEGRATION_APP_PKGS)
+INTEGRATION_PKGS_backends = $(INTEGRATION_BACKEND_PKGS) $(INTEGRATION_MQ_PKG)
 
 .PHONY: test-integration
 test-integration: go-mod-download ## Run Go integration tests + render coverage + gate threshold (requires Docker)
@@ -854,7 +876,7 @@ test-integration: go-mod-download ## Run Go integration tests + render coverage 
 .PHONY: check-integration-parts
 check-integration-parts:
 	@scripts/ci/integration-parts.sh --check $(INTEGRATION_PARTS)
-	@scripts/ci/tagged-tests.sh check integration $(INTEGRATION_APP_PKGS) $(INTEGRATION_BACKEND_PKGS) $(INTEGRATION_MQ_PKG)
+	@scripts/ci/tagged-tests.sh check integration $(foreach p,$(INTEGRATION_PARTS),$(INTEGRATION_PKGS_$(p)))
 
 # -parallel 8: its parallel tests mostly wait, on leases, handovers and
 # containers, so more of them at once than there are cores still fit.
@@ -1097,7 +1119,7 @@ clean-test: ## Remove test artifacts (tmp/ — coverage data, logs, NATS state)
 .PHONY: clean-tools
 clean-tools: ## Remove installed tools and pnpm deps (.bin/, node_modules/)
 	@echo "$(YELLOW)==> Cleaning installed tools and pnpm deps...$(RESET)"
-	@rm -rf .bin/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/ docs/node_modules/
+	@rm -rf .bin/ node_modules/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/ docs/node_modules/
 
 .PHONY: clean-all
 clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + clean-tools + dev data + docker volumes

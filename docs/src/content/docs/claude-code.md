@@ -120,7 +120,7 @@ Project hooks in `.config/wt.toml`:
 
 | Hook | Command | Why |
 | ---- | ------- | --- |
-| `post-start` | `make tools` | Bootstraps the new worktree: tools, modules, pnpm deps, **and git hooks** |
+| `post-start` | `wt step copy-ignored`, then `make tools` (an ordered `[[post-start]]` pipeline) | Seeds the gitignored caches listed in `.worktreeinclude` (`node_modules/`, `.bin/`, build outputs) from the primary checkout, then bootstraps tools, modules, pnpm deps, **and git hooks**. The install runs after the copy, so it decides the final `node_modules` layout, not the copy |
 | `pre-merge` | `make verify` | Fast pre-merge gate (same as pre-commit) |
 | `pre-remove` | `git status --short` | Surfaces uncommitted work before tearing down |
 

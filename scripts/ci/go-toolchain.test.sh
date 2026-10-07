@@ -37,6 +37,10 @@ rejects() {
 ok "go line only" go1.26.6 'module m\n\ngo 1.26.6\n'
 ok "toolchain line wins" go1.26.7 'module m\n\ngo 1.26.6\n\ntoolchain go1.26.7\n'
 ok "trailing comment" go1.26.6 'module m\n\ngo 1.26.6 // pinned\n'
+ok "indented directives" go1.26.7 'module m\n\n\tgo 1.26.6\n  toolchain go1.26.7\n'
+ok "indented go line" go1.26.6 'module m\n\n  go 1.26.6\n'
+rejects "toolchain suffix" 'module m\n\ngo 1.26.6\n\ntoolchain go1.26.6-custom\n'
+rejects "go line suffix" 'module m\n\ngo 1.26.6-custom\n'
 rejects "language version only" 'module m\n\ngo 1.27\n'
 rejects "no go line" 'module m\n'
 
