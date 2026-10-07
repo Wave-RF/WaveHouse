@@ -660,6 +660,7 @@ func TestCachePaths_MatchesTheSDK(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			dir := tc.env(t)
 			root, _ := cachePaths(dir)
+			require.True(t, strings.HasPrefix(root, os.TempDir()), "cachePaths left the temp dirs: %s", root)
 			entry := filepath.Join(root, "unpacked", "sha256", strings.Repeat("ab", 32))
 			require.NoError(t, os.MkdirAll(entry, 0o750))
 			record := filepath.Join(entry, "verified.json")
