@@ -96,7 +96,8 @@ R2=docs-reviewer
 # SubagentStop hook. <mode>: text (the report is the last assistant message),
 # handback (the report went through SubagentHandback and closing text
 # followed), handback-only (nothing followed the hand-back), handback-verdict
-# (the closing text repeats only the VERDICT line), notranscript.
+# (the closing text repeats only the VERDICT line), handback-iterate (the
+# closing text changes the verdict to iterate), notranscript.
 review() {
   local name=$1 type=$2 cwd=$3 start=$4 mode=$5 report=$6 tr last=""
   tr=$scratch/transcript-$name.jsonl
@@ -104,7 +105,7 @@ review() {
     message: {role: "user", content: "Review the branch."}}' > "$tr"
   case $mode in
     text) last=$report ;;
-    handback | handback-only | handback-verdict)
+    handback | handback-only | handback-verdict | handback-iterate)
       jq -nc --arg m "$report" '{type: "assistant", message: {role: "assistant",
         content: [{type: "tool_use", id: "toolu_1", name: "SubagentHandback", input: {message: $m}}]}}' >> "$tr"
       jq -nc '{type: "user", message: {role: "user",
@@ -112,6 +113,7 @@ review() {
       case $mode in
         handback) last="I sent the review to the agent that asked for it." ;;
         handback-verdict) last=$(printf 'Sent.\n\nVERDICT: ship_it') ;; # repeats the verdict, not the sha
+        handback-iterate) last=$(printf 'One more finding after all.\n\nVERDICT: iterate') ;;
       esac
       [ -z "$last" ] || jq -nc --arg m "$last" '{type: "assistant", message: {role: "assistant", content: [{type: "text", text: $m}]}}' >> "$tr" ;;
     notranscript) last=$report; tr=$scratch/missing.jsonl ;;
@@ -223,6 +225,8 @@ review inline "$R2" "$repo" 500 text "$(printf 'REVIEWED: %s\nDo not write VERDI
 expect_no_marker "a VERDICT mentioned mid-sentence is not a verdict" "$repo" "$R2" "$A2" "no VERDICT line"
 review notranscript "$R2" "$repo" 500 notranscript "$(report "$A2")"
 expect_no_marker "no transcript to date the review: no marker" "$repo" "$R2" "$A2" "can't tell when the review began"
+review handback-iterate "$R2" "$repo" 500 handback-iterate "$(report "$A2")"
+expect_no_marker "a final VERDICT: iterate overrides an earlier ship_it hand-back" "$repo" "$R2" "$A2" "VERDICT: iterate"
 
 lines_before=$(wc -l < "$repo/tmp/review-marker.log")
 review other-agent Explore "$repo" 500 text "$(report "$A2")"
@@ -404,6 +408,27 @@ expect_allow "a push mentioned in a comment" "$wtb" "git status # then git push"
 expect_allow "deleting a remote branch" "$wtb" "git push origin --delete old-branch"
 expect_allow "deleting by empty source" "$wtb" "git push origin :old-branch"
 expect_allow "pushing main itself (no delta)" "$repo" "git push origin main"
+
+# The base is origin/main when there is one: a commit made on local main by
+# mistake and then branched from is on local main, but not yet reviewed.
+acc=$scratch/acc
+origin=$scratch/origin.git
+git -C "$scratch" init -q --bare -b main "$origin"
+if [ "$(git -C "$origin" rev-parse --absolute-git-dir 2>/dev/null)" != "$origin" ]; then
+  echo "review-gate test: git did not create $origin; refusing to go on." >&2
+  exit 1
+fi
+scratch_init "$acc"
+mkdir -p "$acc/scripts"
+cp scripts/pre-push-reviewers.sh scripts/skip-pre-push-review.sh "$acc/scripts/"
+git -C "$acc" add scripts
+at 900 "$acc" commit -q -m base
+git -C "$acc" remote add origin "$origin"
+git -C "$acc" push -q origin main
+at 910 "$acc" commit -q --allow-empty -m "on main by mistake"
+at 920 "$acc" switch -q -c feat
+expect_block "commits made on local main, then pushed on a new branch" "$acc" "git push -u origin feat" "missing pre-push review marker"
+expect_allow "…while a commit origin/main has needs no review" "$acc" "git push origin HEAD~1:refs/heads/copy"
 
 expect_allow "another repository without a reviewer manifest is out of scope" "$other" "git push origin x"
 expect_allow "…even pushed from the session's directory" "$repo" "git -C ../other push origin x"

@@ -21,10 +21,12 @@
 # The marker goes into each such worktree's tmp/, so a review of a sibling
 # worktree marks that worktree, not the session's.
 #
-# The report is `.last_assistant_message` when that carries both lines. A
-# subagent that delivers its report through the SubagentHandback tool leaves
-# only its closing text there; the report is that tool call's `message`, read
-# from the subagent's transcript (`.agent_transcript_path`).
+# The report is `.last_assistant_message` whenever that has a VERDICT line,
+# unless the verdict is ship_it with no REVIEWED line; a final iterate or block
+# stands. A subagent that delivers its report through the SubagentHandback tool
+# leaves only its closing text there (no verdict, or a bare ship_it); the report
+# is then that tool call's `message`, read from the subagent's transcript
+# (`.agent_transcript_path`).
 #
 # Every decision for a reviewer goes to stderr and to tmp/review-marker.log
 # (gitignored), which the push gate prints when it blocks, so a missing marker
@@ -97,11 +99,25 @@ handback() {
       | last // empty' "$transcript" 2>/dev/null
 }
 
-# The report is the final message unless that lacks either parseable line; then
-# it's the hand-back's message. One retry covers a transcript not yet flushed.
+# verdict_of <report>: its VERDICT, lowercased. The LAST matching line wins, in
+# case the agent emits it more than once.
+verdict_of() {
+  printf '%s\n' "$1" \
+    | grep -iE "$verdict_re" \
+    | tail -1 \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/^[[:space:]]*verdict:[[:space:]]*([a-z_]+)[[:space:]]*$/\1/'
+}
+
+# The report is the final message unless that has no VERDICT line, or says
+# ship_it without naming the commit (closing text after a hand-back often
+# repeats only the verdict); then it's the hand-back's message. A final iterate
+# or block stands, whatever an earlier hand-back said. One retry covers a
+# transcript not yet flushed.
 report=$(field .last_assistant_message)
 source="the final message"
-if ! grep -qiE "$verdict_re" <<<"$report" || ! grep -qE "$reviewed_re" <<<"$report"; then
+verdict=$(verdict_of "$report")
+if [ -z "$verdict" ] || { [ "$verdict" = ship_it ] && ! grep -qE "$reviewed_re" <<<"$report"; }; then
   hb=""
   if [ -f "$transcript" ]; then
     hb=$(handback)
@@ -110,17 +126,11 @@ if ! grep -qiE "$verdict_re" <<<"$report" || ! grep -qE "$reviewed_re" <<<"$repo
   if [ -n "$hb" ]; then
     report=$hb
     source="the hand-back"
+    verdict=$(verdict_of "$report")
   else
     source="the final message (the transcript has no hand-back)"
   fi
 fi
-
-# The LAST matching line wins, in case the agent emits it more than once.
-verdict=$(printf '%s\n' "$report" \
-  | grep -iE "$verdict_re" \
-  | tail -1 \
-  | tr '[:upper:]' '[:lower:]' \
-  | sed -E 's/^[[:space:]]*verdict:[[:space:]]*([a-z_]+)[[:space:]]*$/\1/')
 
 if [ -z "$verdict" ]; then
   note "$repo" "no VERDICT line in ${source} (expected only for an advisory review) — no marker written."
