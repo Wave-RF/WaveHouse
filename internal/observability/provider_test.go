@@ -10,7 +10,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
-	"go.opentelemetry.io/otel/log/global"
 )
 
 // TestInitProvider_Shutdown verifies that the provider pipeline initializes
@@ -63,10 +62,10 @@ func TestInitProvider_Shutdown(t *testing.T) {
 // must stay bounded by its context deadline. That needs two things together —
 // fanning the traces/metrics/logs providers out concurrently (so their flushes
 // overlap instead of summing) AND returning when the deadline passes even
-// though the experimental logs SDK's BatchProcessor.Shutdown ignores ctx and
-// blocks for the exporter's full ~10s timeout during gRPC backoff. Drop either
-// and the shutdown overruns the budget: serial stacks the flushes, and a plain
-// wg.Wait blocks on the logs straggler.
+// when the logs SDK's BatchProcessor.Shutdown ignores ctx and blocks for the
+// exporter's full ~10s timeout during gRPC backoff, as it did at sdk/log
+// v0.20.0. Drop either and the shutdown overruns the budget: serial stacks the
+// flushes, and a plain wg.Wait blocks on the logs straggler.
 func TestInitProvider_ShutdownParallelBounded(t *testing.T) {
 	// Pin a definitely-unreachable collector so every exporter spends the
 	// shutdown budget in gRPC retry/backoff. t.Setenv also enforces
@@ -76,12 +75,12 @@ func TestInitProvider_ShutdownParallelBounded(t *testing.T) {
 	savedProp := otel.GetTextMapPropagator()
 	savedTP := otel.GetTracerProvider()
 	savedMP := otel.GetMeterProvider()
-	savedLP := global.GetLoggerProvider()
+	savedLP := otel.GetLoggerProvider()
 	t.Cleanup(func() {
 		otel.SetTextMapPropagator(savedProp)
 		otel.SetTracerProvider(savedTP)
 		otel.SetMeterProvider(savedMP)
-		global.SetLoggerProvider(savedLP)
+		otel.SetLoggerProvider(savedLP)
 	})
 
 	shutdown, _, err := InitProvider(context.Background(), "wavehouse-test", ProviderConfig{
@@ -100,7 +99,7 @@ func TestInitProvider_ShutdownParallelBounded(t *testing.T) {
 	ctr.Add(context.Background(), 1)
 	var rec otellog.Record
 	rec.SetBody(attribute.StringValue("shutdown-regression"))
-	global.GetLoggerProvider().Logger("test").Emit(context.Background(), rec)
+	otel.GetLoggerProvider().Logger("test").Emit(context.Background(), rec)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
