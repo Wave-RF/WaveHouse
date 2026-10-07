@@ -70,7 +70,7 @@ function joinableInCode(codeText, line) {
 }
 
 /** In an MDX parse, each line whose line ending falls inside a PREFORMATTED element. */
-function preformattedLineEnds(tokens) {
+function preformattedLineEnds(tokens, lineCount) {
   const ends = new Set();
   let depth = 0;
   let from = 0;
@@ -84,6 +84,9 @@ function preformattedLineEnds(tokens) {
       for (let line = from; line < tag.startLine; line++) ends.add(line);
     }
   }
+  // micromark does not balance tags, so an element left open (or closed by the
+  // wrong tag) still parses. Like CommonMark's HTML block, it runs to the end.
+  if (depth > 0) for (let line = from; line < lineCount; line++) ends.add(line);
   return ends;
 }
 
@@ -170,7 +173,7 @@ export default {
         return;
       }
       tokens = mdx.tokens;
-      preformatted = preformattedLineEnds(tokens);
+      preformatted = preformattedLineEnds(tokens, lines.length);
     }
 
     for (const { first, last, keepTrailing } of wrappedRuns(tokens, lines, preformatted)) {

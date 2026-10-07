@@ -382,6 +382,9 @@ describe("WH001 leaves non-prose alone", () => {
     "<script>\nconst a = 1\nconst b = 2\n</script>\n",
     "the inside of a <script> block",
   );
+  // Still valid to micromark, which never balances tags: say, between two edits.
+  unchangedBoth("<pre>\n+------+\n| box  |\n+------+\n", "a <pre> left open");
+  unchangedBoth("<pre>\nline one\nline two\n</div>\n", "a <pre> closed by the wrong tag");
   fixesTo(
     "joins wrapped prose after a closed <pre>",
     "<pre>x</pre>\nwrapped\nprose\n",
