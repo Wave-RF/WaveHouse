@@ -32,7 +32,7 @@ services:
       # WH_CH_PASSWORD: ""
       # WH_CH_MAX_TOTAL_CONNS: "0"
       # The image bakes no chtypes artifact: the first tenant bind fetches its
-      # ClickHouse line's (~45 MB) into the image's cache, /var/cache/chtypes/v1
+      # ClickHouse line's (~45 MB) into the image's cache, /var/cache/chtypes
       # (CHTYPES_CACHE), which the chtypes-cache volume below keeps across
       # restarts and image pulls. A mirror or pull-through proxy, tried in
       # order (comma-separated):
@@ -67,7 +67,7 @@ services:
     volumes:
       - wavehouse-data:/app/data
       - ./settings:/app/settings    # checked-in seed + trial policy, clickhouse.addr=clickhouse:9000; hot-reloads on edit
-      - chtypes-cache:/var/cache/chtypes/v1 # fetched chtypes artifacts; or a host dir, e.g. ~/.cache/chtypes/v1
+      - chtypes-cache:/var/cache/chtypes # fetched chtypes artifacts; or a host dir, e.g. ~/.cache/chtypes/v1
     # A stop is server.shutdown_timeout (10s) of drain, then a fixed 5s to
     # release NATS/Pebble and 3s to flush telemetry: up to 18s. Docker's
     # default 10s grace would SIGKILL the release; cover it with headroom.

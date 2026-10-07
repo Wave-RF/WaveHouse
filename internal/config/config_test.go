@@ -62,7 +62,7 @@ server:
 clickhouse:
   password: "ch-pass"
   max_total_conns: 40
-  chtypes_cache: /var/cache/chtypes/v1
+  chtypes_cache: /var/cache/chtypes
   chtypes_autofetch: false
   chtypes_artifacts_url: "https://mirror.example/chtypes/v1, https://registry.example/chtypes/v1"
 auth:
@@ -78,7 +78,7 @@ auth:
 	assert.Equal(t, 9090, cfg.Server.Port)
 	assert.Equal(t, "ch-pass", cfg.ClickHouse.Password)
 	assert.Equal(t, 40, cfg.ClickHouse.MaxTotalConns)
-	assert.Equal(t, "/var/cache/chtypes/v1", cfg.ClickHouse.ChtypesCache)
+	assert.Equal(t, "/var/cache/chtypes", cfg.ClickHouse.ChtypesCache)
 	assert.False(t, cfg.ClickHouse.ChtypesAutofetch)
 	assert.Equal(t, []string{"https://mirror.example/chtypes/v1", "https://registry.example/chtypes/v1"}, cfg.ClickHouse.ChtypesBases())
 	assert.Equal(t, "test-secret", cfg.Auth.JWTSecret)

@@ -28,9 +28,9 @@
 # removes the binfmt/QEMU dependency entirely.
 FROM --platform=$BUILDPLATFORM alpine:3 AS layout
 # /app/settings is the empty settings-directory mount point, and
-# /var/cache/chtypes/v1 the chtypes cache — see the same RUN in
+# /var/cache/chtypes the chtypes cache — see the same RUN in
 # deployments/Dockerfile; keep the two in lockstep.
-RUN mkdir -p /app/data /app/settings /var/cache/chtypes/v1 && chown -R 65532:65532 /app /var/cache/chtypes
+RUN mkdir -p /app/data /app/settings /var/cache/chtypes && chown -R 65532:65532 /app /var/cache/chtypes
 
 # The chtypes CLI for THIS image's target platform, at the SDK version go.mod
 # requires. Pure Go (CGO_ENABLED=0), so it cross-compiles natively on
@@ -64,7 +64,7 @@ ENV WH_SETTINGS_DIR=/app/settings
 # Read by both the process (an empty clickhouse.chtypes_cache defers to it)
 # and the bundled CLI, so a fetch either one makes lands where the other
 # looks.
-ENV CHTYPES_CACHE=/var/cache/chtypes/v1
+ENV CHTYPES_CACHE=/var/cache/chtypes
 
 # Pre-created state directories owned by the nonroot user (UID 65532) so
 # the binary can mkdir under /app/data without a volume mount, and so

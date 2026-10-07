@@ -57,11 +57,11 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # chose. Not a VOLUME either (unlike /app/data): it's config, not state,
 # and an anonymous volume would hide a forgotten mount.
 #
-# /var/cache/chtypes/v1 is the chtypes cache, owned by nonroot so an empty
+# /var/cache/chtypes is the chtypes cache, owned by nonroot so an empty
 # named volume mounted there copies up writable. Not a VOLUME: an anonymous
 # volume per container would re-fetch every run and leak on removal; mount a
 # named volume or a host directory there instead (docs/deployment.md).
-RUN mkdir -p /app/data /app/settings /var/cache/chtypes/v1 && chown -R 65532:65532 /app /var/cache/chtypes
+RUN mkdir -p /app/data /app/settings /var/cache/chtypes && chown -R 65532:65532 /app /var/cache/chtypes
 
 # Stage 2: Final minimal image
 #
@@ -77,7 +77,7 @@ ENV WH_SETTINGS_DIR=/app/settings
 # Read by both the process (an empty clickhouse.chtypes_cache defers to it)
 # and the bundled CLI, so a fetch either one makes lands where the other
 # looks.
-ENV CHTYPES_CACHE=/var/cache/chtypes/v1
+ENV CHTYPES_CACHE=/var/cache/chtypes
 
 COPY --from=builder --chown=nonroot:nonroot /app /app
 COPY --from=builder --chown=nonroot:nonroot /var/cache/chtypes /var/cache/chtypes

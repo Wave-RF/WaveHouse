@@ -82,7 +82,7 @@ docker build -f deployments/Dockerfile -t wavehouse:latest .
 
 This builds the runtime image `wavehouse:latest`. (The published `ghcr.io` images are built by the release workflows with `docker buildx` from `deployments/Dockerfile.goreleaser`, not this command — see Registry below.)
 
-All images use multi-stage builds (`golang:1.27-bookworm` glibc builder → `gcr.io/distroless/cc-debian12` runtime — cgo needs glibc, so the previous Alpine/musl builder and `distroless/static` runtime no longer work) for minimal attack surface. The image carries no chtypes artifact: it carries the `chtypes` CLI at `/app/chtypes` and an empty cache at `/var/cache/chtypes/v1`, and fetches each ClickHouse line's artifact on first use (see [chtypes artifacts](#chtypes-artifacts)).
+All images use multi-stage builds (`golang:1.27-bookworm` glibc builder → `gcr.io/distroless/cc-debian12` runtime — cgo needs glibc, so the previous Alpine/musl builder and `distroless/static` runtime no longer work) for minimal attack surface. The image carries no chtypes artifact: it carries the `chtypes` CLI at `/app/chtypes` and an empty cache at `/var/cache/chtypes`, and fetches each ClickHouse line's artifact on first use (see [chtypes artifacts](#chtypes-artifacts)).
 
 ### Registry
 
@@ -120,7 +120,7 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:vX.Y.Z \
 
 **How it recovers, and what to watch.** Every cause is checked again at each of the tenant's schema refreshes (`schema.refresh_interval`), and clears at the first refresh after the cause is gone. A tenant not bound yet clears at its first completed refresh. A failed fetch is retried at every refresh, so it clears once the registry or mirror answers; with autofetch off, a missing artifact clears once a loadable one is installed on the search path, with no restart. A zone name WaveHouse does not recognize clears once the server reports one it recognizes. A zone chtypes cannot load holds up no other tenant, and clears once the server reports a zone chtypes can load, or once another tenant has set the image zone; in the second case the tenant is bound, but chtypes refuses each of its calls ([time zones](#time-zones)). A table refused over its zone clears once the tenant's zone matches the image zone. The image zone is fixed for the life of the process, so changing it, or the server `timezone` that set it, takes a restart; the recovery is to restart, or to serve such tenants from a process of their own (see [time zones](#time-zones)). A table that does not compile is compiled again at every refresh, and clears once its schema, or the artifact answering for it, changes so that it compiles. `/livez` and `/readyz` do not read the type layer, so they stay green through every cause but the first; a tenant not bound yet has not completed a schema discovery, which they report as `503` only while no tenant has completed one ([Boot-time degraded mode](#boot-time-degraded-mode)). So watch for the ingest `503`s, for `wavehouse_sse_rows_withheld_total{reason="unavailable"}`, for the `INFO` lines `chtypes type layer opened` (the cache, whether autofetch is on, and the versions installed for this platform at boot) and `chtypes image zone committed` (the zone this process chose), and for three `ERROR` log lines, each carrying the cause: `chtypes cannot serve this tenant` (a missing, unfetchable or unloadable artifact, an unrecognized zone name, a zone chtypes cannot load on the first open, logged at every refresh), `chtypes could not compile table schema` (one table, logged at every refresh) and `ingest type layer unavailable` (any of the four, logged for the ingest requests it refuses, at most once a minute per tenant and table). A tenant whose zone chtypes cannot load, bound after the image zone is committed ([time zones](#time-zones)), fires none of them: its signal is every JSON, NDJSON or positional CSV/TSV body declined (`422`) with chtypes' generic reason `batch outcome is 'rejected': only a fully accepted batch exports bytes`, every `header=present` body refused `400` with `Invalid time zone: <zone>` (the WARN `ingest body refused by the parser`, which names the zone), and `wavehouse_sse_rows_withheld_total{reason="error"}`. Compare that tenant's `server_tz` on the `schema registry refreshed` log line with the zone on `chtypes image zone committed`. See [API → Ingest error responses](/api#post-v1ingesttabletable--ingest-data) and [Access Control → Where each rule is enforced](/access-control#where-each-rule-is-enforced).
 
-**Where it lives.** chtypes 1.0 reads a v1 cache layout (`oci-layout`, `index.json`, `blobs/`, and `unpacked/sha256/<manifest>/` holding `libchtypes.so` or `.dylib`, `manifest.json` and `verified.json`, the signed verification record the loader requires), several lines and platforms side by side. WaveHouse reads, in order: the cache — `clickhouse.chtypes_cache` (`WH_CHTYPES_CACHE`) when set, which names the layout directory itself, else `$CHTYPES_CACHE`, else `~/.cache/chtypes/v1`; the Docker images set `CHTYPES_CACHE=/var/cache/chtypes/v1` — then the read-only system layouts `/usr/local/share/chtypes/v1` and `/opt/chtypes/v1`. A fetch writes into the cache only. WaveHouse opens chtypes in its **strict cache mode** (the SDK's `StrictCache` option, which WaveHouse sets in code: the equivalent of `CHTYPES_CACHE_STRICT=1`). Chtypes' default mode treats a cache it cannot read as empty, with a warning, and falls through to the system layouts; strict mode makes every fault of the cache or of an existing system layout the error `CHTYPES_CACHE_UNUSABLE` (`errors.Is(err, chtypes.ErrCacheUnusable)`), naming the path, a reason and the OS error: `unreadable_root` or `unreadable_entry` (a directory or install record this user cannot read), `not_a_directory`, `unacceptable_record` (a record nothing can re-verify) and `layout_0x` (a chtypes 0.x registry directory, which never loads under v1). Boot is refused with that error, for example `chtypes: /var/cache/chtypes/v1 is unusable as a cache: unreadable_root (EACCES) [CHTYPES_CACHE_UNUSABLE]`; a missing default cache is the empty cache, but a `clickhouse.chtypes_cache` that is set and does not exist is refused as a typo, and so, with autofetch off, is a host where no layout holds an artifact for this platform. A cache written by one user is readable by another (chtypes 1.1 creates files and directories with the process umask, never writable by others), and a lookup writes nothing. With autofetch on, a cache the process cannot write is a boot warning, `chtypes cache is not writable`, since an installed line still binds; a line that needs fetching then fails at its first bind, as that tenant's unavailable cause, carrying chtypes' `CHTYPES_CACHE_UNUSABLE` with reason `unwritable` and the path (chtypes reports a failed write under the cache this way in every mode). A cache that becomes unusable after boot is the same error as the cause of each tenant it affects, cleared at the first refresh after it is fixed.
+**Where it lives.** chtypes 1.0 reads a v1 cache layout (`oci-layout`, `index.json`, `blobs/`, and `unpacked/sha256/<manifest>/` holding `libchtypes.so` or `.dylib`, `manifest.json` and `verified.json`, the signed verification record the loader requires), several lines and platforms side by side. WaveHouse reads, in order: the cache — `clickhouse.chtypes_cache` (`WH_CHTYPES_CACHE`) when set, which names the layout directory itself, else `$CHTYPES_CACHE`, else `~/.cache/chtypes/v1`; the Docker images set `CHTYPES_CACHE=/var/cache/chtypes` — then the read-only system layouts `/usr/local/share/chtypes/v1` and `/opt/chtypes/v1`. A fetch writes into the cache only. WaveHouse opens chtypes in its **strict cache mode** (the SDK's `StrictCache` option, which WaveHouse sets in code: the equivalent of `CHTYPES_CACHE_STRICT=1`). Chtypes' default mode treats a cache it cannot read as empty, with a warning, and falls through to the system layouts; strict mode makes every fault of the cache or of an existing system layout the error `CHTYPES_CACHE_UNUSABLE` (`errors.Is(err, chtypes.ErrCacheUnusable)`), naming the path, a reason and the OS error: `unreadable_root` or `unreadable_entry` (a directory or install record this user cannot read), `not_a_directory`, `unacceptable_record` (a record nothing can re-verify) and `layout_0x` (a chtypes 0.x registry directory, which never loads under v1). Boot is refused with that error, for example `chtypes: /var/cache/chtypes is unusable as a cache: unreadable_root (EACCES) [CHTYPES_CACHE_UNUSABLE]`; a missing default cache is the empty cache, but a `clickhouse.chtypes_cache` that is set and does not exist is refused as a typo, and so, with autofetch off, is a host where no layout holds an artifact for this platform. A cache written by one user is readable by another (chtypes 1.1 creates files and directories with the process umask, never writable by others), and a lookup writes nothing. With autofetch on, a cache the process cannot write is a boot warning, `chtypes cache is not writable`, since an installed line still binds; a line that needs fetching then fails at its first bind, as that tenant's unavailable cause, carrying chtypes' `CHTYPES_CACHE_UNUSABLE` with reason `unwritable` and the path (chtypes reports a failed write under the cache this way in every mode). A cache that becomes unusable after boot is the same error as the cause of each tenant it affects, cleared at the first refresh after it is fixed.
 
 <a id="time-zones"></a>
 
@@ -150,7 +150,7 @@ Two more consequences follow when a tenant's zone differs from the image zone. A
 
 ### Cache mounts
 
-The images keep their cache at `/var/cache/chtypes/v1`, created empty and owned by the image's `nonroot` user. Mount a volume or host directory there that outlives the container, so a restart or an image pull does not fetch again; without one the process still fetches, into the container's own layer, and every new container fetches again (under `--read-only` it cannot, and warns at boot). Never bake a filled cache into an image layer of your own: installing over an overlay filesystem's lower layer fails its rename (`EXDEV`). The images declare no `VOLUME` for it: an anonymous volume per container would fetch again on every run and be left behind when the container is removed.
+The images keep their cache at `/var/cache/chtypes`, created empty and owned by the image's `nonroot` user. Mount a volume or host directory there that outlives the container, so a restart or an image pull does not fetch again; without one the process still fetches, into the container's own layer, and every new container fetches again (under `--read-only` it cannot, and warns at boot). Never bake a filled cache into an image layer of your own: installing over an overlay filesystem's lower layer fails its rename (`EXDEV`). The images declare no `VOLUME` for it: an anonymous volume per container would fetch again on every run and be left behind when the container is removed.
 
 A **named volume** is the simplest: on its first mount Docker copies the empty, `nonroot`-owned directory into it, so it is writable with no `chown`.
 
@@ -158,11 +158,11 @@ A **named volume** is the simplest: on its first mount Docker copies the empty, 
 docker run -d --name wavehouse -p 8080:8080 \
   -v wavehouse-data:/app/data \
   -v "$PWD/settings:/app/settings:ro" \
-  -v chtypes-cache:/var/cache/chtypes/v1 \
+  -v chtypes-cache:/var/cache/chtypes \
   ghcr.io/wave-rf/wavehouse:latest
 ```
 
-The [compose file](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/compose/standalone.yaml) mounts a `chtypes-cache` volume the same way. A **host directory** works too, for example the cache a host-side WaveHouse or `scripts/fetch-chtypes.sh` already fills: `-v "$HOME/.cache/chtypes/v1:/var/cache/chtypes/v1"`. Linux and macOS builds sit side by side in one layout. On a Linux host the container must run as the directory's owner, because autofetch needs write access to install there and a cache fetched before chtypes 1.1 may still hold owner-readable (0600) records: add `--user "$(id -u):$(id -g)"` and give that user a writable data directory too, or `chown -R 65532:65532` a directory dedicated to the container.
+The [compose file](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/compose/standalone.yaml) mounts a `chtypes-cache` volume the same way. A **host directory** works too, for example the cache a host-side WaveHouse or `scripts/fetch-chtypes.sh` already fills: `-v "$HOME/.cache/chtypes/v1:/var/cache/chtypes"`. Linux and macOS builds sit side by side in one layout. On a Linux host the container must run as the directory's owner, because autofetch needs write access to install there and a cache fetched before chtypes 1.1 may still hold owner-readable (0600) records: add `--user "$(id -u):$(id -g)"` and give that user a writable data directory too, or `chown -R 65532:65532` a directory dedicated to the container.
 
 **Read-only root filesystem.** The images run with `--read-only` (Kubernetes `readOnlyRootFilesystem: true`) as long as the cache and `/app/data` are mounted writable; nothing else is written.
 
@@ -177,13 +177,13 @@ spec:
       image: ghcr.io/wave-rf/wavehouse:latest
       command: ["/app/chtypes", "fetch", "26.8"]
       volumeMounts:
-        - { name: chtypes-cache, mountPath: /var/cache/chtypes/v1 }
+        - { name: chtypes-cache, mountPath: /var/cache/chtypes }
   containers:
     - name: wavehouse
       image: ghcr.io/wave-rf/wavehouse:latest
       securityContext: { readOnlyRootFilesystem: true }
       volumeMounts:
-        - { name: chtypes-cache, mountPath: /var/cache/chtypes/v1 }
+        - { name: chtypes-cache, mountPath: /var/cache/chtypes }
         - { name: data, mountPath: /app/data }
   volumes:
     - name: chtypes-cache
@@ -195,11 +195,11 @@ spec:
 Both images carry the `chtypes` command at `/app/chtypes`, the same SDK version the binary links, and it reads the same `CHTYPES_CACHE`. Run it with `--entrypoint` against the cache volume to prefetch a line, list what is installed and published, or re-hash the installed libraries (add `--strict`, as in `chtypes where --strict`, to turn a cache that cannot be read, or a chtypes 0.x one, into `CHTYPES_CACHE_UNUSABLE` and a non-zero exit, the check boot itself makes):
 
 ```bash
-docker run --rm --entrypoint /app/chtypes -v chtypes-cache:/var/cache/chtypes/v1 \
-  ghcr.io/wave-rf/wavehouse:latest fetch 26.9 --cache /var/cache/chtypes/v1
-docker run --rm --entrypoint /app/chtypes -v chtypes-cache:/var/cache/chtypes/v1 \
+docker run --rm --entrypoint /app/chtypes -v chtypes-cache:/var/cache/chtypes \
+  ghcr.io/wave-rf/wavehouse:latest fetch 26.9 --cache /var/cache/chtypes
+docker run --rm --entrypoint /app/chtypes -v chtypes-cache:/var/cache/chtypes \
   ghcr.io/wave-rf/wavehouse:latest list
-docker run --rm --entrypoint /app/chtypes -v chtypes-cache:/var/cache/chtypes/v1 \
+docker run --rm --entrypoint /app/chtypes -v chtypes-cache:/var/cache/chtypes \
   ghcr.io/wave-rf/wavehouse:latest verify
 ```
 
@@ -263,7 +263,7 @@ WH_CH_PASSWORD=<clickhouse-password>
 # Ceiling on open native ClickHouse connections; 0 = none
 # WH_CH_MAX_TOTAL_CONNS=0
 # chtypes artifacts (see chtypes artifacts): the cache (the images set
-# CHTYPES_CACHE=/var/cache/chtypes/v1; mount a volume there), autofetch, and
+# CHTYPES_CACHE=/var/cache/chtypes; mount a volume there), autofetch, and
 # the registries/mirrors a fetch tries
 # WH_CHTYPES_CACHE=
 # WH_CHTYPES_AUTOFETCH=true
