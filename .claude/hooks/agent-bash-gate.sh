@@ -95,9 +95,10 @@ if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:s
     && block "Agents post inline review comments instead of --request-changes."
 fi
 
-# ── git push: every pushed commit needs a review marker ──────────────────────
+# ── git push: the commit each refspec publishes needs a review marker ────────
 #
-# A pushed commit needs a marker from EVERY reviewer in
+# The commit each refspec publishes (its tip; HEAD when there is no refspec)
+# needs a marker from EVERY reviewer in
 # scripts/pre-push-reviewers.sh (the single source of truth — code, docs, and
 # any future reviewer such as security), read at push time, so adding a
 # reviewer there immediately makes it gate. All are unconditional: even a
@@ -106,11 +107,12 @@ fi
 #
 # The check follows the push to where it runs: the tool call's cwd, then any
 # `cd`/`pushd` before it and any `git -C`, so a push from a sibling worktree is
-# judged on that worktree, not on the one the session started in. Each refspec
-# source is resolved to the commit it publishes (no refspec means HEAD), and a
-# marker for that commit counts from any worktree of the repository: markers
-# are keyed to the commit, which is what was reviewed. When the gate can't tell
-# where a push runs or what it publishes, it blocks and says why.
+# judged on that worktree, not on the one the session started in. A marker for
+# that commit counts from any worktree of the repository: markers are keyed to
+# the commit, which is what was reviewed. When the gate can't tell where a push
+# runs or what it publishes, it blocks and says why. That includes a push that
+# follows a HEAD-moving git command (`git commit … && git push`): the gate runs
+# before the command line does, so it would judge the commit before the move.
 #
 # It gates any commit with a delta against the base (local main, else
 # origin/main), NOT only commits on a branch with an open PR: the agent flow is
@@ -378,7 +380,11 @@ run_simple() {
     if is_assignment "$w"; then
       case ${w%%=*} in GIT_DIR | GIT_WORK_TREE) gitenv="${w%%=*}=" ;; esac
     else
-      case $w in command | builtin | exec | nohup | time | env | '{' | '!') ;; *) break ;; esac
+      case $w in
+        command | builtin | exec | nohup | time | env | '{' | '!') ;;
+        if | then | elif | else | do | while | until) ;;
+        *) break ;;
+      esac
     fi
     k=$((k + 1))
   done
@@ -431,10 +437,14 @@ run_simple() {
         esac
         k=$((k + 1))
       done
-      if [ "$sub" = push ] && [ "${dyns[k]}" = 0 ]; then
-        PUSHES=$((PUSHES + 1))
-        gate_push "$d" "$dwhy" $((k + 1))
-      fi ;;
+      case $sub in
+        commit | merge | rebase | reset | checkout | switch | cherry-pick | revert | am | pull) HEAD_MOVER=$sub ;;
+        push)
+          if [ "${dyns[k]}" = 0 ]; then
+            PUSHES=$((PUSHES + 1))
+            gate_push "$d" "$dwhy" $((k + 1))
+          fi ;;
+      esac ;;
   esac
 }
 
@@ -481,10 +491,12 @@ gate_push() {
     return 0
   fi
 
+  [ -z "$HEAD_MOVER" ] || block "this command runs \`git ${HEAD_MOVER}\` before \`git push\`, and the gate runs before either, so it would judge the commit as it was before the ${HEAD_MOVER}. Run the push as a separate command."
   [ -z "$dynspec" ] || block "can't tell what \`git push … ${dynspec}\` publishes: the refspec is computed by the shell. Name the branch or commit literally."
   [ "${#specs[@]}" -gt 0 ] || specs=(HEAD)
   for spec in "${specs[@]}"; do
     spec=${spec#+}
+    [ "$spec" = : ] && block "the refspec ':' pushes every branch that exists on both sides, so the gate can't check each one's review. Push one branch at a time."
     src=${spec%%:*}
     [ -z "$src" ] && continue # ":<dst>" deletes a remote ref; nothing is published
     case $src in *'*'*) block "the glob refspec '${spec}' publishes several refs at once, so the gate can't check each one's review. Push one branch at a time." ;; esac
@@ -535,10 +547,15 @@ gate_commit() {
       echo "🛑 Claude PR discipline gate: missing pre-push review marker(s) for ${label}${branch} at ${sha:0:8}, pushed from ${top}:"
       echo
       printf '%s' "$missing"
-      if [ -f "$top/tmp/review-marker.log" ]; then
+      # Lines start with an ISO timestamp, so a stable sort on it merges every
+      # worktree's log.
+      decisions=$(while IFS= read -r wt; do
+        [ -n "$wt" ] && [ -f "$wt/tmp/review-marker.log" ] && cat "$wt/tmp/review-marker.log"
+      done <<<"$worktrees" | sort -s -k1,1 | tail -n 4)
+      if [ -n "$decisions" ]; then
         echo
-        echo "Latest review-marker decisions (${top}/tmp/review-marker.log):"
-        tail -n 4 "$top/tmp/review-marker.log" | sed 's/^/    /'
+        echo "Latest review-marker decisions (tmp/review-marker.log, all worktrees):"
+        printf '%s\n' "$decisions" | sed 's/^/    /'
       fi
       cat <<EOF
 
@@ -549,6 +566,9 @@ that names the commit it read (REVIEWED: <sha>) to write its marker, and HEAD
 must not move while it runs; a skipped reviewer gets a logged marker via
 scripts/skip-pre-push-review.sh. The push succeeds once every listed reviewer
 has a marker for the pushed commit — see AGENTS.md §"Agent PR Discipline".
+A session started before the reviewers learned the REVIEWED: line still runs
+their old definitions (they load at session start): restart it, or ask each
+reviewer in its prompt to end with REVIEWED: <the sha it pinned first>.
 EOF
     } >&2
     exit 2
@@ -566,21 +586,48 @@ EOF
   return 0
 }
 
-# Cheap filter first: only a command that runs `git [global options] push`
-# somewhere is tokenized. Quoted strings become a placeholder word so that
-# `git -C "<path>" stash push` reads as a stash, not a push. A wrapped push
-# (`timeout 60 git push`) passes the filter, then blocks below because the
-# tokenizer can't follow it.
-squashed=$(printf '%s' "$cmd" | sed -E "s/'[^']*'/Q/g; s/\"[^\"]*\"/Q/g")
-if printf '%s\n' "$squashed" \
-  | grep -qE '(^|[[:space:];|&(])git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:];|&][^[:space:];|&]*)?)*[[:space:]]+push([[:space:]]|$|[;|&)])'; then
+# `git [global options] push`, as a regex over a line of words.
+# shellcheck disable=SC2016 # the backticks are literal: a push inside `…`
+push_re='(^|[[:space:];|&(`])git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:];|&][^[:space:];|&]*)?)*[[:space:]]+push([[:space:]]|$|[;|&)`])'
+
+# unfollowed_push: true when the tokens hold a `git … push` the walk didn't
+# gate: behind a wrapper it doesn't know (`timeout 60 git push`) or inside a
+# command substitution. A push only mentioned in a quoted string, a heredoc body
+# or a comment is one word or no token at all, so it doesn't count.
+unfollowed_push() {
+  local i n=${#TK_VAL[@]} w line=""
+  for ((i = 0; i <= n; i++)); do
+    if [ "$i" -eq "$n" ] || [ "${TK_OP[i]}" = 1 ]; then
+      printf '%s\n' "$line" | grep -qE "$push_re" && return 0
+      line=""
+      continue
+    fi
+    w=${TK_VAL[i]}
+    if [ "${TK_DYN[i]}" = 1 ]; then
+      printf '%s\n' "$w" | grep -qE "$push_re" && return 0
+      w=Q
+    fi
+    case $w in *[[:space:]]*) w=Q ;; esac
+    line="$line $w"
+  done
+  return 1
+}
+
+# Cheap filter first, so most commands are never tokenized: quoted strings on a
+# line become a placeholder word (`git -C "<path>" stash push` reads as a
+# stash). It may still match a push that is only mentioned, say in a heredoc
+# body; the tokenizer then finds no push and lets the command through.
+squashed=$(printf '%s' "${cmd//$'\\\n'/}" | sed -E "s/'[^']*'/Q/g; s/\"[^\"]*\"/Q/g")
+if printf '%s\n' "$squashed" | grep -qE "$push_re"; then
   hook_cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
   [ -n "$hook_cwd" ] || block "can't tell which directory this \`git push\` runs in: the hook payload has no cwd."
   tokenize "$cmd" || block "can't parse this command (an unterminated quote or substitution?), so can't tell what it pushes."
   PUSHES=0
+  HEAD_MOVER=""
   walk_commands "$hook_cwd"
-  [ "$PUSHES" -gt 0 ] \
-    || block "this command runs \`git push\` in a form the gate can't follow (behind a wrapper such as timeout, sudo or env -C?). Run \`git push\` directly, or as \`git -C <worktree> push …\`."
+  if [ "$PUSHES" -eq 0 ] && unfollowed_push; then
+    block "this command runs \`git push\` in a form the gate can't follow (behind a wrapper such as timeout, sudo or env -C, or in a command substitution). Run \`git push\` directly, or as \`git -C <worktree> push …\`."
+  fi
 fi
 
 exit 0

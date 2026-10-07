@@ -32,7 +32,7 @@ Rules of thumb for today's reviewers:
 
 Launch all kept reviewers **in one message** (one `Agent` call each → concurrent), each in **fresh context**, with **no scope argument**; `subagent_type` is the reviewer name. To review a worktree other than your current directory, name its path in the prompt. Each returns `[MUST]`/`[SHOULD]`/`[MAY]` findings, then a `REVIEWED: <sha>` line naming the commit it read and a `VERDICT:` line; on `ship_it` the `SubagentStop` hook (`review-marker.sh`) writes its marker into the worktree on that commit.
 
-**Leave HEAD alone until every reviewer has finished.** A commit, checkout or reset in that worktree while a reviewer runs voids its `ship_it`: the hook writes no marker, because the marker must attest to the commit the reviewer read. Work on something that doesn't touch the worktree's HEAD meanwhile. When a `ship_it` writes no marker, `tmp/review-marker.log` says why.
+**Leave HEAD alone until every reviewer has finished.** Anything that moves that worktree's HEAD to a different commit while a reviewer runs (a commit, a checkout, a reset to another commit) voids its `ship_it`: the hook writes no marker, because the marker must attest to the commit the reviewer read. Work on something that doesn't touch the worktree's HEAD meanwhile. When a `ship_it` writes no marker, `tmp/review-marker.log` says why.
 
 ## 4. Skip the rest — on the record
 
@@ -54,4 +54,4 @@ It prints a ⚠️ when the skip looks risky (e.g. skipping docs review when doc
 4. Re-decide §2 for the new HEAD, then re-run the kept reviewers in fresh context (parallel) and re-skip the rest.
 5. Repeat until a marker exists for HEAD from every listed reviewer.
 
-Only then does `git push` succeed (and the gate prints any judgment-skips for the record). If a reviewer returns `block`, **stop and surface it to the user** — don't push past it. Never `--no-verify`.
+Only then does `git push` succeed (and the gate prints any judgment-skips for the record). Push in a command of its own: the gate blocks a push that follows a commit, merge, checkout or other HEAD-moving git command on the same line. If a reviewer returns `block`, **stop and surface it to the user** — don't push past it. Never `--no-verify`.

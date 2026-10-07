@@ -12,7 +12,7 @@
 # A marker attests that a reviewer read exactly that commit, so this hook
 # writes one only when all of these hold:
 #   1. The reviewer's report ends with `VERDICT: ship_it` and names the commit
-#      it reviewed on a `REVIEWED: <full sha>` line.
+#      it reviewed on a `REVIEWED: <sha>` line (an unambiguous prefix will do).
 #   2. Some worktree of the repository is on that commit now.
 #   3. That worktree's HEAD was on that commit when the review began and has
 #      not pointed anywhere else since (its HEAD reflog, against the first
@@ -21,8 +21,8 @@
 # The marker goes into each such worktree's tmp/, so a review of a sibling
 # worktree marks that worktree, not the session's.
 #
-# The report is `.last_assistant_message` when that carries the VERDICT line.
-# A subagent that delivers its report through the SubagentHandback tool leaves
+# The report is `.last_assistant_message` when that carries both lines. A
+# subagent that delivers its report through the SubagentHandback tool leaves
 # only its closing text there; the report is that tool call's `message`, read
 # from the subagent's transcript (`.agent_transcript_path`).
 #
@@ -89,12 +89,30 @@ case $transcript in \~/*) transcript="$HOME/${transcript#\~/}" ;; esac
 # Anchored to line start so an inline mention like "do not write VERDICT: ship_it"
 # inside prose can't count.
 verdict_re='^[[:space:]]*VERDICT:[[:space:]]*(ship_it|iterate|block)[[:space:]]*$'
+reviewed_re='^[[:space:]]*REVIEWED:[[:space:]]*([0-9A-Fa-f]+)[[:space:]]*$'
 
-report=$(field .last_assistant_message)
-if ! printf '%s\n' "$report" | grep -qiE "$verdict_re" && [ -f "$transcript" ]; then
-  report=$(jq -Rrn '[inputs | fromjson? | select(.type == "assistant") | .message.content[]?
+handback() {
+  jq -Rrn '[inputs | fromjson? | select(.type == "assistant") | .message.content[]?
       | select(.type == "tool_use" and .name == "SubagentHandback") | .input.message // empty]
-      | last // empty' "$transcript" 2>/dev/null)
+      | last // empty' "$transcript" 2>/dev/null
+}
+
+# The report is the final message unless that lacks either parseable line; then
+# it's the hand-back's message. One retry covers a transcript not yet flushed.
+report=$(field .last_assistant_message)
+source="the final message"
+if ! printf '%s\n' "$report" | grep -qiE "$verdict_re" || ! printf '%s\n' "$report" | grep -qE "$reviewed_re"; then
+  hb=""
+  if [ -f "$transcript" ]; then
+    hb=$(handback)
+    [ -n "$hb" ] || { sleep 1; hb=$(handback); }
+  fi
+  if [ -n "$hb" ]; then
+    report=$hb
+    source="the hand-back"
+  else
+    source="the final message (the transcript has no hand-back)"
+  fi
 fi
 
 # The LAST matching line wins, in case the agent emits it more than once.
@@ -105,7 +123,7 @@ verdict=$(printf '%s\n' "$report" \
   | sed -E 's/^[[:space:]]*verdict:[[:space:]]*([a-z_]+)[[:space:]]*$/\1/')
 
 if [ -z "$verdict" ]; then
-  note "$repo" "no VERDICT line in the report (expected only for an advisory review) — no marker written."
+  note "$repo" "no VERDICT line in ${source} (expected only for an advisory review) — no marker written."
   exit 0
 fi
 if [ "$verdict" != "ship_it" ]; then
@@ -113,17 +131,17 @@ if [ "$verdict" != "ship_it" ]; then
   exit 0
 fi
 
-reviewed=$(printf '%s\n' "$report" \
-  | sed -nE 's/^[[:space:]]*REVIEWED:[[:space:]]*([0-9A-Fa-f]+)[[:space:]]*$/\1/p' \
-  | tail -1 \
-  | tr '[:upper:]' '[:lower:]')
-case ${#reviewed} in
-  40 | 64) ;;
-  *)
-    note "$repo" "ship_it, but the report has no 'REVIEWED: <full commit sha>' line, so it can't tell which commit was reviewed — no marker written."
-    exit 0
-    ;;
-esac
+reviewed=$(printf '%s\n' "$report" | sed -nE "s/${reviewed_re}/\1/p" | tail -1)
+if [ -z "$reviewed" ]; then
+  note "$repo" "ship_it, but ${source} has no 'REVIEWED: <sha>' line, so it can't tell which commit was reviewed — no marker written. A session started before the reviewers learned that line still runs their old definitions (they load at session start): restart it, or ask each reviewer in its prompt to end with 'REVIEWED: <the sha it pinned first>'."
+  exit 0
+fi
+# An abbreviated sha counts when it names exactly one commit.
+if ! full=$(git -C "$repo" rev-parse --verify -q "${reviewed}^{commit}" 2>/dev/null); then
+  note "$repo" "ship_it, but 'REVIEWED: ${reviewed}' doesn't name exactly one commit in ${repo} — no marker written."
+  exit 0
+fi
+reviewed=$full
 short=${reviewed:0:8}
 
 start=""

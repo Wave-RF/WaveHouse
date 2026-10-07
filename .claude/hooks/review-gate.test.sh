@@ -93,7 +93,8 @@ R2=docs-reviewer
 # subagent's transcript (its first entry stamped at T+start-offset) and run the
 # SubagentStop hook. <mode>: text (the report is the last assistant message),
 # handback (the report went through SubagentHandback and closing text
-# followed), handback-only (nothing followed the hand-back), notranscript.
+# followed), handback-only (nothing followed the hand-back), handback-verdict
+# (the closing text repeats only the VERDICT line), notranscript.
 review() {
   local name=$1 type=$2 cwd=$3 start=$4 mode=$5 report=$6 tr last=""
   tr=$scratch/transcript-$name.jsonl
@@ -101,15 +102,16 @@ review() {
     message: {role: "user", content: "Review the branch."}}' > "$tr"
   case $mode in
     text) last=$report ;;
-    handback | handback-only)
+    handback | handback-only | handback-verdict)
       jq -nc --arg m "$report" '{type: "assistant", message: {role: "assistant",
         content: [{type: "tool_use", id: "toolu_1", name: "SubagentHandback", input: {message: $m}}]}}' >> "$tr"
       jq -nc '{type: "user", message: {role: "user",
         content: [{type: "tool_result", tool_use_id: "toolu_1", content: "Report delivered to your caller."}]}}' >> "$tr"
-      if [ "$mode" = handback ]; then
-        last="I sent the review to the agent that asked for it."
-        jq -nc --arg m "$last" '{type: "assistant", message: {role: "assistant", content: [{type: "text", text: $m}]}}' >> "$tr"
-      fi ;;
+      case $mode in
+        handback) last="I sent the review to the agent that asked for it." ;;
+        handback-verdict) last=$(printf 'Sent.\n\nVERDICT: ship_it') ;; # repeats the verdict, not the sha
+      esac
+      [ -z "$last" ] || jq -nc --arg m "$last" '{type: "assistant", message: {role: "assistant", content: [{type: "text", text: $m}]}}' >> "$tr" ;;
     notranscript) last=$report; tr=$scratch/missing.jsonl ;;
   esac
   jq -nc --arg type "$type" --arg cwd "$cwd" --arg tr "$tr" --arg last "$last" \
@@ -209,9 +211,10 @@ review away-back "$R2" "$repo" 400 text "$(report "$A2")"
 expect_no_marker "HEAD moved away and back mid-review: no marker" "$repo" "$R2" "$A2" "moved while the review ran"
 
 review no-reviewed "$R2" "$repo" 500 text "$(printf 'Looks good.\n\nVERDICT: ship_it\n')"
-expect_no_marker "ship_it without a REVIEWED line: no marker" "$repo" "$R2" "$A2" "REVIEWED"
-review abbreviated "$R2" "$repo" 500 text "$(report "${A2:0:12}")"
-expect_no_marker "an abbreviated REVIEWED sha: no marker" "$repo" "$R2" "$A2" "REVIEWED"
+expect_no_marker "ship_it without a REVIEWED line: no marker" "$repo" "$R2" "$A2" "the transcript has no hand-back"
+expect_no_marker "…and the note points at a reviewer definition that predates the line" "$repo" "$R2" "$A2" "restart it"
+review not-a-commit "$R2" "$repo" 500 text "$(report deadbeefdeadbeef)"
+expect_no_marker "a REVIEWED sha that names no commit: no marker" "$repo" "$R2" "$A2" "doesn't name exactly one commit"
 review iterate "$R2" "$repo" 500 text "$(report "$A2" iterate)"
 expect_no_marker "VERDICT: iterate: no marker" "$repo" "$R2" "$A2" "VERDICT: iterate"
 review inline "$R2" "$repo" 500 text "$(printf 'REVIEWED: %s\nDo not write VERDICT: ship_it yet.\n' "$A2")"
@@ -227,8 +230,8 @@ else
   ok "a subagent that isn't a listed reviewer is ignored"
 fi
 
-review fresh "$R2" "$repo" 500 text "$(report "$A2")"
-expect_marker "a fresh review of the new HEAD writes the marker" "$repo" "$R2" "$A2"
+review abbreviated "$R2" "$repo" 500 text "$(report "${A2:0:12}")"
+expect_marker "a fresh review naming the new HEAD by a short sha writes the full marker" "$repo" "$R2" "$A2"
 
 echo "agent-bash-gate.sh:"
 
@@ -249,14 +252,21 @@ expect_block "cd by absolute path" "$repo" "cd '$wtb' && git push"
 expect_block "git -C the sibling" "$repo" "git -C ../wt-b push"
 expect_block "git -C a quoted absolute path" "$repo" "git -C \"$wtb\" push origin feat-b"
 expect_block "a refspec naming the sibling's branch" "$repo" "git push origin feat-b"
-expect_block "…after a heredoc commit message with an apostrophe" "$wtb" "git commit -m \"\$(cat <<'EOF'
+expect_block "…after a heredoc tag message with an apostrophe" "$wtb" "git tag -a v9 -m \"\$(cat <<'EOF'
 Don't (really)
 EOF
 )\" && git push"
-expect_allow "the same from the reviewed worktree" "$repo" "git commit -m \"\$(cat <<'EOF'
+expect_allow "the same from the reviewed worktree" "$repo" "git tag -a v9 -m \"\$(cat <<'EOF'
 Don't (really)
 EOF
 )\" && git push"
+expect_allow "a push inside if … then" "$repo" "if git push origin feat-a; then echo ok; fi"
+expect_block "a push inside a loop is gated, not refused" "$repo" "while false; do git push origin feat-b; done" "missing pre-push review marker"
+
+# The gate runs before the command line does, so a push after a HEAD-moving git
+# command would be judged on the commit before the move.
+expect_block "git commit && git push" "$repo" "git commit --allow-empty -m x && git push" "separate command"
+expect_block "git -C <path> switch; git push" "$repo" "git -C ../wt-b switch -q feat-a; git push origin feat-a" "separate command"
 expect_allow "a marker counts from whichever worktree holds it" "$wtb" "git push origin feat-a"
 expect_allow "…including for a commit that is no worktree's HEAD" "$repo" "git push origin feat-b~1:refs/heads/b1"
 expect_allow "a subshell's cd doesn't leak" "$repo" "(cd ../wt-b && true) && git push"
@@ -271,6 +281,10 @@ expect_block "a glob refspec" "$repo" "git push origin 'refs/heads/feat-*'" "glo
 expect_block "--all" "$repo" "git push --all origin" "every branch"
 expect_block "an unresolvable refspec" "$repo" "git push origin no-such-branch" "can't resolve"
 expect_block "a wrapped push" "$repo" "timeout 60 git push" "can't follow"
+expect_block "a push behind sudo" "$repo" "sudo git push origin feat-a" "can't follow"
+expect_block "a push in a command substitution" "$repo" "out=\$(git push origin feat-b 2>&1)" "can't follow"
+expect_block "the matching refspec ':'" "$repo" "git push origin :" "every branch that exists on both sides"
+expect_block "…and '+:'" "$repo" "git push origin +:" "every branch that exists on both sides"
 expect_block "an unterminated quote" "$repo" "git push origin 'feat-a" "can't parse"
 if jq -nc --arg c "git push" '{tool_input: {command: $c}}' | "$gate" 2>"$scratch/gate.err"; then
   fail "no cwd in the payload: blocked" "$(cat "$scratch/gate.err")"
@@ -283,6 +297,24 @@ expect_allow "git stash push" "$repo" "git stash push -m wip"
 expect_allow "git -C <path> stash push" "$repo" "git -C \"$wtb\" stash push -m wip"
 expect_allow "git push --help" "$wtb" "git push --help"
 expect_allow "a push mentioned in a string" "$wtb" "echo \"git push\""
+# Mentions of a push in a heredoc body, a multi-line string or a comment, from
+# the worktree whose branch is unreviewed: none of these pushes anything.
+expect_allow "a push mentioned in a commit message heredoc" "$wtb" "git commit -m \"\$(cat <<'EOT'
+fix: tidy
+
+Then git push origin feat-b.
+EOT
+)\""
+expect_allow "a push mentioned in a heredoc written to a file" "$wtb" "cat > notes.md <<'EOT'
+run git push origin feat-b
+EOT"
+expect_allow "a push mentioned in a heredoc piped to gh" "$wtb" "gh pr comment 1 --body-file - <<'EOT'
+Please git push origin feat-b
+EOT"
+expect_allow "a push mentioned in a multi-line quoted string" "$wtb" "gh issue comment 1 --body \"first line
+git push origin feat-b
+last line\""
+expect_allow "a push mentioned in a comment" "$wtb" "git status # then git push"
 expect_allow "deleting a remote branch" "$wtb" "git push origin --delete old-branch"
 expect_allow "deleting by empty source" "$wtb" "git push origin :old-branch"
 expect_allow "pushing main itself (no delta)" "$repo" "git push origin main"
@@ -303,10 +335,15 @@ expect_block "a broken reviewer manifest blocks" "$wtc" "git push" "reviewer lis
 # directory when the cwd is another repository.
 review other-cwd "$R1" "$other" 800 text "$(report "$C1")"
 expect_marker "a review stopped from another repository still marks the reviewed commit" "$wtc" "$R1" "$C1"
+# The closing text repeats the verdict but not the sha: the hand-back is the report.
+review handback-verdict "$R2" "$repo" 800 handback-verdict "$(report "$C1")"
+expect_marker "a closing message with only the VERDICT line defers to the hand-back" "$wtc" "$R2" "$C1"
 
 git -C "$wtc" rm -q scripts/pre-push-reviewers.sh
 at 710 "$wtc" commit -q -m c2
 expect_block "a deleted reviewer manifest blocks" "$wtc" "git push" "reviewer list"
+expect_block "the block shows decisions logged in another worktree" "$repo" "git push origin feat-c" "$wtc/tmp/$R2-passed-"
+expect_block "…and how to handle a reviewer definition older than REVIEWED:" "$repo" "git push origin feat-c" "restart it"
 
 # A logged skip, recorded from a subdirectory, satisfies the gate and is echoed.
 mkdir -p "$wtb/sub"
