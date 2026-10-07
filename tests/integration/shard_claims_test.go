@@ -226,6 +226,7 @@ func TestShardClaims_ScaleOneThreeTwo(t *testing.T) {
 // receives the held rows at once, not after ack_wait (a minute here), and
 // none of the rows it acked before.
 func TestShardClaims_CrashWithRowsInFlight(t *testing.T) {
+	t.Parallel()
 	srv := natstest.Start(t)
 	log := &shardLog{}
 	const lease = 3 * time.Second

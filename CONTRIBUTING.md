@@ -39,14 +39,9 @@ Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?t
 
    The pre-push hook (installed by `make tools`) blocks a push until the tree has been validated locally: a code change needs `make ci`, a docs/prose-only change needs only `make verify` (the same split CI makes). `make lint` / `make test` / `make build` are fast inner-loop subsets.
 
-2. Write tests for new functionality. Unit tests go alongside the code in `internal/`. Integration tests carry the `//go:build integration` tag and go in `tests/integration/`, or beside the package when they test one package against its own external server (e.g. `internal/cache/redis_integration_test.go`), with the package added to the `test-integration` target. A test that must import NATS, which only `internal/mq` may do, goes in `internal/mq/natsspike`, or in `internal/mq` itself with the `integration` tag when it needs the package's internals (the external NATS broker's tests, which `make test-integration` selects by name).
+2. Write tests for new functionality. Unit tests go alongside the code in `internal/`. Integration tests carry the `//go:build integration` tag and go in `tests/integration/`, or beside the package when they test one package against its own external server (e.g. `internal/cache/redis_integration_test.go`), with the package added to a part of the integration suite in the `Makefile` (`make test-integration` fails while it is in none). A test that must import NATS, which only `internal/mq` may do, goes in `internal/mq/natsspike`, or in `internal/mq` itself with the `integration` tag when it needs the package's internals (the external NATS broker's tests and the NATS KV lease tests, which `make test-integration` selects by that tag).
 
-3. Update documentation if your change affects:
-   - API endpoints → update `docs/src/content/docs/api.md`
-   - Boot configuration options → update `docs/src/content/docs/configuration.mdx`
-   - Settings-directory keys (`config.json` / `roles.json` / `policies.json` / `pipes.json`) → update `docs/src/content/docs/settings-directory.mdx` plus the seed and fixture copies (see AGENTS.md §Documentation Sync)
-   - Deployment → update `docs/src/content/docs/deployment.md`
-   - Architecture → update `docs/src/content/docs/architecture.md`
+3. Update the documentation and `CHANGELOG.md` (under `## Unreleased`) that your change affects. AGENTS.md §Documentation Sync lists which files go with which kind of change.
 
 4. Follow the commit message format (see below).
 
@@ -90,7 +85,7 @@ test(cache): add tiered cache stampede test
 
 ## Code Style
 
-- **Formatting**: Code must be formatted with `gofumpt` (a strict superset of `gofmt`). `make fmt` checks it (CI runs the same target); `make fix` applies it.
+- **Formatting**: Code must be formatted with `gofumpt` (a strict superset of `gofmt`). `make fmt` checks it, as does `make verify` (what CI and the pre-commit hook run); `make fix` applies it.
 - **Linting**: All lint checks in `.golangci.yml` must pass (see `make lint`).
 - **Naming**: Follow [Go naming conventions](https://go.dev/doc/effective_go#names).
 - **Interfaces**: Define interfaces where they are consumed, not where they are implemented.

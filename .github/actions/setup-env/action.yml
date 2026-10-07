@@ -117,7 +117,7 @@ runs:
       id: gomod-cache
       with:
         path: ~/go/pkg/mod
-        # go.mod is in the key, not just go.sum, because the GOTOOLCHAIN=auto
+        # go.mod is in the key, not just go.sum, because the pinned
         # toolchain rides in ~/go/pkg/mod/golang.org/toolchain (no setup-go)
         # and go.sum records no entry for it. Raising go.mod's `go` directive
         # therefore changes which toolchain belongs in this cache while
@@ -153,12 +153,9 @@ runs:
         # — so every run recompiles cold *and* restores objects nothing can
         # hit, until some unrelated go.sum change rotates the key.
         #
-        # This closes the go-directive half only. GOTOOLCHAIN=auto uses the
-        # LOCAL toolchain whenever it satisfies the directive, so a runner
-        # image bumping its bundled Go swaps the compiler with neither
-        # go.mod nor go.sum moving — same pathology, past both keys. If you
-        # see unexplained cold build caches, that's the cause: rotate the
-        # v<N> prefix to force a save.
+        # The toolchain is pinned to go.mod's directive (see "Pin and verify
+        # Go toolchain" below), so a runner image bumping its bundled Go can
+        # no longer swap the compiler under these keys.
         key: gobuild-v3-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-${{ hashFiles('**/go.mod', '**/go.sum') }}
         # Same-suffix only. The bare-prefix fallback the v2 key carried
         # existed to pick up the shared module cache from another job's
@@ -180,19 +177,25 @@ runs:
 
     # No actions/setup-go: it spends ~9s/job downloading + extracting a
     # toolchain the runner can already provide. The image's preinstalled
-    # `go` + GOTOOLCHAIN=auto (the Go ≥1.21 default) resolve go.mod's
-    # pinned version exactly — and the auto-fetched toolchain lands in
-    # ~/go/pkg/mod/golang.org/toolchain, i.e. inside the module cache
-    # restored above, so warm runs download nothing. A cold cache (first
-    # run after a key rotation, when the image go is older than go.mod's
-    # pin) pays a one-time toolchain fetch from proxy.golang.org here —
-    # this step makes that cost visible and the post-job save captures it.
+    # `go` fetches go.mod's version whenever it differs, and the fetched
+    # toolchain lands in ~/go/pkg/mod/golang.org/toolchain, i.e. inside
+    # the module cache restored above, so warm runs download nothing. A
+    # cold cache pays a one-time fetch from proxy.golang.org here — this
+    # step makes that cost visible and the post-job save captures it.
+    # GOTOOLCHAIN=auto would NOT pin go.mod's version: it means
+    # max(image, go.mod), so an image that ships a newer Go would take over
+    # and break golangci-lint. Export the pin for steps that run Go outside
+    # `make` (which exports the same value from go.mod itself).
     # Trade-off: setup-go's inline problem matchers (PR-file annotations
     # on compile errors) are gone; the log output is unchanged.
-    - name: Verify Go resolves go.mod's toolchain
+    - name: Pin and verify Go toolchain
       if: ${{ inputs.go == 'true' }}
       shell: bash
-      run: go version
+      run: |
+        GOTOOLCHAIN="$(awk '/^toolchain /{t=$2} /^go /{g="go"$2} END{print (t != "") ? t : g}' go.mod)"
+        [[ "$GOTOOLCHAIN" =~ ^go[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "::error::go.mod needs a go line of the form x.y.z, got '$GOTOOLCHAIN'"; exit 1; }
+        echo "GOTOOLCHAIN=$GOTOOLCHAIN" >> "$GITHUB_ENV"
+        GOTOOLCHAIN="$GOTOOLCHAIN" go version
 
     # pnpm must install before its cache step so the store path can be
     # resolved from pnpm itself.
