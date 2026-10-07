@@ -21,10 +21,12 @@
 # The marker goes into each such worktree's tmp/, so a review of a sibling
 # worktree marks that worktree, not the session's.
 #
-# The report is `.last_assistant_message` when that carries both lines. A
-# subagent that delivers its report through the SubagentHandback tool leaves
-# only its closing text there; the report is that tool call's `message`, read
-# from the subagent's transcript (`.agent_transcript_path`).
+# The report is `.last_assistant_message` whenever that has a VERDICT line,
+# unless the verdict is ship_it with no REVIEWED line; a final iterate or block
+# stands. A subagent that delivers its report through the SubagentHandback tool
+# leaves only its closing text there (no verdict, or a bare ship_it); the report
+# is then that tool call's `message`, read from the subagent's transcript
+# (`.agent_transcript_path`).
 #
 # Every decision for a reviewer goes to stderr and to tmp/review-marker.log
 # (gitignored), which the push gate prints when it blocks, so a missing marker
