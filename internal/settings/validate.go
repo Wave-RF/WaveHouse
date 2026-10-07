@@ -749,8 +749,8 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 		}
 		if s.KeepaliveBuckets == nil {
 			v.required("stream.keepalive_buckets")
-		} else if *s.KeepaliveBuckets < 1 {
-			v.errorf(FileConfig, "stream.keepalive_buckets", "must be >= 1, got %d", *s.KeepaliveBuckets)
+		} else if *s.KeepaliveBuckets < 1 || *s.KeepaliveBuckets > MaxKeepaliveBuckets {
+			v.errorf(FileConfig, "stream.keepalive_buckets", "must be in 1-%d, got %d", MaxKeepaliveBuckets, *s.KeepaliveBuckets)
 		}
 		if s.GapWindowMinutes == nil {
 			v.required("stream.gap_window_minutes")

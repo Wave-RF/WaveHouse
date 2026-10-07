@@ -17,7 +17,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
-	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/metric"
@@ -46,8 +45,8 @@ var runtimeStartOnce sync.Once
 // OpenTelemetry SDK reads those from the standard OTEL_EXPORTER_OTLP_* env vars
 // — endpoint (with `https://` selecting TLS via system root CAs), a custom CA
 // via _CERTIFICATE, mutual TLS via _CLIENT_CERTIFICATE/_CLIENT_KEY, and auth
-// _HEADERS. A malformed header is logged and skipped by the SDK (fail-soft),
-// not fatal.
+// _HEADERS. A malformed header is never fatal: traces and metrics skip that
+// entry, while the logs exporter drops the whole variable.
 type ProviderConfig struct {
 	TracesEnabled     bool
 	TracesSampleRate  float64
@@ -72,7 +71,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 	prevProp := otel.GetTextMapPropagator()
 	prevTP := otel.GetTracerProvider()
 	prevMP := otel.GetMeterProvider()
-	prevLP := global.GetLoggerProvider()
+	prevLP := otel.GetLoggerProvider()
 
 	var shutdownFuncs []func(context.Context) error
 
@@ -95,8 +94,8 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 
 		// Fan the providers out concurrently AND bound the whole thing by
 		// ctx: with an unreachable collector, traces and metrics honor the
-		// deadline but the experimental logs SDK's BatchProcessor.Shutdown
-		// (sdk/log v0.20.0) does not — while an export is mid-flight in gRPC
+		// deadline but the logs SDK's BatchProcessor.Shutdown did not at
+		// sdk/log v0.20.0 (#366; the bound stays as a backstop) — while an export is mid-flight in gRPC
 		// backoff it blocks for the exporter's full ~10s timeout, ignoring
 		// ctx. Waiting on all of them (wg.Wait) would drag the whole shutdown
 		// out to that ~10s. Every provider already got the same deadline, so
@@ -128,7 +127,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 		otel.SetTextMapPropagator(prevProp)
 		otel.SetTracerProvider(prevTP)
 		otel.SetMeterProvider(prevMP)
-		global.SetLoggerProvider(prevLP)
+		otel.SetLoggerProvider(prevLP)
 		if shutErr := shutdown(ctx); shutErr != nil {
 			slog.Warn("observability shutdown error during init cleanup",
 				"shutdown_err", shutErr, "cause", inErr)
@@ -226,11 +225,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 
 	if cfg.LogsEnabled {
 		// Endpoint, TLS, and headers come from the SDK's OTEL_EXPORTER_OTLP_*
-		// env vars, same as traces/metrics. Known gap: the pinned otlploggrpc
-		// (v0.19) ignores the env TLS-cert vars, so a custom/private CA and
-		// mutual TLS do not apply to the logs signal (public-CA TLS and
-		// plaintext still work). Upstream bug, not worked around here:
-		// open-telemetry/opentelemetry-go#6661.
+		// env vars, same as traces/metrics.
 		logExporter, err := otlploggrpc.New(ctx)
 		if err != nil {
 			handleErr(err)
@@ -242,7 +237,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 			log.WithResource(res),
 		)
 		shutdownFuncs = append(shutdownFuncs, loggerProvider.Shutdown)
-		global.SetLoggerProvider(loggerProvider)
+		otel.SetLoggerProvider(loggerProvider)
 	}
 
 	return shutdown, promHandler, nil
