@@ -152,9 +152,9 @@ func publishRows(t *testing.T, b mq.Broker, topics []mq.Topic, rows int) {
 	}
 }
 
-// oneWriterEach publishes rows to topics and reports, once every row
-// arrived, whether each topic's rows reached exactly one of procs.
-func oneWriterEach(t *testing.T, b mq.Broker, log *shardLog, topics []mq.Topic, procs ...string) {
+// everyRowOnce publishes rows to topics and reports, once every row arrived,
+// whether each reached one of procs and none arrived twice.
+func everyRowOnce(t *testing.T, b mq.Broker, log *shardLog, topics []mq.Topic, procs ...string) {
 	t.Helper()
 	log.reset()
 	publishRows(t, b, topics, 3)
@@ -166,12 +166,21 @@ func oneWriterEach(t *testing.T, b mq.Broker, log *shardLog, topics []mq.Topic, 
 		}
 		return true
 	}, 30*time.Second, 20*time.Millisecond, "every row arrives")
+	for _, topic := range topics {
+		assert.Subset(t, procs, log.writers(topic), "%v", topic)
+		assert.Equal(t, 3, log.count(topic), "%v: no row twice", topic)
+	}
+}
+
+// oneWriterEach is everyRowOnce, and also reports whether each topic's rows
+// reached exactly one of procs.
+func oneWriterEach(t *testing.T, b mq.Broker, log *shardLog, topics []mq.Topic, procs ...string) {
+	t.Helper()
+	everyRowOnce(t, b, log, topics, procs...)
 	per := map[string]int{}
 	for _, topic := range topics {
 		w := log.writers(topic)
 		require.Len(t, w, 1, "%v written by %v", topic, w)
-		assert.Contains(t, procs, w[0])
-		assert.Equal(t, 3, log.count(topic), "%v: no row twice", topic)
 		per[w[0]]++
 	}
 	t.Logf("tables per process: %v", per)
@@ -194,9 +203,9 @@ func pinnedUnits(t *testing.T, srv *natstest.Server) int {
 	return n
 }
 
-// Scaling 1 → 3 → 2 processes: every table is written by one process at
-// every step, a clean stop hands its shards on well inside the lease, and no
-// row is received twice.
+// Scaling 1 → 3 → 2 processes: every table is written by one process once
+// each step has settled, a clean stop hands its shards on well inside the
+// lease, and no row is received twice.
 func TestShardClaims_ScaleOneThreeTwo(t *testing.T) {
 	srv := natstest.Start(t)
 	log := &shardLog{}
@@ -214,10 +223,16 @@ func TestShardClaims_ScaleOneThreeTwo(t *testing.T) {
 
 	stopped := time.Now()
 	c.stop()
-	oneWriterEach(t, a.broker, log, topics, "proc-a", "proc-b")
+	// The first rows after the stop time it, and are not held to one writer
+	// each: as the survivors take proc-c's shards their even share also
+	// moves one of proc-a's to proc-b, and a table whose rows arrive across
+	// that handover is written by one and then the other.
+	everyRowOnce(t, a.broker, log, topics, "proc-a", "proc-b")
 	took := time.Since(stopped)
 	t.Logf("after a clean stop every table was written again within %s (lease %s)", took.Round(10*time.Millisecond), lease)
 	assert.Less(t, took, 3*lease, "a clean stop releases at once")
+	time.Sleep(3 * time.Second) // membership and handovers settle
+	oneWriterEach(t, a.broker, log, topics, "proc-a", "proc-b")
 	noShardFailure(t, a)
 }
 
