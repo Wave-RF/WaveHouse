@@ -621,8 +621,8 @@ build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
 	@$(MAKE) -j $(JOBS) build build-ts build-docs
 	@echo "$(GREEN)$(BOLD)✔ All artifacts built$(RESET)"
 
-# build-ts: pnpm-driven SDK build → clients/ts/dist/ (ESM + CJS + .d.ts).
-# Required by test-e2e (e2e tests import the built artifact) and by
+# build-ts: pnpm-driven SDK build → clients/ts/dist/ (ESM + CJS + .d.ts + the IIFE
+# bundle), then smoke-loads each entry point (smoke-ts-dist). Required by test-e2e (e2e tests import the built artifact) and by
 # build-all. Standalone via `make build-ts`.
 .PHONY: build-ts
 build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/ and smoke-load each entry point
@@ -631,12 +631,13 @@ build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/ and smoke-lo
 
 # smoke-ts-dist: load the built ESM, CJS and IIFE entry points like a consumer
 # and compare their export surfaces. Runs at the OLDEST Node `engines.node`
-# admits (fetched with `pnpm dlx node@x.y.z`), because an ESM-only dependency
-# only breaks `require()` before 22.12 and the floating .nvmrc Node hides it.
+# admits, because an ESM-only dependency only breaks `require()` before 22.12
+# and the floating .nvmrc Node hides it. `node@runtime:x.y.z` is the official
+# Node runtime; a bare `node@x.y.z` is the unrelated `node` npm package on pnpm 11.
 .PHONY: smoke-ts-dist
-smoke-ts-dist:
+smoke-ts-dist: ## Smoke-load the built SDK entry points at the oldest Node engines.node admits
 	@v=$$(node clients/ts/scripts/smoke-dist.mjs --min-node) && \
-		$(PNPM) dlx node@$$v clients/ts/scripts/smoke-dist.mjs
+		$(PNPM) dlx node@runtime:$$v clients/ts/scripts/smoke-dist.mjs --expect-node $$v
 
 # check-docs: astro check — type-checks .astro/.mdx, content-collection frontmatter
 # schemas, and config TS. Catches what `astro build` does NOT (the build strips
