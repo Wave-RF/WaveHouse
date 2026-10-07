@@ -225,7 +225,8 @@ func (s sharedTables) Invalidate(ctx context.Context, namespaces []cache.Namespa
 // (Alloy/scrape, no collector) is a first-class mode, and the OTel SDK
 // MeterProvider is the shared substrate. Endpoint, TLS, and auth headers
 // come from the standard OTEL_EXPORTER_OTLP_* env vars, read by the SDK. A
-// malformed header is logged and skipped by the SDK (fail-soft);
+// malformed header is never fatal (logs drop the whole variable, traces and
+// metrics just that entry);
 // InitProvider's own error is likewise non-fatal — logged, stdout-only from
 // there on.
 func (a *App) wireObservability(ctx context.Context) {

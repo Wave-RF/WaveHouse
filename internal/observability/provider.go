@@ -45,8 +45,8 @@ var runtimeStartOnce sync.Once
 // OpenTelemetry SDK reads those from the standard OTEL_EXPORTER_OTLP_* env vars
 // — endpoint (with `https://` selecting TLS via system root CAs), a custom CA
 // via _CERTIFICATE, mutual TLS via _CLIENT_CERTIFICATE/_CLIENT_KEY, and auth
-// _HEADERS. A malformed header is logged and skipped by the SDK (fail-soft),
-// not fatal.
+// _HEADERS. A malformed header is never fatal: traces and metrics skip that
+// entry, while the logs exporter drops the whole variable.
 type ProviderConfig struct {
 	TracesEnabled     bool
 	TracesSampleRate  float64
