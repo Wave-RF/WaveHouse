@@ -10,7 +10,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
-	"go.opentelemetry.io/otel/log/global"
 )
 
 // TestInitProvider_Shutdown verifies that the provider pipeline initializes
@@ -76,12 +75,12 @@ func TestInitProvider_ShutdownParallelBounded(t *testing.T) {
 	savedProp := otel.GetTextMapPropagator()
 	savedTP := otel.GetTracerProvider()
 	savedMP := otel.GetMeterProvider()
-	savedLP := global.GetLoggerProvider()
+	savedLP := otel.GetLoggerProvider()
 	t.Cleanup(func() {
 		otel.SetTextMapPropagator(savedProp)
 		otel.SetTracerProvider(savedTP)
 		otel.SetMeterProvider(savedMP)
-		global.SetLoggerProvider(savedLP)
+		otel.SetLoggerProvider(savedLP)
 	})
 
 	shutdown, _, err := InitProvider(context.Background(), "wavehouse-test", ProviderConfig{
@@ -100,7 +99,7 @@ func TestInitProvider_ShutdownParallelBounded(t *testing.T) {
 	ctr.Add(context.Background(), 1)
 	var rec otellog.Record
 	rec.SetBody(attribute.StringValue("shutdown-regression"))
-	global.GetLoggerProvider().Logger("test").Emit(context.Background(), rec)
+	otel.GetLoggerProvider().Logger("test").Emit(context.Background(), rec)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

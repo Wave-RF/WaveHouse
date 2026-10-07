@@ -17,7 +17,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
-	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/metric"
@@ -72,7 +71,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 	prevProp := otel.GetTextMapPropagator()
 	prevTP := otel.GetTracerProvider()
 	prevMP := otel.GetMeterProvider()
-	prevLP := global.GetLoggerProvider()
+	prevLP := otel.GetLoggerProvider()
 
 	var shutdownFuncs []func(context.Context) error
 
@@ -128,7 +127,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 		otel.SetTextMapPropagator(prevProp)
 		otel.SetTracerProvider(prevTP)
 		otel.SetMeterProvider(prevMP)
-		global.SetLoggerProvider(prevLP)
+		otel.SetLoggerProvider(prevLP)
 		if shutErr := shutdown(ctx); shutErr != nil {
 			slog.Warn("observability shutdown error during init cleanup",
 				"shutdown_err", shutErr, "cause", inErr)
@@ -242,7 +241,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 			log.WithResource(res),
 		)
 		shutdownFuncs = append(shutdownFuncs, loggerProvider.Shutdown)
-		global.SetLoggerProvider(loggerProvider)
+		otel.SetLoggerProvider(loggerProvider)
 	}
 
 	return shutdown, promHandler, nil
