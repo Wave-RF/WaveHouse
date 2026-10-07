@@ -621,12 +621,28 @@ build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
 	@$(MAKE) -j $(JOBS) build build-ts build-docs
 	@echo "$(GREEN)$(BOLD)✔ All artifacts built$(RESET)"
 
-# build-ts: pnpm-driven SDK build → clients/ts/dist/ (ESM + CJS + .d.ts).
-# Required by test-e2e (e2e tests import the built artifact) and by
-# build-all. Standalone via `make build-ts`.
+# build-ts: pnpm-driven SDK build → clients/ts/dist/ (ESM + CJS + .d.ts + the
+# IIFE bundle), then smoke-loads each entry point (smoke-ts-dist). Required by
+# test-e2e (e2e tests import the built artifact) and by build-all. Standalone
+# via `make build-ts`.
 .PHONY: build-ts
-build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/
+build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/ and smoke-load each entry point
 	@$(PNPM) --filter $(SDK_NAME) run build
+	@$(MAKE) --no-print-directory smoke-ts-dist
+
+# smoke-ts-dist: load the built ESM, CJS and IIFE entry points like a consumer
+# and compare their export surfaces. Runs at the OLDEST Node `engines.node`
+# admits, because an ESM-only dependency only breaks `require()` before 22.12
+# and the floating .nvmrc Node hides it. That Node is fetched once from
+# nodejs.org into .bin/ against a pinned sha256 (fetch-node.sh, like
+# shellcheck) rather than through pnpm, which on pnpm 11 asks nodejs.org on
+# every run. No pnpm-install prereq of its own: build-ts has already installed
+# the SDK's runtime deps, which dist/ loads from node_modules.
+.PHONY: smoke-ts-dist
+smoke-ts-dist: ## Smoke-load the built SDK entry points at the oldest Node engines.node admits
+	@v=$$(node clients/ts/scripts/smoke-dist.mjs --min-node) && \
+		n=$$(clients/ts/scripts/fetch-node.sh $$v $(LOCAL_BIN)) && \
+		"$$n" clients/ts/scripts/smoke-dist.mjs --expect-node $$v
 
 # check-docs: astro check — type-checks .astro/.mdx, content-collection frontmatter
 # schemas, and config TS. Catches what `astro build` does NOT (the build strips
