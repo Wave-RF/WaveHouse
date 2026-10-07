@@ -28,6 +28,12 @@ if [ -z "$name" ]; then
   exit 2
 fi
 
+# The marker belongs at the root of the worktree this runs in, even from a subdirectory.
+if ! top=$(git rev-parse --show-toplevel 2>/dev/null) || ! cd "$top"; then
+  echo "skip-pre-push-review: not inside a git worktree." >&2
+  exit 2
+fi
+
 # Only a real gating reviewer can be skipped — refuse to mint a marker for an
 # arbitrary name (that would just confuse the gate, never satisfy it).
 list_script="scripts/pre-push-reviewers.sh"
