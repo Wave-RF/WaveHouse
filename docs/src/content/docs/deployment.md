@@ -813,9 +813,9 @@ make obs-grafana  # Full Grafana LGTM stack, auto-login enabled
 make obs-front
 ```
 
-All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP) as **plaintext** receivers. If you are running WaveHouse directly on your host, enable OTel and point it at them: `WH_OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 make dev` (`make dev` leaves OTel off, and the SDK's unset default dials `localhost:4317` over **TLS**, which a plaintext receiver rejects).
+All three publish a **plaintext** OTLP gRPC receiver on `4317` (`make obs-front` also publishes OTLP/HTTP on `4318`). If you are running WaveHouse directly on your host, enable OTel and point it at them: `WH_OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 make dev` (`make dev` leaves OTel off, and the SDK's unset default dials `localhost:4317` over **TLS**, which a plaintext receiver rejects).
 
-If you are running a containerized WaveHouse (e.g., via `deployments/compose/standalone.yaml`), you must override its environment to enable OTel and reach the host-bound collector: `WH_OTEL_ENABLED=true` and `OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317`.
+If you are running a containerized WaveHouse (e.g., via `deployments/compose/standalone.yaml`), add `WH_OTEL_ENABLED: "true"` and `OTEL_EXPORTER_OTLP_ENDPOINT: http://host.docker.internal:4317` to the `wavehouse` service's `environment:` block (exporting them in your shell is not enough: the compose file does not pass them through). On Linux Docker Engine also add `extra_hosts: ["host.docker.internal:host-gateway"]` to the service, since only Docker Desktop defines that name.
 
 ### Dashboards
 
