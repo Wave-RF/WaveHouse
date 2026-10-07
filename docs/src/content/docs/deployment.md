@@ -747,7 +747,7 @@ WaveHouse **pushes** to an OTel collector; scraping-style pipelines (Promtail/Gr
 
 ### Pattern: Local collector (SigNoz, OTel Collector, Alloy)
 
-A local collector almost always speaks **plaintext** gRPC, but the SDK's unset default endpoint is **TLS** at `localhost:4317` — so enabling OTel alone is not enough. Point it at the collector with an explicit `http://` scheme: `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` (or set `OTEL_EXPORTER_OTLP_INSECURE=true`). All three signals (traces, metrics, logs) push through the same connection. This is the simplest setup.
+A local collector almost always speaks **plaintext** gRPC, but the SDK's unset default endpoint is **TLS** at `localhost:4317` — so enabling OTel alone is not enough. Point it at the collector with an explicit `http://` scheme: `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` (or leave the endpoint unset and set `OTEL_EXPORTER_OTLP_INSECURE=true`). All three signals (traces, metrics, logs) push to the same endpoint, each over its own connection. This is the simplest setup.
 
 ```yaml
 otel:

@@ -94,8 +94,8 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 
 		// Fan the providers out concurrently AND bound the whole thing by
 		// ctx: with an unreachable collector, traces and metrics honor the
-		// deadline but the experimental logs SDK's BatchProcessor.Shutdown
-		// (sdk/log v0.20.0) does not — while an export is mid-flight in gRPC
+		// deadline but the logs SDK's BatchProcessor.Shutdown did not at
+		// sdk/log v0.20.0 (#366; the bound stays as a backstop) — while an export is mid-flight in gRPC
 		// backoff it blocks for the exporter's full ~10s timeout, ignoring
 		// ctx. Waiting on all of them (wg.Wait) would drag the whole shutdown
 		// out to that ~10s. Every provider already got the same deadline, so

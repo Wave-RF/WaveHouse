@@ -162,7 +162,7 @@ These are the small targets behind `make dev` — useful directly when you want 
 
 ### Running with observability
 
-WaveHouse natively exports standard OpenTelemetry (OTLP) data to `127.0.0.1:4317`. Rather than coupling a heavy observability database stack to the dev server, we provide three lightweight, single-container dashboard options.
+With `otel.enabled` on, WaveHouse exports standard OpenTelemetry (OTLP) data to the endpoint in `OTEL_EXPORTER_OTLP_ENDPOINT`. Rather than coupling a heavy observability database stack to the dev server, we provide three lightweight, single-container dashboard options.
 
 You run these in a separate terminal tab alongside `make dev` or your test suites (`make test-e2e`).
 
@@ -177,7 +177,7 @@ They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear
 **Typical Workflow:**
 
 1. Open Tab 1: run `make obs-aspire` (UI opens automatically)
-2. Open Tab 2: run `make dev` (or `make test-e2e`)
+2. Open Tab 2: run `make test-e2e`, which enables OTel and points it at `http://127.0.0.1:4317` for you, or `WH_OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 make dev` (`make dev` leaves OTel off, and the SDK's unset default is TLS, which these local receivers reject)
 3. View traces, metrics, and logs flowing into the UI instantly. No accounts or auth tokens required.
 
 ### Using the SDK against `make dev`
