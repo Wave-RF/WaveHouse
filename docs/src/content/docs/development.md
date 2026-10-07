@@ -566,7 +566,7 @@ All test targets accept `ARGS="..."` for pass-through `go test` flags. Build tar
 ### Updating Dependencies
 
 ```bash
-go get -u ./...                         # Update all dependencies (direct and indirect) to latest minor/patch
+go get -u ./...                         # Update the main module's non-test deps (direct and indirect); add -t for test-only deps, and run go get -u tool for the tool block
 go get google.golang.org/grpc@v1.83.2   # Re-apply the gRPC hold until #643 closes (see below)
 go mod tidy                             # Remove unused, add missing
 ```
