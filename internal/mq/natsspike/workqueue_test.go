@@ -8,6 +8,7 @@ package natsspike
 
 import (
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -27,14 +28,24 @@ import (
 // down by the test framework.
 func server(t *testing.T) *natsserver.Server {
 	t.Helper()
+	dir := t.TempDir()
 	s, err := natsserver.NewServer(&natsserver.Options{
-		Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir(), NoSigs: true, NoLog: true,
+		Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: dir, NoSigs: true, NoLog: true,
 	})
 	require.NoError(t, err)
 	s.Start()
 	require.True(t, s.ReadyForConnections(10*time.Second), "server not ready")
-	t.Cleanup(func() { s.Shutdown(); s.WaitForShutdown() })
+	t.Cleanup(func() { shutdown(t, s, dir) })
 	return s
+}
+
+// shutdown stops s and empties its store: a deleted stream's directory is
+// removed by a goroutine Shutdown does not wait for, which would make
+// t.TempDir's own cleanup fail with "directory not empty".
+func shutdown(t *testing.T, s *natsserver.Server, dir string) {
+	t.Helper()
+	s.Shutdown()
+	require.Eventually(t, func() bool { return os.RemoveAll(dir) == nil }, 5*time.Second, 10*time.Millisecond)
 }
 
 func connect(t *testing.T, s *natsserver.Server) jetstream.JetStream {

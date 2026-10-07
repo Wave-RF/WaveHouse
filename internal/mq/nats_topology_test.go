@@ -402,15 +402,19 @@ func TestVerifyNATSTopology_ServerVersion(t *testing.T) {
 		}
 		require.Len(t, v.findings, 1, version)
 		assert.Equal(t, *want, v.findings[0].Severity, version)
+		if *want == FindingRecommended {
+			assert.Empty(t, withoutVersionAdvisory(v.findings), version)
+		} else {
+			assert.Len(t, withoutVersionAdvisory(v.findings), 1, version)
+		}
 	}
 }
 
-// Against the real server, the version finding is there exactly when the
-// server is off the recommended line, and is only ever a recommendation.
+// Against the real server, boot reports the version exactly as it reports
+// the version the module pins.
 func TestVerifyNATSTopology_ServerVersionFinding(t *testing.T) {
 	t.Parallel()
 	f := newNATSFixture(t)
-	f.apply(t, shippedTopology(t))
 	findings, err := verifyNATSTopology(t.Context(), f.connect(t, "wavehouse"), shippedSpec, nil)
 	require.NoError(t, err)
 	var got []Finding
@@ -419,15 +423,10 @@ func TestVerifyNATSTopology_ServerVersionFinding(t *testing.T) {
 			got = append(got, fi)
 		}
 	}
-	version := natsserver.VERSION
-	if strings.HasPrefix(version, recommendedNATSMinor) {
-		assert.Empty(t, got, "server %s is on the recommended line", version)
-		return
-	}
-	require.Len(t, got, 1, "server %s", version)
-	assert.Equal(t, FindingRecommended, got[0].Severity)
-	assert.Contains(t, got[0].Problem, version)
-	assert.Len(t, withoutVersionAdvisory(findings), len(findings)-1)
+	want := &topologyVerifier{}
+	want.serverVersion(natsserver.VERSION)
+	assert.Equal(t, want.findings, got)
+	assert.Len(t, withoutVersionAdvisory(findings), len(findings)-len(got))
 }
 
 func TestVerifyNATSTopology_RefusesAnImpossibleSpec(t *testing.T) {
