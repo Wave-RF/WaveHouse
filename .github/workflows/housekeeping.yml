@@ -22,8 +22,9 @@ name: PR housekeeping
 #
 # A second job runs when a PR closes (merged or not) and deletes the Actions
 # caches that PR's refs saved. The Go, pnpm and Playwright caches only save
-# from `main`, but GitHub's own CodeQL setup still saves ~0.6 GB per PR ref,
-# readable by nobody else, against the repo's 10 GB cache cap.
+# from `main` (a PR saves them only when its key misses `main`'s), and GitHub's
+# own CodeQL setup saves ~0.6 GB per PR ref, readable by nobody else, against
+# the repo's 10 GB cache cap.
 
 on:
   pull_request_target:
@@ -40,7 +41,8 @@ permissions:
   actions: write
 
 concurrency:
-  group: pr-housekeeping-${{ github.event.pull_request.number }}
+  # `closed` gets its own group so a later edited/reopened event can't cancel the cleanup.
+  group: pr-housekeeping-${{ github.event.pull_request.number }}-${{ github.event.action == 'closed' }}
   cancel-in-progress: true
 
 jobs:
@@ -222,5 +224,6 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           for ref in "refs/pull/$PR_NUMBER/merge" "refs/pull/$PR_NUMBER/head"; do
-            gh cache delete --all --ref "$ref" --succeed-on-no-caches
+            gh cache delete --all --ref "$ref" --succeed-on-no-caches \
+              || echo "::warning::deleting caches for $ref failed"
           done

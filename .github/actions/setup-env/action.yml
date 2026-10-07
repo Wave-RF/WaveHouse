@@ -8,27 +8,29 @@
 # exact-key miss. Everywhere else (pull requests, merge-queue refs,
 # branches) the same cache is a restore-only `actions/cache/restore`, which
 # reads `main`'s entry through the default-branch fallback and writes
-# nothing. The reason is the repo's 10 GB cache cap: an entry is readable
-# only from the ref that saved it (and from `main`), so a PR's own Go
-# caches were never reusable by anyone else, yet every PR minted a fresh
-# set and evicted `main`'s warm entries. Two consequences to know about:
+# nothing. The reason is the repo's 10 GB cache cap: a run restores only
+# from its own ref's scope and from `main`'s, so an entry a PR saves is
+# unreadable to every other PR. A PR saved its own ~2.4 GB set whenever
+# its key missed `main`'s (it changed go.mod/go.sum/pnpm-lock.yaml, or ran
+# between a `main` bump and `main`'s save), and that set evicted `main`'s
+# warm entries. Two consequences to know about:
 #   - saves happen at the END of the job (post steps), and only when the
 #     job SUCCEEDED — a failed run rebuilds from restore-keys next time;
 #   - when several jobs miss the same key in one `main` run (e.g. a
 #     lockfile bump), each saves; the backend keeps the first and the rest
 #     log a benign "already exists" warning.
 # A PR that changes a lockfile therefore restores the previous generation
-# via restore-keys and fetches only the delta on every push, until `main`
-# saves the new generation.
+# via restore-keys and fetches the delta on every push, for its whole life.
+# golangci and Astro still save from any ref (see the inventory).
 #
 # The cache inventory (full architecture: .github/workflows/README.md):
 #
 #   1. Go modules, `gomod-v1-` key family, keyed on every go.mod + go.sum
 #      and NOT partitioned per job — ~/go/pkg/mod is a pure function of
 #      those files, so one entry serves every Go job, stored once rather
-#      than per flavor (~1.6 GB on disk; 0.48 GB as a stored archive on a
-#      cold save, drifting up as superseded module versions accumulate
-#      through the restore -> save chain).
+#      than per flavor (~1.6 GB on disk; 0.48 GB as a stored archive).
+#      `main` starts each generation cold (no restore-keys), so superseded
+#      module versions never accumulate in it.
 #   2. Go build objects, `gobuild-v3-` key family, same key inputs,
 #      partitioned by `go-cache-suffix`: the unit, integration and e2e jobs
 #      compile with different flags (-race/-cover/-coverpkg/-tags), so a
@@ -55,7 +57,7 @@
 #      `astro build` — unchanged content skips the parse + transform
 #      pipeline. See #132. Saved from any ref, like golangci: a few KB.
 name: Setup CI environment
-description: Caches (restore + automatic post-job save) and toolchains for WaveHouse CI
+description: Caches (restore everywhere, save on main) and toolchains for WaveHouse CI
 
 inputs:
   go:
@@ -223,7 +225,8 @@ runs:
     # restored above, so warm runs download nothing. A cold cache (first
     # run after a key rotation, when the image go is older than go.mod's
     # pin) pays a one-time toolchain fetch from proxy.golang.org here —
-    # this step makes that cost visible and the post-job save captures it.
+    # this step makes that cost visible; `main`'s post-job save captures it,
+    # while a PR that raises the go directive refetches it on every push.
     # Trade-off: setup-go's inline problem matchers (PR-file annotations
     # on compile errors) are gone; the log output is unchanged.
     - name: Verify Go resolves go.mod's toolchain
