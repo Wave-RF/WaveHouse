@@ -214,6 +214,13 @@ RELEASE_BINARIES := $(addsuffix -release,$(BINARIES))
 export VERSION_LDFLAGS LDFLAGS TAGS
 export GOTESTSUM_FMT
 
+# -trimpath makes compiled packages independent of the checkout's directory,
+# so every worktree shares one Go build cache entry per package and variant
+# instead of building its own. A caller's GOFLAGS is kept.
+GOFLAGS ?=
+override GOFLAGS := -trimpath $(GOFLAGS)
+export GOFLAGS
+
 # ==============================================================================
 # Targets
 # ==============================================================================

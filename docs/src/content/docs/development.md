@@ -338,6 +338,8 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 
 **Note on timing**: gotestsum's `DONE ... in X.XXXs` reports pure test execution time. The total wall time includes Go compiling all packages — the first run compiles everything (~15s), subsequent runs use the build cache (~1s).
 
+**Build cache across worktrees**: `make` exports `GOFLAGS=-trimpath` (your own `GOFLAGS` are kept), so compiled packages don't embed the checkout's path and every worktree of the same source shares one build cache entry per package and variant, instead of building its own. Binaries built this way carry module-relative source paths, so a debugger needs a source-path substitution (Delve's `substitute-path`) to find the files; build with plain `go build` when you want the absolute paths. Code that needs a file from the repository finds it from the working directory, never from `runtime.Caller`, whose paths are module-relative under `-trimpath`.
+
 ### Test Structure
 
 | Category | Location | Docker? | Command |
