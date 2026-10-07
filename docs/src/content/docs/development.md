@@ -566,11 +566,12 @@ All test targets accept `ARGS="..."` for pass-through `go test` flags. Build tar
 ### Updating Dependencies
 
 ```bash
-go get -u ./...        # Update all direct deps to latest minor/patch
-go mod tidy            # Remove unused, add missing
+go get -u ./...                         # Update all dependencies (direct and indirect) to latest minor/patch
+go get google.golang.org/grpc@v1.83.2   # Re-apply the gRPC hold until #643 closes (see below)
+go mod tidy                             # Remove unused, add missing
 ```
 
-`go get -u` ignores Dependabot's holds: until [#643](https://github.com/Wave-RF/WaveHouse/issues/643) closes it pulls `google.golang.org/grpc` 1.84.x, and `make vulncheck` fails on GO-2026-6443. After `go get -u ./...`, run `go get google.golang.org/grpc@v1.83.2` (the version `go.mod` pins); Go steps `proto/otlp` and `grpc-gateway/v2` back down with it (see [Dependabot](#dependabot)).
+`go get -u` ignores Dependabot's holds: until [#643](https://github.com/Wave-RF/WaveHouse/issues/643) closes it pulls `google.golang.org/grpc` 1.84.x, and `make vulncheck` fails on GO-2026-6443. The second line re-applies the hold (1.83.2 is the version `go.mod` pins), and Go steps `proto/otlp` and `grpc-gateway/v2` back down with it; run it before `go mod tidy`, or `make tidy` finds stale `go.sum` lines (see [Dependabot](#dependabot)).
 
 ### Vulnerability Scanning
 
