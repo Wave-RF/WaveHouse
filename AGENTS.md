@@ -149,7 +149,7 @@ Tooling notes (the non-obvious bits `make help` won't tell you):
 make ci   # Full parity with CI: parallel verify + builds + unit/SDK tests, then integration + E2E + cov
 ```
 
-If `make ci` passes locally, your commit has crossed the same gates CI will run — the CI workflow (`.github/workflows/ci.yml`) is a job DAG over the *same Makefile targets* (`verify`, `build-docs`, `test-unit`/`test-ts`, `test-integration`, `test-e2e`, `cov`), just spread across parallel runners. For workflow-only changes, read the YAML diff carefully and run `actionlint` if you have it installed.
+If `make ci` passes locally, your commit has crossed the same gates CI will run — the CI workflow (`.github/workflows/ci.yml`) is a job DAG over the *same Makefile targets* (`verify`, `build-docs`, `test-unit`/`test-ts`, `test-integration`'s parts, `test-e2e`, `cov`), just spread across parallel runners. For workflow-only changes, read the YAML diff carefully and run `actionlint` if you have it installed.
 
 ### Running `make ci` (for agents)
 
@@ -450,7 +450,7 @@ internal/stream/        → SSE fan-out (event Hub: project once per role, Subsc
 internal/tenant/        → Tenant id (type, grammar, reserved default, request header name)
 internal/testutil/      → Shared test helpers (mocks, JWT + schema helpers; logtest/ captures or silences the default logger; cachetest/ is the conformance suite every cache.Cache backend runs; mutationtest/ holds the shared write-classifier cases; storedir/ is the embedded broker's store directory in tests, removed once late consumer-state writes land)
 tests/                  → Integration & E2E tests
-tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer, Redis for shared_cache_test.go, and NATS for the `mq.backend: nats` end-to-end test). A package tested against its own external server keeps them beside it: internal/cache/redis_integration_test.go (Redis, Valkey, Dragonfly, Redis Cluster testcontainers). `make test-integration` also runs `internal/mq/natsspike` (nats-server semantics, under `internal/mq` for the NATS import boundary) and `internal/mq`'s integration-tagged external-NATS broker tests (`TestExternalNATS*`, `TestNewNATS*`, `TestNATSPermissions_Refuse*`, `TestLeases*`)
+tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer, Redis for shared_cache_test.go, and NATS for the `mq.backend: nats` end-to-end test). A package tested against its own external server keeps them beside it: internal/cache/redis_integration_test.go (Redis, Valkey, Dragonfly, Redis Cluster testcontainers). `make test-integration` also runs `internal/mq/natsspike` (nats-server semantics, under `internal/mq` for the NATS import boundary) and `internal/mq`'s integration-tagged external-NATS broker tests, picked by the tag rather than by name (`scripts/ci/tagged-tests.sh`); it runs in two parts, `test-integration-app` (this directory) and `test-integration-backends` (the rest), one CI job each
 tests/e2e/              → E2E test stack (scripts/orchestrator boots ClickHouse and Redis testcontainers + the wavehouse-cov binary)
 tests/e2e/fixtures/     → Idempotent ClickHouse DDL scripts for test tables
 tests/e2e/sdk/          → E2E integration tests via TypeScript SDK (Vitest)
