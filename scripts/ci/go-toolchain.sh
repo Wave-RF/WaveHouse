@@ -11,9 +11,9 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 mod="${1:-go.mod}"
-pin="$(awk '/^toolchain[ \t]/{t=$2} /^go[ \t]/{g="go"$2} END{print (t != "") ? t : g}' "$mod")"
+pin="$(awk '/^[ \t]*toolchain[ \t]/{t=$2} /^[ \t]*go[ \t]/{g="go"$2} END{print (t != "") ? t : g}' "$mod")"
 
-if [[ ! "$pin" =~ ^go[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+if [[ ! "$pin" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "go-toolchain: $mod needs a go line of the form x.y.z (or a toolchain line), got '${pin:-nothing}'; bump with 'go get go@1.N.P'" >&2
   exit 1
 fi
