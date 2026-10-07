@@ -1,5 +1,5 @@
-// WH002/mdx-fence-needs-blank-line — a code fence adjacent to a JSX tag needs a
-// blank line between them.
+// WH002/mdx-fence-needs-blank-line — an MDX code fence needs a blank line
+// between it and a JSX tag, and anywhere CommonMark would read it as HTML.
 //
 // The shape this catches:
 //
@@ -26,40 +26,96 @@
 // interior blank line will therefore look harmless — that is the trap, not a
 // counter-example.
 //
-// This rule reports (CI + editor). The *fix* is applied separately, by
-// scripts/fix-mdx-fences.mjs, because the generic markdownlint fixers never run
-// over .mdx at all — .markdownlint-cli2.jsonc globs .md only, and the .mdx
-// glob lives on `lint:md`. The reason they are kept away:
-// until the blank line exists CommonMark sees no code block, so a YAML block's
-// `#` comments parse as ATX headings and MD022/MD023/MD026/MD034 will happily
-// "fix" them — de-indenting them out of the block and rewriting bare URLs
-// inside what is meant to be verbatim code. markdownlint-cli2 always merges the
-// nearest .markdownlint.json into a --config run, so a "WH002-only" markdownlint
-// pass is not expressible; hence the standalone script. Both read the same
-// detector in ./lib/mdx-fences.mjs.
+// Both checks below read parse trees, never line shape:
+//   - adjacency, the house style: in the MDX parse (./lib/mdx.mjs) the construct
+//     directly above a fence is an opening JSX tag, or the one directly below it
+//     is a closing tag;
+//   - interop, the hazard itself: markdownlint's own CommonMark tokens put the
+//     fence's opening line inside an HTML block. This is what catches a fence
+//     glued to prose inside an open block (`<Aside>` / `Run this first:` /
+//     fence), which no adjacency test can see.
 //
-// parser: "none" — fences are detected lexically, which is the only thing that
-// still works once MDX and CommonMark disagree about what the file contains.
+// This rule reports (CI + editor). The *fix* is applied by scripts/fix-mdx.mjs,
+// because the generic markdownlint fixers never run over .mdx at all —
+// .markdownlint-cli2.jsonc globs .md only, and the .mdx glob lives on
+// `lint:md`. Deliberately no fixInfo: were someone to run markdownlint --fix
+// over .mdx by hand, it would apply the blank-line insert AND, in the same
+// pass, the generic fixes computed against the swallowed-fence parse, repairing
+// the symptom while corrupting the code. Reporting only keeps the violation
+// visible for scripts/fix-mdx.mjs to repair.
 
-import { findFenceTagViolations } from "./lib/mdx-fences.mjs";
+import { descendants, parseMdx } from "./lib/mdx.mjs";
+
+// What may sit between two flow constructs without separating them the way a
+// blank line (`lineEndingBlank`) does.
+const TRIVIA = new Set(["lineEnding", "linePrefix", "listItemIndent", "blockQuotePrefix"]);
+
+function neighbor(tokens, token, step) {
+  const siblings = token.parent?.children ?? tokens;
+  for (let i = siblings.indexOf(token) + step; i >= 0 && i < siblings.length; i += step) {
+    if (!TRIVIA.has(siblings[i].type)) return siblings[i];
+  }
+  return null;
+}
+
+function isJsxTag(token, closing) {
+  if (token?.type !== "mdxJsxFlowTag") return false;
+  const has = (type) => token.children.some((child) => child.type === type);
+  return has("mdxJsxFlowTagClosingMarker") === closing && !has("mdxJsxFlowTagSelfClosingMarker");
+}
+
+const firstLine = (token) => {
+  const [head, ...rest] = token.text.split("\n");
+  return rest.length ? `${head.trim()} …` : head.trim();
+};
 
 export default {
   names: ["WH002", "mdx-fence-needs-blank-line"],
   description: "A code fence adjacent to a JSX tag needs a blank line between them",
   tags: ["code", "mdx"],
-  parser: "none",
+  parser: "micromark",
   function: (params, onError) => {
     // CommonMark has no JSX, so this only applies to MDX.
     if (!params.name.endsWith(".mdx")) return;
 
-    // Deliberately no fixInfo. `fix:md` never runs markdownlint --fix over
-    // .mdx, so a fixInfo here would only ever fire if someone ran it by hand —
-    // which would apply the blank-line insert AND, in the same pass, the generic
-    // fixes computed against the swallowed-fence parse, repairing the symptom
-    // while corrupting the code. Reporting only keeps the violation visible for
-    // scripts/fix-mdx-fences.mjs to repair.
-    for (const { line, detail } of findFenceTagViolations(params.lines)) {
-      onError({ lineNumber: line, detail });
+    const mdx = parseMdx(params.lines);
+    if (mdx.error) {
+      onError({
+        lineNumber: Math.min(Math.max(mdx.error.line, 1), params.lines.length),
+        detail: `not checked: the file does not parse as MDX (${mdx.error.reason})`,
+      });
+      return;
+    }
+
+    const htmlBlocks = [...descendants(params.parsers.micromark.tokens)].filter(
+      (token) => token.type === "htmlFlow" && !token.text.startsWith("<!--"),
+    );
+    // Line → detail, so a fence caught by both checks is reported once.
+    const found = new Map();
+    for (const fence of descendants(mdx.tokens)) {
+      if (fence.type !== "codeFenced") continue;
+
+      const above = neighbor(mdx.tokens, fence, -1);
+      const block = htmlBlocks.find(
+        (b) => b.startLine <= fence.startLine && fence.startLine <= b.endLine,
+      );
+      if (isJsxTag(above, false) && above.endLine === fence.startLine - 1) {
+        found.set(fence.startLine, `fence opens directly after ${firstLine(above)}`);
+      } else if (block) {
+        found.set(
+          fence.startLine,
+          `fence opens inside the HTML block CommonMark starts at ${firstLine(block)}, so it is not read as code`,
+        );
+      }
+
+      const below = neighbor(mdx.tokens, fence, 1);
+      if (isJsxTag(below, true) && below.startLine === fence.endLine + 1) {
+        found.set(below.startLine, `${firstLine(below)} follows a fence directly`);
+      }
+    }
+
+    for (const [lineNumber, detail] of [...found].sort(([a], [b]) => a - b)) {
+      onError({ lineNumber, detail });
     }
   },
 };

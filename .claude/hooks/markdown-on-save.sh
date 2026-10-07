@@ -61,7 +61,7 @@ fi
 # so its worst failure is a render-neutral blank line. `make lint` still CHECKS
 # .mdx; it just never acts on the disagreement. Mirrors `fix:md`.
 if [ "${rel##*.}" = "mdx" ]; then
-  node scripts/fix-mdx-fences.mjs "$rel" >/dev/null 2>&1 || true
+  node scripts/fix-mdx.mjs "$rel" >/dev/null 2>&1 || true
 elif [ -x node_modules/.bin/markdownlint-cli2 ]; then
   # Plain Markdown: markdownlint's parse IS authoritative, so the full fixer
   # chain is safe. `--no-globs` keeps it to this one file rather than the whole

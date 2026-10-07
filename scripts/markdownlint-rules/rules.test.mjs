@@ -193,7 +193,7 @@ describe("WH002 flags an MDX fence glued to a JSX tag", () => {
     assert.equal((stdout.match(/WH002/g) ?? []).length, 2);
   });
 
-  it("does not autofix — the repair is ordered by scripts/fix-mdx-fences.mjs", () => {
+  it("does not autofix — the repair is ordered by scripts/fix-mdx.mjs", () => {
     assert.equal(run("t.mdx", glued, { fix: true }).output, glued);
   });
 
@@ -222,9 +222,16 @@ describe("WH002 flags an MDX fence glued to a JSX tag", () => {
     assert.equal(run("t.mdx", src, { fix: true }).output, src);
   });
 
-  it("does not fire when the backward scan would cross prose", () => {
+  it("reports a fence glued to prose inside an open block, not the tag above the prose", () => {
+    // CommonMark's HTML block from `<Foo>` runs to the next blank line, so the
+    // fence is swallowed even with prose between it and the tag. A line-shape
+    // detector never saw this; the prose ending in `>` must still not be read
+    // as the tail of a multi-line opening tag.
     const src = "<Foo>\nprose that ends in a >\n```yaml\nkey: value\n```\n";
-    assert.doesNotMatch(run("t.mdx", src).stdout, /WH002/);
+    const { stdout } = run("t.mdx", src);
+    assert.equal((stdout.match(/WH002/g) ?? []).length, 1);
+    assert.match(stdout, /t\.mdx:3 .*inside the HTML block CommonMark starts at <Foo>/);
+    assert.doesNotMatch(stdout, /directly after/);
   });
 
   it("still sees both sides when an attribute value contains >", () => {
@@ -293,7 +300,7 @@ describe("fix-mdx-fences.mjs repairs the structure", () => {
     const dir = mkdtempSync(path.join(workdir, "fixer-"));
     const file = path.join(dir, "t.mdx");
     writeFileSync(file, '<TabItem label="YAML">\n```yaml\nkey: value\n```\n</TabItem>\n');
-    execFileSync("node", [path.join(repoRoot, "scripts/fix-mdx-fences.mjs"), file], {
+    execFileSync("node", [path.join(repoRoot, "scripts/fix-mdx.mjs"), file], {
       stdio: "pipe",
     });
     assert.equal(
@@ -308,7 +315,7 @@ describe("fix-mdx-fences.mjs repairs the structure", () => {
     const glued = '<TabItem label="YAML">\n```yaml\nkey: value\n```\n</TabItem>\n';
     writeFileSync(file, glued);
     assert.throws(() =>
-      execFileSync("node", [path.join(repoRoot, "scripts/fix-mdx-fences.mjs"), "--check", file], {
+      execFileSync("node", [path.join(repoRoot, "scripts/fix-mdx.mjs"), "--check", file], {
         stdio: "pipe",
       }),
     );
