@@ -15,6 +15,8 @@ Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, and the admi
 Authorization: Bearer <token>
 ```
 
+Before the token is read, every `/v1` route outside `/v1/ops/*` resolves the request's tenant from the `X-Tenant-ID` header — absent, tenant `0` — and answers `400` for a malformed id, `404` for an unknown one and `503` for one whose settings folder was rejected, whatever token the request carries; see [Multi-tenant deployments](/deployment#multi-tenant-deployments). A settings directory that holds the four files is tenant `0` alone, so a client that sends no header never meets these.
+
 The JWT must use HMAC signing (HS256/HS384/HS512) or be validated via a JWKS endpoint (configured via `auth.jwks_url` in the [settings directory](/settings-directory#authentication) — per tenant, over [a nested directory](/deployment#the-nested-settings-directory), so a JWKS-issued token verifies only under the tenants whose `jwks_url` names its provider's key set; tenants that leave `jwks_url` empty all verify against the shared boot `jwt_secret` and accept each other's tokens, or validate no token at all while it is unset). While a tenant's JWKS has not been fetched yet — at boot, or after a reload built or rebuilt its verifier (a new tenant folder, one adopted again after being rejected or removed, or a changed `jwks_url` or `role_claim`) — a request carrying a token is answered `503 {"error": "token verifier not ready: the tenant's JWKS has not been fetched yet"}` with `Retry-After: 30` rather than evaluated under the `default_role`; requests without a token are unaffected, and so is one authenticated by a valid operator key, which is checked first and never consults the verifier. The accepted signing algorithm is pinned to the active verifier and checked *before* any key is consulted: an HMAC deployment accepts only `HS256`/`HS384`/`HS512`, and a JWKS deployment accepts only the asymmetric family (`RS256/384/512`, `ES256/384/512`, `PS256/384/512`, `EdDSA`). Tokens using `alg: none`, or an algorithm from the other family (e.g. an `HS256` token sent to a JWKS deployment), are rejected outright.
 
 For SSE connections where custom headers are not possible, you can pass the token as a query parameter:
@@ -812,7 +814,7 @@ Returns per-table message counts in one tenant's Dead Letter Queue: the [tenant]
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
 | `tenant` | string | `0` | The tenant whose dead-letter queue is read. |
-| `table` | string | — | Filter stats to a specific table name (e.g., `?table=clicks` returns only the `clicks` count). |
+| `table` | string | — | Filter `tables` to one table name (e.g., `?table=clicks` lists only the `clicks` count); `total` stays the tenant's whole parked count, whatever the filter. |
 
 **Response:**
 
