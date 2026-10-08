@@ -1,18 +1,28 @@
 name: PR cache cleanup
 
-# When a PR closes (merged or not), delete the Actions caches saved under its
-# refs. The Go, pnpm and Playwright caches only save from `main`; what a PR
-# still saves is GitHub's CodeQL dependency cache (~0.4-0.6 GiB, whenever main
-# has no entry for its key), the small golangci/Astro entries, and any
-# Go caches saved before that change. None is readable by another PR, and they
-# count against the repo's 10 GB cache cap until evicted.
+# Deletes the Actions caches pull requests no longer need. Both jobs run the
+# default branch's copy of this workflow and execute nothing from a PR, so no
+# PR-authored code holds the write token, and fork PRs are covered too.
 #
-# No checkout and nothing from the PR is executed: the only PR-derived input is
-# the number, passed through the environment.
+# - When a PR closes (merged or not): every cache saved under its refs. The
+#   Go, pnpm and Playwright caches save only from `main`, except the build
+#   cache below; what a PR still saves is GitHub's CodeQL dependency cache
+#   (~0.4-0.6 GiB, whenever main has no entry for its key), the small
+#   golangci/Astro entries, and any Go caches saved before that change. None
+#   is readable by another PR, and they count against the repo's 10 GB cache
+#   cap until evicted. No checkout: the only PR-derived input is the number,
+#   passed through the environment.
+# - After each CI run of a pull request: the Go build cache entries no run
+#   will read. A PR that changes go.mod/go.sum saves the build cache of the
+#   two long-pole jobs into its own scope (setup-env's `go-cache-pr-save`),
+#   and scripts/ci/prune-pr-build-cache.sh keeps at most one per job per PR.
 
 on:
   pull_request_target:
     types: [closed]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
 
 permissions:
   actions: write
@@ -20,6 +30,7 @@ permissions:
 jobs:
   cache-cleanup:
     name: Delete PR caches
+    if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -36,3 +47,29 @@ jobs:
             gh cache delete --all --ref "$ref" --succeed-on-no-caches || rc=1
           done
           exit "$rc"
+
+  build-cache-prune:
+    name: Prune PR build caches
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Overlapping prunes would race to delete the same entries. A newer
+    # pending run replaces an older one, which is fine: each prunes everything.
+    concurrency:
+      group: pr-build-cache-prune
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      # The default branch, never the PR's tree: the script runs with the
+      # write token.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Delete the build caches no run will read
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: scripts/ci/prune-pr-build-cache.sh

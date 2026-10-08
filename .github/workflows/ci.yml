@@ -261,6 +261,9 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           go-cache-suffix: "-integration-${{ matrix.part }}"
+          # Only the long pole saves from a dependency-changing PR (README,
+          # sizing policy): `backends` finishes well inside it either way.
+          go-cache-pr-save: ${{ matrix.part == 'app' }}
           node: "false" # pure Go + testcontainers
       - name: Run Go integration tests
         env:
@@ -306,6 +309,7 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           go-cache-suffix: "-e2e-cov"
+          go-cache-pr-save: "true" # the other long pole
       # `-j` builds the prereqs (build-ts ∥ build-cover) concurrently,
       # then runs the orchestrator: ClickHouse and Redis testcontainers +
       # the cover binary + the SDK vitest suite.
