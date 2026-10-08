@@ -144,8 +144,8 @@ jobs:
           astro: "true" # check-docs (astro check) reuses the content cache
       # tidy + gofumpt + golangci + vulncheck + shellcheck + actionlint +
       # Biome + markdownlint + misspell + astro check + tsc. No Docker,
-      # no browser. (Cache saves are automatic — setup-env's nested
-      # actions/cache steps save at job end on an exact-key miss.)
+      # no browser. (On main, setup-env's nested actions/cache steps save at
+      # job end on an exact-key miss; elsewhere only golangci/Astro do.)
       - name: Run static checks
         run: make verify
 
@@ -190,12 +190,13 @@ jobs:
           overwrite: true # re-runs of this job re-upload
       # On a lockfile change (= pnpm cache-key rotation; lockfile changes
       # always flip changes.docs=true, so this job runs), drop store
-      # entries unreferenced by any workspace project before the post-job
-      # save captures the store — else the cache grows unboundedly as
-      # deps churn. Runs after the artifact upload, so docs-preview's
-      # poll never waits on it.
+      # entries unreferenced by any workspace project, so a pruned store is
+      # what this job leaves behind. Main only: nothing is saved on other
+      # refs. Runs after the artifact upload, so docs-preview starts without
+      # waiting on it. Whether the saved entry is the pruned one depends on
+      # which job finishes first on main; lint and unit usually do.
       - name: Prune pnpm store before save
-        if: steps.setup.outputs.pnpm-cache-hit != 'true'
+        if: github.ref == 'refs/heads/main' && steps.setup.outputs.pnpm-cache-hit != 'true'
         run: pnpm store prune
 
   # ── Test suites ────────────────────────────────────────────────────
