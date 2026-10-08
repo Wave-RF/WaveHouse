@@ -96,6 +96,7 @@ ARCH := $(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 #   LDFLAGS="-s -w"              extra ldflags (e.g. force-strip a local build)
 #   LIMIT=50                     top-N for `make dep-cut`
 #   JOBS=4                       parallel slots for the -j fan-outs (default: CPU count)
+#   HOST=box KEEP=1 REMOTE_DIR=d where `make ci-remote` runs (see that target)
 #
 # Add binaries here as the project grows (e.g., wavehouse-api, wavehouse-worker).
 BINARIES := wavehouse
@@ -224,6 +225,17 @@ export GOTESTSUM_FMT
 GO_TOOLCHAIN := $(shell scripts/ci/go-toolchain.sh)
 $(if $(GO_TOOLCHAIN),,$(error cannot derive the Go toolchain from go.mod, see above))
 export GOTOOLCHAIN := $(GO_TOOLCHAIN)
+
+# -trimpath makes compiled packages independent of the checkout's directory,
+# so every worktree shares one Go build cache entry per package and variant
+# instead of building its own. A caller's GOFLAGS is kept, and one that already
+# names -trimpath (`-trimpath=false` to opt out) is left alone, which also
+# stops sub-makes from prepending it again.
+GOFLAGS ?=
+ifeq ($(findstring -trimpath,$(GOFLAGS)),)
+override GOFLAGS := -trimpath $(GOFLAGS)
+endif
+export GOFLAGS
 
 # ==============================================================================
 # Targets
@@ -436,10 +448,10 @@ lint-gha: $(ACTIONLINT) $(SHELLCHECK)
 # classifier behind CI's `changes` job and the local git hooks) against the
 # canonical change shapes — fast, dependency-free, so the allowlists can't
 # silently regress. A verify leaf so CI's lint job runs it.
-# test-md-rules: fixtures for the repo-local markdownlint rules. They rewrite
-# every .md/.mdx on every agent write, and they classify by line shape with no
-# parse tree, so an unrecognized construct is corrupted rather than skipped —
-# cheap fixtures are the only thing that catches the next shape regression.
+# test-md-rules: fixtures for the repo-local markdownlint rules and the MDX
+# fixer. They rewrite every .md/.mdx on every agent write, so each construct they
+# must leave alone is pinned here — cheap fixtures are what catches a parser
+# that disagrees with the one the docs render with.
 .PHONY: test-md-rules
 test-md-rules: pnpm-install
 	$(call run,markdownlint rule tests,node --test scripts/markdownlint-rules/rules.test.mjs,)
@@ -492,6 +504,15 @@ test-prune-pr-build-cache:
 .PHONY: test-review-gate
 test-review-gate:
 	$(call run,review-gate test,.claude/hooks/review-gate.test.sh,)
+
+# test-remote-ci: drive scripts/ci/remote-ci.sh through stand-in ssh and docker
+# commands in a scratch repository: only a passing run of exactly HEAD's tree,
+# on a worktree still clean afterwards, may write the make-ci marker. Also
+# checks the pre-push hook's line for that marker. A verify leaf, same as
+# test-classify-paths.
+.PHONY: test-remote-ci
+test-remote-ci:
+	$(call run,remote-ci test,scripts/ci/remote-ci.test.sh,)
 
 .PHONY: vulncheck
 vulncheck: go-mod-download ## Run govulncheck -scan package (V=1: symbol-level scan with example traces)
@@ -554,11 +575,11 @@ fix-ts: pnpm-install
 # comments it reads as headings, autolinking bare URLs. Reporting on that
 # disagreement is useful (lint-md still checks .mdx); acting on it is not.
 #
-# .mdx therefore gets exactly one STRUCTURAL fixer, our own
-# scripts/fix-mdx-fences.mjs — misspell still corrects spelling there, since its
-# curated list needs no parse. That fixer only ever inserts a blank line next to
-# a JSX tag, so its worst failure is a render-neutral blank line rather than
-# rewritten code.
+# .mdx therefore gets exactly one STRUCTURAL fixer, our own scripts/fix-mdx.mjs
+# — misspell still corrects spelling there, since its curated list needs no
+# parse. It runs only WH002 (a blank line beside a fence) and WH001 (joining
+# what an MDX parse calls a paragraph), and refuses to write a result whose
+# block structure, verbatim blocks or non-whitespace text differ from the input.
 #
 # The md pass runs twice because it is not a fixpoint in one: WH001's insert
 # carries the pre-fix text of the lines it joins, so another rule's fix for a
@@ -583,13 +604,13 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (19): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# Leaves (20): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
 # for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
 # test-classify-paths, test-release-channel, test-go-toolchain, test-tagged-tests,
-# test-integration-parts, test-prune-pr-build-cache and test-review-gate for
-# the tooling;
+# test-integration-parts, test-prune-pr-build-cache, test-review-gate and
+# test-remote-ci for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
 # nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
 # (`biome check`) but NOT fmt-ts (`biome format`) — check already covers
@@ -603,7 +624,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-go-toolchain test-tagged-tests test-integration-parts test-prune-pr-build-cache test-review-gate vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-go-toolchain test-tagged-tests test-integration-parts test-prune-pr-build-cache test-review-gate test-remote-ci vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.
@@ -999,6 +1020,16 @@ ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverag
 	@$(MAKE) cov
 	@scripts/ci-marker.sh write
 	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
+
+# ci-remote: run `make ci` for HEAD on another machine, an ssh destination or
+# docker:<container>, and write the same markers here if it passed there for
+# exactly this tree. Host requirements and the checks: scripts/ci/remote-ci.sh.
+HOST ?=
+KEEP ?=
+REMOTE_DIR ?=
+.PHONY: ci-remote
+ci-remote: ## Run `make ci` for HEAD on HOST=<ssh destination> or HOST=docker:<container> (KEEP=1, REMOTE_DIR=…)
+	@KEEP='$(KEEP)' REMOTE_DIR='$(REMOTE_DIR)' scripts/ci/remote-ci.sh '$(HOST)'
 
 ##@ Release
 

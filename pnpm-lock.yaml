@@ -25,12 +25,39 @@ importers:
       '@biomejs/biome':
         specifier: ^2.5.8
         version: 2.5.8
+      '@mdx-js/mdx':
+        specifier: ^3.1.1
+        version: 3.1.1(supports-color@10.2.2)
       markdownlint-cli2:
         specifier: ^0.23.2
         version: 0.23.2(supports-color@10.2.2)
+      micromark:
+        specifier: ^4.0.2
+        version: 4.0.2(supports-color@10.2.2)
+      micromark-extension-directive:
+        specifier: ^4.0.0
+        version: 4.0.0
+      micromark-extension-gfm:
+        specifier: ^3.0.0
+        version: 3.0.0
+      micromark-extension-math:
+        specifier: ^3.1.0
+        version: 3.1.0
+      micromark-extension-mdxjs:
+        specifier: ^3.0.0
+        version: 3.0.0
       nyc:
         specifier: ^18.0.0
         version: 18.0.0(supports-color@10.2.2)
+      remark-directive:
+        specifier: ^4.0.0
+        version: 4.0.0(supports-color@10.2.2)
+      remark-gfm:
+        specifier: ^4.0.1
+        version: 4.0.1(supports-color@10.2.2)
+      remark-math:
+        specifier: ^6.0.0
+        version: 6.0.0(supports-color@10.2.2)
 
   clients/ts:
     dependencies:
