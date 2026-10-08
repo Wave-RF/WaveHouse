@@ -38,6 +38,25 @@ function writeJSON(name: string, doc: unknown): void {
   writeFileSync(join(settingsDir(), name), `${JSON.stringify(doc, null, 2)}\n`);
 }
 
+/**
+ * `config.json` as far as the suite reaches into it: the `clickhouse` block
+ * and the `tls` block inside it. Every other key rides along untouched.
+ */
+export type ConfigFile = Record<string, unknown> & {
+  clickhouse: Record<string, unknown> & { tls: Record<string, unknown> };
+};
+
+/** The configuration currently on disk (`config.json`). */
+export function readConfigFile(): ConfigFile {
+  return readJSON<ConfigFile>("config.json");
+}
+
+/** Replace `config.json` and reload. */
+export async function setConfig(config: ConfigFile): Promise<void> {
+  writeJSON("config.json", config);
+  await reloadSettings();
+}
+
 /** The policy currently on disk (`policies.json`). */
 export function readPolicyFile(): Policy {
   return readJSON<Policy>("policies.json");

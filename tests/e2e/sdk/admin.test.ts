@@ -1,7 +1,14 @@
 import type { Pipe, Policy } from "@wavehouse/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { adminClient } from "./helpers.js";
-import { readPipesFile, readPolicyFile, setPipes, setPolicy } from "./settings.js";
+import {
+  readConfigFile,
+  readPipesFile,
+  readPolicyFile,
+  setConfig,
+  setPipes,
+  setPolicy,
+} from "./settings.js";
 import { suiteTables } from "./tables.js";
 
 describe("Admin", () => {
@@ -137,6 +144,29 @@ describe("Admin", () => {
 
       const unknown = await wh.settings.reload({ tenant: "acme" });
       expect(unknown.error?.status).toBe(404);
+    });
+
+    // A connection tuple is the address, database, user and tls block, so a
+    // tls.server_name the plaintext hops never read still names another one.
+    // Each reload opens the tuple it names and releases the one it left, the
+    // HTTP clients made for it included (#713); the next raw-SQL query runs
+    // on the tuple the tenant is on. query_timeout is the grace a released
+    // tuple gets, so the one moved to is gone five seconds after the reload
+    // back rather than thirty.
+    it("keeps serving across a reload that moves the tenant to another connection tuple", async () => {
+      const baseline = readConfigFile();
+      const moved = structuredClone(baseline);
+      moved.clickhouse.tls.server_name = "clickhouse.e2e";
+      moved.clickhouse.query_timeout = 5;
+      try {
+        await setConfig(moved);
+        const onMoved = await wh.sql("SELECT 1 AS one");
+        expect(onMoved.error).toBeNull();
+      } finally {
+        await setConfig(baseline);
+      }
+      const onRestored = await wh.sql("SELECT 1 AS one");
+      expect(onRestored.error).toBeNull();
     });
   });
 

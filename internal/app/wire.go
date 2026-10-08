@@ -257,6 +257,24 @@ func (a *App) wireObservability(ctx context.Context) {
 	}
 }
 
+// chMembers is what each served tenant asks of the ClickHouse pools: its
+// settings' clickhouse block, with the boot-config password.
+func (a *App) chMembers() []chconn.Member {
+	var ms []chconn.Member
+	for id, store := range a.tenants.All() {
+		c := store.ClickHouse()
+		ms = append(ms, chconn.Member{Tenant: id, Params: chconn.Params{
+			Addr: c.Addr, HTTPPort: c.HTTPPort, HTTPScheme: c.HTTPScheme,
+			Database: c.Database, Username: c.Username, Password: a.cfg.ClickHouse.Password,
+			QueryTimeout: c.QueryTimeout,
+			TLS:          chconn.TLS(c.TLS),
+			Headers:      c.Headers,
+			MaxOpenConns: c.MaxOpenConns, MaxIdleConns: c.MaxIdleConns,
+		}})
+	}
+	return ms
+}
+
 // wireClickHouse opens the ClickHouse pools: one per distinct address,
 // database, user, password and tls tuple among the served tenants' clickhouse
 // blocks (with the boot-config password), shared by the tenants naming it and
@@ -274,29 +292,14 @@ func (a *App) wireObservability(ctx context.Context) {
 // where it already does (schema discovery retries, /readyz, query errors).
 // Every consumer resolves its tenant's pool per call (chConn, chTargetFor).
 func (a *App) wireClickHouse() error {
-	members := func() []chconn.Member {
-		var ms []chconn.Member
-		for id, store := range a.tenants.All() {
-			c := store.ClickHouse()
-			ms = append(ms, chconn.Member{Tenant: id, Params: chconn.Params{
-				Addr: c.Addr, HTTPPort: c.HTTPPort, HTTPScheme: c.HTTPScheme,
-				Database: c.Database, Username: c.Username, Password: a.cfg.ClickHouse.Password,
-				QueryTimeout: c.QueryTimeout,
-				TLS:          chconn.TLS(c.TLS),
-				Headers:      c.Headers,
-				MaxOpenConns: c.MaxOpenConns, MaxIdleConns: c.MaxIdleConns,
-			}})
-		}
-		return ms
-	}
-	pools, err := chconn.NewPools(a.cfg.ClickHouse.MaxTotalConns, members())
+	pools, err := chconn.NewPools(a.cfg.ClickHouse.MaxTotalConns, a.chMembers())
 	if err != nil {
 		return fmt.Errorf("clickhouse open: %w", err)
 	}
 	a.pools = pools
 	a.add(component{name: "clickhouse", close: withoutContext(pools.Close)})
 	a.tenants.AfterAdopt(func([]tenant.ID) {
-		stale, err := pools.Reconcile(members())
+		stale, released, err := pools.Reconcile(a.chMembers())
 		if err != nil {
 			slog.Error("clickhouse pools reconciled in part; the next reload retries", "error", err)
 		}
@@ -309,6 +312,16 @@ func (a *App) wireClickHouse() error {
 		// previous database's. Only an API process discovers schemas.
 		if a.discoveries != nil {
 			a.discoveries.drop(stale)
+		}
+		// A released tuple's HTTP clients go with its pool (#713): each
+		// consumer's cache drops the client it made for the tuple, idle
+		// connections closed, once the pool's grace has passed. By the
+		// tuples released, not the stale tenants: a tenant moved to another
+		// user reads the same tables and still left a tuple behind.
+		for _, r := range released {
+			for _, clients := range a.httpClients {
+				clients.Release(r)
+			}
 		}
 		// A tenant back on a pool after an absence was out of the cache
 		// fan-out (sharedTables) while away, and one moved to another
@@ -800,6 +813,10 @@ func (a *App) wireStreaming() {
 // it consumes only the shards this process is assigned (ingest.ClaimShards),
 // so each table has one writer.
 func (a *App) wireIngestWorker() {
+	// Built here rather than by the worker, which exists only once Run
+	// starts it, so the pools hook releases from it from the first reload on.
+	clients := ingest.NewHTTPClients()
+	a.httpClients = append(a.httpClients, clients)
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
 		var queue ingest.Queue = a.mq
 		if _, ok := a.mq.(mq.Sharded); ok {
@@ -810,7 +827,7 @@ func (a *App) wireIngestWorker() {
 				return err
 			}
 		}
-		stop, failed, err := ingest.StartIngestWorker(ctx, queue, sharedTables{Cache: a.cache, sharing: a.pools.SharingTables}, a.pools.Target, dlqFor(a.tenants))
+		stop, failed, err := ingest.StartIngestWorker(ctx, queue, sharedTables{Cache: a.cache, sharing: a.pools.SharingTables}, clients, a.pools.Target, dlqFor(a.tenants))
 		if err != nil {
 			return err
 		}
@@ -1008,9 +1025,11 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 
 	// /v1/ops/query proxies straight to ClickHouse over HTTP — no native
 	// driver involvement. The HTTP target of the tenant ?tenant= names,
-	// resolved per request like the ingest worker's.
+	// resolved per request like the ingest worker's; like the worker's too,
+	// its clients are released with their tuples' pools (httpClients).
 	queryHandler := api.NewQueryHandler(a.chTargetFor, queryTimeout)
 	queryHandler.Tenants = a.tenants
+	a.httpClients = append(a.httpClients, queryHandler.Clients())
 
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,

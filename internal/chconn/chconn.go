@@ -154,8 +154,9 @@ type Target struct {
 	Password string
 	Database string
 	// TLS configures an https URL; nil means net/http's defaults. The
-	// pointer is the tuple's, so it changes only when the tenant moves to a
-	// tuple with another tls block, which is what HTTPClients keys on.
+	// pointer is the tuple's — nil for a zero tls block, else the config
+	// built when the tuple's pool opened — so it changes only when the
+	// tenant moves to another tuple, which is what HTTPClients keys on.
 	TLS *tls.Config
 	// Headers go on every request ahead of the consumer's own; read-only.
 	Headers map[string]string
@@ -388,6 +389,14 @@ func (s *snapshot) clone() *snapshot {
 	return next
 }
 
+// Released is a tuple a reconcile released: the TLS config its tenants'
+// Targets carried, which an HTTPClients keys the tuple's client on, and the
+// grace its pool closes after.
+type Released struct {
+	TLS   *tls.Config
+	Grace time.Duration
+}
+
 // Pools holds one Manager per tuple the served tenants name, reconciled
 // after every settings reload: a new tuple opens a pool (no dial), a tenant
 // whose tuple changed is repointed, a tuple no tenant names any more is
@@ -413,7 +422,7 @@ type Pools struct {
 // boot: nothing is left open.
 func NewPools(ceiling int, want []Member) (*Pools, error) {
 	p := newPools(ceiling, dial)
-	if _, err := p.Reconcile(want); err != nil {
+	if _, _, err := p.Reconcile(want); err != nil {
 		_ = p.Close()
 		return nil, err
 	}
@@ -433,7 +442,10 @@ func newPools(ceiling int, d dialer) *Pools {
 // fan-out (SharingTables) while away — and the ones it moved to another
 // address or database, whose cached results were read from other tables. A
 // move that keeps the address and database (a username or tls change) reads
-// the same tables and is not stale. The walk keeps the ceiling at every
+// the same tables and is not stale. It returns the tuples it released as
+// well, for the caller to release their HTTP clients (HTTPClients.Release):
+// each one no tenant names any more, its tenants removed or moved, a move
+// that is not stale included. The walk keeps the ceiling at every
 // step: tenants no longer wanted leave first, then each wanted tenant is
 // placed in turn, and a refused placement — the ceiling, or a pool that
 // cannot be opened — is undone before the next, so a refused move leaves the
@@ -441,7 +453,7 @@ func newPools(ceiling int, d dialer) *Pools {
 // placed once more at the end, since a shrink or a move placed after it may
 // have freed the budget it needed; only what the second pass refuses is
 // reported.
-func (p *Pools) Reconcile(want []Member) (stale []tenant.ID, err error) {
+func (p *Pools) Reconcile(want []Member) (stale []tenant.ID, released []Released, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	cur := p.cur.Load()
@@ -492,6 +504,7 @@ func (p *Pools) Reconcile(want []Member) (stale []tenant.ID, err error) {
 				_ = t.manager.Close()
 			} else {
 				t.manager.Release(grace)
+				released = append(released, Released{TLS: t.manager.tlsCfg, Grace: grace})
 			}
 			delete(w.next.tuples, id)
 		case s != t.manager.Sizes():
@@ -508,7 +521,7 @@ func (p *Pools) Reconcile(want []Member) (stale []tenant.ID, err error) {
 			stale = append(stale, id)
 		}
 	}
-	return stale, errors.Join(w.errs...)
+	return stale, released, errors.Join(w.errs...)
 }
 
 // walk is one Reconcile's working state: the snapshot being built, and the
@@ -774,11 +787,13 @@ func (p *Pools) Close() error {
 
 // HTTPClients hands an HTTP-interface consumer the client for a target: one
 // per TLS config, made by the consumer's own factory (the worker's tuned
-// transport, the proxy's redirect policy) and kept for the process lifetime.
-// A config is built each time a pool opens on a tls block, so the set grows
-// with the pools ever opened on one — a block whose pool closed and
-// reopened adds another — not with requests; a client whose pool is gone
-// keeps only its transport, whose idle connections time out on their own.
+// transport, the proxy's redirect policy). A tuple with a tls block has a
+// config of its own, built when its pool opened, so its client lasts as long
+// as its pool does: Release drops it once the tuple is released, and a tuple
+// that opens again gets another. The tuples with a zero tls block share the
+// nil config and so one client, which stays — nothing in it is one tuple's,
+// and its connections to an address no tuple names any more idle out on the
+// transport's own timeout.
 //
 // The factory gets a copy of the config, never the target's own: net/http
 // appends its HTTP/2 protocols to TLSClientConfig.NextProtos in place when
@@ -808,4 +823,25 @@ func (c *HTTPClients) For(t Target) *http.Client {
 	cl := c.build(t.TLS.Clone())
 	c.clients[t.TLS] = cl
 	return cl
+}
+
+// Release drops the client of a tuple a reconcile released and closes its
+// idle connections, after the grace the tuple's pool closes after
+// (Manager.Release): until then a consumer that resolved the tuple's Target
+// just before the reload's swap still finds its client. A request in flight
+// when the grace ends finishes: only idle connections are closed. The nil
+// config is no one tuple's, so its client is not dropped.
+func (c *HTTPClients) Release(r Released) {
+	if r.TLS == nil {
+		return
+	}
+	time.AfterFunc(r.Grace, func() {
+		c.mu.Lock()
+		cl, ok := c.clients[r.TLS]
+		delete(c.clients, r.TLS)
+		c.mu.Unlock()
+		if ok {
+			cl.CloseIdleConnections()
+		}
+	})
 }

@@ -113,11 +113,13 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 	tests := []struct {
 		name       string
 		setup      func(t *testing.T) (Queue, cache.Cache)
+		clients    *chconn.HTTPClients
 		wantErrSub string
 	}{
 		{
 			name:       "nil queue",
 			setup:      func(*testing.T) (Queue, cache.Cache) { return nil, &testutil.MockCache{} },
+			clients:    NewHTTPClients(),
 			wantErrSub: "message queue is nil",
 		},
 		{
@@ -126,7 +128,15 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 				emb := testutil.NewEmbeddedMQ(t, 1024*1024)
 				return emb, nil
 			},
+			clients:    NewHTTPClients(),
 			wantErrSub: "cache is nil",
+		},
+		{
+			name: "nil clients",
+			setup: func(t *testing.T) (Queue, cache.Cache) {
+				return testutil.NewEmbeddedMQ(t, 1024*1024), &testutil.MockCache{}
+			},
+			wantErrSub: "clickhouse http clients is nil",
 		},
 	}
 
@@ -134,7 +144,7 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			q, c := tt.setup(t)
-			_, _, err := StartIngestWorker(context.Background(), q, c,
+			_, _, err := StartIngestWorker(context.Background(), q, c, tt.clients,
 				func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErrSub)
@@ -260,7 +270,14 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	stopFn, _, err := StartIngestWorker(ctx, emb, &testutil.MockCache{},
+	// The cache is the caller's, which releases a tuple's client from it:
+	// the worker must insert through the one it is handed.
+	var built atomic.Int32
+	clients := chconn.NewHTTPClients(func(cfg *tls.Config) *http.Client {
+		built.Add(1)
+		return ingestHTTPClient(cfg)
+	})
+	stopFn, _, err := StartIngestWorker(ctx, emb, &testutil.MockCache{}, clients,
 		func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		}, nil)
@@ -287,6 +304,7 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 
 	err = stopFn(shutCtx)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Eventually(t, func() bool { return built.Load() == 1 }, 5*time.Second, 10*time.Millisecond, "the insert went through the caller's cache")
 }
 
 // TestStartIngestWorker_StopFunc_CleanShutdown verifies the graceful path: with
@@ -300,7 +318,7 @@ func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 
 	// chURL is never dialed: with no messages there is no flush, so a dummy
 	// host/port is fine.
-	stopFn, _, err := StartIngestWorker(context.Background(), emb, &testutil.MockCache{},
+	stopFn, _, err := StartIngestWorker(context.Background(), emb, &testutil.MockCache{}, NewHTTPClients(),
 		func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
 	require.NoError(t, err)
 

@@ -7,9 +7,11 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,6 +60,34 @@ func postQuery(h *QueryHandler, body []byte) *httptest.ResponseRecorder {
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ops/query", bytes.NewReader(body))
 	h.Handle(w, r)
 	return w
+}
+
+// The cache the proxy hands the wiring is the one its queries go through: a
+// client released from it takes the connection a query left idle with it.
+func TestQueryHandler_ClientsIsTheCacheItsQueriesUse(t *testing.T) {
+	t.Parallel()
+	var closed atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			closed.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	h := newTestQueryHandler(func(*settings.Store) chconn.Target {
+		return chconn.Target{URL: srv.URL, TLS: tlsCfg}
+	}, func(*settings.Store) time.Duration { return 30 * time.Second })
+
+	rec := postQuery(h, []byte(`{"sql":"SELECT 1"}`))
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	require.Zero(t, closed.Load(), "the query's connection is kept for the next one")
+
+	h.Clients().Release(chconn.Released{TLS: tlsCfg})
+	assert.Eventually(t, func() bool { return closed.Load() == 1 }, 5*time.Second, 5*time.Millisecond)
 }
 
 // assertSecurityHeaders confirms Cache-Control: no-store and

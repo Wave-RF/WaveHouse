@@ -2041,6 +2041,65 @@ func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 	assert.True(t, dup, "an id acme sent before the removal is still a duplicate")
 }
 
+// tlsSettings is poolSettings with both ClickHouse hops on TLS, so the
+// tenant's tuple has a TLS config of its own for its HTTP clients to be keyed
+// on (a zero tls block's is the nil every such tuple shares).
+func tlsSettings(addr string) map[string]any {
+	p := poolSettings(addr, 10)
+	ch := p["clickhouse"].(map[string]any)
+	ch["http_scheme"] = "https"
+	ch["tls"].(map[string]any)["enabled"] = true
+	return p
+}
+
+// A tenant's HTTP clients go with its pool (#713): once a removed tenant's
+// tuple is released and its grace has passed, neither the ingest worker's
+// cache nor the query proxy's holds the client it made for that tuple. The
+// tenant beside it keeps its clients.
+func TestReload_RemovedTenantsHTTPClientsGoWithItsPool(t *testing.T) {
+	root := writeNestedSettings(t, map[string]map[string]any{
+		"acme":   tlsSettings(closedAddr(t)),
+		"globex": tlsSettings(closedAddr(t)),
+	})
+	a := newApp(t, testConfig(t, root), Options{})
+	// A tuple is released after the longest query_timeout among its tenants,
+	// a second at the least in a settings directory: the pools are asked for
+	// a millisecond instead, so the test does not wait one out.
+	members := a.chMembers()
+	for i := range members {
+		members[i].Params.QueryTimeout = time.Millisecond
+	}
+	_, _, err := a.pools.Reconcile(members)
+	require.NoError(t, err)
+	require.Len(t, a.httpClients, 2, "the ingest worker's and the query proxy's")
+	acme, globex := a.pools.Target("acme"), a.pools.Target("globex")
+	require.NotNil(t, acme.TLS)
+	require.NotSame(t, acme.TLS, globex.TLS, "a config per tuple")
+	type made struct{ acme, globex *http.Client }
+	before := make([]made, len(a.httpClients))
+	for i, clients := range a.httpClients {
+		before[i] = made{acme: clients.For(acme), globex: clients.For(globex)}
+	}
+
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
+	a.tenants.Reload("test")
+	require.Nil(t, a.pools.For("acme"), "its pool is released")
+	// For makes a client for a config it holds none for, so a new one means
+	// the one made before the reload is gone.
+	assert.Eventually(t, func() bool {
+		for i, clients := range a.httpClients {
+			if clients.For(acme) == before[i].acme {
+				return false
+			}
+		}
+		return true
+	}, 5*time.Second, 5*time.Millisecond, "a cache still holds the removed tenant's client past its grace")
+	for i, clients := range a.httpClients {
+		assert.NotSame(t, before[i].acme, clients.For(acme), "cache %d", i)
+		assert.Same(t, before[i].globex, clients.For(globex), "cache %d keeps the other tenant's", i)
+	}
+}
+
 // Over a nested directory the probes read every tenant together: /livez is
 // degraded while no tenant has completed a first discovery, names the tenant
 // in its diagnostic, and turns 200 for good at the first success, whatever
