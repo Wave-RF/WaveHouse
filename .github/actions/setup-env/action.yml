@@ -25,12 +25,12 @@
 # golangci and Astro still save from any ref (see the inventory).
 #
 # One exception, for the Go build cache of the two long-pole jobs (the
-# integration suite's `app` part and e2e, which set `go-cache-pr-save`): a
-# pull request whose key misses main's, i.e. one that changes
-# go.mod/go.sum, saves it into its own scope. The key is per dependency
-# state, so the PR saves once and its later pushes restore their own
-# entry instead of recompiling the dependency delta, about 30-45s on each
-# long pole. pr-cache-cleanup.yml deletes the entries no run will read.
+# integration suite's `app` part and e2e): on a pull request that changes a
+# go.mod/go.sum, ci.yml sets `go-cache-pr-save` from the `changes` job's
+# `go-deps`, and the cache saves into the PR's own scope. The key is per
+# dependency state, so the PR saves once and its later pushes restore their
+# own entry instead of recompiling the dependency delta, about 30-45s on
+# each long pole. pr-cache-cleanup.yml deletes the entries no run will read.
 #
 # The cache inventory (full architecture: .github/workflows/README.md):
 #
@@ -77,7 +77,7 @@ inputs:
     description: "REQUIRED when `go` is true (the default) — the action fails the job without one. Per-job Go build-cache partition, e.g. '-unit', fresh for every job (jobs compile with different flags, and two jobs on one key race to save it); an empty suffix yields a restore-key that prefix-matches every other flavor's entry, the cross-flavor restore the gomod-v1/gobuild-v3 split exists to avoid. A job that doesn't build Go passes `go: \"false\"` instead. The shared part of the cache is gomod-v1, which needs no suffix. The default stays empty because a composite action's `required:` isn't enforced by the runner — the guard step is."
     default: ""
   go-cache-pr-save:
-    description: "Also save this job's Go build cache from a pull request whose go.mod/go.sum differ from main's, into the PR's own scope. Only for the jobs on the critical path: see the sizing policy in .github/workflows/README.md before adding one."
+    description: "Also save this job's Go build cache from a pull request, into the PR's own scope, when its key misses. ci.yml sets it only for the long-pole jobs of a PR that changes a go.mod/go.sum (the `changes` job's `go-deps`): see the sizing policy in .github/workflows/README.md before adding a job."
     default: "false"
   golangci:
     description: "Cache the golangci-lint binary + analysis cache (lint job only)"
@@ -220,12 +220,12 @@ runs:
           gobuild-v3-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-
 
     # `go-cache-pr-save` on a pull request (the header's exception). The
-    # exact key first, from the PR's scope or main's: a PR that changes no
-    # dependency hits main's entry here and saves nothing. Only on a miss
-    # does the step below restore the newest entry of this flavor (the PR's
-    # own, then main's) and save the exact key into the PR's scope. One
-    # step with restore-keys would prefer a stale entry in the PR's scope,
-    # left from an earlier dependency change, to main's exact one.
+    # exact key first, from the PR's scope or main's: a PR whose dependency
+    # change main already has hits main's entry here and saves nothing. Only
+    # on a miss does the step below restore the newest entry of this flavor
+    # (the PR's own, then main's) and save the exact key into the PR's
+    # scope. One step with restore-keys would prefer a stale entry in the
+    # PR's scope, left from an earlier dependency change, to main's exact one.
     # The prefix must match scripts/ci/prune-pr-build-cache.sh.
     - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: ${{ inputs.go == 'true' && github.event_name == 'pull_request' && inputs.go-cache-pr-save == 'true' }}

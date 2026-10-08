@@ -42,8 +42,11 @@ trap 'rm -f "$list"' EXIT
 if [ -n "$from" ]; then
   cp "$from" "$list"
 else
-  # A failed listing must not read as "nothing to prune".
-  if ! gh api --paginate "repos/$GH_REPO/actions/caches?key=$prefix&per_page=100" \
+  # A failed listing must not read as "nothing to prune". Oldest first, so
+  # entries saved while it pages land on later pages instead of shifting
+  # the earlier ones.
+  if ! gh api --paginate \
+    "repos/$GH_REPO/actions/caches?key=$prefix&sort=created_at&direction=asc&per_page=100" \
     --jq '.actions_caches[]' >"$list"; then
     echo "::error::prune-pr-build-cache: listing the caches failed" >&2
     exit 1
@@ -51,8 +54,11 @@ else
 fi
 
 # id, ref, key, size, reason — one line per entry to delete.
+# Deduplicated first: paging can return an entry twice, and two copies of
+# a PR's newest entry would make `.[:-1]` delete it.
 doomed="$(jq -rs --arg prefix "$prefix" '
   map(select(.key | startswith($prefix)))
+  | unique_by(.id)
   | (map(select(.ref == "refs/heads/main") | [.key, .version])) as $main
   | map(select(.ref | startswith("refs/pull/")))
   | (map(select([.key, .version] as $k | any($main[]; . == $k)) | .why = "on main")
