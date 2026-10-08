@@ -101,6 +101,10 @@ type App struct {
 	pools       *chconn.Pools
 	bootState   *api.BootState
 	discoveries *discoveries
+	// httpClients is the client caches of the HTTP-interface consumers this
+	// process runs, the ingest worker's and the query proxy's: a reload
+	// releases from each the clients of the tuples it released.
+	httpClients []*chconn.HTTPClients
 	// dedup is one store per tenant, each following its own folder's switch,
 	// and dedupeStats the figures of the one Pebble instance they share.
 	dedup       *dedupe.Stores

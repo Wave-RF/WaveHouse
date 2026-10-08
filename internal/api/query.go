@@ -127,6 +127,10 @@ func NewQueryHandler(target func(*settings.Store) chconn.Target, queryTimeout fu
 	}
 }
 
+// Clients is the proxy's client cache, for the wiring to release a tuple's
+// client from as a reload releases the tuple's pool.
+func (h *QueryHandler) Clients() *chconn.HTTPClients { return h.clients }
+
 // proxyHTTPClient is the proxy's client for the ClickHouse HTTP interface:
 // net/http's default transport with the target's TLS config for an https
 // target. ClickHouse's HTTP interface doesn't 3xx in normal operation, and

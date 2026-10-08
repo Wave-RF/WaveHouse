@@ -57,8 +57,9 @@ type IngestWorker struct {
 	// consumer could not start, or delivery ended underneath it. Buffered so
 	// the dispatch loop never blocks on a caller that has already gone.
 	failed chan error
-	// clients follows the target's TLS config: one client per config,
-	// replaced when a reload changes it (chconn.HTTPClients).
+	// clients follows the target's TLS config: one client per config
+	// (NewHTTPClients), the caller's to release from as a reload releases a
+	// tuple's pool.
 	clients *chconn.HTTPClients
 	cache   cache.Cache
 	// target resolves a tenant's ClickHouse HTTP wiring per insert
@@ -153,9 +154,12 @@ const (
 // the caller must treat it as fatal (internal/app returns it from Run, which
 // stops the process — the next boot recreates the consumer). The worker has
 // already flushed and acked what it held by the time failed fires; stop is
-// still the caller's to call.
+// still the caller's to call. clients is the worker's client cache
+// (NewHTTPClients), built by the caller so it can release a tuple's client
+// from it whether or not the worker has started.
 func StartIngestWorker(
 	ctx context.Context, queue Queue, cache cache.Cache,
+	clients *chconn.HTTPClients,
 	target func(tenant.ID) chconn.Target,
 	dlqEnabled func(id tenant.ID, table string) bool,
 ) (stop func(context.Context) error, failed <-chan error, err error) {
@@ -164,6 +168,9 @@ func StartIngestWorker(
 	}
 	if cache == nil {
 		return nil, nil, fmt.Errorf("cache is nil")
+	}
+	if clients == nil {
+		return nil, nil, fmt.Errorf("clickhouse http clients is nil")
 	}
 	if target == nil {
 		return nil, nil, fmt.Errorf("clickhouse target is nil")
@@ -181,7 +188,7 @@ func StartIngestWorker(
 	worker := &IngestWorker{
 		dlq:        queue,
 		failed:     make(chan error, 1),
-		clients:    chconn.NewHTTPClients(ingestHTTPClient),
+		clients:    clients,
 		cache:      cache,
 		target:     target,
 		maxBatch:   defaultMaxBatch,
@@ -201,6 +208,10 @@ func StartIngestWorker(
 	}
 	return stopFunc, worker.failed, nil
 }
+
+// NewHTTPClients returns the client cache a worker inserts through
+// (ingestHTTPClient).
+func NewHTTPClients() *chconn.HTTPClients { return chconn.NewHTTPClients(ingestHTTPClient) }
 
 // ingestHTTPClient is the worker's client for the ClickHouse HTTP
 // interface: a transport tuned for high-throughput inserts, with the
