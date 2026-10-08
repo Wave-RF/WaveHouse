@@ -214,6 +214,17 @@ RELEASE_BINARIES := $(addsuffix -release,$(BINARIES))
 export VERSION_LDFLAGS LDFLAGS TAGS
 export GOTESTSUM_FMT
 
+# GOTOOLCHAIN=auto means max(local, go.mod), so a newer local Go (or runner
+# image) silently diverges from CI, and golangci-lint panics type-checking a
+# standard library newer than the Go it was built with. Pin to go.mod's
+# `toolchain` line if it has one, else its `go` line (see the script, which CI
+# shares). The pin is strict, so `go install` in `make tools` also runs on it:
+# a tool that needs a newer Go fails until go.mod's directive catches up.
+# Override with `make GOTOOLCHAIN=local ...` (the environment's value is ignored).
+GO_TOOLCHAIN := $(shell scripts/ci/go-toolchain.sh)
+$(if $(GO_TOOLCHAIN),,$(error cannot derive the Go toolchain from go.mod, see above))
+export GOTOOLCHAIN := $(GO_TOOLCHAIN)
+
 # ==============================================================================
 # Targets
 # ==============================================================================
@@ -339,7 +350,7 @@ obs-front: ## Start local OTel Front UI
 ##@ Code Quality
 
 # Dynamically find all directories containing Go files, safely ignoring hidden folders like .worktrees
-GO_DIRS := $(shell go list -f '{{.Dir}}' ./...)
+GO_DIRS := $(shell GOTOOLCHAIN=$(GOTOOLCHAIN) go list -f '{{.Dir}}' ./...)
 
 # fmt / lint / fix: one Biome binary (biome.json) scans the whole workspace
 # (SDK + e2e + docs); Markdown is owned separately by markdownlint-cli2 (rules in
@@ -445,6 +456,12 @@ test-classify-paths:
 .PHONY: test-release-channel
 test-release-channel:
 	$(call run,release-channel test,scripts/ci/release-channel.test.sh,)
+
+# test-go-toolchain: assert scripts/ci/go-toolchain.sh, the one derivation of
+# the Go toolchain the Makefile and setup-env pin to. A verify leaf.
+.PHONY: test-go-toolchain
+test-go-toolchain:
+	$(call run,go-toolchain test,scripts/ci/go-toolchain.test.sh,)
 
 # test-tagged-tests: assert scripts/ci/tagged-tests.sh, which picks the tests
 # `make test-integration` runs by build tag, against `go test -list` on a
@@ -559,11 +576,11 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (17): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# Leaves (18): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
 # for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
-# test-classify-paths, test-release-channel, test-tagged-tests,
+# test-classify-paths, test-release-channel, test-go-toolchain, test-tagged-tests,
 # test-integration-parts and test-review-gate for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
 # nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
@@ -578,7 +595,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-tagged-tests test-integration-parts test-review-gate vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-go-toolchain test-tagged-tests test-integration-parts test-review-gate vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.
@@ -745,12 +762,17 @@ DOCS_PROSE   = $(shell bash scripts/docs-prose.sh all 2>/dev/null)
 
 # pnpm-install: hidden internal target. Node targets depend on it to ensure
 # workspace deps are present; on a warm tree `--frozen-lockfile` is a fast
-# no-op. No doc string → hidden from `make help`. --reporter=silent drops the
-# "Scope / Already up to date / Done in Xms" chatter so it doesn't clutter the
-# verify checklist; fatal errors (e.g. a lockfile mismatch) still print.
+# no-op. No doc string → hidden from `make help`. The output is captured and
+# only replayed when the install fails, so the "Scope / Already up to date /
+# Done in Xms" chatter stays out of the verify checklist. Not --reporter=silent:
+# it prints nothing at all, even on failure, so a supply-chain policy violation
+# surfaced as a bare `Error 1`. confirm-modules-purge=false because pnpm's
+# "The modules directory at … will be removed and reinstalled from scratch.
+# Proceed? (Y/n)" prompt, written to the captured stdout, would otherwise hang
+# the recipe invisibly on a terminal (CI=true skips it in CI).
 .PHONY: pnpm-install
 pnpm-install:
-	@$(PNPM) install --frozen-lockfile --reporter=silent
+	@out=$$($(PNPM) install --frozen-lockfile --config.confirm-modules-purge=false 2>&1) || { printf '%s\n' "$$out"; exit 1; }
 
 # install-playwright-docs: hidden helper — fetch the Chromium build the docs
 # site needs (rehype-mermaid build-time SSR is the build's only browser use;
