@@ -36,19 +36,56 @@ type shardLog struct {
 	mu   sync.Mutex
 	rows map[mq.Topic]map[string]int
 	at   map[mq.Topic]time.Time // the last row's arrival
+	seq  map[mq.Topic][]rowSeen // every row, in arrival order
 }
 
-func (l *shardLog) add(topic mq.Topic, proc string) {
+// rowSeen is one received row: its payload (the publish sequence) and who got it.
+type rowSeen struct {
+	n    int
+	proc string
+}
+
+func (l *shardLog) add(topic mq.Topic, proc string, payload []byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.rows == nil {
-		l.rows, l.at = map[mq.Topic]map[string]int{}, map[mq.Topic]time.Time{}
+		l.rows, l.at, l.seq = map[mq.Topic]map[string]int{}, map[mq.Topic]time.Time{}, map[mq.Topic][]rowSeen{}
 	}
+	n, err := strconv.Atoi(string(payload))
+	if err != nil {
+		n = -1 // handoffs reports the row out of order
+	}
+	l.seq[topic] = append(l.seq[topic], rowSeen{n, proc})
 	if l.rows[topic] == nil {
 		l.rows[topic] = map[string]int{}
 	}
 	l.rows[topic][proc]++
 	l.at[topic] = time.Now()
+}
+
+// handoffs is how many times topic's rows changed hands, and whether they
+// arrived in publish order.
+func (l *shardLog) handoffs(topic mq.Topic) (changes int, inOrder bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	inOrder = true
+	for i, r := range l.seq[topic] {
+		inOrder = inOrder && r.n >= 0
+		if i == 0 {
+			continue
+		}
+		prev := l.seq[topic][i-1]
+		changes += btoi(r.proc != prev.proc)
+		inOrder = inOrder && r.n > prev.n
+	}
+	return changes, inOrder
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func (l *shardLog) count(topic mq.Topic) int {
@@ -80,7 +117,7 @@ func (l *shardLog) writers(topic mq.Topic) []string {
 func (l *shardLog) reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.rows, l.at = nil, nil
+	l.rows, l.at, l.seq = nil, nil, nil
 }
 
 // shardProc is one ingest process's claims over a shared NATS, as the
@@ -122,7 +159,7 @@ func startShardProc(t *testing.T, url, id string, lease time.Duration, log *shar
 	cons, err := q.CreateConsumer(ctx, mq.ConsumerConfig{Durable: ingest.BufferConsumerName, AckWait: 60 * time.Second, MaxAckPending: 10_000})
 	require.NoError(t, err)
 	stop, failed, err := cons.Consume(func(m *mq.Message) {
-		log.add(m.Topic(), id)
+		log.add(m.Topic(), id, m.Data)
 		if p.hold.Load() {
 			p.held.Add(1)
 			return
@@ -152,9 +189,10 @@ func publishRows(t *testing.T, b mq.Broker, topics []mq.Topic, rows int) {
 	}
 }
 
-// oneWriterEach publishes rows to topics and reports, once every row
-// arrived, whether each topic's rows reached exactly one of procs.
-func oneWriterEach(t *testing.T, b mq.Broker, log *shardLog, topics []mq.Topic, procs ...string) {
+// everyRowOnce publishes rows to topics and reports, once every row arrived,
+// whether each reached one of procs, none arrived twice, each topic changed
+// writer at most once, and its rows arrived in publish order.
+func everyRowOnce(t *testing.T, b mq.Broker, log *shardLog, topics []mq.Topic, procs ...string) {
 	t.Helper()
 	log.reset()
 	publishRows(t, b, topics, 3)
@@ -166,12 +204,24 @@ func oneWriterEach(t *testing.T, b mq.Broker, log *shardLog, topics []mq.Topic, 
 		}
 		return true
 	}, 30*time.Second, 20*time.Millisecond, "every row arrives")
+	for _, topic := range topics {
+		assert.Subset(t, procs, log.writers(topic), "%v", topic)
+		assert.Equal(t, 3, log.count(topic), "%v: no row twice", topic)
+		changes, inOrder := log.handoffs(topic)
+		assert.LessOrEqual(t, changes, 1, "%v changed writer %d times; a handover moves it once", topic, changes)
+		assert.True(t, inOrder, "%v: rows arrived out of order", topic)
+	}
+}
+
+// oneWriterEach is everyRowOnce, and also reports whether each topic's rows
+// reached exactly one of procs.
+func oneWriterEach(t *testing.T, b mq.Broker, log *shardLog, topics []mq.Topic, procs ...string) {
+	t.Helper()
+	everyRowOnce(t, b, log, topics, procs...)
 	per := map[string]int{}
 	for _, topic := range topics {
 		w := log.writers(topic)
 		require.Len(t, w, 1, "%v written by %v", topic, w)
-		assert.Contains(t, procs, w[0])
-		assert.Equal(t, 3, log.count(topic), "%v: no row twice", topic)
 		per[w[0]]++
 	}
 	t.Logf("tables per process: %v", per)
@@ -194,9 +244,9 @@ func pinnedUnits(t *testing.T, srv *natstest.Server) int {
 	return n
 }
 
-// Scaling 1 → 3 → 2 processes: every table is written by one process at
-// every step, a clean stop hands its shards on well inside the lease, and no
-// row is received twice.
+// Scaling 1 → 3 → 2 processes: every table is written by one process once
+// each step has settled, a clean stop hands its shards on within three
+// leases, and no row is received twice.
 func TestShardClaims_ScaleOneThreeTwo(t *testing.T) {
 	srv := natstest.Start(t)
 	log := &shardLog{}
@@ -214,10 +264,16 @@ func TestShardClaims_ScaleOneThreeTwo(t *testing.T) {
 
 	stopped := time.Now()
 	c.stop()
-	oneWriterEach(t, a.broker, log, topics, "proc-a", "proc-b")
+	// The first rows after the stop time it, and are not held to one writer
+	// each: as the survivors take proc-c's shards their even share also
+	// moves one of proc-a's to proc-b, and a table whose rows arrive across
+	// that handover is written by one and then the other.
+	everyRowOnce(t, a.broker, log, topics, "proc-a", "proc-b")
 	took := time.Since(stopped)
 	t.Logf("after a clean stop every table was written again within %s (lease %s)", took.Round(10*time.Millisecond), lease)
 	assert.Less(t, took, 3*lease, "a clean stop releases at once")
+	time.Sleep(3 * time.Second) // membership and handovers settle
+	oneWriterEach(t, a.broker, log, topics, "proc-a", "proc-b")
 	noShardFailure(t, a)
 }
 
@@ -226,6 +282,7 @@ func TestShardClaims_ScaleOneThreeTwo(t *testing.T) {
 // receives the held rows at once, not after ack_wait (a minute here), and
 // none of the rows it acked before.
 func TestShardClaims_CrashWithRowsInFlight(t *testing.T) {
+	t.Parallel()
 	srv := natstest.Start(t)
 	log := &shardLog{}
 	const lease = 3 * time.Second

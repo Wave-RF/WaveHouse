@@ -9,6 +9,7 @@
     "includes": [
       "clients/ts/src/**",
       "clients/ts/*.{ts,js,mjs,cjs,json}",
+      "clients/ts/scripts/**/*.{ts,js,mjs,cjs}",
       "tests/e2e/sdk/**/*.{ts,js,mjs,cjs,json}",
       "docs/**/*.{ts,js,mjs,cjs,json}",
       "scripts/**/*.{ts,js,mjs,cjs}"

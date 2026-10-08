@@ -39,3 +39,22 @@ catalog:
   typescript: "^6.0.3"
   vitest: "^4.1.11"
   "@types/node": "^26.4.1"
+
+# Disable the virtual store's hoisted fallback (node_modules/.pnpm/node_modules),
+# so a dependency that imports something it doesn't declare fails to resolve
+# instead of silently picking up a transitive copy.
+hoist: false
+
+# node_modules is derived state: re-link on a layout change (such as the hoist
+# setting above) instead of prompting, because a prompt aborts with no TTY.
+confirmModulesPurge: false
+
+# starlight-image-zoom imports `astro/zod` but only declares its Starlight peer.
+# Declaring the astro peer (not a dependency) makes pnpm link the docs' own
+# astro next to it, keeping one shared astro instance.
+# Remove once starlight-image-zoom declares astro as a peer (0.16.0 does not).
+# Tracked in #746.
+packageExtensions:
+  starlight-image-zoom:
+    peerDependencies:
+      astro: "*"

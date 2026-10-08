@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -1547,10 +1546,14 @@ func TestFlushTable_MixedColumnLists_TwoInserts(t *testing.T) {
 // verdict rather than the rejection: that message stays unacked and redelivers,
 // so counting on rejection would re-count it on every retry of a DLQ outage.
 func TestRejectPoison_CountedByDisposition(t *testing.T) {
+	// The counter binds to the first global provider, so a later run in the
+	// same process would record into a dead reader: swap the counter itself.
 	reader := sdkmetric.NewManualReader()
-	saved := otel.GetMeterProvider()
-	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
-	defer otel.SetMeterProvider(saved)
+	counter, err := newPoisonCounter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
+	require.NoError(t, err)
+	saved := poisonCounter
+	poisonCounter = counter
+	t.Cleanup(func() { poisonCounter = saved })
 
 	dispositions := func() map[string]int64 {
 		var rm metricdata.ResourceMetrics

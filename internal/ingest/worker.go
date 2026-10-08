@@ -107,10 +107,15 @@ type IngestWorker struct {
 // the stream, unacked and due for redelivery. Counting at rejection would score
 // the same envelope again on every retry, and would report it as parked or as
 // gone for good while it was still sitting in the queue.
-var poisonCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
-	"wavehouse_ingest_poison_total",
-	metric.WithDescription("Ingest envelopes the worker could not read, by disposition: parked on the DLQ, or acked and dropped where the DLQ is disabled for the table"),
-)
+var poisonCounter, _ = newPoisonCounter(otel.Meter("wavehouse-ingest"))
+
+// newPoisonCounter builds the counter on m (a test builds it on its own meter).
+func newPoisonCounter(m metric.Meter) (metric.Int64Counter, error) {
+	return m.Int64Counter(
+		"wavehouse_ingest_poison_total",
+		metric.WithDescription("Ingest envelopes the worker could not read, by disposition: parked on the DLQ, or acked and dropped where the DLQ is disabled for the table"),
+	)
+}
 
 // retryCounter counts rows handed back to the MQ for a delayed retry because
 // ClickHouse could not take them, by reason: the chconn.Class of the failure
