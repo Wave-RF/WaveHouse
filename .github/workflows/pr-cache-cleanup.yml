@@ -15,7 +15,9 @@ name: PR cache cleanup
 # - After each CI run of a pull request: the Go build cache entries no run
 #   will read. A PR that changes go.mod/go.sum saves the build cache of the
 #   two long-pole jobs into its own scope (setup-env's `go-cache-pr-save`),
-#   and scripts/ci/prune-pr-build-cache.sh keeps at most one per job per PR.
+#   and scripts/ci/prune-pr-build-cache.sh keeps at most one per job per
+#   open PR, and none for a closed one: a run still going when its PR
+#   closed can save after the close cleanup.
 
 on:
   pull_request_target:
@@ -60,6 +62,7 @@ jobs:
     permissions:
       actions: write
       contents: read
+      pull-requests: read # which PRs holding an entry are closed
     steps:
       # The default branch, never the PR's tree: the script runs with the
       # write token.

@@ -3,7 +3,7 @@
 # build cache entries from pull-request scopes with a write token. Deleting
 # a PR's newest entry, or anything of main's, would cost every later run its
 # warm cache, so the selection is pinned here against fixtures, and the
-# delete and listing paths against a stub `gh`. Run by `make verify`
+# PR-state, delete and listing paths against a stub `gh`. Run by `make verify`
 # (target: test-prune-pr-build-cache). Needs jq; no network.
 
 set -uo pipefail
@@ -44,6 +44,11 @@ pr2=refs/pull/2/merge
   # Paging returned the PR's only entry twice: still its newest.
   row 50 refs/pull/5/merge "$app-$(h 8)" 2026-10-06T00:00:00Z
   row 50 refs/pull/5/merge "$app-$(h 8)" 2026-10-06T00:00:00Z
+  # Each the newest of its flavor and ref: all kept while PR 6 is open, all
+  # deleted once it is closed, head ref included.
+  row 80 refs/pull/6/merge "$app-$(h a)" 2026-10-07T00:00:00Z
+  row 81 refs/pull/6/merge "gobuild-v3-Linux-go-e2e-cov-$(h a)" 2026-10-07T00:00:00Z
+  row 82 refs/pull/6/head "$app-$(h b)" 2026-10-07T00:00:00Z
   # Not ours: other families, main's old generation, merge-queue refs.
   row 60 $pr2 "golangci-Linux-$(h 1)" 2026-10-01T00:00:00Z
   row 61 $pr2 "golangci-Linux-$(h 2)" 2026-10-02T00:00:00Z
@@ -51,24 +56,10 @@ pr2=refs/pull/2/merge
   row 71 refs/heads/gh-readonly-queue/main/pr-9-abc "$app-$(h 9)" 2026-10-02T00:00:00Z
 } >"$dir/caches.jsonl"
 
-# selects <name> <want ids, space-separated, sorted>
-selects() {
-  local name="$1" want="$2" got
-  got="$(env -u GH_REPO "$script" --dry-run --from "$dir/caches.jsonl" 2>&1 |
-    sed -n 's/^would delete \([0-9]*\) .*/\1/p' | sort -n | tr '\n' ' ' | sed 's/ $//')"
-  if [ "$got" = "$want" ]; then
-    printf '  ok   %-28s %s\n' "$name" "$got"
-  else
-    printf '  FAIL %-28s want [%s], got [%s]\n' "$name" "$want" "$got" >&2
-    fails=$((fails + 1))
-  fi
-}
-
-# Copies of main's (10), superseded (20 21), the same-second tie's older (40).
-selects "selection" "10 20 21 40"
-
-# A stub gh: logs each call; fails the listing, or a delete of an id named in
-# STUB_404 / STUB_403, as the real one does (message on stdout and stderr).
+# A stub gh: logs each call; answers a PR lookup `closed` for a number in
+# STUB_CLOSED and `open` otherwise; fails the listing (STUB_LIST_FAIL), every
+# PR lookup (STUB_PULLS_FAIL), or a delete of an id named in STUB_404 /
+# STUB_403, as the real one does (message on stdout and stderr).
 mkdir "$dir/bin"
 cat >"$dir/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -77,6 +68,10 @@ case "$*" in
   *--paginate*)
     [ -n "${STUB_LIST_FAIL:-}" ] && { echo '{"message":"Bad credentials"}'; echo "gh: Bad credentials (HTTP 401)" >&2; exit 1; }
     cat "$STUB_LIST" ;;
+  *"/pulls/"*)
+    [ -n "${STUB_PULLS_FAIL:-}" ] && { echo "gh: Bad Gateway (HTTP 502)"; exit 1; }
+    for a in "$@"; do case "$a" in */pulls/*) n="${a##*/}" ;; esac; done
+    case " ${STUB_CLOSED:-} " in *" $n "*) echo closed ;; *) echo open ;; esac ;;
   *"-X DELETE"*)
     id="${!#}"; id="${id##*/}"
     case " ${STUB_404:-} " in *" $id "*) echo "gh: Not Found (HTTP 404)"; exit 1 ;; esac
@@ -85,6 +80,32 @@ esac
 exit 0
 EOF
 chmod +x "$dir/bin/gh"
+
+# selects <name> <want exit> <want ids, sorted> [env...]: a dry run's picks.
+selects() {
+  local name="$1" want_rc="$2" want="$3" rc got
+  shift 3
+  env "$@" PATH="$dir/bin:$PATH" GH_REPO=o/r STUB_LOG="$dir/log" \
+    "$script" --dry-run --from "$dir/caches.jsonl" >"$dir/out" 2>&1
+  rc=$?
+  got="$(sed -n 's/^would delete \([0-9]*\) .*/\1/p' "$dir/out" | sort -n | tr '\n' ' ' | sed 's/ $//')"
+  if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
+    printf '  ok   %-28s exit %s, [%s]\n' "$name" "$rc" "$got"
+  else
+    printf '  FAIL %-28s want exit %s [%s], got exit %s [%s]\n' "$name" "$want_rc" "$want" "$rc" "$got" >&2
+    sed 's/^/       /' "$dir/out" >&2
+    fails=$((fails + 1))
+  fi
+}
+
+# Open PRs: copies of main's (10), superseded (20 21), the same-second tie's
+# older (40).
+selects "selection, PRs open" 0 "10 20 21 40"
+# A closed PR loses every build entry, under both refs; other families stay.
+selects "closed PR: all entries" 0 "10 20 21 40 80 81 82" STUB_CLOSED=6
+selects "closed PR: only build cache" 0 "10 20 21 22 23 40" STUB_CLOSED=2
+# A failed lookup must not read as closed: nothing extra, and the run fails.
+selects "PR lookup fails" 1 "10 20 21 40" STUB_CLOSED="2 6" STUB_PULLS_FAIL=1
 
 # deletes <name> <want exit> <want DELETE ids, sorted> [env...]
 deletes() {
@@ -111,7 +132,7 @@ deletes "403 fails after the rest" 1 "10 20 21 40" STUB_403=10
 deletes "failed listing fails" 1 "" STUB_LIST_FAIL=1
 
 : >"$dir/empty.jsonl"
-if out="$(env -u GH_REPO "$script" --dry-run --from "$dir/empty.jsonl" 2>&1)" &&
+if out="$(PATH="$dir/bin:$PATH" GH_REPO=o/r STUB_LOG="$dir/log" "$script" --dry-run --from "$dir/empty.jsonl" 2>&1)" &&
   [ "$out" = "prune-pr-build-cache: nothing to delete" ]; then
   printf '  ok   %-28s\n' "empty list"
 else

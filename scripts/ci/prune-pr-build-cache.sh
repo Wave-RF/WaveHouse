@@ -3,20 +3,23 @@
 # run will read. setup-env lets a PR's long-pole jobs save their build
 # cache into the PR's own scope when the key misses main's, i.e. the PR
 # changes go.mod or go.sum (.github/workflows/README.md, invariant 6).
-# Each later dependency change in the PR mints another key, and a run
-# racing main's own save can store a copy of main's key, so in every
-# refs/pull/* scope this deletes:
+# Each later dependency change in the PR mints another key, so in every
+# refs/pull/<n>/* scope this deletes:
+#   - every entry, once PR <n> is closed: a run that was still going when
+#     the PR closed can save after the close cleanup has run;
 #   - an entry whose key and version main also holds: main's copy serves
 #     it, and a PR whose dependencies match main's holds no build cache;
 #   - every entry but the newest of its flavor (the key minus its hash):
 #     restore-keys return the newest match, so the older ones are dead.
-# It needs no PR number, so fork PRs are covered too.
+# A PR counts as closed only when the API says so: a failed lookup keeps its
+# newest entries and fails the run once the rest is done. Fork PRs are
+# covered too.
 #
 # Usage: scripts/ci/prune-pr-build-cache.sh [--dry-run] [--from <file>]
 #   --dry-run    list what would be deleted; delete nothing
 #   --from FILE  read the cache list from FILE (one JSON object per line,
 #                as `gh api .../actions/caches --jq '.actions_caches[]'`
-#                prints) instead of the API
+#                prints) instead of the API; PR states still come from it
 # Env: GH_TOKEN, GH_REPO (owner/name).
 
 set -euo pipefail
@@ -33,9 +36,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ -z "$from" ] || [ "$dry_run" = 0 ]; then
-  : "${GH_REPO:?GH_REPO (owner/name) is required}"
-fi
+: "${GH_REPO:?GH_REPO (owner/name) is required}"
 
 list="$(mktemp)"
 trap 'rm -f "$list"' EXIT
@@ -53,15 +54,31 @@ else
   fi
 fi
 
+# One lookup per PR that holds an entry.
+rc=0 closed=""
+for n in $(jq -rs --arg prefix "$prefix" '
+  map(select(.key | startswith($prefix)) | .ref | capture("^refs/pull/(?<n>[0-9]+)/").n)
+  | unique[]' "$list"); do
+  if state="$(gh api "repos/$GH_REPO/pulls/$n" --jq .state 2>&1)"; then
+    [ "$state" = closed ] && closed="$closed $n"
+  else
+    echo "::error::prune-pr-build-cache: looking up PR #$n failed, so its newest entries stay: $state" >&2
+    rc=1
+  fi
+done
+
 # id, ref, key, size, reason — one line per entry to delete.
 # Deduplicated first: paging can return an entry twice, and two copies of
 # a PR's newest entry would make `.[:-1]` delete it.
-doomed="$(jq -rs --arg prefix "$prefix" '
+doomed="$(jq -rs --arg prefix "$prefix" --arg closed "$closed" '
   map(select(.key | startswith($prefix)))
   | unique_by(.id)
   | (map(select(.ref == "refs/heads/main") | [.key, .version])) as $main
+  | ($closed | split(" ") | map(select(. != ""))) as $closed
   | map(select(.ref | startswith("refs/pull/")))
-  | (map(select([.key, .version] as $k | any($main[]; . == $k)) | .why = "on main")
+  | (map(select((.ref | capture("^refs/pull/(?<n>[0-9]+)/").n) as $n | any($closed[]; . == $n))
+         | .why = "PR closed")
+     + map(select([.key, .version] as $k | any($main[]; . == $k)) | .why = "on main")
      + (group_by([.ref, (.key | sub("-[0-9a-f]{64}$"; ""))])
         | map(sort_by((.created_at | sub("\\.[0-9]+Z$"; "Z")), .id) | .[:-1][])
         | map(.why = "superseded")))
@@ -71,10 +88,10 @@ doomed="$(jq -rs --arg prefix "$prefix" '
 
 if [ -z "$doomed" ]; then
   echo "prune-pr-build-cache: nothing to delete"
-  exit 0
+  exit "$rc"
 fi
 
-rc=0 freed=0
+freed=0
 while IFS=$'\t' read -r id ref key size why; do
   if [ "$dry_run" = 1 ]; then
     echo "would delete $id ($why) $ref $key"
