@@ -2,24 +2,36 @@
 # can't self-checkout, so the consuming job must checkout first. Each CI
 # job opts into exactly the toolchains it needs via the inputs below.
 #
-# Caching is OWNED here end-to-end: each cache is a nested `actions/cache`
-# step, whose automatic post-job step saves on an exact-key miss — no save
-# steps in ci.yml, so restore and save can never drift. Two consequences
-# to know about (both accepted for the boilerplate this kills):
+# Caching is OWNED here end-to-end: no save steps in ci.yml. The Go, pnpm
+# and Playwright caches (the large ones) SAVE ONLY ON `main`: there each is
+# an `actions/cache` step, whose automatic post-job step saves on an
+# exact-key miss. Everywhere else (pull requests, merge-queue refs,
+# branches) the same cache is a restore-only `actions/cache/restore`, which
+# reads `main`'s entry through the default-branch fallback and writes
+# nothing. The reason is the repo's 10 GB cache cap: a run restores only
+# from its own ref's scope and from `main`'s, so an entry a PR saves is
+# unreadable to every other PR. A PR saved its own ~2.4 GB set whenever
+# its key missed `main`'s (it changed go.mod/go.sum/pnpm-lock.yaml, or ran
+# between a `main` bump and `main`'s save), and that set evicted `main`'s
+# warm entries. Two consequences to know about:
 #   - saves happen at the END of the job (post steps), and only when the
-#     job SUCCEEDED — a failed run rebuilds from restore-keys next time;
-#   - when several jobs miss the same key in one run (e.g. a lockfile
-#     bump), each saves; the backend keeps the first and the rest log a
-#     benign "already exists" warning.
+#     job SUCCEEDED — a failed run rebuilds from restore-keys next time
+#     (except `gomod-v1` on `main`, which has none: see below);
+#   - when several jobs miss the same key in one `main` run (e.g. a
+#     lockfile bump), each saves; the backend keeps the first and the rest
+#     log a benign "already exists" warning.
+# A PR that changes a lockfile therefore restores the previous generation
+# via restore-keys and fetches the delta on every push, for its whole life.
+# golangci and Astro still save from any ref (see the inventory).
 #
 # The cache inventory (full architecture: .github/workflows/README.md):
 #
 #   1. Go modules, `gomod-v1-` key family, keyed on every go.mod + go.sum
 #      and NOT partitioned per job — ~/go/pkg/mod is a pure function of
 #      those files, so one entry serves every Go job, stored once rather
-#      than per flavor (~1.6 GB on disk; 0.48 GB as a stored archive on a
-#      cold save, drifting up as superseded module versions accumulate
-#      through the restore -> save chain).
+#      than per flavor (~1.6 GB on disk; 0.48 GB as a stored archive).
+#      `main` starts each generation cold (no restore-keys), so superseded
+#      module versions never accumulate in it.
 #   2. Go build objects, `gobuild-v3-` key family, same key inputs,
 #      partitioned per job by `go-cache-suffix`: the unit, integration and
 #      e2e jobs compile with different flags (-race/-cover/-coverpkg/-tags),
@@ -29,7 +41,8 @@
 #      setup-go's exact-key-only cache (actions/setup-go#357).
 #   3. golangci-lint binary + analysis cache keyed on Makefile +
 #      .golangci.yml. Analysis cache is the win (~10s warm vs ~90s).
-#      Only the lint job needs it.
+#      Only the lint job needs it. Still saved from any ref: ~40 MB, and
+#      only a PR that edits one of those two files mints one.
 #   4. pnpm store (path resolved at runtime) keyed on the root
 #      lockfile — the pnpm workspace projects share one lockfile +
 #      store. Path is dynamic because pnpm's documented default
@@ -44,9 +57,9 @@
 #   6. Astro content-collection cache (docs/.astro/) keyed on the root
 #      lockfile + astro.config.mjs. Speeds up warm `astro check` /
 #      `astro build` — unchanged content skips the parse + transform
-#      pipeline. See #132.
+#      pipeline. See #132. Saved from any ref, like golangci: a few KB.
 name: Setup CI environment
-description: Caches (restore + automatic post-job save) and toolchains for WaveHouse CI
+description: Caches (restore everywhere, save on main) and toolchains for WaveHouse CI
 
 inputs:
   go:
@@ -71,11 +84,12 @@ inputs:
 # Exact-key cache-hit flags, for consumers that want to skip work on a
 # warm cache (e.g. docs-build's pnpm-store prune). Saves are NOT gated on
 # these from the outside — the nested actions/cache steps handle their
-# own post-job saves.
+# own post-job saves. Only one of each save/restore pair runs, so the
+# value is whichever of the two reported.
 outputs:
   pnpm-cache-hit:
     description: "true if the exact-key pnpm store cache was restored"
-    value: ${{ steps.pnpm-cache.outputs.cache-hit }}
+    value: ${{ steps.pnpm-cache.outputs.cache-hit || steps.pnpm-cache-restore.outputs.cache-hit }}
 
 runs:
   using: composite
@@ -105,26 +119,41 @@ runs:
     # five entries of ~0.9-1.2 GB stored each, ~5.2 GB per generation.
     # Against a 10 GB repo cap that means two live generations overflowed
     # it, and GitHub started LRU-evicting warm entries mid-run. Split out,
-    # it is stored once and a measured generation is 1.05 GB — 0.48 module
-    # plus 0.57 across the five build entries (#443). Sizes here are
+    # it is stored once and a generation measured 1.05 GB when #443 split it —
+    # 0.48 module plus 0.57 across the five build entries (1.62 GiB on
+    # 2026-10-07). Sizes here are
     # stored-archive bytes / 2^30, the unit the README's usage check
     # prints.
     #
     # All Go jobs miss this key together on a dependency bump and all try to
     # save; the backend keeps the first and the rest log a benign "already
     # exists" (same trade-off as the rest of the inventory, see header).
+    #
+    # `main` saves; every other ref restores only (see the header). `main`
+    # also omits restore-keys: starting from nothing on a dependency bump
+    # stores a clean generation, so superseded module versions don't
+    # accumulate through a restore -> save chain. The cost is a cold
+    # `go mod download` in each Go job (they run in parallel), per bump,
+    # on `main` only.
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.go == 'true' }}
+      if: ${{ inputs.go == 'true' && github.ref == 'refs/heads/main' }}
       id: gomod-cache
       with:
         path: ~/go/pkg/mod
-        # go.mod is in the key, not just go.sum, because the GOTOOLCHAIN=auto
+        # go.mod is in the key, not just go.sum, because the pinned
         # toolchain rides in ~/go/pkg/mod/golang.org/toolchain (no setup-go)
         # and go.sum records no entry for it. Raising go.mod's `go` directive
         # therefore changes which toolchain belongs in this cache while
         # leaving go.sum untouched — a go.sum-only key would exact-hit, and
         # because saves fire only on an exact-key MISS the freshly fetched
         # toolchain would never be saved, re-downloading on every run.
+        key: gomod-v1-${{ runner.os }}-${{ hashFiles('**/go.mod', '**/go.sum') }}
+
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.go == 'true' && github.ref != 'refs/heads/main' }}
+      id: gomod-cache-restore
+      with:
+        path: ~/go/pkg/mod
         key: gomod-v1-${{ runner.os }}-${{ hashFiles('**/go.mod', '**/go.sum') }}
         # A stale generation is still worth restoring: a bump moves a handful
         # of modules, so most of the tree is reusable and `go mod download`
@@ -141,8 +170,12 @@ runs:
     # (~/go/pkg/mod moved out, above). Saves only happen on an exact-key
     # miss, so without a bump the old v2 entry would exact-hit forever and
     # the new, smaller content would never be saved.
+    #
+    # Save-on-`main` only, like gomod-v1. Go trims build-cache entries
+    # unused for five days on its own (mtimes survive the archive), so the
+    # restore -> save chain on `main` doesn't grow without bound.
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.go == 'true' }}
+      if: ${{ inputs.go == 'true' && github.ref == 'refs/heads/main' }}
       id: gobuild-cache
       with:
         path: ~/.cache/go-build
@@ -154,17 +187,23 @@ runs:
         # — so every run recompiles cold *and* restores objects nothing can
         # hit, until some unrelated go.sum change rotates the key.
         #
-        # This closes the go-directive half only. GOTOOLCHAIN=auto uses the
-        # LOCAL toolchain whenever it satisfies the directive, so a runner
-        # image bumping its bundled Go swaps the compiler with neither
-        # go.mod nor go.sum moving — same pathology, past both keys. If you
-        # see unexplained cold build caches, that's the cause: rotate the
-        # v<N> prefix to force a save.
+        # The toolchain is pinned to go.mod's directive (see "Pin and verify
+        # Go toolchain" below), so a runner image bumping its bundled Go can
+        # no longer swap the compiler under these keys.
         key: gobuild-v3-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-${{ hashFiles('**/go.mod', '**/go.sum') }}
         # Same-suffix only. The bare-prefix fallback the v2 key carried
         # existed to pick up the shared module cache from another job's
         # entry; that job is now gomod-v1's, and another flavor's build
         # objects are not reusable here.
+        restore-keys: |
+          gobuild-v3-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-
+
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.go == 'true' && github.ref != 'refs/heads/main' }}
+      id: gobuild-cache-restore
+      with:
+        path: ~/.cache/go-build
+        key: gobuild-v3-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-${{ hashFiles('**/go.mod', '**/go.sum') }}
         restore-keys: |
           gobuild-v3-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-
 
@@ -181,19 +220,25 @@ runs:
 
     # No actions/setup-go: it spends ~9s/job downloading + extracting a
     # toolchain the runner can already provide. The image's preinstalled
-    # `go` + GOTOOLCHAIN=auto (the Go ≥1.21 default) resolve go.mod's
-    # pinned version exactly — and the auto-fetched toolchain lands in
-    # ~/go/pkg/mod/golang.org/toolchain, i.e. inside the module cache
-    # restored above, so warm runs download nothing. A cold cache (first
-    # run after a key rotation, when the image go is older than go.mod's
-    # pin) pays a one-time toolchain fetch from proxy.golang.org here —
-    # this step makes that cost visible and the post-job save captures it.
+    # `go` fetches go.mod's version whenever it differs, and the fetched
+    # toolchain lands in ~/go/pkg/mod/golang.org/toolchain, i.e. inside
+    # the module cache restored above, so warm runs download nothing. A
+    # cold cache pays a one-time fetch from proxy.golang.org here — this
+    # step makes that cost visible; `main`'s post-job save captures it, while
+    # a PR that raises the go directive refetches it on every push.
+    # GOTOOLCHAIN=auto would NOT pin go.mod's version: it means
+    # max(image, go.mod), so an image that ships a newer Go would take over
+    # and break golangci-lint. Export the pin for steps that run Go outside
+    # `make` (which exports the same value from go.mod itself).
     # Trade-off: setup-go's inline problem matchers (PR-file annotations
     # on compile errors) are gone; the log output is unchanged.
-    - name: Verify Go resolves go.mod's toolchain
+    - name: Pin and verify Go toolchain
       if: ${{ inputs.go == 'true' }}
       shell: bash
-      run: go version
+      run: |
+        GOTOOLCHAIN="$(scripts/ci/go-toolchain.sh)"
+        echo "GOTOOLCHAIN=$GOTOOLCHAIN" >> "$GITHUB_ENV"
+        GOTOOLCHAIN="$GOTOOLCHAIN" go version
 
     # pnpm must install before its cache step so the store path can be
     # resolved from pnpm itself.
@@ -210,8 +255,17 @@ runs:
       run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.node == 'true' }}
+      if: ${{ inputs.node == 'true' && github.ref == 'refs/heads/main' }}
       id: pnpm-cache
+      with:
+        path: ${{ steps.pnpm-store.outputs.path }}
+        key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: |
+          pnpm-${{ runner.os }}-
+
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.node == 'true' && github.ref != 'refs/heads/main' }}
+      id: pnpm-cache-restore
       with:
         path: ${{ steps.pnpm-store.outputs.path }}
         key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
@@ -224,8 +278,17 @@ runs:
     # on the root pnpm-lock.yaml since that's where the Playwright version
     # is locked. Closes the Playwright half of #132.
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: ${{ inputs.playwright == 'true' }}
+      if: ${{ inputs.playwright == 'true' && github.ref == 'refs/heads/main' }}
       id: playwright-cache
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: |
+          playwright-${{ runner.os }}-
+
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.playwright == 'true' && github.ref != 'refs/heads/main' }}
+      id: playwright-cache-restore
       with:
         path: ~/.cache/ms-playwright
         key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}

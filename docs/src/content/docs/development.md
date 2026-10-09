@@ -13,12 +13,12 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 
 | Tool | Required version | Why | Install |
 | ---- | ---------------- | --- | ------- |
-| **Go** | 1.26+ (matches `go.mod`) | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
-| **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with BSD Make 3.81, which **will not work** | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
+| **Go** | Any Go ≥ 1.21; `make` runs the version `go.mod` pins, its `toolchain` line if it has one, else its `go` line (currently 1.26.6), downloading it once if yours differs (needs network). `make GOTOOLCHAIN=local …` uses yours instead (an environment value is ignored): it needs a Go ≥ that version, and `make lint-go` needs `go.mod`'s minor | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
+| **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with GNU Make 3.81, which is **not supported**: it silently ignores `--output-sync`, so the parallel output of `make verify` / `make ci` interleaves line by line and a failure can scroll away behind other jobs' output | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse and a Redis via testcontainers (no compose file), the integration suite also dynamodb-local, and the integration suite also runs the shared cache backend against Redis, Valkey, Dragonfly (pulled from `docker.dragonflydb.io`) and a one-node Redis Cluster | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
-| **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
+| **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make tools`, `make verify`, `make lint`, `make fmt`, `make fix`, `make ci`, `make build-ts`, `make dev-ts`, `make test-ts`, `make test-e2e`, `make test-all`, `make check-docs`, `make build-docs`, `make build-all`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` (`make tools` itself runs `pnpm install`, and `make verify` is what the pre-commit hook runs, so a Go-only contributor needs pnpm too) | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** + **jq** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` and `shellcheck` binaries into `.bin/` and, for `make build-ts`, the oldest Node that `engines.node` admits; `jq` is needed by `make verify` (the review-gate hook tests) and by the Claude Code hooks | usually preinstalled (`jq` ships with macOS 15+); otherwise `apt install jq` / `brew install jq` |
 
 ### Auto-installed by `make tools`
@@ -26,7 +26,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 Run `make tools` once after cloning to populate everything that doesn't have to be on your PATH:
 
 - **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
-- **`misspell` v0.8.0, `shellcheck` v0.11.0, `actionlint` v1.7.12** → installed to `.bin/<os>_<arch>/`; they back `make lint-prose`, `make lint-sh`, and `make lint-gha`. `make tools` also points `core.hooksPath` at `.githooks/`, which is what installs the pre-commit and pre-push gates.
+- **`misspell` v0.8.0, `shellcheck` v0.11.0, `actionlint` v1.7.12** → installed to `.bin/<os>_<arch>/`; they back `make lint-prose`, `make lint-sh`, and `make lint-gha`. `make tools` also points `core.hooksPath` at `.githooks/`, which is what installs the pre-commit and pre-push gates (`git config --unset core.hooksPath` turns them off for every worktree of the clone, and the next `make tools` turns them back on; use `--no-verify` for a one-off).
 - **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
 - **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
 - **pnpm deps** for the repo root plus `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). The root workspace is where the repo-wide linters live — **Biome** (JS/TS/JSON) and **markdownlint-cli2** (Markdown/MDX, including the repo-local `WH001`/`WH002` rules). Neither is ever run from a global install: `make lint` / `make fix` shell out to `pnpm -w run`, and every target that needs them declares the `pnpm-install` prerequisite, so a clean clone is linting correctly after `make tools` with nothing else on your PATH. `make tools` runs only the pnpm install; `make build-ts` also downloads the oldest Node that `engines.node` admits (a 45–51 MB tarball, about 175 MB unpacked, once, into `.bin/`, verified against a pinned sha256) to smoke-load the built SDK entry points with `make smoke-ts-dist`; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by two parts of the docs *build*: `rehype-mermaid` (SVG diagram rendering) and the `diagram-png` integration (`docs/src/integrations/diagram-png.mjs`), which rasterizes each diagram to light/dark PNGs (a solid surface-card variant plus a transparent-background variant for slide decks) at `astro:build:done` for the Copy/Download buttons in the zoom lightbox. Both reuse the same Playwright Chromium, as does the manual `docs/scripts/screenshot.mjs` QA helper. `starlight-links-validator` runs under `build-docs` / CI only — the `dev-docs` watch loop skips it so a mid-edit dangling link doesn't fail every rebuild (CI still enforces link validity before merge; run `DOCS_WATCH_STRICT=1 make dev-docs` to keep the validator on locally). The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm --filter wavehouse-docs exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`. It is also a real `@wavehouse/sdk` consumer, but of the **published** package: the landing page's live demo takes the SDK from the registry, pinned in `docs/package.json`, not from `clients/ts/`. That is deliberate — the demo streams against a separately-deployed backend, so binding it to the workspace would ship an unreleased wire format to the live site the moment a change merged ([#568](https://github.com/Wave-RF/WaveHouse/issues/568)). The pin is raised on purpose when a new SDK release is tagged. Nothing in the docs build needs `build-ts`, including when you drive Astro directly through pnpm (e.g. `pnpm --filter wavehouse-docs run start`). pnpm's hoisted fallback is off; see [Updating Dependencies](#updating-dependencies).
@@ -34,7 +34,7 @@ Run `make tools` once after cloning to populate everything that doesn't have to 
 ### Verify your setup
 
 ```bash
-go version          # go1.26+
+go version          # go1.21+ (make runs go.mod's version itself)
 make --version      # GNU Make 4.x
 docker compose version
 node --version      # v22.x (matches .nvmrc and CI)
@@ -42,7 +42,7 @@ pnpm --version      # 11.21+
 jq --version
 ```
 
-If any of those are wrong/missing, the Makefile recipes will fail with confusing errors (e.g. `--output-sync` is unrecognized on Make 3.81; `pnpm: command not found` on `make test-ts`).
+If any of those are wrong/missing, the Makefile recipes will fail or misbehave confusingly (e.g. a failure buried in interleaved parallel output on Make 3.81; `pnpm: command not found` on `make tools`).
 
 ### Optional but recommended
 
@@ -416,6 +416,8 @@ A global copy is never what `make lint` runs, so install one only if you want to
 - **macOS**: `brew install golangci-lint`
 - **Binary**: See [golangci-lint.run/welcome/install/](https://golangci-lint.run/welcome/install/)
 
+The Makefile exports `GOTOOLCHAIN` pinned to `go.mod`'s `toolchain` line if it has one, else its `go` directive, so local runs and CI use the same Go even when your installed Go is newer (the first run downloads that toolchain once). A bare `go test` outside `make` is not pinned. Raising the `go` directive to a new minor version (1.27, not a 1.26 patch) also needs a golangci-lint release built with that minor or newer: otherwise `make lint-go` refuses with `can't load config: the Go language version (go1.26) used to build golangci-lint is lower than the targeted Go version (1.27.1)`. Bump the directive with `go get go@1.N.P`, because `go mod edit -go=1.27` writes a version `make` cannot pin.
+
 The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control) — that file is the authoritative list of enabled linters. Highlights:
 
 - **errcheck** — Unchecked error returns
@@ -478,19 +480,20 @@ WaveHouse/
 │   └── testutil/           # Shared test helpers and mocks (cachetest suite)
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)
-│   └── e2e/                # E2E suite (orchestrator + ClickHouse and Redis testcontainers)
-│       ├── fixtures/       # ClickHouse DDL + config and settings-directory fixtures
+│   └── e2e/                # E2E suite (SDK specs; `scripts/orchestrator` starts ClickHouse and Redis testcontainers)
+│       ├── fixtures/       # E2E server config + settings-directory fixtures
 │       └── sdk/            # E2E specs driven through the TypeScript SDK (Vitest)
 ├── clients/                # Client SDKs
 │   └── ts/                 # TypeScript SDK (@wavehouse/sdk, pnpm workspace)
 ├── deployments/
 │   ├── compose/            # Docker Compose files (standalone.yaml, dependencies.yaml)
+│   ├── nats/               # Helm values and JetStream manifests for an external NATS (`mq.backend: nats`)
 │   ├── Dockerfile          # Runtime image
 │   └── Dockerfile.goreleaser  # Release image (built by GoReleaser)
 ├── scripts/                # E2E orchestrator, cov tool, CI/hook helpers
 ├── docs/                   # Documentation
 ├── config.yaml             # Default configuration file
-├── Makefile                # Build, test, lint, deploy targets
+├── Makefile                # Build, test, lint, release targets
 ├── .golangci.yml           # Linter configuration
 ├── .goreleaser.yaml        # Release build configuration
 └── .air.toml               # Hot-reload configuration
@@ -498,7 +501,7 @@ WaveHouse/
 
 ## Code Conventions
 
-- **Strict Go formatting**: Use `gofumpt` (a stricter superset of `gofmt`, enforced by CI). Run `make fmt` to format.
+- **Strict Go formatting**: Use `gofumpt` (a stricter superset of `gofmt`, enforced by CI). `make fmt` checks it, as does `make verify` (what CI and the pre-commit hook run); `make fix` applies it.
 - **Interface-first design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) are defined as interfaces so implementations can be swapped behind a stable contract.
 - **Package boundaries**: The `internal/` directory ensures packages are private to this module.
 - **Error handling**: Return errors to callers. Use `slog` for structured logging, through the default logger (`slog.InfoContext(ctx, …)` and its siblings) — constructors don't take a `*slog.Logger`; tests silence or capture it with `internal/testutil/logtest`.
@@ -528,7 +531,7 @@ Run `make help` to see all targets. Key ones:
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
 | `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) + Markdown/MDX (markdownlint) + prose (misspell) |
 | `make vulncheck` | Run `govulncheck -scan package` (`V=1`: the default symbol-level scan, with example traces) |
-| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + tagged-test selector and integration-parts fixtures + review-gate hook tests + docs type-check (`astro check` — not a full build, so link validation stays CI's job) (parallel-safe: `make -j verify`) |
+| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + go-toolchain fixtures + tagged-test selector and integration-parts fixtures + review-gate hook tests + docs type-check (`astro check` — not a full build, so link validation is left to `make build-docs`, which `make ci` runs); a bare `make verify` runs these in parallel |
 | `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint `--fix`), MDX (`fix-mdx-fences` only — the generic fixers never run over `.mdx`), and docs-prose spelling (misspell, both) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
@@ -714,7 +717,7 @@ The `main branch protection` ruleset requires one status check to pass before an
 
 - `CI` — the aggregator job of `.github/workflows/ci.yml`. The workflow is a job DAG over the same Makefile targets local `make ci` runs: `lint` (`make verify`), `unit` (`make test-unit test-ts`), `integration` (one job per part of `make test-integration`: `make test-integration-app`, `make test-integration-backends`), `e2e` (`make -j test-e2e` — builds its own SDK dist + cover binary on a warm cache, runs the suite exactly like a local run), `coverage` (`make cov` over every suite's uploaded coverage fragment + threshold gates, like local `make ci`'s final step), `docs-build` (`make build-docs` when docs-affecting files changed, uploading the docs dist artifact), `PR title` (Conventional Commits), and the docs preview/deploy jobs. The aggregator fails if any job failed or was canceled and treats skipped jobs as passing — docs-only PRs skip the Go test suites by design, and fork PRs run everything except the (secret-bearing) docs deploys. Every run's Summary page gets a per-job wall-clock table from the non-gating `Timing summary` job. The full architecture — DAG diagram, design invariants, cache policy, how to add a job — lives in [`.github/workflows/README.md`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/workflows/README.md).
 
-The `PR housekeeping` workflow still runs on every PR (labels + the title explainer comment) but is no longer a required check.
+The `PR housekeeping` workflow still runs on every PR (labels + the title explainer comment) but is no longer a required check. A separate `PR cache cleanup` workflow deletes a closed PR's Actions caches.
 
 The ruleset also requires an approval from the `@Wave-RF/wavehouse-admins` team (the `required_reviewers` rule — this is what mandates an admin sign-off, replacing the old `Admin approval` status-check workflow), plus 1 approving review, approval of the most recent push by someone other than its author, resolution of all review threads, linear history, no branch deletion, no force-push, and squash-merge only. Repository admins may bypass these requirements when merging their own PR (e.g. a trivial `.github` change) but still cannot push directly to `main`.
 
