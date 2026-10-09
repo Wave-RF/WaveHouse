@@ -118,5 +118,5 @@ The handful of things that most often trip up a first session — each is expect
 
 ## Going further
 
-- **Validate JWTs**: set `WH_AUTH_JWT_SECRET=<secret>` (the middleware always runs; without a secret every request is the policy `default_role`) and replace the shipped trial policy (`deployments/compose/settings/policies.json`) with a least-privilege one — see [API Reference — Authentication](/api#authentication) and [Access Control](/access-control).
+- **Validate JWTs**: set `auth.jwt_secret` in the settings directory's `config.json` (`deployments/compose/settings/config.json` in the quickstart; it reloads live — the middleware always runs, and without a secret or a `jwks_url` every request is the policy `default_role`) and replace the shipped trial policy (`deployments/compose/settings/policies.json`) with a least-privilege one — see [API Reference — Authentication](/api#authentication) and [Access Control](/access-control).
 - **Enable deduplication**: set `dedupe.enabled` to `true` in the settings directory's `config.json` (it hot-reloads, no restart) — records dedupe on their `event_id` field by default; pick a different field (globally or per table) in the same file — see [Settings Directory — Deduplication](/settings-directory#deduplication).

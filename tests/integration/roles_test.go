@@ -323,7 +323,6 @@ func TestRoles_SeparateProcesses(t *testing.T) {
 	none := filepath.Join(t.TempDir(), "none")
 	shared := map[string]string{
 		"WH_SETTINGS_DIR":      settingsDir,
-		"WH_CH_PASSWORD":       testCHPassword,
 		"WH_AUTH_OPERATOR_KEY": natsOperatorKey,
 
 		"WH_MQ_BACKEND":            "nats",

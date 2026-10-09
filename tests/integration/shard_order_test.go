@@ -154,14 +154,18 @@ func noWorkerFailure(t *testing.T, procs ...*workerProc) {
 }
 
 // unitOf publishes data to topic before anything consumes it, and returns
-// the unit whose durable the row waits on.
+// the unit whose durable the row waits on. The server counts a stored row
+// toward its durables on a goroutine of its own, after acking the publish,
+// so the counts are read until one has risen.
 func unitOf(t *testing.T, srv *natstest.Server, b mq.Broker, topic mq.Topic, data []byte) string {
 	t.Helper()
 	before := pendingByUnit(t, srv)
 	require.NoError(t, b.Publish(t.Context(), topic, data))
-	for u, n := range pendingByUnit(t, srv) {
-		if n > before[u] {
-			return u
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		for u, n := range pendingByUnit(t, srv) {
+			if n > before[u] {
+				return u
+			}
 		}
 	}
 	t.Fatalf("no unit took %v's row", topic)
@@ -261,6 +265,14 @@ func TestShardClaims_BlockedOwnerKeepsItsShard(t *testing.T) {
 // rows: a table on another unit of the same process keeps flowing.
 func TestShardClaims_StuckShardDoesNotStallTheOthers(t *testing.T) {
 	t.Parallel()
+	const (
+		share = 8
+		// more rows take more/share batch windows: the healthy unit holds at
+		// most share rows, too few to fill a batch, so each batch is written
+		// as its window (the worker's 5s) closes.
+		more   = 3 * share
+		window = 5 * time.Second
+	)
 	srv := natstest.Start(t)
 	pub := shardBroker(t, srv.URL())
 	stuck := mq.Topic{Tenant: "acme", Table: "stuck"}
@@ -285,7 +297,7 @@ func TestShardClaims_StuckShardDoesNotStallTheOthers(t *testing.T) {
 			<-unblock
 		}
 	})
-	a := startWorkerProc(t, srv.URL(), "proc-a", 3*time.Second, ingest.ClaimConfig{Every: 100 * time.Millisecond, MaxHeld: 8}, ch.URL)
+	a := startWorkerProc(t, srv.URL(), "proc-a", 3*time.Second, ingest.ClaimConfig{Every: 100 * time.Millisecond, MaxHeld: share}, ch.URL)
 	t.Cleanup(func() { closeOnce(unblock) }) // first, should the test end early
 	select {
 	case <-entered:
@@ -293,15 +305,22 @@ func TestShardClaims_StuckShardDoesNotStallTheOthers(t *testing.T) {
 		t.Fatal("the stuck table's insert never started")
 	}
 	_, _, held := unitState(t, srv, stuckUnit)
-	require.GreaterOrEqual(t, held, 8, "the stuck unit's share is full")
+	require.GreaterOrEqual(t, held, share, "the stuck unit's share is full")
+	// Row 0 opened the healthy table's first window when the worker started,
+	// as the stuck table's rows did; the rows start a window of their own
+	// once it has closed.
+	require.Eventually(t, func() bool { return len(log.table(healthy.Table)) == 1 }, 30*time.Second, 50*time.Millisecond,
+		"the healthy table's first row was never written")
 
-	const more = 30
 	for i := 1; i <= more; i++ {
 		require.NoError(t, pub.Publish(t.Context(), healthy, seqEnvelope(t, healthy.Table, i)))
 	}
 	began := time.Now()
-	require.Eventually(t, func() bool { return len(log.table(healthy.Table)) == more+1 }, 20*time.Second, 50*time.Millisecond,
-		"the healthy table stalled behind the stuck one: %v", log.table(healthy.Table))
+	// One window more than the rows take, for the inserts, acks and fetches
+	// between windows.
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Len(c, log.table(healthy.Table), more+1, "the healthy table stalled behind the stuck one")
+	}, (more/share+1)*window, 50*time.Millisecond)
 	t.Logf("with %s's share full, %s's %d rows were written %s after they were published",
 		stuck.Table, healthy.Table, more, time.Since(began).Round(10*time.Millisecond))
 	assert.True(t, inOrder(log.table(healthy.Table), more+1))

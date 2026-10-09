@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -328,6 +329,8 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"clickhouse.max_open_conns below idle", FileConfig, `{"clickhouse": {"max_open_conns": 2, "max_idle_conns": 5}}`, "clickhouse.max_open_conns: must be >= clickhouse.max_idle_conns (5), got 2"},
 		{"missing auth.jwks_url", FileConfig, `{"auth": {"role_claim": "role"}}`, "auth.jwks_url: required"},
 		{"missing auth.role_claim", FileConfig, `{"auth": {"jwks_url": ""}}`, "auth.role_claim: required"},
+		{"missing auth.jwt_secret", FileConfig, `{"auth": {"jwks_url": "", "role_claim": "role"}}`, "auth.jwt_secret: required"},
+		{"missing clickhouse.password", FileConfig, `{"clickhouse": {"username": "default"}}`, "clickhouse.password: required"},
 		{"auth.jwks_url relative", FileConfig, `{"auth": {"jwks_url": "/.well-known/jwks.json"}}`, "must be an absolute http(s) URL"},
 		{"auth.jwks_url bad scheme", FileConfig, `{"auth": {"jwks_url": "ftp://idp.example/jwks"}}`, "must be an absolute http(s) URL"},
 		{"auth.role_claim empty", FileConfig, `{"auth": {"role_claim": ""}}`, "auth.role_claim: must be a non-empty claim path"},
@@ -467,6 +470,51 @@ func TestValidate_RoleReferences(t *testing.T) {
 	})
 }
 
+// TestValidate_SecretsReadableByOthersWarn pins the permission check on
+// config.json (#529, #786 review): a file that carries a secret and that
+// every user can read warns, naming the keys and the mode; one the group
+// can read (a Kubernetes Secret volume with defaultMode 0400 under fsGroup is 0440), one only the
+// owner can read, or one whose secrets are empty (the seed), does not. A
+// warning, since a bind mount or a Kubernetes volume is routinely owned by
+// another user than the server's.
+func TestValidate_SecretsReadableByOthersWarn(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no permission bits on windows")
+	}
+	tests := []struct {
+		name   string
+		config string
+		mode   os.FileMode
+		want   string
+	}{
+		{"both secrets, world readable", configJSON(`{"clickhouse": {"password": "s3cret"}, "auth": {"jwt_secret": "hmac"}}`), 0o644, "config.json: carries clickhouse.password and auth.jwt_secret but is world-readable (mode 0644)"},
+		{"one secret, others only", configJSON(`{"auth": {"jwt_secret": "hmac"}}`), 0o604, "carries auth.jwt_secret but is world-readable (mode 0604)"},
+		{"secrets, group readable", configJSON(`{"clickhouse": {"password": "s3cret"}, "auth": {"jwt_secret": "hmac"}}`), 0o640, ""},
+		{"secrets, fsGroup layout", configJSON(`{"auth": {"jwt_secret": "hmac"}}`), 0o440, ""},
+		{"secrets, owner only", configJSON(`{"clickhouse": {"password": "s3cret"}, "auth": {"jwt_secret": "hmac"}}`), 0o600, ""},
+		{"empty secrets, world readable", configJSON(`{}`), 0o644, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			files := validFiles()
+			files[FileConfig] = tt.config
+			dir := writeDir(t, files)
+			require.NoError(t, os.Chmod(filepath.Join(dir, FileConfig), tt.mode))
+			doc, findings := ValidateDir(dir)
+			require.NotNil(t, doc, "a permission warning never rejects the directory: %s", findingStrings(findings))
+			assert.False(t, HasErrors(findings))
+			got := findingStrings(findings)
+			if tt.want == "" {
+				assert.NotContains(t, got, "world-readable")
+			} else {
+				assert.Contains(t, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidate_Warnings(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -485,6 +533,7 @@ func TestValidate_Warnings(t *testing.T) {
 		{"https with a plaintext native hop", FileConfig, configJSON(`{"clickhouse": {"http_scheme": "https"}}`), "clickhouse.tls.enabled: clickhouse.http_scheme is https but the native hop is plaintext"},
 		{"default on required parameter", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x", "required": true, "default": 5}]}]}`, "never used"},
 		{"grant with neither operation", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"analyst": {}}}}`, "neither select nor insert"},
+		{"jwt_secret beside a jwks_url is ignored", FileConfig, configJSON(`{"auth": {"jwks_url": "https://idp.example/jwks.json", "jwt_secret": "hmac"}}`), "auth.jwt_secret: ignored while auth.jwks_url is set"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
