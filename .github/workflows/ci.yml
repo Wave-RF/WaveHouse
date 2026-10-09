@@ -313,6 +313,7 @@ jobs:
         with:
           go-cache-suffix: "-e2e-cov"
           go-cache-pr-save: ${{ needs.changes.outputs.go-deps == 'true' }} # the other long pole
+          smoke-node: "true" # make build-ts runs smoke-ts-dist, which downloads the oldest Node
       # `-j` builds the prereqs (build-ts ∥ build-cover) concurrently,
       # then runs the orchestrator: ClickHouse and Redis testcontainers +
       # the cover binary + the SDK vitest suite.
