@@ -218,8 +218,9 @@ export GOTESTSUM_FMT
 # image) silently diverges from CI, and golangci-lint panics type-checking a
 # standard library newer than the Go it was built with. Pin to go.mod's
 # `toolchain` line if it has one, else its `go` line (see the script, which CI
-# shares). The pin is strict, so `go install` in `make tools` also runs on it:
-# a tool that needs a newer Go fails until go.mod's directive catches up.
+# and deployments/Dockerfile share). The pin is strict, so `go install` in
+# `make tools` also runs on it: a tool that needs a newer Go fails until
+# go.mod's directive catches up.
 # Override with `make GOTOOLCHAIN=local ...` (the environment's value is ignored).
 GO_TOOLCHAIN := $(shell scripts/ci/go-toolchain.sh)
 $(if $(GO_TOOLCHAIN),,$(error cannot derive the Go toolchain from go.mod, see above))
