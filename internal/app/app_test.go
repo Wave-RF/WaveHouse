@@ -85,6 +85,12 @@ func writeSettings(t *testing.T, patch map[string]any) string {
 	ch["addr"] = closedAddr(t)
 	doc["clickhouse"], err = json.Marshal(ch)
 	require.NoError(t, err)
+	// The seed's auth block validates no token; the tests mint HMAC tokens.
+	var au map[string]any
+	require.NoError(t, json.Unmarshal(doc["auth"], &au))
+	au["jwt_secret"] = testJWTSecret
+	doc["auth"], err = json.Marshal(au)
+	require.NoError(t, err)
 	for key, val := range patch {
 		doc[key], err = json.Marshal(val)
 		require.NoError(t, err)
@@ -99,6 +105,11 @@ func writeSettings(t *testing.T, patch map[string]any) string {
 	return dir
 }
 
+// testJWTSecret is the HMAC secret writeSettings gives the default tenant's
+// auth block; deliberately not testutil.TestJWTSecret, so a token minted
+// with that one is a wrong-secret token here.
+const testJWTSecret = "unit-test-secret"
+
 func testConfig(t *testing.T, settingsDir string) *config.Config {
 	t.Helper()
 	return &config.Config{
@@ -109,7 +120,6 @@ func testConfig(t *testing.T, settingsDir string) *config.Config {
 		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
 		Coord:    config.Coord{Backend: config.CoordLocal},
 		Roles:    config.AllRoles(),
-		Auth:     config.Auth{JWTSecret: "unit-test-secret"},
 		Settings: config.Settings{Dir: settingsDir},
 	}
 }
@@ -1319,7 +1329,7 @@ func signRole(t *testing.T, priv ed25519.PrivateKey, kid, role string) string {
 
 // authPatch is a config.json patch pointing the tenant's verifier at jwksURL.
 func authPatch(jwksURL string) map[string]any {
-	return map[string]any{"auth": map[string]any{"jwks_url": jwksURL, "role_claim": "role"}}
+	return map[string]any{"auth": map[string]any{"jwks_url": jwksURL, "jwt_secret": testJWTSecret, "role_claim": "role"}}
 }
 
 // analystPipe gives the settings directory at dir one pipe, `p`, that the
@@ -1369,7 +1379,7 @@ func TestNew_UnreachableJWKSBootsFailClosed(t *testing.T) {
 	assert.Less(t, time.Since(started), 5*time.Second, "boot must not wait on the endpoint")
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/p", nil)
-	// Signed with the boot secret: the HMAC family, which a JWKS tenant never
+	// Signed with an HMAC secret: the HMAC family, which a JWKS tenant never
 	// accepts, fetched or not.
 	req.Header.Set("Authorization", "Bearer "+testutil.MakeJWT(t, map[string]any{"role": "analyst"}))
 	rec := httptest.NewRecorder()
@@ -1430,7 +1440,7 @@ func TestNew_VerifierPerTenant(t *testing.T) {
 	eventuallyVerified("globex", globexToken)
 	assert.False(t, verified("globex", acmeToken), "acme's token is refused under globex's header")
 	assert.False(t, verified("acme", globexToken))
-	assert.False(t, verified("acme", testutil.MakeJWT(t, map[string]any{"role": "analyst"})), "the boot secret's HMAC family never verifies under a JWKS tenant")
+	assert.False(t, verified("acme", testutil.MakeJWT(t, map[string]any{"role": "analyst"})), "an HMAC token never verifies under a JWKS tenant")
 
 	// acme moves to globex's provider; globex's folder is untouched.
 	rewriteSettings(t, filepath.Join(root, "acme"), authPatch(globex.URL))
@@ -1805,7 +1815,7 @@ func TestRun_StopEndsOpenStreams(t *testing.T) {
 // at addr with the native pool sized to open.
 func poolSettings(addr string, open int) map[string]any {
 	return map[string]any{"clickhouse": map[string]any{
-		"addr": addr, "http_port": 8123, "http_scheme": "http", "database": "default", "username": "default", "query_timeout": 30,
+		"addr": addr, "http_port": 8123, "http_scheme": "http", "database": "default", "username": "default", "password": "", "query_timeout": 30,
 		"tls":     map[string]any{"enabled": false, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": false, "server_name": ""},
 		"headers": map[string]any{}, "max_open_conns": open, "max_idle_conns": 5,
 	}}

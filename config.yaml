@@ -45,11 +45,10 @@ prometheus:
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
 
-# Only the password and the connection ceiling are boot config; addr,
-# http_port, http_scheme, database, username, query_timeout, tls, headers and
-# the pool sizes are the settings directory's clickhouse block.
+# Only the connection ceiling is boot config; addr, http_port, http_scheme,
+# database, username, password, query_timeout, tls, headers and the pool
+# sizes are the settings directory's clickhouse block.
 clickhouse:
-  password: ""
   max_total_conns: 0 # ceiling on open native connections across pools; 0 = none
 
 # Each layer's implementation, chosen at boot. Every layer defaults to its
@@ -99,11 +98,11 @@ cache:
 # Auth has no on/off switch — the JWT middleware always runs. A request with no
 # token, or an invalid/expired one, falls back to the policy default_role;
 # elevated access needs a valid token whose role_claim matches a granted role
-# (or the policy admin_role). With neither jwt_secret (here) nor jwks_url (a
-# settings key, with role_claim) set, no token can validate, so every request
-# is the default_role — a pure public deployment. Only the secrets live here.
+# (or the policy admin_role). The verifier — jwt_secret, jwks_url, role_claim
+# — is the settings directory's auth block; with neither jwt_secret nor
+# jwks_url set, no token can validate, so every request is the default_role —
+# a pure public deployment. Only the platform's operator key lives here.
 auth:
-  jwt_secret: change-me-in-production
   operator_key: "" # non-JWT full-access operator credential (Authorization: Operator <key>, or X-Operator-Key) for break-glass; empty disables
 
 # Settings directory (REQUIRED): roles.json, policies.json, pipes.json,

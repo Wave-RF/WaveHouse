@@ -601,6 +601,37 @@ func TestRedis_CloseDeliversPastAnOpenBreaker(t *testing.T) {
 	assert.Nil(t, e.Value, "the bump Close delivered orphans the fill")
 }
 
+// The server can be slow to answer the first command after it comes back: a
+// runner under load resumes a paused container late. Close's first attempt
+// then misses the op timeout, and it retries within its budget rather than
+// leaving the bump pending (#747).
+func TestRedis_CloseRetriesASlowFirstReply(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := startRedis(t)
+	p := newProxy(t, s.addr, nil)
+	a := open(t, &server{addr: p.addr, mode: cache.RedisStandalone}, uniquePrefix(), func(c *cache.RedisConfig) {
+		c.Timeout, c.BreakerThreshold, c.BreakerOpenFor = 100*time.Millisecond, 1, time.Hour
+	})
+	deps := []cache.Namespace{{Tenant: "acme", Table: "events"}}
+	_, _, err := a.Lookup(ctx, "acme", "q", deps)
+	require.NoError(t, err)
+
+	const slow = 150 * time.Millisecond // over the op timeout
+	p.replyDelay.Store(int64(slow))
+	_, _, err = a.Lookup(ctx, "acme", "q", deps)
+	require.Error(t, err)
+	require.True(t, cache.Bypassed(a))
+	_, err = a.Invalidate(ctx, deps)
+	require.Error(t, err)
+	require.Equal(t, 1, cache.Pending(a))
+
+	const back = 600 * time.Millisecond // attempts are 200 ms apart (op timeout + backoff): three miss, two remain in Close's 1 s
+	time.AfterFunc(back, func() { p.replyDelay.Store(0) })
+	require.NoError(t, a.Close())
+	assert.Zero(t, cache.Pending(a), "Close retried until the server answered")
+}
+
 // A cluster client reads the topology after the handshake; a node that
 // answers the handshake and then goes quiet held that read, and so boot and
 // Close, for rueidis's 10 s default. It is bounded like a dial now. Any

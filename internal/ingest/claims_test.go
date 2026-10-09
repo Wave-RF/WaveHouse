@@ -789,8 +789,11 @@ func TestClaims_DifferingExtrasLeaveConfiguredUnitsAlone(t *testing.T) {
 		}
 		return true
 	}
-	// Settled once every process has joined and holds a share, not at the
-	// first moment each unit has one owner while members still arrive.
+	// Settled once every process has joined, holds a share, and has read
+	// every member, and a few ticks then pass with nothing moving — not at
+	// the first moment each unit has one owner while a member's view still
+	// lags: a process that has yet to read the last member gives units up on
+	// its next tick, after the owners already looked split.
 	settledSplit := func() bool {
 		if !oneEach() {
 			return false
@@ -799,9 +802,25 @@ func TestClaims_DifferingExtrasLeaveConfiguredUnitsAlone(t *testing.T) {
 		for _, u := range f.units {
 			holders[f.owners()[u][0]] = true
 		}
-		return len(holders) == len(procs)
+		if len(holders) != len(procs) {
+			return false
+		}
+		for _, p := range procs {
+			if p.loop.membersGauge.Load() != int64(len(procs)) {
+				return false
+			}
+		}
+		return true
 	}
-	require.Eventually(t, settledSplit, 5*time.Second, 10*time.Millisecond, "%v", f.owners())
+	quiet := func() bool {
+		if !settledSplit() {
+			return false
+		}
+		n := len(f.eventLog())
+		time.Sleep(3 * fastClaims(ClaimConfig{}).Every)
+		return settledSplit() && len(f.eventLog()) == n
+	}
+	require.Eventually(t, quiet, 5*time.Second, 10*time.Millisecond, "%v", f.owners())
 	before := f.eventLog()
 	time.Sleep(300 * time.Millisecond) // several ticks
 	assert.True(t, oneEach(), "%v", f.owners())

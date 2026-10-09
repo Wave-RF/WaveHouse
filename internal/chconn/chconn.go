@@ -117,7 +117,7 @@ func (s Sizes) max(o Sizes) Sizes {
 }
 
 // Params is what one tenant asks of its connection: the settings
-// directory's clickhouse block plus the boot-config password. The Identity
+// directory's clickhouse block, password included. The Identity
 // picks the pool; the rest is the tenant's own — the HTTP-interface wiring
 // and headers, the query deadline, and the pool sizes the shared pool is at
 // least as large as.

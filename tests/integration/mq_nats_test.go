@@ -56,10 +56,9 @@ func bootNATSProcess(t *testing.T, natsURL, root string, roles ...config.Role) *
 	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	cfg := &config.Config{
-		DataDir:    t.TempDir(),
-		Server:     config.Server{Port: ln.Addr().(*net.TCPAddr).Port, ShutdownTimeout: 10},
-		ClickHouse: config.ClickHouse{Password: testCHPassword},
-		Auth:       config.Auth{OperatorKey: natsOperatorKey},
+		DataDir: t.TempDir(),
+		Server:  config.Server{Port: ln.Addr().(*net.TCPAddr).Port, ShutdownTimeout: 10},
+		Auth:    config.Auth{OperatorKey: natsOperatorKey},
 		MQ: config.MQ{Backend: config.MQNATS, NATS: config.MQNATSConfig{
 			URLs: []string{natsURL}, User: natstest.WaveHouseUser, PasswordFile: pw,
 			SubjectPrefix: "wh", Partitions: 4, Shards: 8, IngestConsumer: "wh-ingest",
@@ -137,19 +136,56 @@ func (p *natsProcess) sse(t *testing.T, id tenant.ID, query string) <-chan strin
 	return lines
 }
 
-// awaitEvent reads lines until a data line contains want.
-func awaitEvent(t *testing.T, lines <-chan string, want string) {
+// sawEvent reads lines until a data line contains want, and reports whether
+// one arrived within d.
+func sawEvent(t *testing.T, lines <-chan string, want string, d time.Duration) bool {
 	t.Helper()
-	deadline := time.After(30 * time.Second)
+	deadline := time.After(d)
 	for {
 		select {
 		case line, ok := <-lines:
 			require.True(t, ok, "the stream ended before an event with %q", want)
 			if strings.HasPrefix(line, "data:") && strings.Contains(line, want) {
-				return
+				return true
 			}
 		case <-deadline:
-			t.Fatalf("no event with %q within 30s", want)
+			return false
+		}
+	}
+}
+
+// awaitEvent fails the test unless a data line containing want arrives.
+func awaitEvent(t *testing.T, lines <-chan string, want string) {
+	t.Helper()
+	if !sawEvent(t, lines, want, 30*time.Second) {
+		t.Fatalf("no event with %q within 30s", want)
+	}
+}
+
+// awaitLiveFanOut returns once every stream has received an event that went
+// through the queue after it opened. It works around #784 (a stream says
+// ": connected" before it is registered for live events, and a hub bridge
+// reads the history stream from now on): once that is fixed, drop the probes
+// and assert that no event is lost after ": connected". Each probe is a row
+// of its own, so the rows the test checks are unaffected.
+func awaitLiveFanOut(t *testing.T, p *natsProcess, streams ...<-chan string) {
+	t.Helper()
+	pending := map[int]bool{}
+	for i := range streams {
+		pending[i] = true
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for attempt := 0; len(pending) > 0; attempt++ {
+		require.True(t, time.Now().Before(deadline), "%d live stream(s) never received a probe event", len(pending))
+		if attempt > 0 {
+			t.Logf("live fan-out not up after %d probe(s); %d stream(s) still waiting", attempt, len(pending))
+		}
+		status, body := p.do(t, http.MethodPost, "/v1/ingest?table=events", map[string]string{tenant.Header: "acme", "Content-Type": "application/json"}, fmt.Sprintf(`{"id":"probe-%d","page":"probe"}`, attempt))
+		require.Equal(t, http.StatusOK, status, body)
+		for i := range pending {
+			if sawEvent(t, streams[i], `"probe-`, time.Second) {
+				delete(pending, i)
+			}
 		}
 	}
 }
@@ -204,6 +240,7 @@ func TestNATSBackend_EndToEnd(t *testing.T) {
 	since := time.Now().UTC()
 	liveA := a.sse(t, "acme", "table=events")
 	liveB := b.sse(t, "acme", "table=events")
+	awaitLiveFanOut(t, a, liveA, liveB)
 	for id, row := range map[tenant.ID]string{"acme": `{"id":"a1","page":"home"}`, "globex": `{"id":"g1","page":"cart"}`} {
 		status, body := a.do(t, http.MethodPost, "/v1/ingest?table=events", map[string]string{tenant.Header: id.String(), "Content-Type": "application/json"}, row)
 		require.Equal(t, http.StatusOK, status, body)

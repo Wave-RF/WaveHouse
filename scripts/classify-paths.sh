@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Pure path classifier — the single source of truth for which file changes
-# count as `code` (Go/SDK test work) vs `docs` (docs-site build inputs).
+# count as `code` (Go/SDK test work) vs `docs` (docs-site build inputs), and
+# whether they touch the Go dependencies (`go-deps`).
 #
-# Reads a newline-delimited file list on stdin, writes two key=value lines:
+# Reads a newline-delimited file list on stdin, writes three key=value lines:
 #
 #   code=true|false   false only when EVERY path is prose/repo-meta
 #                     (docs/, *.md, license/attribution, labels, issue +
@@ -15,6 +16,10 @@
 #                     is cheaper than missing a coupling that comes back),
 #                     the workspace lockfile, or the CI build plumbing
 #                     itself (ci.yml / setup-env).
+#   go-deps=true|false true when any path is a go.mod or go.sum, in any
+#                     module: the files the Go cache keys hash
+#                     (.github/actions/setup-env). CI lets a PR that changes
+#                     them save its long-pole jobs' build cache.
 #
 # Dependency-free and side-effect-free on purpose, so every caller can
 # trust it with just a file list:
@@ -24,8 +29,8 @@
 #   - hooks — the local git hooks pipe `git diff --name-only`.
 # The event-level fail-closed policy (pushes / dispatches / merge-group
 # runs always run everything) is a CI decision and lives in the wrapper,
-# NOT here. Empty stdin ⇒ code=false docs=false; callers decide what an
-# empty change set means (CI's wrapper fails closed to true).
+# NOT here. Empty stdin ⇒ all three false; callers decide what an empty
+# change set means (CI's wrapper fails closed to code/docs true).
 
 set -euo pipefail
 
@@ -36,6 +41,7 @@ files="$(cat)"
 if [ -z "$files" ]; then
   echo "code=false"
   echo "docs=false"
+  echo "go-deps=false"
   exit 0
 fi
 
@@ -76,4 +82,10 @@ if matches '^(docs/|clients/ts/|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.github/wo
   echo "docs=true"
 else
   echo "docs=false"
+fi
+
+if matches '(^|/)go\.(mod|sum)$'; then
+  echo "go-deps=true"
+else
+  echo "go-deps=false"
 fi

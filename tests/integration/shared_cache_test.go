@@ -75,10 +75,9 @@ func bootRedisApp(t *testing.T, redisAddr, prefix string, timeout time.Duration)
 	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	cfg := &config.Config{
-		DataDir:    t.TempDir(),
-		Server:     config.Server{ShutdownTimeout: 10},
-		ClickHouse: config.ClickHouse{Password: testCHPassword},
-		MQ:         config.MQ{Backend: config.MQEmbedded},
+		DataDir: t.TempDir(),
+		Server:  config.Server{ShutdownTimeout: 10},
+		MQ:      config.MQ{Backend: config.MQEmbedded},
 		Cache: config.Cache{Backend: config.CacheRedis, Redis: config.CacheRedisConfig{
 			Addrs: []string{redisAddr}, Mode: config.RedisStandalone, KeyPrefix: prefix,
 			Timeout: timeout, DialTimeout: time.Second,

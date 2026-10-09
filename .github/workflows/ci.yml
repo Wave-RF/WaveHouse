@@ -61,8 +61,9 @@ concurrency:
 jobs:
   # ── Change detection ───────────────────────────────────────────────
   # Classifies the changed files (scripts/ci/classify-changes.sh — the
-  # single source of truth for the code/docs outputs and their fail-closed
-  # rules) so the test/docs jobs can skip work, and lists the integration
+  # single source of truth for the code/docs/go-deps outputs and their
+  # fail-closed rules) so the test/docs jobs can skip work and the long poles
+  # know whether a PR changes its Go dependencies, and lists the integration
   # suite's parts for the integration matrix and the coverage job.
   changes:
     name: Detect changes
@@ -74,6 +75,7 @@ jobs:
     outputs:
       code: ${{ steps.detect.outputs.code }}
       docs: ${{ steps.detect.outputs.docs }}
+      go-deps: ${{ steps.detect.outputs.go-deps }}
       integration-parts: ${{ steps.parts.outputs.integration-parts }}
       integration-fragments: ${{ steps.parts.outputs.integration-fragments }}
       integration-producers: ${{ steps.parts.outputs.integration-producers }}
@@ -261,6 +263,10 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           go-cache-suffix: "-integration-${{ matrix.part }}"
+          # Only the long pole saves, and only on a PR that changes a
+          # go.mod/go.sum (README, sizing policy): `backends` finishes well
+          # inside it either way.
+          go-cache-pr-save: ${{ matrix.part == 'app' && needs.changes.outputs.go-deps == 'true' }}
           node: "false" # pure Go + testcontainers
       - name: Run Go integration tests
         env:
@@ -306,6 +312,7 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           go-cache-suffix: "-e2e-cov"
+          go-cache-pr-save: ${{ needs.changes.outputs.go-deps == 'true' }} # the other long pole
       # `-j` builds the prereqs (build-ts ∥ build-cover) concurrently,
       # then runs the orchestrator: ClickHouse and Redis testcontainers +
       # the cover binary + the SDK vitest suite.

@@ -142,7 +142,7 @@ dev: deps-up $(AIR)
 **While `make dev` is running you get:**
 
 - WaveHouse on `http://localhost:8080` with the default allow-all CORS posture, so a browser-based app on any localhost port can hit the API directly.
-- A placeholder JWT secret (`change-me-in-production`) ships in `config.yaml`, and the trial `public` policy in `./settings` (see [Test the API](#test-the-api)). Override the secret via `WH_AUTH_JWT_SECRET`.
+- The trial `public` policy ships in `./settings` (see [Test the API](#test-the-api)); its `auth.jwt_secret` is empty, so no token validates until you set one there (see [Validating tokens](#validating-tokens)).
 - ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
 - Hot reload: editing any `.go` file under `cmd/` or `internal/` triggers a debounced rebuild + restart. Boot config isn't hot-reloaded (settings-directory files are) — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
 
@@ -199,10 +199,10 @@ Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { c
 
 ### Validating tokens
 
-There is no auth on/off switch — the JWT middleware always runs, but authorization is the policy's job (an empty `policies.json` adopts no policy and denies every token-based caller, admins included — only the operator key below still reaches the admin surface). To exercise token auth in dev, set a known secret — the trial policy's `admin_role` defaults to `admin`, so a JWT with `role: admin` unlocks the admin surface:
+There is no auth on/off switch — the JWT middleware always runs, but authorization is the policy's job (an empty `policies.json` adopts no policy and denies every token-based caller, admins included — only the operator key below still reaches the admin surface). To exercise token auth in dev, set a known secret in `./settings/config.json` (a settings key, so it reloads live under a running `make dev`) — the trial policy's `admin_role` defaults to `admin`, so a JWT with `role: admin` unlocks the admin surface:
 
-```bash
-WH_AUTH_JWT_SECRET=my-secret make dev
+```json
+"auth": { "jwks_url": "", "jwt_secret": "my-secret", "role_claim": "role" }
 ```
 
 The **operator key** is a non-JWT alternative: set one and send it in an `Authorization: Operator <key>` header (or the `X-Operator-Key` alias). Even with no policy adopted it reaches the **admin surface** — enough to trigger a settings reload over HTTP after fixing `policies.json` (the break-glass path). Once a policy is adopted, the key's role resolves to `admin`, so it then has full data-plane access too (pipes, queries, streaming, ingest) — handy for trialing without minting a JWT:
@@ -256,9 +256,9 @@ curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
 ### Using an .env File
 
 ```bash
-# .env — boot config only (secrets, sizing, exporters); the ClickHouse
-# address and the rest of the wiring are settings-directory keys
-export WH_CH_PASSWORD=
+# .env — boot config only (the operator key, sizing, exporters); the
+# ClickHouse wiring and the token verifier are settings-directory keys
+export WH_AUTH_OPERATOR_KEY=
 ```
 
 Then:
@@ -338,6 +338,8 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 
 **Note on timing**: gotestsum's `DONE ... in X.XXXs` reports pure test execution time. The total wall time includes Go compiling all packages — the first run compiles everything (~15s), subsequent runs use the build cache (~1s).
 
+**Build cache across worktrees**: `make` exports `GOFLAGS=-trimpath` (your own `GOFLAGS` are kept), so compiled packages don't embed the checkout's path and every worktree of the same source shares one build cache entry per package and variant, instead of building its own. Opt out with `GOFLAGS=-trimpath=false make …`. `make build` is the exception: its debug binary keeps absolute source paths, so a debugger finds the files. Release and coverage binaries and test binaries built through `make` are trimmed; their frames read `github.com/Wave-RF/WaveHouse/internal/…` (standard-library frames are plain import paths such as `runtime/proc.go`), so map the module path to your checkout, for example, at the `(dlv)` prompt, `config substitute-path github.com/Wave-RF/WaveHouse /absolute/path/to/your/checkout` (or a `substitute-path` entry with `from` and `to` in `~/.config/dlv/config.yml`, or your editor's `substitutePath`). Code that needs a file from the repository finds it from the working directory, never from `runtime.Caller`, whose paths are module-relative under `-trimpath`.
+
 ### Test Structure
 
 | Category | Location | Docker? | Command |
@@ -385,7 +387,7 @@ docker compose -f deployments/compose/dependencies.yaml --profile redis up -d
 WH_CONFIG=tests/e2e/fixtures/config.yaml WH_CACHE_REDIS_ADDRS=localhost:6379 go run ./cmd/wavehouse
 ```
 
-The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the fixture's `settings.dir` is relative to the working directory. The fixture's settings directory (policy, pipes, and tunables) points at ClickHouse on `localhost:9000`; if yours isn't there, edit `clickhouse.addr` / `http_port` in `tests/e2e/fixtures/settings/config.json` (the orchestrator patches them itself for its testcontainer).
+The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (whose `./settings/config.json` has an empty `auth.jwt_secret`, so the suite's tokens do not validate) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the fixture's `settings.dir` is relative to the working directory. The fixture's settings directory (policy, pipes, and tunables) points at ClickHouse on `localhost:9000`; if yours isn't there, edit `clickhouse.addr` / `http_port` in `tests/e2e/fixtures/settings/config.json` (the orchestrator patches them itself for its testcontainer).
 
 Prefixing the variable to `make dev` does **not** work: that recipe pins `WH_CONFIG=.config.local.yaml` inline, which overrides anything inherited from the environment.
 
@@ -531,7 +533,7 @@ Run `make help` to see all targets. Key ones:
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
 | `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) + Markdown/MDX (markdownlint) + prose (misspell) |
 | `make vulncheck` | Run `govulncheck -scan package` (`V=1`: the default symbol-level scan, with example traces) |
-| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + go-toolchain fixtures + Dockerfile Go-version check + tagged-test selector and integration-parts fixtures + review-gate hook tests + docs type-check (`astro check` — not a full build, so link validation is left to `make build-docs`, which `make ci` runs); a bare `make verify` runs these in parallel |
+| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + go-toolchain fixtures + Dockerfile Go-version check + tagged-test selector and integration-parts fixtures + PR build-cache prune fixtures + review-gate hook tests + docs type-check (`astro check` — not a full build, so link validation is left to `make build-docs`, which `make ci` runs); a bare `make verify` runs these in parallel |
 | `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint `--fix`), MDX (`fix-mdx-fences` only — the generic fixers never run over `.mdx`), and docs-prose spelling (misspell, both) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
@@ -717,7 +719,7 @@ The `main branch protection` ruleset requires one status check to pass before an
 
 - `CI` — the aggregator job of `.github/workflows/ci.yml`. The workflow is a job DAG over the same Makefile targets local `make ci` runs: `lint` (`make verify`), `unit` (`make test-unit test-ts`), `integration` (one job per part of `make test-integration`: `make test-integration-app`, `make test-integration-backends`), `e2e` (`make -j test-e2e` — builds its own SDK dist + cover binary on a warm cache, runs the suite exactly like a local run), `coverage` (`make cov` over every suite's uploaded coverage fragment + threshold gates, like local `make ci`'s final step), `docs-build` (`make build-docs` when docs-affecting files changed, uploading the docs dist artifact), `PR title` (Conventional Commits), and the docs preview/deploy jobs. The aggregator fails if any job failed or was canceled and treats skipped jobs as passing — docs-only PRs skip the Go test suites by design, and fork PRs run everything except the (secret-bearing) docs deploys. Every run's Summary page gets a per-job wall-clock table from the non-gating `Timing summary` job. The full architecture — DAG diagram, design invariants, cache policy, how to add a job — lives in [`.github/workflows/README.md`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/workflows/README.md).
 
-The `PR housekeeping` workflow still runs on every PR (labels + the title explainer comment) but is no longer a required check. A separate `PR cache cleanup` workflow deletes a closed PR's Actions caches.
+The `PR housekeeping` workflow still runs on every PR (labels + the title explainer comment) but is no longer a required check. A separate `PR cache cleanup` workflow deletes a closed PR's Actions caches, and after each PR run deletes the Go build cache entries no run will read.
 
 The ruleset also requires an approval from the `@Wave-RF/wavehouse-admins` team (the `required_reviewers` rule — this is what mandates an admin sign-off, replacing the old `Admin approval` status-check workflow), plus 1 approving review, approval of the most recent push by someone other than its author, resolution of all review threads, linear history, no branch deletion, no force-push, and squash-merge only. Repository admins may bypass these requirements when merging their own PR (e.g. a trivial `.github` change) but still cannot push directly to `main`.
 

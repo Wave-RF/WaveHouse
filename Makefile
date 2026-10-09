@@ -225,6 +225,17 @@ GO_TOOLCHAIN := $(shell scripts/ci/go-toolchain.sh)
 $(if $(GO_TOOLCHAIN),,$(error cannot derive the Go toolchain from go.mod, see above))
 export GOTOOLCHAIN := $(GO_TOOLCHAIN)
 
+# -trimpath makes compiled packages independent of the checkout's directory,
+# so every worktree shares one Go build cache entry per package and variant
+# instead of building its own. A caller's GOFLAGS is kept, and one that already
+# names -trimpath (`-trimpath=false` to opt out) is left alone, which also
+# stops sub-makes from prepending it again.
+GOFLAGS ?=
+ifeq ($(findstring -trimpath,$(GOFLAGS)),)
+override GOFLAGS := -trimpath $(GOFLAGS)
+endif
+export GOFLAGS
+
 # ==============================================================================
 # Targets
 # ==============================================================================
@@ -484,6 +495,13 @@ test-tagged-tests:
 test-integration-parts:
 	$(call run,integration-parts test,scripts/ci/integration-parts.test.sh,)
 
+# test-prune-pr-build-cache: assert scripts/ci/prune-pr-build-cache.sh, which
+# deletes pull-request build cache entries with a write token: one wrongly
+# selected costs a PR its warm cache, or main every run's. A verify leaf.
+.PHONY: test-prune-pr-build-cache
+test-prune-pr-build-cache:
+	$(call run,prune-pr-build-cache test,scripts/ci/prune-pr-build-cache.test.sh,)
+
 # test-review-gate: feed the pre-push review hooks (.claude/hooks/
 # review-marker.sh and agent-bash-gate.sh) synthetic hook events in a scratch
 # repository with sibling worktrees: a marker must attest to the exact commit a
@@ -583,12 +601,13 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (19): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# Leaves (20): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
 # for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
 # test-classify-paths, test-release-channel, test-go-toolchain, check-dockerfile-go, test-tagged-tests,
-# test-integration-parts and test-review-gate for the tooling;
+# test-integration-parts, test-prune-pr-build-cache and test-review-gate for the
+# tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
 # nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
 # (`biome check`) but NOT fmt-ts (`biome format`) — check already covers
@@ -602,7 +621,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-go-toolchain check-dockerfile-go test-tagged-tests test-integration-parts test-review-gate vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-go-toolchain check-dockerfile-go test-tagged-tests test-integration-parts test-prune-pr-build-cache test-review-gate vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.

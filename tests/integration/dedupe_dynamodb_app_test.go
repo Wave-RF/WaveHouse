@@ -64,11 +64,10 @@ func TestDynamoDBDedupe_TwoInstancesShareSeenIDs(t *testing.T) {
 		ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 		require.NoError(t, err)
 		cfg := &config.Config{
-			DataDir:    t.TempDir(),
-			Server:     config.Server{ShutdownTimeout: 10},
-			ClickHouse: config.ClickHouse{Password: testCHPassword},
-			MQ:         config.MQ{Backend: config.MQEmbedded},
-			Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
+			DataDir: t.TempDir(),
+			Server:  config.Server{ShutdownTimeout: 10},
+			MQ:      config.MQ{Backend: config.MQEmbedded},
+			Cache:   config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
 			Dedupe: config.Dedupe{Backend: config.DedupeDynamoDB, Lease: lease, DynamoDB: config.DedupeDynamoDBConfig{
 				Table: ddbTable, Region: "us-east-1", Endpoint: e.dynamoEndpoint,
 				// dynamodb-local under a parallel suite is slower than the real thing.

@@ -793,9 +793,10 @@ func (r *RedisCache) drain(ctx context.Context, conn func() rueidis.Client) bool
 	return r.pending.len() == 0
 }
 
-// Close stops the background loops, makes one last attempt at the pending
-// bumps, and closes the connection. Bumps still undelivered are lost: the
-// entries they would orphan are served until their TTL.
+// Close stops the background loops, retries the pending bumps past the
+// breaker every drainMinBackoff for up to closeDrainBudget, and closes the
+// connection. Bumps still undelivered are lost: the entries they would
+// orphan are served until their TTL.
 func (r *RedisCache) Close() error {
 	r.closeOnce.Do(func() {
 		r.cancel()
@@ -803,13 +804,23 @@ func (r *RedisCache) Close() error {
 		if r.pending.len() > 0 {
 			ctx, cancel := context.WithTimeout(context.Background(), closeDrainBudget)
 			// Past the breaker: an open one is why bumps are pending, and this
-			// is the last chance to deliver them.
-			r.drain(ctx, func() rueidis.Client {
+			// is the last chance to deliver them. A server just back can miss
+			// the first attempt's op timeout, so retry within the budget.
+			last := func() rueidis.Client {
 				if cp := r.client.Load(); cp != nil {
 					return *cp
 				}
 				return nil
-			})
+			}
+			// With no client the dial loop has stopped and no retry can help.
+			for r.client.Load() != nil && !r.drain(ctx, last) {
+				select {
+				case <-ctx.Done():
+				case <-time.After(drainMinBackoff):
+					continue
+				}
+				break
+			}
 			cancel()
 			if n := r.pending.len(); n > 0 {
 				slog.Warn("cache: closing with undelivered invalidations; entries they orphan stay cached until their TTL", "pending", n)

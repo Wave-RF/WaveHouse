@@ -22,15 +22,14 @@ services:
       # pre-creates /app/data owned by the nonroot user; bind-mount any
       # persistent volume here.
       WH_DATA_DIR: /app/data
-      # ClickHouse wiring (addr, ports, database, user, tls, headers, pool
-      # sizes) is in ./settings/config.json — the settings directory below —
-      # where it hot-reloads. Only the password (a secret) and the connection
-      # ceiling are env; the bundled ClickHouse has no password.
-      # WH_CH_PASSWORD: ""
+      # ClickHouse wiring (addr, ports, database, user, password, tls,
+      # headers, pool sizes) is in ./settings/config.json — the settings
+      # directory below — where it hot-reloads; the bundled ClickHouse has no
+      # password. Only the connection ceiling is env.
       # WH_CH_MAX_TOTAL_CONNS: "0"
-      # No auth on/off switch: set WH_AUTH_JWT_SECRET to validate tokens;
-      # without it, every request resolves to the policy default_role.
-      # WH_AUTH_JWT_SECRET: "change-me"
+      # No auth on/off switch: set auth.jwt_secret in ./settings/config.json
+      # to validate tokens; without it (or a jwks_url), every request
+      # resolves to the policy default_role.
       #
       # Optional non-JWT operator credential: a request presenting it
       # (Authorization: Operator <key>, or the X-Operator-Key alias) gets
