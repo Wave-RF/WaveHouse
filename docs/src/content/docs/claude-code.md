@@ -36,12 +36,14 @@ Two scripts, both committed to the repo:
 
 | Hook | Behavior |
 | ---- | -------- |
-| `pre-commit` | Runs `make verify` (the static checks listed in [Development → Makefile Targets](/development#makefile-targets), ~30s) — **blocks on failure**. Skipped if `make ci` or `make verify` already ran for the current tree state (cached via `scripts/ci-marker.sh`). |
-| `pre-push` | Scales the bar to the change set (same classifier CI uses, `scripts/classify-paths.sh`): a **code** change requires the `make ci` marker (`tmp/ci-passed-tree-<TREE-sha>`, from `make ci` or `make ci-remote`); a **docs/prose-only** push requires only the `make verify` marker (`tmp/verify-passed-tree-<TREE-sha>`) — CI skips the Go/SDK suites for those too. **Blocks** if the required marker is absent. Fail-closed: an unclassifiable push falls back to requiring `make ci`. |
+| `pre-commit` | Runs `make verify` (the static checks listed in [Development → Makefile Targets](/development#makefile-targets), ~30s) — **blocks on failure**. Skipped if `make ci` or `make verify` already ran for the current tree state (cached via `scripts/ci-marker.sh`). A worktree with no `Makefile` has nothing to verify and commits; a missing or failing `scripts/ci-marker.sh` is reported and `make verify` runs. |
+| `pre-push` | Scales the bar to the change set (same classifier CI uses, `scripts/classify-paths.sh`): a **code** change requires the `make ci` marker (`tmp/ci-passed-tree-<TREE-sha>`, from `make ci` or `make ci-remote`); a **docs/prose-only** push requires only the `make verify` marker (`tmp/verify-passed-tree-<TREE-sha>`) — CI skips the Go/SDK suites for those too. **Blocks** if the required marker is absent. Fail-closed: an unclassifiable push falls back to requiring `make ci`. A pushed commit with no `Makefile` goes through, having no code to validate; one with a `Makefile`, pushed from a worktree without `scripts/ci-marker.sh`, is blocked. |
 
 `--no-verify` is for intentional WIP / draft pushes. Agents should not use it — policy in AGENTS.md §"Agent PR Discipline", not regex-enforced.
 
 Both markers are tree-keyed so commit-then-push works without a re-run when the tree is unchanged. `make ci` / `make verify` skip the marker write when `$CI` is set (CI runners don't push). Shared logic lives in `scripts/ci-marker.sh`.
+
+`make tools` sets `core.hooksPath` to the relative `.githooks`, which git resolves in each worktree: each worktree runs its own branch's hooks, and one whose branch has no `.githooks/` runs none. An absolute `core.hooksPath` runs one checkout's hooks in every worktree, which is why the hooks handle a worktree with no code. `make test-githooks` (part of `make verify`) commits and pushes through the real hooks from scratch worktrees with and without code.
 
 ## What's in `.claude/` and `.config/`
 

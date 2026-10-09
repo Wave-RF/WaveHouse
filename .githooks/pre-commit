@@ -1,13 +1,38 @@
 #!/usr/bin/env bash
 # Runs `make verify` (or skips if `scripts/ci-marker.sh` says it already passed
 # for this tree). Bypass: `git commit --no-verify`.
+#
+# An absolute core.hooksPath runs this hook in every worktree of the
+# repository, including ones whose branch holds no code (an orphan branch that
+# keeps a tool's state, say). A worktree with no Makefile has nothing to verify.
 
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-if scripts/ci-marker.sh has-verify-marker 2>/dev/null; then
-  echo "✔ pre-commit: verify already passed for this tree (cached)" >&2
+if [ ! -f Makefile ]; then
+  echo "pre-commit: no Makefile in $PWD, so nothing to verify." >&2
   exit 0
+fi
+
+# has-verify-marker exits 0 when the marker is there and 1 when it isn't; any
+# other failure, or a missing script, is reported and falls through to the full
+# `make verify`.
+marker_script=scripts/ci-marker.sh
+if [ ! -x "$marker_script" ]; then
+  echo "⚠️  pre-commit: $marker_script is missing or not executable, so the cached verify result can't be checked; running 'make verify'." >&2
+else
+  err=$("$marker_script" has-verify-marker 2>&1 >/dev/null)
+  case $? in
+    0)
+      echo "✔ pre-commit: verify already passed for this tree (cached)" >&2
+      exit 0
+      ;;
+    1) ;;
+    *)
+      echo "⚠️  pre-commit: $marker_script has-verify-marker failed, so the cached verify result can't be checked; running 'make verify'." >&2
+      [ -n "$err" ] && printf '%s\n' "$err" | sed 's/^/    /' >&2
+      ;;
+  esac
 fi
 
 make verify || { echo "🛑 pre-commit: 'make verify' failed." >&2; exit 1; }
