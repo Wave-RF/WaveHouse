@@ -42,6 +42,8 @@ cp scripts/ci-marker.sh scripts/classify-paths.sh "$repo/scripts/"
 cp scripts/ci/remote-ci.sh "$repo/scripts/ci/"
 cp .githooks/pre-push "$repo/.githooks/"
 echo 'tmp/' > "$repo/.gitignore"
+# A code repository has a Makefile; the pre-push hook passes a commit without one.
+printf 'ci:\n' > "$repo/Makefile"
 git -C "$repo" add -A
 git -C "$repo" commit -q -m base
 git -C "$repo" update-ref refs/remotes/origin/main HEAD
