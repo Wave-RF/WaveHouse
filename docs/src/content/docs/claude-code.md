@@ -121,7 +121,7 @@ Each hook in `.claude/settings.json` names its script under `$CLAUDE_PROJECT_DIR
 
 | Event | Script | With the script missing |
 | ----- | ------ | ----------------------- |
-| PreToolUse (Bash) | `agent-bash-gate.sh` | Blocks (exit 2) a command that contains the words `git` and `push`, or `gh` with `pr` or `api` and one of `create`, `edit`, `ready`, `review`, `merge` or `requested_reviewers`, and every command when there is no `jq` to read it with. Other commands go through, so the session can still work |
+| PreToolUse (Bash) | `agent-bash-gate.sh` | Blocks (exit 2) a command that contains the words `git` and `push`; `gh` and `pr` with one of `create`, `new`, `edit`, `ready`, `review` or `merge`; or `gh` and `api` with `pulls` or `graphql`, which covers every call to the pull-request or GraphQL API, reads included. It also blocks every command when there is no `jq` to read it with. Other commands go through, so the session can still work |
 | SubagentStop | `review-marker.sh` | Reports it on stderr with exit 1. Exit 2 [would keep the subagent running](https://code.claude.com/docs/en/hooks#exit-code-2-behavior-per-event). A reviewer's `ship_it` writes no marker, so the push gate blocks for lack of one |
 | PostToolUse | `gofumpt-on-save.sh`, `markdown-on-save.sh` | Reports it with exit 2, which shows Claude the message; the edit has already happened |
 

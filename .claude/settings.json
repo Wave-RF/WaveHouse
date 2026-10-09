@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "h=\"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-bash-gate.sh\"; [ -f \"$h\" ] && [ -x \"$h\" ] && exec \"$h\"; c=$(jq -r '.tool_input.command // empty' 2>/dev/null) || { c='git push'; cat >/dev/null; }; m() { printf '%s\\n' \"$c\" | grep -Eq '(^|[^[:alnum:]_.-])('\"$1\"')([^[:alnum:]_.-]|$)'; }; if { m git && m push; } || { m gh && m 'pr|api' && m 'create|edit|ready|review|merge|requested_reviewers'; }; then echo \"🛑 Claude PR discipline gate: $h is missing or not executable, so this push or PR change can't be checked and is blocked (without jq, every command is). If this session's checkout was removed, restart Claude Code from a live checkout.\" >&2; exit 2; fi",
+            "command": "h=\"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-bash-gate.sh\"; [ -f \"$h\" ] && [ -x \"$h\" ] && exec \"$h\"; c=$(jq -r '.tool_input.command // empty' 2>/dev/null) || { c='git push'; cat >/dev/null; }; m() { printf '%s\\n' \"$c\" | grep -Eq '(^|[^[:alnum:]_.-])('\"$1\"')([^[:alnum:]_.-]|$)'; }; if { m git && m push; } || { m gh && { { m pr && m 'create|new|edit|ready|review|merge'; } || { m api && m 'pulls|graphql'; }; }; }; then echo \"🛑 Claude PR discipline gate: $h is missing or not executable, so this push or PR change can't be checked and is blocked (without jq, every command is). If this session's checkout was removed, restart Claude Code from a live checkout.\" >&2; exit 2; fi",
             "timeout": 30
           }
         ]

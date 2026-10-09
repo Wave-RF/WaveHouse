@@ -61,6 +61,12 @@ for t in cat grep; do ln -s "$(command -v "$t")" "$nojq/$t"; done
 
 gone=$scratch/gone # the project directory of a session whose checkout was removed
 mkdir "$gone"
+noexec=$scratch/noexec # one whose hook scripts are there but not executable
+mkdir -p "$noexec/.claude/hooks"
+for s in agent-bash-gate.sh review-marker.sh gofumpt-on-save.sh markdown-on-save.sh; do
+  cp "$root/.claude/hooks/$s" "$noexec/.claude/hooks/$s"
+  chmod a-x "$noexec/.claude/hooks/$s"
+done
 
 # run <shell> <command> <project-dir|-> <payload-file> [PATH]: run a hook
 # command as Claude Code does, with CLAUDE_PROJECT_DIR unset for `-`; sets rc,
@@ -114,11 +120,16 @@ pushes=(
   'cd sub && git -C ../wt push origin HEAD'
   "$(printf 'git commit -qm x\ngit push')"
   'gh pr create --draft --title "fix: x"'
+  'gh pr new --title "fix: x"'
   'gh pr ready 12'
   'gh pr edit 12 --add-reviewer someone'
   'gh pr merge 12 --squash'
   'gh pr review 12 --approve'
   'gh api -X POST repos/o/r/pulls/1/requested_reviewers -f reviewers[]=someone'
+  'gh api repos/o/r/pulls/1/reviews -f event=APPROVE'
+  'gh api repos/o/r/pulls -f head=feat -f base=main -f title="fix: x"'
+  'gh api -X PUT repos/o/r/pulls/1/merge'
+  "gh api graphql -f query='mutation { markPullRequestReadyForReview(input: {pullRequestId: \"x\"}) { clientMutationId } }'"
 )
 others=(
   'ls -la'
@@ -127,26 +138,32 @@ others=(
   'gh pr view 12'
   'gh pr checks 12'
   'gh issue edit 5 --title x'
+  'gh api repos/o/r/issues/5/comments'
   'make verify'
 )
 
 for sh in "${shells[@]}"; do
   echo "── $sh"
 
-  # Every command in settings.json, for every event: a missing script must not
-  # look like the shell's own failure (126/127), and must say what is missing.
+  # Every command in settings.json, for every event: a script that is missing,
+  # or there but not executable, must not end the hook the way the shell would
+  # (126/127, or 0), and the hook must say what is wrong.
   while IFS= read -r line; do
     event=$(jq -r '.[0]' <<<"$line")
     cmd=$(jq -r '.[1]' <<<"$line")
     jq -nc --arg e "$event" '{hook_event_name: $e, tool_name: "Bash", tool_input: {command: "git push", file_path: "x.go"},
       agent_type: "pre-push-reviewer"}' >"$scratch/payload"
-    run "$sh" "$cmd" "$gone" "$scratch/payload"
-    name="$event hook with its script missing says so (exit $rc, not 126/127)"
-    if [ "$rc" != 0 ] && [ "$rc" != 126 ] && [ "$rc" != 127 ] && [[ $err == *"is missing or not executable"* ]]; then
-      ok "$name"
-    else
-      fail "$name" "$err"
-    fi
+    for d in "$gone" "$noexec"; do
+      what=missing
+      [ "$d" = "$noexec" ] && what="not executable"
+      run "$sh" "$cmd" "$d" "$scratch/payload"
+      name="$event hook with its script $what says so (exit $rc, not 0/126/127)"
+      if [ "$rc" != 0 ] && [ "$rc" != 126 ] && [ "$rc" != 127 ] && [[ $err == *"is missing or not executable"* ]]; then
+        ok "$name"
+      else
+        fail "$name" "$err"
+      fi
+    done
   done < <(jq -c '.hooks | to_entries[] | .key as $e | .value[] | .hooks[] | select(.type == "command") | [$e, .command]' "$settings")
 
   # PreToolUse: the gate's script is gone.
@@ -174,26 +191,32 @@ for sh in "${shells[@]}"; do
   printf 'not json' >"$scratch/payload"
   run "$sh" "$pre" "$gone" "$scratch/payload"
   expect "PreToolUse, gate missing: blocks an unreadable payload" 2 "is missing or not executable"
-  mkdir -p "$scratch/noexec/.claude/hooks"
-  printf '#!/bin/sh\nexit 0\n' >"$scratch/noexec/.claude/hooks/agent-bash-gate.sh"
   bash_payload 'git push'
-  run "$sh" "$pre" "$scratch/noexec" "$scratch/payload"
+  run "$sh" "$pre" "$noexec" "$scratch/payload"
   expect "PreToolUse, gate not executable: blocks a push" 2 "is missing or not executable"
+  bash_payload 'ls -la'
+  run "$sh" "$pre" "$noexec" "$scratch/payload"
+  expect "PreToolUse, gate not executable: lets 'ls -la' through" 0 ""
 
-  # SubagentStop: visible, but never exit 2 (that keeps the subagent running).
-  stop_payload pre-push-reviewer
-  run "$sh" "$stop" "$gone" "$scratch/payload"
-  expect "SubagentStop, marker hook missing: reports it on stderr with exit 1" 1 "review-marker.sh is missing or not executable"
+  for d in "$gone" "$noexec"; do
+    what=missing
+    [ "$d" = "$noexec" ] && what="not executable"
 
-  # PostToolUse: exit 2 shows Claude the message; the edit already happened.
-  i=0
-  while IFS= read -r c; do
-    c=$(jq -r . <<<"$c")
-    edit_payload "$scratch/x.go"
-    run "$sh" "$c" "$gone" "$scratch/payload"
-    expect "PostToolUse, ${post_scripts[i]} missing: tells Claude with exit 2" 2 "${post_scripts[i]} is missing or not executable"
-    i=$((i + 1))
-  done <<<"$post"
+    # SubagentStop: visible, but never exit 2 (that keeps the subagent running).
+    stop_payload pre-push-reviewer
+    run "$sh" "$stop" "$d" "$scratch/payload"
+    expect "SubagentStop, marker hook $what: reports it on stderr with exit 1" 1 "review-marker.sh is missing or not executable"
+
+    # PostToolUse: exit 2 shows Claude the message; the edit already happened.
+    i=0
+    while IFS= read -r c; do
+      c=$(jq -r . <<<"$c")
+      edit_payload "$scratch/x.go"
+      run "$sh" "$c" "$d" "$scratch/payload"
+      expect "PostToolUse, ${post_scripts[i]} $what: tells Claude with exit 2" 2 "${post_scripts[i]} is missing or not executable"
+      i=$((i + 1))
+    done <<<"$post"
+  done
 
   # A missing script's command still reads its whole payload: a hook that
   # exits without reading would leave a large write to its stdin unfinished.
