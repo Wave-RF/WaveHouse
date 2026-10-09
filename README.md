@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Wave-RF/WaveHouse/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/Wave-RF/WaveHouse?filter=!client&color=%2306B0BF"></a>
+  <a href="https://github.com/Wave-RF/WaveHouse/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/Wave-RF/WaveHouse?filter=v*&color=%2306B0BF"></a>
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-%23086D77"></a>
 </p>
 

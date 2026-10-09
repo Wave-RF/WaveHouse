@@ -539,7 +539,7 @@ Run `make help` to see all targets. Key ones:
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
 | `make build-release` | Stripped release-style build → `bin/wavehouse-release` |
 | `make build-cover` | Coverage-instrumented build → `bin/wavehouse-cov` (used by E2E) |
-| `make build-ts` | Build TypeScript SDK → `clients/ts/dist/`, then smoke-load its ESM, CJS and IIFE entry points at the oldest Node `engines.node` admits |
+| `make build-ts` | Build TypeScript SDK → `clients/ts/dist/`, then smoke-load its ESM, CJS and IIFE entry points at the oldest Node `engines.node` admits, and type-check a CommonJS and an ESM consumer against the built declarations with `tsc --module node16` |
 | **Test** | |
 | `make test` | Alias for `test-unit` |
 | `make test-unit` | Go unit tests + render coverage + gate suite threshold |

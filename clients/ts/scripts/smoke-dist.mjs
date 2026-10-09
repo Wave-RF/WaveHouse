@@ -2,9 +2,18 @@
 // Run it at the oldest Node the package supports (`make smoke-ts-dist`):
 // a dependency that is ESM-only breaks `require()` there but not on a current Node.
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
@@ -41,13 +50,15 @@ const names = (o) => Object.keys(o).sort();
 
 const exp = pkg.exports["."];
 check("package.json entry points agree", () => {
-  if (pkg.main !== exp.require)
-    throw new Error(`main ${pkg.main} != exports.require ${exp.require}`);
-  if (pkg.module !== exp.import)
-    throw new Error(`module ${pkg.module} != exports.import ${exp.import}`);
+  if (pkg.main !== exp.require.default)
+    throw new Error(`main ${pkg.main} != exports.require.default ${exp.require.default}`);
+  if (pkg.module !== exp.import.default)
+    throw new Error(`module ${pkg.module} != exports.import.default ${exp.import.default}`);
   if (pkg.jsdelivr !== pkg.unpkg) throw new Error(`jsdelivr ${pkg.jsdelivr} != unpkg ${pkg.unpkg}`);
-  if (pkg.types !== exp.types) throw new Error(`types ${pkg.types} != exports.types ${exp.types}`);
-  if (!existsSync(resolve(root, exp.types))) throw new Error(`${exp.types} does not exist`);
+  if (pkg.types !== exp.import.types)
+    throw new Error(`types ${pkg.types} != exports.import.types ${exp.import.types}`);
+  for (const f of [exp.import.types, exp.require.types])
+    if (!existsSync(resolve(root, f))) throw new Error(`${f} does not exist`);
 });
 
 // Entry points are loaded by package name, through the exports map, so a broken
@@ -58,8 +69,8 @@ check("exports map resolves to the declared files", () => {
     if (resolve(got) !== resolve(root, want))
       throw new Error(`${cond} resolved to ${got}, want ${want}`);
   };
-  same(fileURLToPath(import.meta.resolve(pkg.name)), exp.import, "import");
-  same(requireFromPkg.resolve(pkg.name), exp.require, "require");
+  same(fileURLToPath(import.meta.resolve(pkg.name)), exp.import.default, "import");
+  same(requireFromPkg.resolve(pkg.name), exp.require.default, "require");
 });
 
 // The ESM build is the reference surface; CJS and IIFE must match it exactly.
@@ -71,7 +82,7 @@ try {
     throw new Error("empty export surface or missing createClient");
   }
 } catch (err) {
-  failures.push(`esm (${exp.import}) via import(): ${err?.stack ?? err}`);
+  failures.push(`esm (${exp.import.default}) via import(): ${err?.stack ?? err}`);
 }
 
 const sameSurface = (mod) => {
@@ -83,7 +94,7 @@ const sameSurface = (mod) => {
   }
 };
 
-check(`cjs (${exp.require}) via require()`, () => {
+check(`cjs (${exp.require.default}) via require()`, () => {
   sameSurface(requireFromPkg(pkg.name));
 });
 
@@ -97,10 +108,56 @@ check(`iife (${pkg.unpkg}) as a classic script`, () => {
     if (!own.has(k) && !nodeOnly.has(k)) ctx[k] = globalThis[k];
   }
   ctx.window = ctx.self = ctx;
-  vm.runInContext(readFileSync(resolve(root, pkg.unpkg), "utf8"), ctx, { filename: pkg.unpkg });
+  vm.runInContext(readFileSync(resolve(root, pkg.unpkg), "utf8"), ctx, {
+    filename: pkg.unpkg,
+  });
   const g = ctx.WaveHouse;
   if (!g) throw new Error("script did not define the WaveHouse global");
   sameSurface(g);
+});
+
+// A TypeScript consumer picks the declarations by its own module format: under
+// node16/nodenext a CommonJS project may not `import` an ESM-typed package
+// (TS1479), though the runtime `require()` works. Compile one consumer of each
+// format against the built package, offline, from a scratch project that
+// resolves it by name through node_modules like an installed copy.
+check("type declarations resolve for CommonJS and ESM consumers", () => {
+  const tsc = resolve(root, "node_modules/typescript/bin/tsc");
+  const dir = mkdtempSync(join(tmpdir(), "wavehouse-sdk-types-"));
+  try {
+    mkdirSync(join(dir, "node_modules/@wavehouse"), { recursive: true });
+    symlinkSync(root, join(dir, "node_modules", pkg.name), "dir");
+    const use = `import { createClient } from "${pkg.name}";\nexport const c: ReturnType<typeof createClient> = createClient({ baseURL: "http://localhost" });\n`;
+    const bad = [];
+    for (const [kind, type, file] of [
+      ["CommonJS", "commonjs", "index.ts"],
+      ["ESM", "module", "index.ts"],
+    ]) {
+      const proj = join(dir, kind);
+      mkdirSync(proj);
+      writeFileSync(join(proj, "package.json"), JSON.stringify({ type }));
+      writeFileSync(join(proj, file), use);
+      const r = spawnSync(
+        process.execPath,
+        [
+          tsc,
+          "--noEmit",
+          "--strict",
+          "--skipLibCheck",
+          "--module",
+          "node16",
+          "--target",
+          "es2022",
+          join(proj, file),
+        ],
+        { encoding: "utf8", cwd: proj },
+      );
+      if (r.status !== 0) bad.push(`${kind} consumer:\n${r.stdout}${r.stderr}`);
+    }
+    if (bad.length) throw new Error(bad.join("\n"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 check(`bin (${pkg.bin["wavehouse-codegen"]}) --help`, () => {
@@ -115,5 +172,5 @@ if (failures.length) {
   process.exit(1);
 }
 console.log(
-  `dist smoke ok on node ${process.version}: ${expected.length} exports across esm, cjs, iife; exports map, bin and package.json fields ok`,
+  `dist smoke ok on node ${process.version}: ${expected.length} exports across esm, cjs, iife; exports map, type declarations (CommonJS and ESM consumers), bin and package.json fields ok`,
 );
