@@ -43,7 +43,9 @@ digest='sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 
 passes "match" "$mod" 'FROM golang:1.26.9-alpine AS builder\nFROM scratch\n'
 passes "match, no variant" "$mod" 'FROM golang:1.26.9\n'
-passes "digest" "$mod" "FROM golang:1.26.9-alpine@$digest AS builder\n"
+rejects "digest, matching tag" "$mod" "FROM golang:1.26.9-alpine@$digest AS builder\n"
+rejects "digest, registry prefix" "$mod" "FROM docker.io/library/golang:1.26.9-alpine@$digest\n"
+rejects "digest, no tag" "$mod" "FROM golang@$digest\n"
 passes "platform flag" "$mod" "FROM --platform=\$BUILDPLATFORM golang:1.26.9-alpine AS builder\n"
 passes "lowercase from" "$mod" 'from golang:1.26.9-alpine as builder\n'
 passes "toolchain line wins" 'module m\n\ngo 1.26.6\n\ntoolchain go1.26.9\n' 'FROM golang:1.26.9-alpine\n'

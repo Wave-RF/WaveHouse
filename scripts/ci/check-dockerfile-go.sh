@@ -5,8 +5,9 @@
 # an older Go, or refuse to build, depending on which side is behind. The pin
 # comes from scripts/ci/go-toolchain.sh, the one derivation the Makefile and CI
 # share. It fails closed: a Dockerfile with no `golang:` FROM line, or a FROM
-# whose image is an ARG (`FROM ${IMAGE}`, `golang:${V}-alpine`), cannot be
-# verified, so it is an error rather than a pass. Run by `make verify` (target:
+# whose image is an ARG (`FROM ${IMAGE}`, `golang:${V}-alpine`) or a digest
+# (`golang:1.26.9-alpine@sha256:...`: Docker uses the digest and ignores the
+# tag), cannot be verified, so it is an error rather than a pass. Run by `make verify` (target:
 # check-dockerfile-go).
 #
 # Usage: check-dockerfile-go.sh [Dockerfile] [go.mod]
@@ -50,10 +51,14 @@ while IFS= read -r image; do
     bad=$((bad + 1))
     continue
   fi
-  base="${image%%@*}" # drop a digest
-  base="${base##*/}"  # drop a registry host[:port]/path prefix
-  [[ "$base" == golang || "$base" == golang:* ]] || continue
+  base="${image##*/}" # drop a registry host[:port]/path prefix
+  [[ "$base" == golang || "$base" == golang:* || "$base" == golang@* ]] || continue
   found=$((found + 1))
+  if [[ "$base" == *@* ]]; then
+    echo "check-dockerfile-go: $dockerfile has 'FROM $image', pinned by digest: Docker ignores the tag then, so this check cannot verify the Go version; pin by tag (golang:$want-<variant>)" >&2
+    bad=$((bad + 1))
+    continue
+  fi
   tag="${base#golang}"
   tag="${tag#:}"
   # The tag is the version, or the version and a letter-led variant (-alpine),
