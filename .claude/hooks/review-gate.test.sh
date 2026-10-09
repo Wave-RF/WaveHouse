@@ -458,15 +458,38 @@ expect_block "…and how to handle a reviewer definition older than REVIEWED:" "
 
 # A logged skip, recorded from a subdirectory, satisfies the gate and is echoed.
 mkdir -p "$wtb/sub"
-(cd "$wtb/sub" && ../scripts/skip-pre-push-review.sh "$R1" "test skip" 2>/dev/null \
-  && ../scripts/skip-pre-push-review.sh "$R2" "test skip" 2>/dev/null)
+(cd "$wtb/sub" && ../scripts/skip-pre-push-review.sh "$R1" "test skip" \
+  && ../scripts/skip-pre-push-review.sh "$R2" "test skip") 2>"$scratch/skip.err"
 B2=$(git -C "$wtb" rev-parse HEAD)
-if has_marker "$wtb" "$R1" "$B2" && [ ! -d "$wtb/sub/tmp" ]; then
+if has_marker "$wtb" "$R1" "$B2" && has_marker "$wtb" "$R2" "$B2" && [ ! -d "$wtb/sub/tmp" ]; then
   ok "skip-pre-push-review.sh writes to the worktree root from a subdirectory"
 else
-  fail "skip-pre-push-review.sh writes to the worktree root from a subdirectory"
+  fail "skip-pre-push-review.sh writes to the worktree root from a subdirectory" "$(cat "$scratch/skip.err")"
 fi
 expect_allow "skipped reviewers satisfy the gate and are echoed" "$wtb" "git push origin feat-b" "skipped by judgment"
+
+# Bash writes each of the manifest's names separately, so a reader that stops
+# at the first match can exit before a later write, which then dies of SIGPIPE.
+# Whether it does is up to the scheduler; a pause after each name gives the
+# reader time to exit first.
+slow=$scratch/slow
+scratch_init "$slow"
+mkdir -p "$slow/scripts"
+cp scripts/pre-push-reviewers.sh "$slow/scripts/reviewers.sh"
+cp scripts/skip-pre-push-review.sh "$slow/scripts/"
+# shellcheck disable=SC2016 # the manifest's own code, expanded when it runs
+printf '%s\n' '#!/usr/bin/env bash' 'bash "${0%/*}/reviewers.sh" | while read -r r; do echo "$r"; sleep 0.3; done' \
+  > "$slow/scripts/pre-push-reviewers.sh"
+git -C "$slow" add scripts
+at 1000 "$slow" commit -q -m base
+first=$(bash scripts/pre-push-reviewers.sh)
+first=${first%%$'\n'*}
+(cd "$slow" && scripts/skip-pre-push-review.sh "$first" "test skip") 2>"$scratch/skip.err"
+if has_marker "$slow" "$first" "$(git -C "$slow" rev-parse HEAD)"; then
+  ok "the first-listed reviewer can be skipped while the manifest is still writing"
+else
+  fail "the first-listed reviewer can be skipped while the manifest is still writing" "$(cat "$scratch/skip.err")"
+fi
 
 # The gh checks still resolve the title linter from the session's checkout.
 CLAUDE_PROJECT_DIR=$root expect_block "gh pr create title lint" "$repo" "gh pr create --draft --title \"Bad title.\"" "PR title"

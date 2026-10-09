@@ -36,8 +36,12 @@ fi
 
 # Only a real gating reviewer can be skipped — refuse to mint a marker for an
 # arbitrary name (that would just confuse the gate, never satisfy it).
+# Match the captured list, not a pipe: grep -q quits at the first match, and a
+# manifest still writing then dies of SIGPIPE, which pipefail reads as a miss.
 list_script="scripts/pre-push-reviewers.sh"
-if [ ! -f "$list_script" ] || ! bash "$list_script" 2>/dev/null | grep -Fxq -- "$name"; then
+reviewers=""
+[ -f "$list_script" ] && reviewers=$(bash "$list_script" 2>/dev/null)
+if ! grep -Fxq -- "$name" <<<"$reviewers"; then
   echo "skip-pre-push-review: '$name' is not a reviewer in $list_script — refusing." >&2
   exit 2
 fi
@@ -47,10 +51,10 @@ head_sha=$(git rev-parse HEAD 2>/dev/null) || {
   exit 2
 }
 
-# Resolve the review base the same way the push gate does (local main, else
-# origin/main) for the advisory relevance check below.
+# Resolve the review base the same way the push gate does (origin/main, else
+# local main) for the advisory relevance check below.
 base=""
-for ref in main origin/main; do
+for ref in origin/main main; do
   if git rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then base="$ref"; break; fi
 done
 
@@ -64,7 +68,8 @@ skiplog="tmp/review-skips-${head_sha}.log"
 warn=""
 case "$name" in
   pre-push-reviewer)
-    if [ -n "$base" ] && git diff --name-only "${base}...HEAD" 2>/dev/null | grep -qvE '\.mdx?$'; then
+    if [ -n "$base" ] && changed=$(git diff --name-only "${base}...HEAD" 2>/dev/null) \
+      && [ -n "$changed" ] && grep -qvE '\.mdx?$' <<<"$changed"; then
       warn="non-docs files changed on this branch — a code review is probably warranted"
     fi
     ;;
