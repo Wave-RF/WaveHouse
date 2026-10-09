@@ -25,12 +25,9 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// Config is the boot-config half of authentication: the secrets, fixed for
-// the process lifetime and shared by every tenant.
+// Config is the boot-config half of authentication: the platform's own
+// credential, fixed for the process lifetime and shared by every tenant.
 type Config struct {
-	// JWTSecret is the HMAC secret, the verifier of a tenant whose Wiring
-	// names no JWKS URL.
-	JWTSecret string
 	// OperatorKey is the optional non-JWT operator credential; a match on
 	// the presented credential (Authorization: Operator <key>, or the
 	// X-Operator-Key alias) authorizes a full-access platform operator (see
@@ -41,7 +38,10 @@ type Config struct {
 // Wiring is one tenant's half: the verifier wiring its settings directory's
 // auth block carries, adopted per tenant (Authenticator.Reconfigure).
 type Wiring struct {
-	JWKSURL   string
+	JWKSURL string
+	// JWTSecret is the HMAC secret, the verifier when JWKSURL is empty; a
+	// tenant's own, so a reload that rotates it rebuilds the verifier.
+	JWTSecret string
 	RoleClaim string // dot-separated claim path, e.g. "role" or "app_metadata.role"
 }
 
@@ -131,7 +131,7 @@ func (v *verifier) keyFunc(t *jwt.Token) (any, error) {
 	return []byte(v.secret), nil
 }
 
-// newVerifier builds a verifier from the secrets and one tenant's wiring.
+// newVerifier builds a verifier from one tenant's wiring.
 // Accepted signing algorithms are restricted to the verifier's family, so
 // jwt.Parse rejects an unexpected alg (including "none") before keyFunc runs
 // — defense-in-depth against alg-confusion and alg:none attacks. With a JWKS
@@ -139,8 +139,8 @@ func (v *verifier) keyFunc(t *jwt.Token) (any, error) {
 // once and pending — a token-bearing request is refused to retry
 // (ErrVerifierPending), never evaluated under the policy default_role —
 // until a fetch succeeds, so neither boot nor a reload waits on the URL.
-func newVerifier(cfg Config, w Wiring) *verifier {
-	v := &verifier{secret: cfg.JWTSecret, roleClaim: w.roleClaim(), url: w.JWKSURL}
+func newVerifier(w Wiring) *verifier {
+	v := &verifier{secret: w.JWTSecret, roleClaim: w.roleClaim(), url: w.JWKSURL}
 	if v.url == "" {
 		v.validMethods = hmacMethods
 		return v
@@ -302,8 +302,8 @@ func (b *cappedBody) Read(p []byte) (int, error) {
 // builds a new verifier from the tenant's adopted wiring and swaps it in
 // when that wiring changed, keeping the one it has when it did not; Prune
 // drops the verifiers of tenants that stopped being served, rejected or
-// removed; Close stops every JWKS refresh. The secrets are boot config and
-// never change.
+// removed; Close stops every JWKS refresh. The operator key is boot config
+// and never changes.
 type Authenticator struct {
 	cfg      Config
 	tenantOf TenantSource
@@ -334,11 +334,11 @@ func (a *Authenticator) Reconfigure(id tenant.ID, w Wiring) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	old := (*a.verifiers.Load())[id]
-	if old != nil && old.roleClaim == w.roleClaim() && old.url == w.JWKSURL {
+	if old != nil && old.roleClaim == w.roleClaim() && old.url == w.JWKSURL && old.secret == w.JWTSecret {
 		return
 	}
 	next := maps.Clone(*a.verifiers.Load())
-	next[id] = newVerifier(a.cfg, w)
+	next[id] = newVerifier(w)
 	a.verifiers.Store(&next)
 	if old != nil {
 		old.stop()

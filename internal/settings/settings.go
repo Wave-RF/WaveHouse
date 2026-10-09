@@ -65,8 +65,9 @@ type PipesFile struct {
 // runs on (`mq.backend`, `cache.backend`, `dedupe.backend`,
 // `coord.backend`), resource sizing (`data_dir`, `cache.l1_max_cost`,
 // `clickhouse.max_total_conns`), listeners, the observability exporters —
-// and the secrets (`clickhouse.password`, `auth.jwt_secret`,
-// `auth.operator_key`), which never belong in a tracked JSON file. Every
+// and the process-level secrets (`auth.operator_key`, `cache.redis.password`).
+// A tenant's own secrets — `clickhouse.password`, `auth.jwt_secret` — live
+// here with the wiring they belong to, so they reload with it (#529). Every
 // block and every top-level key inside it is REQUIRED, but dedupe.retention
 // (missing means "0", forever): the binary carries no other compiled default,
 // so the adopted snapshot is exactly what the files say.
@@ -85,12 +86,11 @@ type TenantConfig struct {
 	CORS       *CORSConfig       `json:"cors"`
 }
 
-// ClickHouseConfig is the ClickHouse wiring minus the password (boot config
-// `clickhouse.password` / WH_CH_PASSWORD, a secret). A reload that changes
-// any of it swaps the connection unconditionally; reachability is a runtime
-// concern (schema discovery, /readyz), never a reload one. A certificate
-// file that cannot be read or parsed is the one exception: boot refuses,
-// and a reload keeps the previous connection.
+// ClickHouseConfig is the ClickHouse wiring, password included. A reload
+// that changes any of it swaps the connection unconditionally; reachability
+// is a runtime concern (schema discovery, /readyz), never a reload one. A
+// certificate file that cannot be read or parsed is the one exception: boot
+// refuses, and a reload keeps the previous connection.
 type ClickHouseConfig struct {
 	// Addr is the native-protocol host:port (schema discovery, structured
 	// queries, pipes, /readyz).
@@ -101,6 +101,8 @@ type ClickHouseConfig struct {
 	HTTPScheme *string `json:"http_scheme"`
 	Database   *string `json:"database"`
 	Username   *string `json:"username"`
+	// Password pairs with Username; may be empty (a passwordless user).
+	Password *string `json:"password"`
 	// QueryTimeout is the deadline in seconds (>= 1) of a call on the query
 	// paths: structured queries, pipes (writes included) and the raw-SQL proxy.
 	QueryTimeout *int `json:"query_timeout"`
@@ -130,14 +132,19 @@ type ClickHouseTLS struct {
 	ServerName         *string `json:"server_name"`
 }
 
-// AuthConfig is the JWT verifier wiring minus the secrets (boot config
-// `auth.jwt_secret` and `auth.operator_key`). A reload that changes it
-// rebuilds the tenant's verifier; until a JWKS endpoint's key set has been
-// fetched, a token-bearing request is refused (503) rather than verified.
+// AuthConfig is the JWT verifier wiring, the HMAC secret included; the
+// operator key is boot config (`auth.operator_key`), a credential of the
+// platform, not of a tenant. A reload that changes it rebuilds the tenant's
+// verifier; until a JWKS endpoint's key set has been fetched, a
+// token-bearing request is refused (503) rather than verified.
 type AuthConfig struct {
 	// JWKSURL, when non-empty, makes JWKS the sole verifier (the HMAC
 	// secret is then ignored). Must be an absolute http(s) URL.
 	JWKSURL *string `json:"jwks_url"`
+	// JWTSecret is the HMAC secret tokens are verified with when JWKSURL is
+	// empty; with both empty no token validates, and every request is the
+	// policy default_role.
+	JWTSecret *string `json:"jwt_secret"`
 	// RoleClaim is the dot-separated claim path the role is read from.
 	RoleClaim *string `json:"role_claim"`
 }

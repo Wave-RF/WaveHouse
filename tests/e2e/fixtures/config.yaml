@@ -6,12 +6,11 @@
 # env vars. Everything below is pinned here so the
 # rig config is visible and editable without recompiling Go.
 
-# JWT validation. The suite signs test tokens with this fixed dev secret;
-# don't reuse outside the e2e rig. role_claim / jwks_url live in
-# settings/config.json.
-auth:
-  jwt_secret: sdk-dev-secret
-  # operator_key: "" # non-JWT full-access operator credential (Authorization: Operator, or X-Operator-Key); unset in the rig
+# JWT validation. The suite signs test tokens with the fixed dev secret in
+# settings/config.json (auth.jwt_secret: sdk-dev-secret, beside role_claim
+# and jwks_url); don't reuse it outside the e2e rig.
+# auth:
+#   operator_key: "" # non-JWT full-access operator credential (Authorization: Operator, or X-Operator-Key); unset in the rig
 
 
 # The shared cache, as a multi-instance deployment runs it; the in-process

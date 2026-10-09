@@ -511,6 +511,10 @@ func (v *validator) checkClickHouse(ch *ClickHouseConfig) {
 			v.errorf(FileConfig, path, "must not be empty")
 		}
 	}
+	// Required like every key, but empty is a value: a passwordless user.
+	if ch.Password == nil {
+		v.required("clickhouse.password")
+	}
 	if ch.QueryTimeout == nil {
 		v.required("clickhouse.query_timeout")
 	} else if *ch.QueryTimeout < 1 {
@@ -582,7 +586,7 @@ func (v *validator) checkClickHouseHeaders(headers map[string]string) {
 		case !validHeaderName(name):
 			v.errorf(FileConfig, path, "not a valid HTTP header name")
 		case slices.ContainsFunc(reservedHeaders, func(r string) bool { return strings.EqualFold(r, name) }):
-			v.errorf(FileConfig, path, "carries ClickHouse credentials, which come from clickhouse.username and the boot password")
+			v.errorf(FileConfig, path, "carries ClickHouse credentials, which come from clickhouse.username and clickhouse.password")
 		case seen[canonical] != "":
 			v.errorf(FileConfig, path, "spells the same header as %q; names are case-insensitive", seen[canonical])
 		default:
@@ -676,6 +680,16 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 			v.required("auth.role_claim")
 		} else if strings.TrimSpace(*a.RoleClaim) == "" || strings.TrimSpace(*a.RoleClaim) != *a.RoleClaim {
 			v.errorf(FileConfig, "auth.role_claim", "must be a non-empty claim path with no surrounding whitespace, got %q", *a.RoleClaim)
+		}
+		// Required like every key, but empty is a posture: with no JWKS URL
+		// either, no token validates and the tenant is as public as its
+		// policy's default_role — valid (the seed ships so), which boot
+		// warns about per tenant.
+		switch {
+		case a.JWTSecret == nil:
+			v.required("auth.jwt_secret")
+		case a.JWKSURL != nil && *a.JWKSURL != "" && *a.JWTSecret != "":
+			v.warnf(FileConfig, "auth.jwt_secret", "ignored while auth.jwks_url is set: JWKS is the sole verifier")
 		}
 	}
 	if d := c.Dedupe; d == nil {

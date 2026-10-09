@@ -115,9 +115,9 @@ func authOperatorHeader(key string) func(*http.Request) {
 	return func(r *http.Request) { r.Header.Set("Authorization", "Operator "+key) }
 }
 
-func cfg() Config { return Config{JWTSecret: testutil.TestJWTSecret} }
+func cfg() Config { return Config{} }
 
-func roleClaim() Wiring { return Wiring{RoleClaim: "role"} }
+func roleClaim() Wiring { return Wiring{RoleClaim: "role", JWTSecret: testutil.TestJWTSecret} }
 
 // staticPolicies is a PolicySource fixed to p, whatever the tenant.
 func staticPolicies(p *policy.Policy) PolicySource {
@@ -242,7 +242,7 @@ func TestMiddleware_BearerScheme_CaseInsensitive(t *testing.T) {
 func TestMiddleware_ValidToken_NestedRoleClaim(t *testing.T) {
 	t.Parallel()
 	tok := testutil.MakeJWT(t, map[string]any{"app_metadata": map[string]any{"role": "manager"}})
-	c := run(t, cfg(), Wiring{RoleClaim: "app_metadata.role"}, bearer(tok))
+	c := run(t, cfg(), Wiring{RoleClaim: "app_metadata.role", JWTSecret: testutil.TestJWTSecret}, bearer(tok))
 	assert.Equal(t, "manager", c.role)
 }
 
@@ -259,7 +259,7 @@ func TestMiddleware_ValidToken_NoRoleClaim_RolelessNoError(t *testing.T) {
 func TestMiddleware_DefaultRoleClaim(t *testing.T) {
 	t.Parallel()
 	// Empty RoleClaim defaults to "role".
-	c := run(t, cfg(), Wiring{}, bearer(testutil.MakeJWT(t, map[string]any{"role": "viewer"})))
+	c := run(t, cfg(), Wiring{JWTSecret: testutil.TestJWTSecret}, bearer(testutil.MakeJWT(t, map[string]any{"role": "viewer"})))
 	assert.Equal(t, "viewer", c.role)
 }
 
@@ -275,7 +275,7 @@ func TestMiddleware_InvalidToken_FallsBackWithError(t *testing.T) {
 func TestMiddleware_WrongSecret_FallsBackWithError(t *testing.T) {
 	t.Parallel()
 	tok := testutil.MakeJWT(t, map[string]any{"role": "viewer"}) // signed with testutil secret
-	c := run(t, Config{JWTSecret: "a-different-secret-entirely!"}, roleClaim(), bearer(tok))
+	c := run(t, cfg(), Wiring{RoleClaim: "role", JWTSecret: "a-different-secret-entirely!"}, bearer(tok))
 	assert.Empty(t, c.role)
 	assert.True(t, errors.Is(c.authErr, errInvalidToken))
 }
@@ -663,7 +663,7 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 	}{
 		{
 			name:     "match sets operator bit and stamps the live admin role",
-			cfg:      Config{JWTSecret: testutil.TestJWTSecret, OperatorKey: testOperatorKey},
+			cfg:      Config{OperatorKey: testOperatorKey},
 			w:        roleClaim(),
 			store:    adminStore(),
 			setup:    operatorHeader(testOperatorKey),
@@ -699,7 +699,7 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 			// A non-matching key never authenticates; the request falls through to
 			// the Bearer-token path (a valid JWT → role editor, claims set).
 			name:       "wrong key falls through to the JWT path",
-			cfg:        Config{JWTSecret: testutil.TestJWTSecret, OperatorKey: testOperatorKey},
+			cfg:        Config{OperatorKey: testOperatorKey},
 			w:          roleClaim(),
 			store:      adminStore(),
 			setup:      withBoth("wrong-key"),
@@ -710,7 +710,7 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 			// The operator key is checked before the Bearer token, so it wins even
 			// when a valid JWT is also present (and never parses the JWT claims).
 			name:     "operator key wins over a valid JWT",
-			cfg:      Config{JWTSecret: testutil.TestJWTSecret, OperatorKey: testOperatorKey},
+			cfg:      Config{OperatorKey: testOperatorKey},
 			w:        roleClaim(),
 			store:    adminStore(),
 			setup:    withBoth(testOperatorKey),
@@ -732,7 +732,7 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 		},
 		{
 			name:     "Authorization Operator scheme grants operator",
-			cfg:      Config{JWTSecret: testutil.TestJWTSecret, OperatorKey: testOperatorKey},
+			cfg:      Config{OperatorKey: testOperatorKey},
 			w:        roleClaim(),
 			store:    adminStore(),
 			setup:    authOperatorHeader(testOperatorKey),
@@ -751,7 +751,7 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 		{
 			// A Bearer credential is a JWT, never mistaken for the operator key.
 			name:       "Authorization Bearer is a JWT, not the operator key",
-			cfg:        Config{JWTSecret: testutil.TestJWTSecret, OperatorKey: testOperatorKey},
+			cfg:        Config{OperatorKey: testOperatorKey},
 			w:          roleClaim(),
 			store:      adminStore(),
 			setup:      bearer(editorJWT),
@@ -974,7 +974,7 @@ func TestAuthenticator_ReconfigureSwapsRoleClaim(t *testing.T) {
 	a.Reconfigure(tenant.Default, roleClaim())
 	assert.Same(t, before, (*a.verifiers.Load())[tenant.Default], "unchanged wiring keeps the verifier")
 
-	a.Reconfigure(tenant.Default, Wiring{RoleClaim: "app_metadata.role"})
+	a.Reconfigure(tenant.Default, Wiring{RoleClaim: "app_metadata.role", JWTSecret: testutil.TestJWTSecret})
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	assert.Equal(t, "new", got, "the next request sees the reconfigured claim path")
 }
@@ -990,7 +990,7 @@ func TestAuthenticator_ReconfigureAppliesUnreachableJWKS(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := newAuth(t, cfg(), Wiring{}, nil)
+	a := newAuth(t, cfg(), Wiring{JWTSecret: testutil.TestJWTSecret}, nil)
 
 	var got string
 	h := a.Middleware()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got = RoleFromContext(r.Context()) }))

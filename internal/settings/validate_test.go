@@ -328,6 +328,8 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"clickhouse.max_open_conns below idle", FileConfig, `{"clickhouse": {"max_open_conns": 2, "max_idle_conns": 5}}`, "clickhouse.max_open_conns: must be >= clickhouse.max_idle_conns (5), got 2"},
 		{"missing auth.jwks_url", FileConfig, `{"auth": {"role_claim": "role"}}`, "auth.jwks_url: required"},
 		{"missing auth.role_claim", FileConfig, `{"auth": {"jwks_url": ""}}`, "auth.role_claim: required"},
+		{"missing auth.jwt_secret", FileConfig, `{"auth": {"jwks_url": "", "role_claim": "role"}}`, "auth.jwt_secret: required"},
+		{"missing clickhouse.password", FileConfig, `{"clickhouse": {"username": "default"}}`, "clickhouse.password: required"},
 		{"auth.jwks_url relative", FileConfig, `{"auth": {"jwks_url": "/.well-known/jwks.json"}}`, "must be an absolute http(s) URL"},
 		{"auth.jwks_url bad scheme", FileConfig, `{"auth": {"jwks_url": "ftp://idp.example/jwks"}}`, "must be an absolute http(s) URL"},
 		{"auth.role_claim empty", FileConfig, `{"auth": {"role_claim": ""}}`, "auth.role_claim: must be a non-empty claim path"},
@@ -485,6 +487,7 @@ func TestValidate_Warnings(t *testing.T) {
 		{"https with a plaintext native hop", FileConfig, configJSON(`{"clickhouse": {"http_scheme": "https"}}`), "clickhouse.tls.enabled: clickhouse.http_scheme is https but the native hop is plaintext"},
 		{"default on required parameter", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x", "required": true, "default": 5}]}]}`, "never used"},
 		{"grant with neither operation", FilePolicies, `{"default_role": "public", "tables": {"clicks": {"analyst": {}}}}`, "neither select nor insert"},
+		{"jwt_secret beside a jwks_url is ignored", FileConfig, configJSON(`{"auth": {"jwks_url": "https://idp.example/jwks.json", "jwt_secret": "hmac"}}`), "auth.jwt_secret: ignored while auth.jwks_url is set"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

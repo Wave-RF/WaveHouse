@@ -933,9 +933,9 @@ Use `GET /v1/ops/dlq/stats` to monitor DLQ depth, per tenant (`?tenant=`).
 
 ## Generating a JWT for Testing
 
-Needed whenever a caller must present a role — e.g. to reach an admin endpoint (role == `admin_role`) or any role beyond the policy `default_role`. The token must be signed with the configured `jwt_secret` (or a key the `jwks_url` serves) and must carry the role in its role claim (`auth.role_claim`, default `role`) — a token without the claim resolves to the policy `default_role`.
+Needed whenever a caller must present a role — e.g. to reach an admin endpoint (role == `admin_role`) or any role beyond the policy `default_role`. The token must be signed with the tenant's `auth.jwt_secret` (or a key its `jwks_url` serves), both settings-directory keys, and must carry the role in its role claim (`auth.role_claim`, default `role`) — a token without the claim resolves to the policy `default_role`.
 
-`"change-me-in-production"` below is the placeholder shipped in the repo's `config.yaml` (what `make dev` / `./bin/wavehouse` load). The compose quickstart sets **no** secret — set `WH_AUTH_JWT_SECRET` on the `wavehouse` service and sign with that value (see [Development — Validating tokens](/development#validating-tokens)).
+`"change-me-in-production"` below stands for your settings directory's `auth.jwt_secret`. The seed `wavehouse bootstrap` writes (what `make dev` loads) and the compose quickstart's `deployments/compose/settings/config.json` both leave it empty, so no token validates until you set one — a settings key, so it reloads live — and sign with that value (see [Development — Validating tokens](/development#validating-tokens)).
 
 ```bash
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli):
