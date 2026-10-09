@@ -652,7 +652,9 @@ func (v *validator) checkClickHousePool(ch *ClickHouseConfig) {
 
 // checkSecretsMode warns when config.json carries a secret that every user
 // can read. Only the others bit counts: the server's group is a legitimate
-// reader (a Kubernetes Secret volume under fsGroup is 0440), and the file
+// reader (a Kubernetes Secret volume with defaultMode 0400 under fsGroup is
+// 0440; fsGroup only adds group-read, so the default 0644 stays
+// world-readable), and the file
 // is routinely owned by a user other than the server's. A warning, not an
 // error: refusing the file would break those deployments rather than
 // protect them, and the seed's secrets are empty, so a fresh directory is

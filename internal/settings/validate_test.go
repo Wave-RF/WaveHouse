@@ -473,7 +473,7 @@ func TestValidate_RoleReferences(t *testing.T) {
 // TestValidate_SecretsReadableByOthersWarn pins the permission check on
 // config.json (#529, #786 review): a file that carries a secret and that
 // every user can read warns, naming the keys and the mode; one the group
-// can read (a Kubernetes Secret volume under fsGroup is 0440), one only the
+// can read (a Kubernetes Secret volume with defaultMode 0400 under fsGroup is 0440), one only the
 // owner can read, or one whose secrets are empty (the seed), does not. A
 // warning, since a bind mount or a Kubernetes volume is routinely owned by
 // another user than the server's.
