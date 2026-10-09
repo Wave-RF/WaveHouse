@@ -15,7 +15,7 @@ Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, and the admi
 Authorization: Bearer <token>
 ```
 
-The JWT must use HMAC signing (HS256/HS384/HS512) or be validated via a JWKS endpoint (configured via `auth.jwks_url` in the [settings directory](/settings-directory#authentication) — per tenant, over [a nested directory](/deployment#the-nested-settings-directory), so a JWKS-issued token verifies only under the tenants whose `jwks_url` names its provider's key set; tenants that leave `jwks_url` empty all verify against the shared boot `jwt_secret` and accept each other's tokens, or validate no token at all while it is unset). While a tenant's JWKS has not been fetched yet — at boot, or after a reload built or rebuilt its verifier (a new tenant folder, one adopted again after being rejected or removed, or a changed `jwks_url` or `role_claim`) — a request carrying a token is answered `503 {"error": "token verifier not ready: the tenant's JWKS has not been fetched yet"}` with `Retry-After: 30` rather than evaluated under the `default_role`; requests without a token are unaffected, and so is one authenticated by a valid operator key, which is checked first and never consults the verifier. The accepted signing algorithm is pinned to the active verifier and checked *before* any key is consulted: an HMAC deployment accepts only `HS256`/`HS384`/`HS512`, and a JWKS deployment accepts only the asymmetric family (`RS256/384/512`, `ES256/384/512`, `PS256/384/512`, `EdDSA`). Tokens using `alg: none`, or an algorithm from the other family (e.g. an `HS256` token sent to a JWKS deployment), are rejected outright.
+The JWT must use HMAC signing (HS256/HS384/HS512) or be validated via a JWKS endpoint (configured via `auth.jwks_url` in the [settings directory](/settings-directory#authentication) — per tenant, over [a nested directory](/deployment#the-nested-settings-directory), so a JWKS-issued token verifies only under the tenants whose `jwks_url` names its provider's key set; a tenant that leaves `jwks_url` empty verifies against its own `auth.jwt_secret` — tenants carrying the same secret accept each other's tokens — or validates no token at all while that is empty). While a tenant's JWKS has not been fetched yet — at boot, or after a reload built or rebuilt its verifier (a new tenant folder, one adopted again after being rejected or removed, or a changed `jwks_url` or `role_claim`; a changed `jwt_secret` rebuilds an HMAC tenant's verifier but is ignored under a `jwks_url`) — a request carrying a token is answered `503 {"error": "token verifier not ready: the tenant's JWKS has not been fetched yet"}` with `Retry-After: 30` rather than evaluated under the `default_role`; requests without a token are unaffected, and so is one authenticated by a valid operator key, which is checked first and never consults the verifier. The accepted signing algorithm is pinned to the active verifier and checked *before* any key is consulted: an HMAC deployment accepts only `HS256`/`HS384`/`HS512`, and a JWKS deployment accepts only the asymmetric family (`RS256/384/512`, `ES256/384/512`, `PS256/384/512`, `EdDSA`). Tokens using `alg: none`, or an algorithm from the other family (e.g. an `HS256` token sent to a JWKS deployment), are rejected outright.
 
 For SSE connections where custom headers are not possible, you can pass the token as a query parameter:
 
@@ -935,14 +935,14 @@ Use `GET /v1/ops/dlq/stats` to monitor DLQ depth, per tenant (`?tenant=`).
 
 Needed whenever a caller must present a role — e.g. to reach an admin endpoint (role == `admin_role`) or any role beyond the policy `default_role`. The token must be signed with the tenant's `auth.jwt_secret` (or a key its `jwks_url` serves), both settings-directory keys, and must carry the role in its role claim (`auth.role_claim`, default `role`) — a token without the claim resolves to the policy `default_role`.
 
-`"change-me-in-production"` below stands for your settings directory's `auth.jwt_secret`. The seed `wavehouse bootstrap` writes (what `make dev` loads) and the compose quickstart's `deployments/compose/settings/config.json` both leave it empty, so no token validates until you set one — a settings key, so it reloads live — and sign with that value (see [Development — Validating tokens](/development#validating-tokens)).
+`"my-secret"` below stands for your settings directory's `auth.jwt_secret`. The seed `wavehouse bootstrap` writes (what `make dev` loads) and the compose quickstart's `deployments/compose/settings/config.json` both leave it empty, so no token validates until you set one — a settings key, so it reloads live — and sign with that value (see [Development — Validating tokens](/development#validating-tokens)).
 
 ```bash
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli):
-jwt encode --secret "change-me-in-production" '{"role": "admin", "exp": 9999999999}'
+jwt encode --secret "my-secret" '{"role": "admin", "exp": 9999999999}'
 
 # Export for use with curl:
-export TOKEN=$(jwt encode --secret "change-me-in-production" '{"role": "admin", "exp": 9999999999}')
+export TOKEN=$(jwt encode --secret "my-secret" '{"role": "admin", "exp": 9999999999}')
 curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \

@@ -979,6 +979,52 @@ func TestAuthenticator_ReconfigureSwapsRoleClaim(t *testing.T) {
 	assert.Equal(t, "new", got, "the next request sees the reconfigured claim path")
 }
 
+// TestAuthenticator_ReconfigureRotatesSecret pins the per-tenant HMAC secret
+// (#529): a reload that changes a tenant's jwt_secret rebuilds its verifier,
+// so a token signed with the retired secret stops validating at once and one
+// signed with the new secret validates; two tenants on different secrets
+// reject each other's tokens; and on a JWKS tenant, where the secret is
+// ignored, editing it keeps the verifier it has — a rebuild would refuse
+// token checks until the key set is fetched again.
+func TestAuthenticator_ReconfigureRotatesSecret(t *testing.T) {
+	t.Parallel()
+	const acmeSecret, globexSecret, rotated = "acme-secret-at-least-32-chars-long", "globex-secret-at-least-32-chars-lo", "rotated-secret-at-least-32-chars-long"
+	a := NewAuthenticator(Config{}, testTenantOf, nil)
+	t.Cleanup(a.Close)
+	a.Reconfigure("acme", Wiring{RoleClaim: "role", JWTSecret: acmeSecret})
+	a.Reconfigure("globex", Wiring{RoleClaim: "role", JWTSecret: globexSecret})
+	sign := func(secret string) string {
+		tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"role": "editor", "exp": time.Now().Add(time.Hour).Unix()})
+		signed, err := tok.SignedString([]byte(secret))
+		require.NoError(t, err)
+		return signed
+	}
+	acmeTok, globexTok, rotatedTok := sign(acmeSecret), sign(globexSecret), sign(rotated)
+
+	assert.Equal(t, "editor", serve(t, a, both(asTenant("acme"), bearer(acmeTok))).role)
+	assert.Equal(t, "editor", serve(t, a, both(asTenant("globex"), bearer(globexTok))).role)
+	c := serve(t, a, both(asTenant("globex"), bearer(acmeTok)))
+	assert.Empty(t, c.role, "acme's token is refused under globex")
+	assert.True(t, errors.Is(c.authErr, errInvalidToken))
+	assert.Empty(t, serve(t, a, both(asTenant("acme"), bearer(globexTok))).role)
+
+	before := (*a.verifiers.Load())["acme"]
+	a.Reconfigure("acme", Wiring{RoleClaim: "role", JWTSecret: rotated})
+	assert.NotSame(t, before, (*a.verifiers.Load())["acme"], "a changed secret rebuilds the verifier")
+	assert.Equal(t, "editor", serve(t, a, both(asTenant("acme"), bearer(rotatedTok))).role, "the next request validates against the new secret")
+	c = serve(t, a, both(asTenant("acme"), bearer(acmeTok)))
+	assert.Empty(t, c.role, "a token signed with the retired secret stops validating")
+	assert.True(t, errors.Is(c.authErr, errInvalidToken))
+	assert.Equal(t, "editor", serve(t, a, both(asTenant("globex"), bearer(globexTok))).role, "the other tenant is untouched")
+
+	srv, _ := jwksServer(t, "kid-1", 0)
+	a.Reconfigure("initech", Wiring{JWKSURL: srv.URL, RoleClaim: "role", JWTSecret: acmeSecret})
+	jwks := (*a.verifiers.Load())["initech"]
+	a.Reconfigure("initech", Wiring{JWKSURL: srv.URL, RoleClaim: "role", JWTSecret: rotated})
+	assert.Same(t, jwks, (*a.verifiers.Load())["initech"], "under a JWKS URL the secret is ignored, so changing it keeps the verifier")
+	assert.Empty(t, serve(t, a, both(asTenant("initech"), bearer(rotatedTok))).role, "and never verifies an HMAC token")
+}
+
 // TestAuthenticator_ReconfigureAppliesUnreachableJWKS pins "settings are the
 // authority": a reload pointing at an unreachable JWKS swaps the verifier
 // anyway, so the HMAC token stops validating (fail closed) instead of the

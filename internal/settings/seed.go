@@ -55,7 +55,7 @@ func WriteSeed(dir string) error {
 		return err
 	}
 	for _, name := range Files() {
-		if err := os.WriteFile(filepath.Join(dir, name), files[name], 0o644); err != nil { //nolint:gosec // G306: settings files hold no secrets and are read by the server user
+		if err := os.WriteFile(filepath.Join(dir, name), files[name], 0o644); err != nil { //nolint:gosec // G306: the seed's secret keys are empty, and the server runs as another user in the container; the operator tightens the mode when filling them in (deployment docs)
 			return err
 		}
 	}

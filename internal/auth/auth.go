@@ -53,6 +53,16 @@ func (w Wiring) roleClaim() string {
 	return w.RoleClaim
 }
 
+// secret is the HMAC secret the verifier reads: none under a JWKS URL,
+// where the key is ignored, so editing it there neither rebuilds the
+// verifier nor interrupts token checks while the key set is fetched again.
+func (w Wiring) secret() string {
+	if w.JWKSURL != "" {
+		return ""
+	}
+	return w.JWTSecret
+}
+
 // TenantSource names the tenant a request resolved to — the store
 // api.TenantMW put in the context, and its Tenant() — and false on a
 // tenant-exempt route, where none was resolved.
@@ -140,7 +150,7 @@ func (v *verifier) keyFunc(t *jwt.Token) (any, error) {
 // (ErrVerifierPending), never evaluated under the policy default_role —
 // until a fetch succeeds, so neither boot nor a reload waits on the URL.
 func newVerifier(w Wiring) *verifier {
-	v := &verifier{secret: w.JWTSecret, roleClaim: w.roleClaim(), url: w.JWKSURL}
+	v := &verifier{secret: w.secret(), roleClaim: w.roleClaim(), url: w.JWKSURL}
 	if v.url == "" {
 		v.validMethods = hmacMethods
 		return v
@@ -334,7 +344,7 @@ func (a *Authenticator) Reconfigure(id tenant.ID, w Wiring) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	old := (*a.verifiers.Load())[id]
-	if old != nil && old.roleClaim == w.roleClaim() && old.url == w.JWKSURL && old.secret == w.JWTSecret {
+	if old != nil && old.roleClaim == w.roleClaim() && old.url == w.JWKSURL && old.secret == w.secret() {
 		return
 	}
 	next := maps.Clone(*a.verifiers.Load())
