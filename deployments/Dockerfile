@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
 # Stage 1: Build
-FROM golang:1.26-alpine AS builder
+# The tag must equal go.mod's Go version: the image sets GOTOOLCHAIN=local, so
+# an older Go refuses to build instead of fetching one. `make verify` checks
+# it (check-dockerfile-go).
+FROM golang:1.26.9-alpine AS builder
 WORKDIR /src
 
 # Pass build tags as an argument (defaults to empty)

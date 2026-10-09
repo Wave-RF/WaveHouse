@@ -117,7 +117,7 @@ Verbose: `V=1 make test`. Extra args: `make test ARGS="-run TestFoo"`. Build tag
 Tooling notes (the non-obvious bits `make help` won't tell you):
 
 - Dev tools (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) are pinned in `go.mod` via `tool` directives — `go tool <name>`, no manual install.
-- `make` exports `GOTOOLCHAIN` pinned to `go.mod`'s Go version, so a newer local Go is not used; a bare `go` outside `make` is not pinned, and the override is `make GOTOOLCHAIN=local ...` (an environment value is ignored).
+- `make` exports `GOTOOLCHAIN` pinned to `go.mod`'s Go version, so a newer local Go is not used; `deployments/Dockerfile` pins the matching `golang` image tag instead (its image sets `GOTOOLCHAIN=local`), which `make check-dockerfile-go` verifies; a bare `go` outside `make` is not pinned, and the override is `make GOTOOLCHAIN=local ...` (an environment value is ignored).
 - `golangci-lint` is pinned in the Makefile (v2.11.4), auto-installed to `.bin/` on first `make lint` — kept out of `go.mod` (its deps conflict with the main module).
 - `pnpm` (≥ 11.21) + `Node 22 LTS` (`.nvmrc`, matches CI) must be on PATH; `make tools` runs one root `pnpm install --frozen-lockfile` across the three workspaces (SDK `clients/ts/`, E2E `tests/e2e/sdk/`, docs `docs/`).
 - **GNU Make 4+** required (uses `--output-sync=target`); macOS ships GNU Make 3.81, which ignores it, so parallel output interleaves. Full setup: `docs/src/content/docs/development.md` § Prerequisites.
