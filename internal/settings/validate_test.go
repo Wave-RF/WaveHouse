@@ -472,7 +472,8 @@ func TestValidate_RoleReferences(t *testing.T) {
 
 // TestValidate_SecretsReadableByOthersWarn pins the permission check on
 // config.json (#529, #786 review): a file that carries a secret and that
-// other users can read warns, naming the keys and the mode; one only the
+// every user can read warns, naming the keys and the mode; one the group
+// can read (a Kubernetes Secret volume under fsGroup is 0440), one only the
 // owner can read, or one whose secrets are empty (the seed), does not. A
 // warning, since a bind mount or a Kubernetes volume is routinely owned by
 // another user than the server's.
@@ -487,8 +488,10 @@ func TestValidate_SecretsReadableByOthersWarn(t *testing.T) {
 		mode   os.FileMode
 		want   string
 	}{
-		{"both secrets, group and world readable", configJSON(`{"clickhouse": {"password": "s3cret"}, "auth": {"jwt_secret": "hmac"}}`), 0o644, "config.json: carries clickhouse.password and auth.jwt_secret but is readable by other users (mode 0644)"},
-		{"one secret, group readable", configJSON(`{"auth": {"jwt_secret": "hmac"}}`), 0o640, "carries auth.jwt_secret but is readable by other users (mode 0640)"},
+		{"both secrets, world readable", configJSON(`{"clickhouse": {"password": "s3cret"}, "auth": {"jwt_secret": "hmac"}}`), 0o644, "config.json: carries clickhouse.password and auth.jwt_secret but is world-readable (mode 0644)"},
+		{"one secret, others only", configJSON(`{"auth": {"jwt_secret": "hmac"}}`), 0o604, "carries auth.jwt_secret but is world-readable (mode 0604)"},
+		{"secrets, group readable", configJSON(`{"clickhouse": {"password": "s3cret"}, "auth": {"jwt_secret": "hmac"}}`), 0o640, ""},
+		{"secrets, fsGroup layout", configJSON(`{"auth": {"jwt_secret": "hmac"}}`), 0o440, ""},
 		{"secrets, owner only", configJSON(`{"clickhouse": {"password": "s3cret"}, "auth": {"jwt_secret": "hmac"}}`), 0o600, ""},
 		{"empty secrets, world readable", configJSON(`{}`), 0o644, ""},
 	}
@@ -504,7 +507,7 @@ func TestValidate_SecretsReadableByOthersWarn(t *testing.T) {
 			assert.False(t, HasErrors(findings))
 			got := findingStrings(findings)
 			if tt.want == "" {
-				assert.NotContains(t, got, "readable by other users")
+				assert.NotContains(t, got, "world-readable")
 			} else {
 				assert.Contains(t, got, tt.want)
 			}

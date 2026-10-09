@@ -650,14 +650,15 @@ func (v *validator) checkClickHousePool(ch *ClickHouseConfig) {
 	}
 }
 
-// checkSecretsMode warns when config.json carries a secret that other users
-// can read. A warning, not an error: a bind mount or a Kubernetes volume is
-// routinely owned by a user other than the server's, so refusing the file
-// would break those deployments rather than protect them, and the seed's
-// secrets are empty, so a fresh directory is quiet. Windows modes carry no
-// such bits.
+// checkSecretsMode warns when config.json carries a secret that every user
+// can read. Only the others bit counts: the server's group is a legitimate
+// reader (a Kubernetes Secret volume under fsGroup is 0440), and the file
+// is routinely owned by a user other than the server's. A warning, not an
+// error: refusing the file would break those deployments rather than
+// protect them, and the seed's secrets are empty, so a fresh directory is
+// quiet. Windows modes carry no such bits.
 func (v *validator) checkSecretsMode(c TenantConfig) {
-	if runtime.GOOS == "windows" || v.configMode&0o044 == 0 {
+	if runtime.GOOS == "windows" || v.configMode&0o004 == 0 {
 		return
 	}
 	var keys []string
@@ -670,7 +671,7 @@ func (v *validator) checkSecretsMode(c TenantConfig) {
 	if len(keys) == 0 {
 		return
 	}
-	v.warnf(FileConfig, "", "carries %s but is readable by other users (mode %04o): restrict it to the server's user, or mount it with mode 0400", strings.Join(keys, " and "), v.configMode)
+	v.warnf(FileConfig, "", "carries %s but is world-readable (mode %04o): restrict it to the server's user or group", strings.Join(keys, " and "), v.configMode)
 }
 
 // required reports a missing key. Every top-level tunable is required so the
