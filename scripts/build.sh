@@ -6,11 +6,14 @@
 #   <variant> debug | release | cover
 #
 # Variant differences:
-#   debug    bin/<name>           DWARF + symbol tables kept (LDFLAGS empty);
-#                                 what `make build` produces.
+#   debug    bin/<name>           DWARF + symbol tables kept (LDFLAGS empty) and
+#                                 absolute source paths (-trimpath=false, which
+#                                 overrides the Makefile's GOFLAGS), so a
+#                                 debugger finds the files; what `make build`
+#                                 produces.
 #   release  bin/<name>-release   `-s -w` applied — DWARF + symbol tables
 #                                 stripped; what `make build-release` produces.
-#   cover    bin/<name>-cov       Same as debug + `-cover` instrumentation;
+#   cover    bin/<name>-cov       Same as debug, but trimmed, + `-cover` instrumentation;
 #                                 used by E2E to capture coverage from a real
 #                                 running binary.
 #
@@ -31,7 +34,7 @@ case "$variant" in
 debug)
 	label=$name
 	ldflags="${LDFLAGS:-} ${VERSION_LDFLAGS:-}"
-	build_flags=()
+	build_flags=(-trimpath=false)
 	output="bin/$name"
 	;;
 release)

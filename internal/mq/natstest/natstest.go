@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -43,10 +42,24 @@ const (
 // Secret reference.
 func Password(user string) string { return "pw-" + user }
 
-// repoFile is path under the repository root.
+// repoFile is path under the repository root, found by walking up from the
+// working directory to go.mod. runtime.Caller would not do: -trimpath makes
+// it return module-relative paths.
 func repoFile(path string) string {
-	_, file, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(file), "..", "..", "..", path)
+	dir, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return filepath.Join(dir, path)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			panic("natstest: no go.mod above the working directory")
+		}
+		dir = parent
+	}
 }
 
 // ShippedValues and ShippedManifests are the files an operator deploys.
