@@ -126,7 +126,7 @@ gh_pr() {
 # gh POST. A field sent from a file (`-F key=@file`, --input) isn't read.
 gh_api() {
   local i=$1 e=$2 j w f ep="" method="" fields=0 write=0 path
-  local draft="" title="" event="" query="" values=""
+  local draft="" title="" event="" query="" qdyn=0 values=""
   for ((j = i; j < e; j++)); do
     w=${TK_VAL[j]}
     f=""
@@ -150,9 +150,12 @@ gh_api() {
       draft=*) draft=${f#draft=} ;;
       title=*) [ "${TK_DYN[j]}" = 0 ] && title=${f#title=} ;;
       event=*) event=${f#event=} ;;
-      query=*) query=${f#query=} ;;
+      query=*) query=${f#query=}; [ "${TK_DYN[j]}" = 0 ] || qdyn=1 ;;
     esac
   done
+  # A computed query (`-f query="$(cat <<'EOF' … EOF)"`) is matched against
+  # the code that computes it, heredoc bodies included.
+  [ "$qdyn" = 0 ] || query=$GH_CODE
   if [ -n "$method" ]; then
     case $method in [gG][eE][tT]) ;; *) write=1 ;; esac
   else
@@ -200,12 +203,37 @@ gh_api() {
   return 0
 }
 
+# shell_code_at <i> <end>: SHELL_CODE = the token index of the code a shell
+# whose arguments start at token <i> runs with -c (its first argument after
+# the options), or -1 when it isn't given -c. Steps over options and the value
+# of -o, +o, -O, +O, --rcfile and --init-file; a short-option cluster that
+# contains c (-c, -lc, -euc) counts as -c, a long option (--norc) doesn't.
+shell_code_at() {
+  local m=$1 e=$2 c=0
+  SHELL_CODE=-1
+  while [ "$m" -lt "$e" ]; do
+    case ${TK_VAL[m]} in
+      --) m=$((m + 1)); break ;;
+      --rcfile | --init-file) m=$((m + 1)) ;;
+      --*) ;;
+      [-+]*[oO]*)
+        case ${TK_VAL[m]} in -*c*) c=1 ;; esac
+        m=$((m + 1)) ;;
+      -*c*) c=1 ;;
+      [-+]?*) ;;
+      *) break ;;
+    esac
+    m=$((m + 1))
+  done
+  if [ "$c" = 1 ] && [ "$m" -lt "$e" ]; then SHELL_CODE=$m; fi
+}
+
 # gh_scan: judge every gh pr and gh api command in the current tokens, and
 # queue in GH_QUEUE the code a shell will run: each $(…) and `…`, the code a
 # shell is handed with -c or eval, and a heredoc or here-string a shell reads,
 # directly or through a pipe.
 gh_scan() {
-  local i j k n=${#TK_VAL[@]} w line="" start=0 s
+  local i j k m n=${#TK_VAL[@]} w line="" start=0 s
   local -a lines=() starts=() ends=()
   for ((i = 0; i <= n; i++)); do
     if [ "$i" -eq "$n" ] || [ "${TK_OP[i]}" = 1 ]; then
@@ -221,19 +249,29 @@ gh_scan() {
   for ((k = 0; k < ${#lines[@]}; k++)); do
     for ((j = starts[k]; j < ends[k]; j++)); do
       w=${TK_VAL[j]##*/}
-      if [ "$w" = gh ] && [ "${TK_DYN[j]}" = 0 ] && [ $((j + 1)) -lt "${ends[k]}" ]; then
-        case ${TK_VAL[j + 1]} in
-          pr) [ $((j + 2)) -lt "${ends[k]}" ] && gh_pr $((j + 2)) "${ends[k]}" ;;
-          api) gh_api $((j + 2)) "${ends[k]}" ;;
-        esac
+      if [ "$w" = gh ] && [ "${TK_DYN[j]}" = 0 ]; then
+        # gh takes -R/--repo before the command too: `gh -R o/r pr ready 12`.
+        m=$((j + 1))
+        while [ "$m" -lt "${ends[k]}" ]; do
+          case ${TK_VAL[m]} in
+            -R | --repo) m=$((m + 2)) ;;
+            -R?* | --repo=*) m=$((m + 1)) ;;
+            *) break ;;
+          esac
+        done
+        if [ "$m" -lt "${ends[k]}" ]; then
+          case ${TK_VAL[m]} in
+            pr) [ $((m + 1)) -lt "${ends[k]}" ] && gh_pr $((m + 1)) "${ends[k]}" ;;
+            api) gh_api $((m + 1)) "${ends[k]}" ;;
+          esac
+        fi
         break
       fi
-      # Code handed to a shell: `bash -c '…'` (or -lc, -ec, …), or eval's words.
+      # Code handed to a shell: `bash -c '…'` (or -lc, -e -c, …), or eval's words.
       case $w in
         sh | bash | dash | zsh | ksh)
-          case ${TK_VAL[j + 1]:-} in
-            -*c*) [ $((j + 2)) -lt "${ends[k]}" ] && GH_QUEUE+=("${TK_VAL[j + 2]}") ;;
-          esac ;;
+          shell_code_at $((j + 1)) "${ends[k]}"
+          [ "$SHELL_CODE" -lt 0 ] || GH_QUEUE+=("${TK_VAL[SHELL_CODE]}") ;;
         eval)
           s=""
           for ((i = j + 1; i < ends[k]; i++)); do s+=" ${TK_VAL[i]}"; done
@@ -262,20 +300,25 @@ gh_scan() {
   done
 }
 
-# gate_gh: judge the line, then each piece of code it hands a shell, in turn
-# (at most 64, a bound on code that nests itself). A line it can't parse is
-# refused when it mentions a gh pr or gh api command: it can't tell what runs.
+# gate_gh: judge the line, then each piece of code it hands a shell, in turn.
+# It follows 64 pieces, a bound on code that nests itself; past that, any piece
+# left that mentions a gh pr or gh api command is refused, unjudged. So is a
+# line it can't parse that mentions one: it can't tell what runs.
 gate_gh() {
-  local q code
+  local q
   grep -qE '(^|[^[:alnum:]_-])gh[[:space:]]' <<<"$cmd" || return 0
   GH_QUEUE=("$cmd")
   for ((q = 0; q < ${#GH_QUEUE[@]} && q < 64; q++)); do
-    code=${GH_QUEUE[q]}
-    if tokenize "$code"; then
+    GH_CODE=${GH_QUEUE[q]}
+    if tokenize "$GH_CODE"; then
       gh_scan
-    elif grep -qE "${gh_re}(pr|api)$end_re" <<<"$code"; then
+    elif grep -qE "$gh_cmd_re" <<<"$GH_CODE"; then
       block "can't parse this command (an unterminated quote or substitution?), so can't tell what it does to a PR. Fix the quoting, or run the gh command on its own."
     fi
+  done
+  for (( ; q < ${#GH_QUEUE[@]}; q++)); do
+    grep -qE "$gh_cmd_re" <<<"${GH_QUEUE[q]}" \
+      && block "this command nests more code than the gate follows (64 pieces), and some of what's left runs gh. Split it into separate commands."
   done
   return 0
 }
@@ -889,6 +932,8 @@ end_re='([[:space:]]|$|[;|&)`])'
 push_re=${git_re}push$end_re
 # shellcheck disable=SC2016
 gh_re='(^|[[:space:];|&(`])gh[[:space:]]+'
+# A gh pr or gh api command, -R/--repo before it allowed, anywhere in a text.
+gh_cmd_re=${gh_re}'((-R|--repo)(=|[[:space:]]*)[^[:space:]]+[[:space:]]+)*(pr|api)'$end_re
 head_re=${git_re}'(commit|merge|rebase|reset|checkout|switch|cherry-pick|revert|am|pull)'$end_re
 # shellcheck disable=SC2016
 shell_re='(^|[[:space:];|&(`])(eval|([^[:space:];|&]*/)?(ba|z|da|k)?sh)([[:space:]<]|$)'

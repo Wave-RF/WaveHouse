@@ -609,6 +609,44 @@ expect_block "a non-draft whose body says draft=true" "$repo" "gh api repos/o/r/
 expect_block "an API merge through a full URL" "$repo" 'gh api --method PUT https://api.github.com/repos/o/r/pulls/12/merge' "don't merge"
 expect_block "an API merge with fields set by -F=" "$repo" 'gh api repos/o/r/pulls/12/merge --field=merge_method=squash' "don't merge"
 
+# The gate follows 64 pieces of nested code; a gh command beyond them is refused.
+# shellcheck disable=SC2016 # literal $(true)s, for the gate to read
+pad62=$(printf ' $(true)%.0s' $(seq 62)) pad63=$(printf ' $(true)%.0s' $(seq 63))
+expect_block "a gh pr ready in the 63rd substitution is judged" "$repo" "echo$pad62 \$(gh pr ready 12)" "ready-for-review"
+expect_block "a gh pr ready past the 64 the gate follows is refused" "$repo" "echo$pad63 \$(gh pr ready 12)" "nests more code"
+expect_allow "a gh read beside 70 substitutions with no gh in them" "$repo" "gh pr view 12 && echo$pad63 \$(true) \$(true) \$(true) \$(true) \$(true) \$(true) \$(true)"
+
+# gh resolves -R/--repo before the command.
+expect_block "gh -R o/r pr ready" "$repo" 'gh -R o/r pr ready 12' "ready-for-review"
+expect_block "gh --repo o/r pr review --approve" "$repo" 'gh --repo o/r pr review 12 --approve' "Only humans approve"
+expect_block "gh --repo=o/r pr create without --draft" "$repo" 'gh --repo=o/r pr create --title "fix: x"' "must use --draft"
+expect_block "gh -Ro/r pr edit --add-reviewer" "$repo" 'gh -Ro/r pr edit 12 --add-reviewer someone' "Adding/removing reviewers"
+expect_block "gh -R o/r api merge" "$repo" 'gh -R o/r api -X PUT repos/o/r/pulls/12/merge' "don't merge"
+expect_allow "gh -R o/r pr view" "$repo" 'gh -R o/r pr view 12'
+
+# A GraphQL query computed by a heredoc inside $(…) is read from that heredoc.
+expect_block "GraphQL ready in a heredoc query" "$repo" "gh api graphql -f query=\"\$(cat <<'EOF'
+mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }
+EOF
+)\"" "ready-for-review"
+expect_allow "a GraphQL read in a heredoc query" "$repo" "gh api graphql -f query=\"\$(cat <<'EOF'
+query { viewer { login } }
+EOF
+)\""
+
+# A shell given options before -c still runs the code after them; the push
+# check and the gh check agree on these forms.
+expect_block "bash -e -c with a gh pr ready" "$repo" "bash -e -c 'gh pr ready 12'" "ready-for-review"
+expect_block "bash -euo pipefail -c with a gh pr ready" "$repo" "bash -euo pipefail -c 'gh pr ready 12'" "ready-for-review"
+expect_block "bash -o pipefail -c with a gh pr ready" "$repo" "bash -o pipefail -c 'gh pr ready 12'" "ready-for-review"
+expect_block "bash +o posix -c with a gh pr ready" "$repo" "bash +o posix -c 'gh pr ready 12'" "ready-for-review"
+expect_block "bash --noprofile --norc -c with an API merge" "$repo" "bash --noprofile --norc -c 'gh api -X PUT repos/o/r/pulls/12/merge'" "don't merge"
+expect_block "bash -e -c with a push" "$repo" "bash -e -c 'git -C ../wt-b push'" "can't follow"
+expect_block "bash -euo pipefail -c with a push" "$repo" "bash -euo pipefail -c 'git -C ../wt-b push'" "can't follow"
+expect_block "bash --noprofile --norc -c with a push" "$repo" "bash --noprofile --norc -c 'git -C ../wt-b push'" "can't follow"
+expect_allow "bash --norc running a script, not -c" "$repo" 'bash --norc scripts/pre-push-reviewers.sh'
+expect_allow "bash -o pipefail -c with a read" "$repo" "bash -o pipefail -c 'gh pr view 12'"
+
 if [ "$fails" -gt 0 ]; then
   printf '\n%d case(s) failed\n' "$fails" >&2
   exit 1
