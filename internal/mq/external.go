@@ -537,6 +537,22 @@ func boolGauge(b bool) int64 {
 	return 0
 }
 
+// Ready reports whether a publish can get through right now: ErrUnavailable
+// while the connection is down (the client reconnects by itself, so this is
+// the gap between a disconnect and the reconnect, or a server that is gone
+// for good), ErrTopology while the topology failed its last check. The
+// readiness probe reads it. Under coord.backend=nats the lease bucket rides
+// this connection and is part of the check, so it is covered too.
+func (e *ExternalNATS) Ready() error {
+	if !e.connected.Load() {
+		return fmt.Errorf("%w: not connected to nats", ErrUnavailable)
+	}
+	if !e.topologyOK.Load() {
+		return fmt.Errorf("%w: the topology failed its last check", ErrTopology)
+	}
+	return nil
+}
+
 // track registers stop to run at Close, returning its unregistration.
 func (e *ExternalNATS) track(stop func()) (untrack func()) {
 	e.mu.Lock()

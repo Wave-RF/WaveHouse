@@ -579,3 +579,7 @@ func Start(t testing.TB) *Server {
 
 // URL is the server's client URL.
 func (s *Server) URL() string { return s.s.ClientURL() }
+
+// Shutdown stops the server before the test ends, for what a client does
+// once it is gone; the test's own cleanup finds it stopped.
+func (s *Server) Shutdown() { s.s.Shutdown() }

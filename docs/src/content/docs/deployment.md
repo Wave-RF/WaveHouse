@@ -237,7 +237,7 @@ UID 65532 is the canonical distroless `nonroot` user; the same number works rega
 API servers in standalone mode expose liveness and readiness endpoints under the Kubernetes-convention names `/livez` and `/readyz`:
 
 - `GET /livez` — Liveness probe. Returns 200 once the gateway has discovered ClickHouse table schemas at least once. Returns 503 with a diagnostic body while the boot-time schema discovery retry loop is still running (e.g. ClickHouse unreachable, target database missing). After successful boot, `/livez` stays 200 — transient ClickHouse blips at runtime are reflected in `/readyz`, not `/livez`. Over a [nested settings directory](#the-nested-settings-directory) it is 503 while no tenant has completed a first discovery, and 200 from the first tenant's success on.
-- `GET /readyz` — Readiness probe. Returns 200 if the gateway is fully booted and ClickHouse is currently reachable, 503 otherwise. Over a nested directory every open ClickHouse pool is pinged at once and one that answers is enough; the 503 names every pool that did not.
+- `GET /readyz` — Readiness probe. Returns 200 if the gateway is fully booted and every backend it serves requests through is answering, 503 otherwise, naming each check that failed: `clickhouse` (every open pool is pinged at once and one that answers is enough; the failure names every pool that did not), `mq` under [`mq.backend: nats`](#external-nats) (the connection is down, or the topology failed its last check — the lease bucket of `coord.backend: nats` included). The shared cache and the dedupe stores are not checks: a tripped breaker falls back to ClickHouse, and a dedupe store that is not answering fails that tenant's ingest closed per request. Full behavior in the [API reference](/api#get-readyz--readiness-probe).
 
 `/healthz` remains registered as a **permanent alias** of `/livez` (it's the most widely-recognized name); `/health` and `/ready` are **deprecated aliases** for the v0.1.x line and will be removed in v0.2.0. Point new deployments at the `/livez` / `/readyz` names.
 
@@ -460,7 +460,7 @@ Two things the automated tests do not cover. Check them once on your own cluster
 
 ### Monitoring
 
-These gauges are exported through [OpenTelemetry or Prometheus](#observability) under `mq.backend: nats`:
+These gauges are exported through [OpenTelemetry or Prometheus](#observability) under `mq.backend: nats`; `/readyz` fails, naming `mq`, while either of the first two reads `0`, so the orchestrator moves traffic away from a process the cluster has dropped ([Health Checks](#health-checks)):
 
 | Gauge | Meaning |
 | --- | --- |
@@ -502,7 +502,7 @@ A split needs backends that every process can reach: a shared `mq.backend`, so t
 
 Run every role in one process, the default, until you need more than one.
 
-A pod without the `api` role serves an ops listener on `:8080`: `/livez`, `/readyz` and their aliases, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404 (under `/v1/ops`, 403 without the operator key, and 401 for a bearer token). Point the same probes at it as at an API pod. `/livez` does not wait for schema discovery there, because only the API runs it. `/readyz` checks ClickHouse in an ingest pod. Every pod reads the settings directory, so mount it in every Deployment. The reload route on the ops listener accepts only the operator key, so whatever reloads your API pods over HTTP must send the operator key to the worker pods too, or rely on `SIGHUP` (or, over a flat directory, the directory watcher) instead.
+A pod without the `api` role serves an ops listener on `:8080`: `/livez`, `/readyz` and their aliases, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404 (under `/v1/ops`, 403 without the operator key, and 401 for a bearer token). Point the same probes at it as at an API pod. `/livez` does not wait for schema discovery there, because only the API runs it. `/readyz` checks ClickHouse in an ingest pod, and the NATS connection in every pod. Every pod reads the settings directory, so mount it in every Deployment. The reload route on the ops listener accepts only the operator key, so whatever reloads your API pods over HTTP must send the operator key to the worker pods too, or rely on `SIGHUP` (or, over a flat directory, the directory watcher) instead.
 
 Give each pod a stable `WH_INSTANCE_ID` only if you need one in the logs or in the lease's `holder`. The default, the pod's hostname with a random suffix, already names each pod uniquely.
 

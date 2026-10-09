@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/api"
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
@@ -56,6 +57,7 @@ func (a *App) wireNATSMQ(ctx context.Context) error {
 		return fmt.Errorf("mq open: %w", err)
 	}
 	a.adoptMQ(broker)
+	a.readiness = append(a.readiness, api.Check{Name: "mq", Run: func(context.Context) error { return broker.Ready() }})
 	if !a.cfg.Has(config.RoleAPI) {
 		return nil // replay and dedupe run on the API path only
 	}

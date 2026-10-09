@@ -980,10 +980,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	ingestHandler.DedupeSettings = (*settings.Store).DedupeFor
 	ingestHandler.DedupeLease = a.cfg.Dedupe.Lease
 
-	// Readiness pings every open pool at once and is ready at the first
-	// answer: one tenant's ClickHouse outage is not the process's.
-	healthHandler := api.NewHealthHandler(a.pools.Ping)
-	healthHandler.Boot = a.bootState
+	healthHandler := a.healthHandler()
 
 	streamHandler := api.NewStreamHandler(a.hub, a.mq)
 	streamHandler.Metrics = a.sseMetrics
@@ -1027,6 +1024,26 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	deps.MetricsHandler, deps.MetricsPath = a.inlineMetrics()
 	a.handler = api.NewRouter(deps)
 	a.wireServers(func() { close(closing) })
+}
+
+// healthHandler serves the probes. Readiness pings every open ClickHouse
+// pool at once and is ready at the first answer — one tenant's ClickHouse
+// outage is not the process's — then consults each backend the wiring
+// registered (readiness). A process with none of them is ready once booted.
+// Not consulted: the shared cache (a tripped breaker falls back to
+// ClickHouse), the dedupe stores (a store that is not answering fails that
+// tenant's ingest closed per request, and is only needed to dedupe), and the
+// lease store under coord.backend=nats (the MQ's connection and topology).
+// The boot state is the API's (schema discovery); it is nil in a process
+// without that role.
+func (a *App) healthHandler() *api.HealthHandler {
+	var checks []api.Check
+	if a.pools != nil {
+		checks = append(checks, api.Check{Name: "clickhouse", Run: a.pools.Ping})
+	}
+	h := api.NewHealthHandler(append(checks, a.readiness...)...)
+	h.Boot = a.bootState
+	return h
 }
 
 // inlineMetrics is the metrics endpoint to mount on the main router: with

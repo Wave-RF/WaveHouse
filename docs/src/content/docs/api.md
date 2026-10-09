@@ -144,7 +144,12 @@ Over a [nested settings directory](/deployment#the-nested-settings-directory) th
 
 > Canonical name (current Kubernetes convention). Also served at **`/ready`** — a deprecated alias kept for v0.1.x and scheduled for removal in v0.2.0.
 
-Returns `200 OK` if the process is fully booted (schema discovery complete) and ClickHouse is currently reachable. Returns `503 Service Unavailable` otherwise. No authentication required. Over a [nested settings directory](/deployment#the-nested-settings-directory) it pings every open ClickHouse pool at once and answers `200` at the first one that does, so a tenant whose ClickHouse does not answer does not make the process unready; the `503` names every pool that failed (one per line in `error`) when none answers — including when no pool is open at all, a directory serving no tenant.
+Returns `200 OK` if the process is fully booted (schema discovery complete) and every backend it serves requests through is currently answering. Returns `503 Service Unavailable` otherwise, with `error` naming each check that failed, one per line, prefixed by its name. No authentication required. The checks, every one run on every call:
+
+- `clickhouse` — pings every open ClickHouse pool at once and passes at the first one that answers, so over a [nested settings directory](/deployment#the-nested-settings-directory) a tenant whose ClickHouse does not answer does not make the process unready; the failure names every pool that did not answer (one per line) when none does — including when no pool is open at all, a directory serving no tenant.
+- `mq` — under [`mq.backend: nats`](/deployment#external-nats): fails while the connection to the cluster is down (the client reconnects by itself; this is the gap in between, or a cluster that is gone for good) and while the topology failed its last check (the same two states as the `wavehouse_mq_connected` and `wavehouse_mq_topology_ok` gauges). Under `coord.backend: nats` the lease bucket rides this connection and is part of that check, so it is covered here. The embedded queue is in-process and has no check.
+
+The shared cache and the dedupe stores are deliberately not checks: a tripped cache breaker bypasses the cache and queries fall back to ClickHouse, and a dedupe store that is not answering fails that tenant's ingest closed per request ([`503` with `Retry-After`](/deployment#a-shared-dedupe-table-on-dynamodb)) while every other route carries on, so the process can still do its job.
 
 **Response (ready):**
 
@@ -155,14 +160,14 @@ Returns `200 OK` if the process is fully booted (schema discovery complete) and 
 **Response (not ready):**
 
 ```json
-{"status": "not ready", "error": "localhost:9000 database default user default: dial tcp 127.0.0.1:9000: connect: connection refused"}
+{"status": "not ready", "error": "clickhouse: localhost:9000 database default user default: dial tcp 127.0.0.1:9000: connect: connection refused\nmq: message queue unavailable: not connected to nats"}
 ```
 
 Status code: `503 Service Unavailable`
 
 ### Liveness vs readiness — behavior matrix
 
-`/livez` (liveness) and `/readyz` (readiness) answer different questions, so they diverge once the process has booted. `/livez` is **sticky**: after the first successful schema discovery it stays `200` for the rest of the process lifetime, even if ClickHouse later becomes unreachable — liveness asks "is the process alive and past boot," not "is its backend up right now." `/readyz` stays **conditional**: it pings ClickHouse on every call and drops back to `503` whenever ClickHouse is unreachable.
+`/livez` (liveness) and `/readyz` (readiness) answer different questions, so they diverge once the process has booted. `/livez` is **sticky**: after the first successful schema discovery it stays `200` for the rest of the process lifetime, even if ClickHouse later becomes unreachable — liveness asks "is the process alive and past boot," not "is its backend up right now." `/readyz` stays **conditional**: it runs its checks on every call and drops back to `503` whenever ClickHouse — or the external queue — is unreachable.
 
 | State                      | `/livez` | `/readyz` |
 |----------------------------|:--------:|:---------:|
@@ -171,7 +176,7 @@ Status code: `503 Service Unavailable`
 | Post-boot, ClickHouse dies | 200 ★    | 503       |
 | Post-boot, ClickHouse back | 200      | 200       |
 
-★ Once boot completes, `/livez` no longer tracks ClickHouse state — a runtime ClickHouse outage surfaces in `/readyz` only. This is what keeps a Kubernetes `livenessProbe` from restart-looping the pod during a transient backend blip (see [Deployment → Boot-time degraded mode](/deployment#boot-time-degraded-mode)). Over a nested directory the rows hold per process rather than per tenant: "ClickHouse up" means at least one tenant's pool answers, and "discovery complete" means one tenant's has.
+★ Once boot completes, `/livez` no longer tracks ClickHouse state — a runtime ClickHouse outage, like a queue disconnect, surfaces in `/readyz` only. This is what keeps a Kubernetes `livenessProbe` from restart-looping the pod during a transient backend blip (see [Deployment → Boot-time degraded mode](/deployment#boot-time-degraded-mode)). Over a nested directory the rows hold per process rather than per tenant: "ClickHouse up" means at least one tenant's pool answers, and "discovery complete" means one tenant's has.
 
 ---
 
@@ -218,7 +223,7 @@ A process whose [`roles`](/configuration#process-roles) leave out `api` (an inge
 | Route | Notes |
 | ----- | ----- |
 | `GET /livez` (and `/healthz`, `/health`) | `200` once booted. It does not wait for schema discovery, which only the API runs. |
-| `GET /readyz` (and `/ready`) | In a process running `ingest`, `200` when a ClickHouse pool answers, as above. |
+| `GET /readyz` (and `/ready`) | The `clickhouse` check in a process running `ingest`, and the `mq` check under `mq.backend: nats`, as above; a process with neither is ready once booted. |
 | `GET /version` | As above. |
 | The metrics path | When `prometheus.port` is `0`. |
 | `POST /v1/ops/settings/reload` | As [below](#post-v1opssettingsreload--reload-settings-directory), but it accepts only the [operator key](#authentication): no token verifier runs without the `api` role, so an admin token is `401`. |
