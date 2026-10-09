@@ -48,8 +48,8 @@ project_dir="${CLAUDE_PROJECT_DIR:-.}"
 # is only mentioned, in a quoted string, a heredoc body or a comment
 # (`python3 - <<'EOF'` with `# gh pr ready` in it), doesn't count, unless a
 # shell runs it: a $(…), `bash -c '…'`, `eval`, or a heredoc or here-string a
-# shell reads, directly or through a pipe; that code is tokenized and judged
-# the same way. A heredoc read by a shell inside a $(…) is not followed. Each
+# shell reads, directly or through a pipe; that code, as written, quotes and
+# heredoc bodies included, is tokenized and judged the same way. Each
 # gh command is judged on its own words: a gh api call by its endpoint (its
 # first argument that isn't a flag) and its fields, never by text elsewhere on
 # the line or inside a field's value, so a comment body that names an endpoint
@@ -279,14 +279,8 @@ gh_scan() {
       esac
     done
   done
-  for ((j = 0; j < ${#TK_SUBS[@]}; j++)); do
-    s=${TK_SUBS[j]//$'\002'/}
-    s=${s//$'\003'/}
-    # shellcheck disable=SC2016 # a literal $( … ), stripped to the code inside
-    case $s in
-      '$('*')') s=${s#??}; GH_QUEUE+=("${s%?}") ;;
-      '`'*'`') s=${s#?}; GH_QUEUE+=("${s%?}") ;;
-    esac
+  for ((j = 0; j < ${#TK_CODE[@]}; j++)); do
+    GH_QUEUE+=("${TK_CODE[j]}")
   done
   for ((j = 0; j < ${#TK_IN[@]}; j++)); do
     for ((k = 0; k < ${#lines[@]}; k++)); do
@@ -366,7 +360,9 @@ reviewers_script="scripts/pre-push-reviewers.sh"
 # TK_OP, TK_IN / TK_IN_AT with each heredoc body and here-string and the token
 # index of the simple command that reads it, and TK_SUBS with the text of every
 # $(…) and `…`, wherever its word went (an argument, a here-string, a redirect
-# target), each quoted part inside a $(…) wrapped in \002…\003; returns 1 on an
+# target), each quoted part inside a $(…) wrapped in \002…\003, and TK_CODE
+# with the code inside each one exactly as written, quotes and heredoc bodies
+# included, for the gh checks to tokenize in turn; returns 1 on an
 # unterminated quote or substitution.
 
 tk_flush() {
@@ -439,13 +435,14 @@ tk_dquote() {
 }
 
 tk_dollar() {
-  local rest part s0=${#_w}
+  local rest part s0=${#_w} start=$_i
   _inw=1; _dyn=1
   case ${_s:_i+1:1} in
     '(')
       _w+='$'; _i=$((_i + 1)); _insub=$((_insub + 1))
       tk_paren || return 1
-      _insub=$((_insub - 1)); TK_SUBS+=("${_w:s0}") ;;
+      _insub=$((_insub - 1)); TK_SUBS+=("${_w:s0}")
+      TK_CODE+=("${_s:start+2:_i-start-3}") ;;
     '{')
       rest=${_s:_i}
       case $rest in *'}'*) ;; *) return 1 ;; esac
@@ -458,12 +455,15 @@ tk_dollar() {
 }
 
 tk_backtick() {
-  local c s0=${#_w}
+  local c s0=${#_w} start=$_i
   _inw=1; _dyn=1; _w+='`'; _i=$((_i + 1))
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
     case $c in
-      '`') _w+=$c; _i=$((_i + 1)); TK_SUBS+=("${_w:s0}"); return 0 ;;
+      '`')
+        _w+=$c; _i=$((_i + 1)); TK_SUBS+=("${_w:s0}")
+        TK_CODE+=("${_s:start+1:_i-start-2}")
+        return 0 ;;
       \\) _w+=${_s:_i:2}; _i=$((_i + 2)) ;;
       *) _w+=$c; _i=$((_i + 1)) ;;
     esac
@@ -573,7 +573,7 @@ tokenize() {
   local LC_ALL=C c c2 rest line
   _s=$1; _n=${#1}; _i=0
   _w=""; _inw=0; _dyn=0; _skip=0; _cmd0=0; _insub=0
-  TK_VAL=(); TK_DYN=(); TK_OP=(); TK_IN=(); TK_IN_AT=(); TK_SUBS=(); _hd_delim=(); _hd_strip=(); _hd_at=()
+  TK_VAL=(); TK_DYN=(); TK_OP=(); TK_IN=(); TK_IN_AT=(); TK_SUBS=(); TK_CODE=(); _hd_delim=(); _hd_strip=(); _hd_at=()
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
     case $c in

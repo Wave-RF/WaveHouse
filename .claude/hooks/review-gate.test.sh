@@ -647,6 +647,21 @@ expect_block "bash --noprofile --norc -c with a push" "$repo" "bash --noprofile 
 expect_allow "bash --norc running a script, not -c" "$repo" 'bash --norc scripts/pre-push-reviewers.sh'
 expect_allow "bash -o pipefail -c with a read" "$repo" "bash -o pipefail -c 'gh pr view 12'"
 
+# The code inside a $(…) is judged as written, its quotes kept.
+expect_block "a GraphQL ready mutation captured by \$(…)" "$repo" "resp=\$(gh api graphql -f query='mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }')" "ready-for-review"
+# shellcheck disable=SC2016 # a literal $(…), for the gate to read
+CLAUDE_PROJECT_DIR=$root expect_allow "a draft PR's URL captured by \$(…), two-word title" "$repo" 'url=$(gh pr create --draft --title "fix: add the thing" --body-file b.md)'
+# shellcheck disable=SC2016
+CLAUDE_PROJECT_DIR=$root expect_allow "a draft PR's URL captured by \$(…), scoped title" "$repo" 'url=$(gh pr create --draft --title "feat(gate): add the thing" --body-file b.md)'
+# shellcheck disable=SC2016
+CLAUDE_PROJECT_DIR=$root expect_block "a bad title inside \$(…) is still linted" "$repo" 'url=$(gh pr create --draft --title "Bad title." --body-file b.md)' "PR title"
+expect_allow "a comment body with an apostrophe inside \$(…)" "$repo" "out=\$(gh pr comment 12 --body \"it's fixed\")"
+expect_allow "a gh pr ready only grepped for inside \$(…)" "$repo" "n=\$(grep -c 'gh pr ready' AGENTS.md)"
+expect_block "a gh pr ready in a heredoc read by bash inside \$(…)" "$repo" "out=\$(bash <<'EOF'
+gh pr ready 12
+EOF
+)" "ready-for-review"
+
 if [ "$fails" -gt 0 ]; then
   printf '\n%d case(s) failed\n' "$fails" >&2
   exit 1
