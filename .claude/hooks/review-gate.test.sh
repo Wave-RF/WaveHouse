@@ -9,6 +9,24 @@
 # `make verify` (target: test-review-gate). Needs git and jq; no network.
 
 set -uo pipefail
+
+# The hooks run under whichever bash `#!/usr/bin/env bash` finds first. macOS
+# ships bash 3.2 as /bin/bash, and a Mac with no newer bash on PATH runs them
+# under it, so when /bin/bash is another bash the suite runs a second time with
+# it first on PATH. The test itself stays on this bash either way.
+if [ -z "${HOOK_TEST_BASH:-}" ]; then
+  self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  HOOK_TEST_BASH=$(command -v bash) "$BASH" "$self"
+  rc=$?
+  if [ -x /bin/bash ] && ! [ /bin/bash -ef "$(command -v bash)" ]; then
+    shim=$(mktemp -d) && ln -s /bin/bash "$shim/bash" || exit 1
+    echo "── the hooks again under /bin/bash $(/bin/bash -c 'echo "$BASH_VERSION"')"
+    PATH="$shim:$PATH" HOOK_TEST_BASH=/bin/bash "$BASH" "$self" || rc=1
+    rm -rf "$shim"
+  fi
+  exit "$rc"
+fi
+
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1 # repo root (.claude/hooks/../..)
 root=$PWD
 gate=$root/.claude/hooks/agent-bash-gate.sh
@@ -562,6 +580,34 @@ EOF" "ready-for-review"
 expect_block "a gh pr ready in a heredoc piped into sh" "$repo" "cat <<'EOF' | sh
 gh pr ready 12
 EOF" "ready-for-review"
+
+# gh api handed to a shell is judged like any other gh api call.
+expect_block "an API merge handed to bash -c" "$repo" "bash -c 'gh api -X PUT repos/o/r/pulls/12/merge'" "don't merge"
+expect_block "an API approval handed to sh -c" "$repo" 'sh -c "gh api repos/o/r/pulls/12/reviews -f event=APPROVE"' "Only humans approve"
+expect_block "GraphQL ready handed to bash -lc" "$repo" "bash -lc \"gh api graphql -f query='mutation { markPullRequestReadyForReview(input: {pullRequestId: \\\"PR_x\\\"}) { clientMutationId } }'\"" "ready-for-review"
+expect_block "an API merge handed to eval" "$repo" "eval 'gh api -X PUT repos/o/r/pulls/12/merge'" "don't merge"
+expect_allow "a read handed to bash -c" "$repo" "bash -c 'gh api repos/o/r/pulls/12'"
+
+# A boolean flag set with = counts as set when its value is true, and not when false.
+expect_allow "gh pr create --draft=true" "$repo" 'gh pr create --draft=true --title "fix: x"'
+expect_block "gh pr create --draft=false" "$repo" 'gh pr create --draft=false --title "fix: x"' "must use --draft"
+expect_block "gh pr review --approve=true" "$repo" 'gh pr review 12 --approve=true' "Only humans approve"
+expect_allow "gh pr review --approve=false --comment" "$repo" 'gh pr review 12 --approve=false --comment -b "noted"'
+expect_block "gh pr review --request-changes=true" "$repo" 'gh pr review 12 --request-changes=true -b "see inline"' "instead of --request-changes"
+expect_block "gh pr edit --add-reviewer=someone" "$repo" 'gh pr edit 12 --add-reviewer=someone' "Adding/removing reviewers"
+
+# Each gh api call is judged by its own endpoint and fields, not by text in a
+# field's value or in another command on the line.
+expect_allow "a review-thread reply that quotes a merge endpoint" "$repo" "gh api repos/o/r/pulls/12/comments/34/replies -f body='Merging is PUT repos/o/r/pulls/12/merge and only a person runs it.'"
+expect_allow "an issue comment that names requested_reviewers" "$repo" "gh api -X POST repos/o/r/issues/12/comments -f body='requested_reviewers is set by the ruleset'"
+expect_allow "a comment body with event=APPROVE in it" "$repo" "gh api -X POST repos/o/r/issues/12/comments -f body='a review sends event=APPROVE; we do not'"
+expect_allow "a GraphQL comment that mentions a mutation name" "$repo" "gh api graphql -f query='mutation(\$b: String!) { addComment(input: {subjectId: \"I_x\", body: \$b}) { clientMutationId } }' -f b='markPullRequestReadyForReview is for people'"
+expect_allow "a reviewer read, then a comment, on one line" "$repo" 'gh api repos/o/r/pulls/12/requested_reviewers && gh api -X POST repos/o/r/issues/12/comments -f body=ping'
+expect_block "a comment, then a reviewer write, on one line" "$repo" "gh api -X POST repos/o/r/issues/12/comments -f body=ping && gh api repos/o/r/pulls/12/requested_reviewers -f 'reviewers[]=someone'" "Reviewer-write"
+expect_allow "a draft opened through the REST API whose body says draft=false" "$repo" "gh api repos/o/r/pulls -f head=feat -f base=main -F draft=true -f body='not draft=false'"
+expect_block "a non-draft whose body says draft=true" "$repo" "gh api repos/o/r/pulls -f head=feat -f base=main -f body='draft=true'" "must be drafts"
+expect_block "an API merge through a full URL" "$repo" 'gh api --method PUT https://api.github.com/repos/o/r/pulls/12/merge' "don't merge"
+expect_block "an API merge with fields set by -F=" "$repo" 'gh api repos/o/r/pulls/12/merge --field=merge_method=squash' "don't merge"
 
 if [ "$fails" -gt 0 ]; then
   printf '\n%d case(s) failed\n' "$fails" >&2

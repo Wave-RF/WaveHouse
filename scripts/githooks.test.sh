@@ -10,6 +10,23 @@
 # (target: test-githooks). Needs git and make; no network.
 
 set -uo pipefail
+
+# The git hooks run under whichever bash `#!/usr/bin/env bash` finds first.
+# macOS ships bash 3.2 as /bin/bash, so when that is another bash the suite runs
+# a second time with it first on PATH (review-gate.test.sh does the same).
+if [ -z "${HOOK_TEST_BASH:-}" ]; then
+  self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  HOOK_TEST_BASH=$(command -v bash) "$BASH" "$self"
+  rc=$?
+  if [ -x /bin/bash ] && ! [ /bin/bash -ef "$(command -v bash)" ]; then
+    shim=$(mktemp -d) && ln -s /bin/bash "$shim/bash" || exit 1
+    echo "── the hooks again under /bin/bash $(/bin/bash -c 'echo "$BASH_VERSION"')"
+    PATH="$shim:$PATH" HOOK_TEST_BASH=/bin/bash "$BASH" "$self" || rc=1
+    rm -rf "$shim"
+  fi
+  exit "$rc"
+fi
+
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1 # repo root (scripts/..)
 root=$PWD
 fails=0
