@@ -49,12 +49,13 @@ Both markers are tree-keyed so commit-then-push works without a re-run when the 
 
 | Path | Purpose |
 | ---- | ------- |
-| `.claude/settings.json` | Team-wide: `deny` permissions (force-push / git reset --hard / filter-branch / update-ref -d, gh pr merge / ready / approve / request-changes, gh repo/release delete, gh secret delete, gh workflow disable, rm -rf / sudo rm), all four hooks wired |
+| `.claude/settings.json` | Team-wide: `deny` permissions (force-push / git reset --hard / filter-branch / update-ref -d, gh pr merge / ready / approve / request-changes, gh repo/release delete, gh secret delete, gh workflow disable, rm -rf / sudo rm), all four hooks wired, each through a guard that runs its script when it's there and fails closed when it isn't (see [When a hook script is missing](#when-a-hook-script-is-missing)) |
 | `.claude/hooks/gofumpt-on-save.sh` | PostToolUse Edit/Write/MultiEdit: auto-formats `.go` files |
 | `.claude/hooks/markdown-on-save.sh` | PostToolUse Edit/Write/MultiEdit: repairs MDX fence structure in `.mdx`, applies markdownlint `--fix` (WH001 unwrapping) in `.md` only, and runs misspell over docs prose in both |
 | `.claude/hooks/agent-bash-gate.sh` | PreToolUse Bash: catches accidental Agent PR Discipline violations (drafts only, no human reviewer adds, a marker (from a review or a logged skip) from every reviewer in `scripts/pre-push-reviewers.sh` required for the commit each refspec publishes (its tip, or HEAD with no refspec) when `origin/main` (local `main` if there's no `origin/main`) doesn't have it yet; PR title linted via `scripts/lint-pr-title.sh` on `gh pr create` / `gh pr edit --title`). A push is judged where it runs (the tool call's `cwd`, a `cd` or `pushd` before it, `git -C`), and a marker counts from any worktree of the repository. It blocks a push it can't follow (a computed path or refspec, `GIT_DIR` or `GIT_WORK_TREE` set earlier on the line, `--all` or a glob refspec, a push behind a wrapper or in a command substitution, code handed to `bash -c`, `eval` or a heredoc or here-string read by a shell) and one that follows a HEAD-moving git command on the same line, run directly or not. It reads only the command line, so it catches the common accidental forms, not deliberate evasion; it doesn't follow a script that pushes, a `$(…)` inside an unquoted heredoc body, a heredoc read by a shell inside `$(…)`, a shell behind a wrapper or one it doesn't know (`fish -c`), code piped into a shell, `git push --tags`, or git run by path or through an alias. A line it can't parse, such as one with an apostrophe in a comment inside `$(…)`, is refused |
 | `.claude/hooks/review-marker.sh` | SubagentStop: on a reviewer's `VERDICT: ship_it`, writes its `tmp/<name>-passed-<sha>` marker for the commit named on the report's `REVIEWED:` line, into the worktree on that commit, and only if that worktree's HEAD stayed on it for the whole review (its reflog against the subagent transcript's first timestamp). The reviewer set comes from `scripts/pre-push-reviewers.sh`; filters by `agent_type` in-script. Reads the report from `.last_assistant_message`, or, when that has no `VERDICT:` line or says `ship_it` without `REVIEWED:`, from the hand-back message in the subagent's transcript; a final `iterate` or `block` stands. An abbreviated sha counts if it names exactly one commit. Logs every decision to `tmp/review-marker.log` |
 | `.claude/hooks/review-gate.test.sh` | Test for the two review hooks: feeds them synthetic events in a scratch repository with sibling worktrees (`make test-review-gate`, part of `make verify`) |
+| `.claude/hooks/hook-commands.test.sh` | Test for the hook commands in `.claude/settings.json`: runs each one under `sh -c` as Claude Code does, with its script present, missing and not executable (`make test-hook-commands`, part of `make verify`) |
 | `.claude/commands/cover.md` | `/cover [suite]` — suite dispatch + coverage threshold analysis |
 | `.claude/commands/docs-review.md` | `/docs-review [path\|all]` — launches the `docs-reviewer` subagent. No-arg = the gating pre-push docs review; a path/`all` = advisory |
 | `.claude/commands/prepush.md` | `/prepush [all]` — the pre-push gate: reads `scripts/pre-push-reviewers.sh`, runs the reviewers the change needs in parallel (fresh context), skips the rest on the record (`scripts/skip-pre-push-review.sh`), loops to `ship_it`. `all` forces the full set |
@@ -113,6 +114,18 @@ Agents (Claude Code etc.) have additional gating beyond what humans face — enf
 - **PR reviews on others' PRs stay local.** Use the `pr-review-locally` skill for local-only audits — the reviewers' findings go to you, not the PR.
 
 Full ruleset and rationale: AGENTS.md §"Agent PR Discipline".
+
+### When a hook script is missing
+
+Each hook in `.claude/settings.json` names its script under `$CLAUDE_PROJECT_DIR`, the directory the session started in. If that checkout is removed while the session runs, or a script goes missing or loses its executable bit, a bare path would make the shell exit 127, and Claude Code treats any exit code but 2 as a [non-blocking error](https://code.claude.com/docs/en/hooks#other-exit-codes): the push gate would stop gating without a word. So each command is a short guard that `exec`s the script when it's there and executable, unchanged, and otherwise acts by event:
+
+| Event | Script | With the script missing |
+| ----- | ------ | ----------------------- |
+| PreToolUse (Bash) | `agent-bash-gate.sh` | Blocks (exit 2) a command that contains the words `git` and `push`, or `gh` with `pr` or `api` and one of `create`, `edit`, `ready`, `review`, `merge` or `requested_reviewers`, and every command when there is no `jq` to read it with. Other commands go through, so the session can still work |
+| SubagentStop | `review-marker.sh` | Reports it on stderr with exit 1. Exit 2 [would keep the subagent running](https://code.claude.com/docs/en/hooks#exit-code-2-behavior-per-event). A reviewer's `ship_it` writes no marker, so the push gate blocks for lack of one |
+| PostToolUse | `gofumpt-on-save.sh`, `markdown-on-save.sh` | Reports it with exit 2, which shows Claude the message; the edit has already happened |
+
+Every message names the missing script and says to restart Claude Code from a live checkout. The PreToolUse match is crude on purpose: like the gate, it guards against accidents, not deliberate workarounds, and it errs toward blocking.
 
 ## Worktrunk integration
 
