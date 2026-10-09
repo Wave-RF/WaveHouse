@@ -118,7 +118,9 @@ func TestRedis_UnreachableIsBypassed(t *testing.T) {
 	assert.Contains(t, owed, "wh:{acme}:T")
 	assert.Contains(t, owed, "wh:{globex}:T")
 
+	start := time.Now()
 	require.NoError(t, r.Close())
+	assert.Less(t, time.Since(start), closeDrainBudget/2, "with no client there is nothing to retry")
 	require.NoError(t, r.Close(), "idempotent")
 }
 
