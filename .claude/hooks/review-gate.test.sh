@@ -9,6 +9,24 @@
 # `make verify` (target: test-review-gate). Needs git and jq; no network.
 
 set -uo pipefail
+
+# The hooks run under whichever bash `#!/usr/bin/env bash` finds first. macOS
+# ships bash 3.2 as /bin/bash, and a Mac with no newer bash on PATH runs them
+# under it, so when /bin/bash is another bash the suite runs a second time with
+# it first on PATH. The test itself stays on this bash either way.
+if [ -z "${HOOK_TEST_BASH:-}" ]; then
+  self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  HOOK_TEST_BASH=$(command -v bash) "$BASH" "$self"
+  rc=$?
+  if [ -x /bin/bash ] && ! [ /bin/bash -ef "$(command -v bash)" ]; then
+    shim=$(mktemp -d) && ln -s /bin/bash "$shim/bash" || exit 1
+    echo "── the hooks again under /bin/bash $(/bin/bash -c 'echo "$BASH_VERSION"')"
+    PATH="$shim:$PATH" HOOK_TEST_BASH=/bin/bash "$BASH" "$self" || rc=1
+    rm -rf "$shim"
+  fi
+  exit "$rc"
+fi
+
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1 # repo root (.claude/hooks/../..)
 root=$PWD
 gate=$root/.claude/hooks/agent-bash-gate.sh
@@ -494,6 +512,170 @@ fi
 # The gh checks still resolve the title linter from the session's checkout.
 CLAUDE_PROJECT_DIR=$root expect_block "gh pr create title lint" "$repo" "gh pr create --draft --title \"Bad title.\"" "PR title"
 expect_block "gh pr create without --draft" "$repo" "gh pr create --title \"fix: x\""
+
+# The alias, REST and GraphQL forms of the humans-only gh pr actions (#790).
+expect_block "gh pr new without --draft" "$repo" 'gh pr new --title "fix: x"' "must use --draft"
+CLAUDE_PROJECT_DIR=$root expect_block "gh pr new title lint" "$repo" 'gh pr new --draft --title "Bad title."' "PR title"
+CLAUDE_PROJECT_DIR=$root expect_block "an unquoted gh pr create title is linted" "$repo" 'gh pr create --draft --title Bad.' "PR title"
+CLAUDE_PROJECT_DIR=$root expect_allow "gh pr new --draft with a good title" "$repo" 'gh pr new --draft --title "fix: add the thing"'
+expect_block "approve through the REST API" "$repo" 'gh api repos/o/r/pulls/12/reviews -f event=APPROVE' "Only humans approve"
+expect_block "request changes through the REST API" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews -f event=REQUEST_CHANGES -f body='see inline'" "instead of --request-changes"
+expect_block "submit a pending review as an approval" "$repo" 'gh api repos/{owner}/{repo}/pulls/12/reviews/34/events -f event=APPROVE' "Only humans approve"
+expect_block "open a PR through the REST API without draft" "$repo" 'gh api repos/o/r/pulls -f head=feat -f base=main -f title="fix: x"' "must be drafts"
+CLAUDE_PROJECT_DIR=$root expect_block "a draft opened through the REST API gets the title lint" "$repo" 'gh api repos/o/r/pulls -f head=feat -f base=main -F draft=true -f title="Bad title."' "PR title"
+CLAUDE_PROJECT_DIR=$root expect_block "a retitle through the REST API gets the title lint" "$repo" 'gh api --method=PATCH repos/o/r/pulls/12 -f "title=Bad title."' "PR title"
+CLAUDE_PROJECT_DIR=$root expect_allow "a draft opened through the REST API with a good title" "$repo" 'gh api repos/o/r/pulls -f head=feat -f base=main -F draft=true -f title="fix: add the thing"'
+expect_block "ready for review through GraphQL" "$repo" "gh api graphql -f query='mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'" "ready-for-review"
+expect_block "request reviewers with reviewers[]= and no -X" "$repo" "gh api repos/o/r/pulls/12/requested_reviewers -f 'reviewers[]=someone'" "Reviewer-write"
+expect_block "remove a requested reviewer" "$repo" "gh api -X DELETE repos/o/r/pulls/12/requested_reviewers -f 'reviewers[]=someone'" "Reviewer-write"
+expect_block "a quoted requested_reviewers path" "$repo" 'gh api -XPOST "repos/o/r/pulls/12/requested_reviewers" -f reviewers[]=someone' "Reviewer-write"
+expect_block "request reviewers through GraphQL" "$repo" "gh api graphql -f query='mutation { requestReviews(input: {pullRequestId: \"PR_x\", userIds: [\"U_x\"]}) { clientMutationId } }'" "Reviewer-write"
+expect_block "approve through GraphQL" "$repo" "gh api graphql -f query='mutation { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: APPROVE}) { clientMutationId } }'" "Only humans approve"
+expect_block "open a non-draft PR through GraphQL" "$repo" "gh api graphql -f query='mutation { createPullRequest(input: {repositoryId: \"R_x\", baseRefName: \"main\", headRefName: \"feat\", title: \"fix: x\"}) { clientMutationId } }'" "must be drafts"
+expect_block "merge through the REST API" "$repo" 'gh api -X PUT repos/o/r/pulls/12/merge -f merge_method=squash' "don't merge"
+expect_block "merge through GraphQL" "$repo" "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'" "don't merge"
+expect_block "auto-merge through GraphQL" "$repo" "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'" "don't merge"
+# gh pr merge itself is left to the deny rule in .claude/settings.json: a
+# person merges with it from shell mode, which this hook may see.
+expect_allow "gh pr merge is left to the settings.json deny rule" "$repo" 'gh pr merge 12 --squash'
+
+# Look-alikes that read, or don't touch a PR, go through.
+expect_allow "read a PR through the REST API" "$repo" 'gh api repos/o/r/pulls/12'
+expect_allow "list PRs" "$repo" "gh api 'repos/o/r/pulls?state=open'"
+expect_allow "list PRs with -X GET and fields" "$repo" 'gh api -X GET repos/o/r/pulls -f state=open'
+expect_allow "read a PR's reviews" "$repo" 'gh api repos/o/r/pulls/12/reviews'
+expect_allow "read its requested reviewers" "$repo" 'gh api repos/o/r/pulls/12/requested_reviewers'
+expect_allow "check whether it merged" "$repo" 'gh api repos/o/r/pulls/12/merge'
+expect_allow "a COMMENT review through the REST API" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews -f event=COMMENT -f body='looks fine'"
+expect_allow "a GraphQL query that reads reviews" "$repo" "gh api graphql -f query='query { repository(owner: \"o\", name: \"r\") { pullRequest(number: 12) { reviews(last: 5) { nodes { state } } } } }'"
+expect_allow "a draft PR opened through GraphQL" "$repo" "gh api graphql -f query='mutation { createPullRequest(input: {repositoryId: \"R_x\", baseRefName: \"main\", headRefName: \"feat\", title: \"fix: x\", draft: true}) { clientMutationId } }'"
+expect_allow "an issue comment that mentions approve and merge" "$repo" "gh api -X POST repos/o/r/issues/12/comments -f body='approve it, then merge'"
+expect_allow "gh pr view" "$repo" 'gh pr view 12'
+
+# A gh command only mentioned in a heredoc body, a comment or a quoted string
+# isn't run; one a shell runs still is.
+expect_allow "a gh pr ready in a comment inside a python heredoc" "$repo" "python3 - <<'EOF'
+# gh pr ready is humans-only.
+print('ok')
+EOF"
+expect_allow "gh pr merge and an API merge in a cat heredoc" "$repo" "cat <<'EOF' >notes.txt
+gh pr merge 12 --squash
+gh api -X PUT repos/o/r/pulls/12/merge
+EOF"
+expect_allow "a gh pr ready in a shell comment" "$repo" 'ls # then gh pr ready 12'
+expect_allow "a gh pr ready in a quoted string" "$repo" 'echo "run gh pr ready 12 when done"'
+expect_allow "a PR body heredoc that mentions gh pr ready" "$repo" "gh pr create --draft --title \"fix: x\" --body \"\$(cat <<'EOF'
+A person runs gh pr ready 12 later.
+EOF
+)\""
+expect_block "a gh pr ready run on its own line" "$repo" "cd .
+gh pr ready 12" "ready-for-review"
+expect_block "a gh pr ready behind a wrapper" "$repo" 'timeout 60 gh pr ready 12' "ready-for-review"
+# shellcheck disable=SC2016 # a literal $(…), for the gate to read
+expect_block "a gh pr ready in a \$(…)" "$repo" 'echo "$(gh pr ready 12)"' "ready-for-review"
+expect_block "a gh pr ready handed to bash -c" "$repo" "bash -c 'gh pr ready 12'" "ready-for-review"
+expect_block "a gh pr ready in a heredoc read by bash" "$repo" "bash <<'EOF'
+gh pr ready 12
+EOF" "ready-for-review"
+expect_block "a gh pr ready in a heredoc piped into sh" "$repo" "cat <<'EOF' | sh
+gh pr ready 12
+EOF" "ready-for-review"
+
+# gh api handed to a shell is judged like any other gh api call.
+expect_block "an API merge handed to bash -c" "$repo" "bash -c 'gh api -X PUT repos/o/r/pulls/12/merge'" "don't merge"
+expect_block "an API approval handed to sh -c" "$repo" 'sh -c "gh api repos/o/r/pulls/12/reviews -f event=APPROVE"' "Only humans approve"
+expect_block "GraphQL ready handed to bash -lc" "$repo" "bash -lc \"gh api graphql -f query='mutation { markPullRequestReadyForReview(input: {pullRequestId: \\\"PR_x\\\"}) { clientMutationId } }'\"" "ready-for-review"
+expect_block "an API merge handed to eval" "$repo" "eval 'gh api -X PUT repos/o/r/pulls/12/merge'" "don't merge"
+expect_allow "a read handed to bash -c" "$repo" "bash -c 'gh api repos/o/r/pulls/12'"
+
+# A boolean flag set with = counts as set when its value is true, and not when false.
+expect_allow "gh pr create --draft=true" "$repo" 'gh pr create --draft=true --title "fix: x"'
+expect_block "gh pr create --draft=false" "$repo" 'gh pr create --draft=false --title "fix: x"' "must use --draft"
+expect_block "gh pr review --approve=true" "$repo" 'gh pr review 12 --approve=true' "Only humans approve"
+expect_allow "gh pr review --approve=false --comment" "$repo" 'gh pr review 12 --approve=false --comment -b "noted"'
+expect_block "gh pr review --request-changes=true" "$repo" 'gh pr review 12 --request-changes=true -b "see inline"' "instead of --request-changes"
+expect_block "gh pr edit --add-reviewer=someone" "$repo" 'gh pr edit 12 --add-reviewer=someone' "Adding/removing reviewers"
+
+# gh pr create / new can request reviewers or assign people at creation; on gh pr review -r / -a stay --request-changes / --approve.
+for c in create new; do
+  expect_block "gh pr $c --reviewer x" "$repo" "gh pr $c --draft --title \"feat: x\" --reviewer x" "Adding/removing reviewers"
+  expect_block "gh pr $c --reviewer=x" "$repo" "gh pr $c --draft --title \"feat: x\" --reviewer=x" "Adding/removing reviewers"
+  expect_block "gh pr $c -r x" "$repo" "gh pr $c --draft --title \"feat: x\" -r x" "Adding/removing reviewers"
+  expect_block "gh pr $c -rx (glued)" "$repo" "gh pr $c --draft --title \"feat: x\" -rx" "Adding/removing reviewers"
+  expect_block "gh pr $c --assignee x" "$repo" "gh pr $c --draft --title \"feat: x\" --assignee x" "Adding/removing reviewers"
+  expect_block "gh pr $c --assignee=x" "$repo" "gh pr $c --draft --title \"feat: x\" --assignee=x" "Adding/removing reviewers"
+  expect_block "gh pr $c -a x" "$repo" "gh pr $c --draft --title \"feat: x\" -a x" "Adding/removing reviewers"
+  expect_block "gh pr $c -a=x (glued)" "$repo" "gh pr $c --draft --title \"feat: x\" -a=x" "Adding/removing reviewers"
+done
+expect_allow "a plain gh pr create --draft" "$repo" 'gh pr create --draft --title "feat: x"'
+expect_block "gh pr review -a is still --approve" "$repo" 'gh pr review 12 -a' "Only humans approve"
+expect_block "gh pr review -r is still --request-changes" "$repo" 'gh pr review 12 -r -b "see inline"' "instead of --request-changes"
+
+# Each gh api call is judged by its own endpoint and fields, not by text in a
+# field's value or in another command on the line.
+expect_allow "a review-thread reply that quotes a merge endpoint" "$repo" "gh api repos/o/r/pulls/12/comments/34/replies -f body='Merging is PUT repos/o/r/pulls/12/merge and only a person runs it.'"
+expect_allow "an issue comment that names requested_reviewers" "$repo" "gh api -X POST repos/o/r/issues/12/comments -f body='requested_reviewers is set by the ruleset'"
+expect_allow "a comment body with event=APPROVE in it" "$repo" "gh api -X POST repos/o/r/issues/12/comments -f body='a review sends event=APPROVE; we do not'"
+expect_allow "a GraphQL comment that mentions a mutation name" "$repo" "gh api graphql -f query='mutation(\$b: String!) { addComment(input: {subjectId: \"I_x\", body: \$b}) { clientMutationId } }' -f b='markPullRequestReadyForReview is for people'"
+expect_allow "a reviewer read, then a comment, on one line" "$repo" 'gh api repos/o/r/pulls/12/requested_reviewers && gh api -X POST repos/o/r/issues/12/comments -f body=ping'
+expect_block "a comment, then a reviewer write, on one line" "$repo" "gh api -X POST repos/o/r/issues/12/comments -f body=ping && gh api repos/o/r/pulls/12/requested_reviewers -f 'reviewers[]=someone'" "Reviewer-write"
+expect_allow "a draft opened through the REST API whose body says draft=false" "$repo" "gh api repos/o/r/pulls -f head=feat -f base=main -F draft=true -f body='not draft=false'"
+expect_block "a non-draft whose body says draft=true" "$repo" "gh api repos/o/r/pulls -f head=feat -f base=main -f body='draft=true'" "must be drafts"
+expect_block "an API merge through a full URL" "$repo" 'gh api --method PUT https://api.github.com/repos/o/r/pulls/12/merge' "don't merge"
+expect_block "an API merge with fields set by -F=" "$repo" 'gh api repos/o/r/pulls/12/merge --field=merge_method=squash' "don't merge"
+
+# The gate follows 64 pieces of nested code; a gh command beyond them is refused.
+# shellcheck disable=SC2016 # literal $(true)s, for the gate to read
+pad62=$(printf ' $(true)%.0s' $(seq 62)) pad63=$(printf ' $(true)%.0s' $(seq 63))
+expect_block "a gh pr ready in the 63rd substitution is judged" "$repo" "echo$pad62 \$(gh pr ready 12)" "ready-for-review"
+expect_block "a gh pr ready past the 64 the gate follows is refused" "$repo" "echo$pad63 \$(gh pr ready 12)" "nests more code"
+expect_allow "a gh read beside 70 substitutions with no gh in them" "$repo" "gh pr view 12 && echo$pad63 \$(true) \$(true) \$(true) \$(true) \$(true) \$(true) \$(true)"
+
+# gh resolves -R/--repo before the command.
+expect_block "gh -R o/r pr ready" "$repo" 'gh -R o/r pr ready 12' "ready-for-review"
+expect_block "gh --repo o/r pr review --approve" "$repo" 'gh --repo o/r pr review 12 --approve' "Only humans approve"
+expect_block "gh --repo=o/r pr create without --draft" "$repo" 'gh --repo=o/r pr create --title "fix: x"' "must use --draft"
+expect_block "gh -Ro/r pr edit --add-reviewer" "$repo" 'gh -Ro/r pr edit 12 --add-reviewer someone' "Adding/removing reviewers"
+expect_block "gh -R o/r api merge" "$repo" 'gh -R o/r api -X PUT repos/o/r/pulls/12/merge' "don't merge"
+expect_allow "gh -R o/r pr view" "$repo" 'gh -R o/r pr view 12'
+
+# A GraphQL query computed by a heredoc inside $(…) is read from that heredoc.
+expect_block "GraphQL ready in a heredoc query" "$repo" "gh api graphql -f query=\"\$(cat <<'EOF'
+mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }
+EOF
+)\"" "ready-for-review"
+expect_allow "a GraphQL read in a heredoc query" "$repo" "gh api graphql -f query=\"\$(cat <<'EOF'
+query { viewer { login } }
+EOF
+)\""
+
+# A shell given options before -c still runs the code after them; the push
+# check and the gh check agree on these forms.
+expect_block "bash -e -c with a gh pr ready" "$repo" "bash -e -c 'gh pr ready 12'" "ready-for-review"
+expect_block "bash -euo pipefail -c with a gh pr ready" "$repo" "bash -euo pipefail -c 'gh pr ready 12'" "ready-for-review"
+expect_block "bash -o pipefail -c with a gh pr ready" "$repo" "bash -o pipefail -c 'gh pr ready 12'" "ready-for-review"
+expect_block "bash +o posix -c with a gh pr ready" "$repo" "bash +o posix -c 'gh pr ready 12'" "ready-for-review"
+expect_block "bash --noprofile --norc -c with an API merge" "$repo" "bash --noprofile --norc -c 'gh api -X PUT repos/o/r/pulls/12/merge'" "don't merge"
+expect_block "bash -e -c with a push" "$repo" "bash -e -c 'git -C ../wt-b push'" "can't follow"
+expect_block "bash -euo pipefail -c with a push" "$repo" "bash -euo pipefail -c 'git -C ../wt-b push'" "can't follow"
+expect_block "bash --noprofile --norc -c with a push" "$repo" "bash --noprofile --norc -c 'git -C ../wt-b push'" "can't follow"
+expect_allow "bash --norc running a script, not -c" "$repo" 'bash --norc scripts/pre-push-reviewers.sh'
+expect_allow "bash -o pipefail -c with a read" "$repo" "bash -o pipefail -c 'gh pr view 12'"
+
+# The code inside a $(…) is judged as written, its quotes kept.
+expect_block "a GraphQL ready mutation captured by \$(…)" "$repo" "resp=\$(gh api graphql -f query='mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }')" "ready-for-review"
+# shellcheck disable=SC2016 # a literal $(…), for the gate to read
+CLAUDE_PROJECT_DIR=$root expect_allow "a draft PR's URL captured by \$(…), two-word title" "$repo" 'url=$(gh pr create --draft --title "fix: add the thing" --body-file b.md)'
+# shellcheck disable=SC2016
+CLAUDE_PROJECT_DIR=$root expect_allow "a draft PR's URL captured by \$(…), scoped title" "$repo" 'url=$(gh pr create --draft --title "feat(gate): add the thing" --body-file b.md)'
+# shellcheck disable=SC2016
+CLAUDE_PROJECT_DIR=$root expect_block "a bad title inside \$(…) is still linted" "$repo" 'url=$(gh pr create --draft --title "Bad title." --body-file b.md)' "PR title"
+expect_allow "a comment body with an apostrophe inside \$(…)" "$repo" "out=\$(gh pr comment 12 --body \"it's fixed\")"
+expect_allow "a gh pr ready only grepped for inside \$(…)" "$repo" "n=\$(grep -c 'gh pr ready' AGENTS.md)"
+expect_block "a gh pr ready in a heredoc read by bash inside \$(…)" "$repo" "out=\$(bash <<'EOF'
+gh pr ready 12
+EOF
+)" "ready-for-review"
 
 if [ "$fails" -gt 0 ]; then
   printf '\n%d case(s) failed\n' "$fails" >&2
