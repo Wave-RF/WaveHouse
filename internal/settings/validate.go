@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -59,6 +60,9 @@ func ValidateDir(dir string) (*Document, []Finding) {
 
 type validator struct {
 	findings []Finding
+	// configMode is config.json's permission bits as checkDir found them,
+	// zero when it did not get that far; checkSecretsMode reads it.
+	configMode os.FileMode
 }
 
 func (v *validator) errorf(file, path, format string, args ...any) {
@@ -143,6 +147,9 @@ func (v *validator) checkDir(dir string) (map[string][]byte, bool) {
 			v.errorf(name, "", "not a regular file (mode %s) — expected a JSON file", info.Mode().Type())
 			files[name] = nil
 			continue
+		}
+		if name == FileConfig {
+			v.configMode = info.Mode().Perm()
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -643,6 +650,29 @@ func (v *validator) checkClickHousePool(ch *ClickHouseConfig) {
 	}
 }
 
+// checkSecretsMode warns when config.json carries a secret that other users
+// can read. A warning, not an error: a bind mount or a Kubernetes volume is
+// routinely owned by a user other than the server's, so refusing the file
+// would break those deployments rather than protect them, and the seed's
+// secrets are empty, so a fresh directory is quiet. Windows modes carry no
+// such bits.
+func (v *validator) checkSecretsMode(c TenantConfig) {
+	if runtime.GOOS == "windows" || v.configMode&0o044 == 0 {
+		return
+	}
+	var keys []string
+	if ch := c.ClickHouse; ch != nil && ch.Password != nil && *ch.Password != "" {
+		keys = append(keys, "clickhouse.password")
+	}
+	if a := c.Auth; a != nil && a.JWTSecret != nil && *a.JWTSecret != "" {
+		keys = append(keys, "auth.jwt_secret")
+	}
+	if len(keys) == 0 {
+		return
+	}
+	v.warnf(FileConfig, "", "carries %s but is readable by other users (mode %04o): restrict it to the server's user, or mount it with mode 0400", strings.Join(keys, " and "), v.configMode)
+}
+
 // required reports a missing key. Every top-level tunable is required so the
 // adopted snapshot never depends on a value the files don't state.
 func (v *validator) required(path string) {
@@ -692,6 +722,7 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 			v.warnf(FileConfig, "auth.jwt_secret", "ignored while auth.jwks_url is set: JWKS is the sole verifier")
 		}
 	}
+	v.checkSecretsMode(c)
 	if d := c.Dedupe; d == nil {
 		v.required("dedupe")
 	} else {

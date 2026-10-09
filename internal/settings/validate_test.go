@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -467,6 +468,48 @@ func TestValidate_RoleReferences(t *testing.T) {
 		out := findingStrings(findings)
 		assert.NotContains(t, out, "is not declared", "reference checks against a broken registry are noise")
 	})
+}
+
+// TestValidate_SecretsReadableByOthersWarn pins the permission check on
+// config.json (#529, #786 review): a file that carries a secret and that
+// other users can read warns, naming the keys and the mode; one only the
+// owner can read, or one whose secrets are empty (the seed), does not. A
+// warning, since a bind mount or a Kubernetes volume is routinely owned by
+// another user than the server's.
+func TestValidate_SecretsReadableByOthersWarn(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no permission bits on windows")
+	}
+	tests := []struct {
+		name   string
+		config string
+		mode   os.FileMode
+		want   string
+	}{
+		{"both secrets, group and world readable", configJSON(`{"clickhouse": {"password": "s3cret"}, "auth": {"jwt_secret": "hmac"}}`), 0o644, "config.json: carries clickhouse.password and auth.jwt_secret but is readable by other users (mode 0644)"},
+		{"one secret, group readable", configJSON(`{"auth": {"jwt_secret": "hmac"}}`), 0o640, "carries auth.jwt_secret but is readable by other users (mode 0640)"},
+		{"secrets, owner only", configJSON(`{"clickhouse": {"password": "s3cret"}, "auth": {"jwt_secret": "hmac"}}`), 0o600, ""},
+		{"empty secrets, world readable", configJSON(`{}`), 0o644, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			files := validFiles()
+			files[FileConfig] = tt.config
+			dir := writeDir(t, files)
+			require.NoError(t, os.Chmod(filepath.Join(dir, FileConfig), tt.mode))
+			doc, findings := ValidateDir(dir)
+			require.NotNil(t, doc, "a permission warning never rejects the directory: %s", findingStrings(findings))
+			assert.False(t, HasErrors(findings))
+			got := findingStrings(findings)
+			if tt.want == "" {
+				assert.NotContains(t, got, "readable by other users")
+			} else {
+				assert.Contains(t, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestValidate_Warnings(t *testing.T) {
