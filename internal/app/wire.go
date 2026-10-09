@@ -1029,8 +1029,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 // healthHandler serves the probes. Readiness pings every open ClickHouse
 // pool at once and is ready at the first answer — one tenant's ClickHouse
 // outage is not the process's — then consults each backend the wiring
-// registered (readiness). A process with none of them is ready once booted.
-// Not consulted: the shared cache (a tripped breaker falls back to
+// registered (readiness). Not consulted: the shared cache (a tripped breaker falls back to
 // ClickHouse), the dedupe stores (a store that is not answering fails that
 // tenant's ingest closed per request, and is only needed to dedupe), and the
 // lease store under coord.backend=nats (the MQ's connection and topology).

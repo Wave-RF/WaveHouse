@@ -30,8 +30,8 @@ func (a *App) wireOpsAuth() func(http.Handler) http.Handler {
 
 // wireOpsHTTP serves the ops-only router of a process without the api role:
 // the probes, /version, the metrics endpoint, and the settings reload.
-// Readiness consults what the process has: the ClickHouse pools (the ingest
-// role) and the external NATS; a process with neither is ready once booted.
+// Readiness consults the external NATS, which a process without the api role
+// always runs, and the ClickHouse pools of one running ingest.
 func (a *App) wireOpsHTTP(authMW func(http.Handler) http.Handler) {
 	deps := api.OpsDependencies{
 		Health:   a.healthHandler(),

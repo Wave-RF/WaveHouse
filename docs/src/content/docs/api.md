@@ -144,7 +144,7 @@ Over a [nested settings directory](/deployment#the-nested-settings-directory) th
 
 > Canonical name (current Kubernetes convention). Also served at **`/ready`** — a deprecated alias kept for v0.1.x and scheduled for removal in v0.2.0.
 
-Returns `200 OK` if the process is fully booted (schema discovery complete) and every backend it serves requests through is currently answering. Returns `503 Service Unavailable` otherwise, with `error` naming each check that failed, one per line, prefixed by its name. No authentication required. The checks, every one run on every call:
+Returns `200 OK` if the process is fully booted (schema discovery complete) and every backend it cannot do its job without is currently answering. Returns `503 Service Unavailable` otherwise, with `error` naming each check that failed, one per line, prefixed by its name. No authentication required. The checks, every one run on every call:
 
 - `clickhouse` — pings every open ClickHouse pool at once and passes at the first one that answers, so over a [nested settings directory](/deployment#the-nested-settings-directory) a tenant whose ClickHouse does not answer does not make the process unready; the failure names every pool that did not answer (one per line) when none does — including when no pool is open at all, a directory serving no tenant.
 - `mq` — under [`mq.backend: nats`](/deployment#external-nats): fails while the connection to the cluster is down (the client reconnects by itself; this is the gap in between, or a cluster that is gone for good) and while the topology failed its last check (the same two states as the `wavehouse_mq_connected` and `wavehouse_mq_topology_ok` gauges). Under `coord.backend: nats` the lease bucket rides this connection and is part of that check, so it is covered here. The embedded queue is in-process and has no check.
@@ -223,7 +223,7 @@ A process whose [`roles`](/configuration#process-roles) leave out `api` (an inge
 | Route | Notes |
 | ----- | ----- |
 | `GET /livez` (and `/healthz`, `/health`) | `200` once booted. It does not wait for schema discovery, which only the API runs. |
-| `GET /readyz` (and `/ready`) | The `clickhouse` check in a process running `ingest`, and the `mq` check under `mq.backend: nats`, as above; a process with neither is ready once booted. |
+| `GET /readyz` (and `/ready`) | The `mq` check (a process without `api` always runs `mq.backend: nats`), plus the `clickhouse` check in a process running `ingest`, as above. |
 | `GET /version` | As above. |
 | The metrics path | When `prometheus.port` is `0`. |
 | `POST /v1/ops/settings/reload` | As [below](#post-v1opssettingsreload--reload-settings-directory), but it accepts only the [operator key](#authentication): no token verifier runs without the `api` role, so an admin token is `401`. |

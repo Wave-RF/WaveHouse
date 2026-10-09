@@ -58,7 +58,7 @@ type HealthHandler struct {
 	// so the 503 names each one that failed, not just the first. Which
 	// dependencies a process has is internal/app's to wire: the ClickHouse
 	// pools (chconn.Pools.Ping: every open pool at once, ready at the first
-	// answer) and the external NATS; a process with neither is ready once
+	// answer) and the external NATS; a handler with none is ready once
 	// booted.
 	Checks []Check
 	// Boot is consulted by both Liveness and Readiness. When non-nil and
