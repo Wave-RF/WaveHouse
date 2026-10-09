@@ -871,10 +871,16 @@ func TestExternalNATS_ResetOrphaned(t *testing.T) {
 
 	var hold atomic.Bool
 	hold.Store(true)
-	unitConsumer(t, a, unit, &hold)
+	_, _, gotA := unitConsumer(t, a, unit, &hold)
 	for _, row := range []string{"x", "y"} {
 		require.NoError(t, a.Publish(t.Context(), topic, []byte(row)))
 	}
+	// The server pins A and delivers asynchronously: until A holds the pin and
+	// both rows are awaiting an ack, ResetOrphaned sees an idle unit (no
+	// error), not a live holder.
+	require.ElementsMatch(t, []string{"x", "y"}, []string{receive(t, gotA), receive(t, gotA)})
+	require.Eventually(t, func() bool { return unitPin(t, f, topic) != "" },
+		10*time.Second, 10*time.Millisecond, "the server pins A")
 	reset, err := b.ResetOrphaned(t.Context(), unit)
 	require.ErrorIs(t, err, ErrUnitHeld, "a live holder's rows are its own")
 	assert.False(t, reset)
