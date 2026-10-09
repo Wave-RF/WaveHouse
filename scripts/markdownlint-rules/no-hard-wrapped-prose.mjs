@@ -5,237 +5,206 @@
 // diff. AI-authored docs arrive wrapped by default, which is what motivated
 // this rule; the fix is mechanical, so it autofixes rather than nagging.
 //
-// parser: "none" — this works on raw lines, never on a parse tree, so the same
-// rule applies to .md and .mdx alike without markdownlint having to understand
-// MDX (it doesn't: it parses CommonMark).
-//
-// That shape is also the hazard: every construct this rule must not touch has
-// to be recognized from line shape alone, and a construct it fails to recognize
-// is silently destroyed rather than merely missed. Anything added to classify()
-// needs a fixture in rules.test.mjs — two corrupting bugs
-// (pipe-less tables, short setext underlines) got through review on exactly
-// that gap. Prefer skipping too much: a paragraph left wrapped is a nit, a
-// joined table is data loss.
+// Paragraphs come from a parser, not from line shape: markdownlint's own
+// micromark tokens for .md, and an MDX parse (./lib/mdx.mjs) for .mdx, where
+// CommonMark's reading is wrong. So tables, code, headings, setext underlines,
+// math, asides, JSX, ESM and indented code are untouched by construction, and a
+// nested list item indented four spaces is joined like any other (an earlier
+// line-shape version read it as indented code and skipped it). Within a
+// paragraph, the few lines below are still kept apart: a paragraph left wrapped
+// is a nit, a corrupted one is data loss. Every case has a fixture in
+// rules.test.mjs.
 
-// Lines that open a block. A block line is never joined to the line above it,
-// and (unless noted) never absorbs the line below.
-const BLOCK = new RegExp(
-  [
-    "^\\s{0,3}#{1,6}\\s", // ATX heading
-    "^\\s{0,3}>", // blockquote
-    "^\\s{0,3}\\|", // pipe-led table row
-    "^\\s*<", // HTML / JSX / comment
-    "^\\s*:::", // Starlight aside (remark-directive)
-    "^\\s{0,3}\\[[^\\]]+\\]:\\s", // link reference / footnote definition
-    // Thematic break, and setext underlines — which may be a SINGLE character,
-    // so `Title` + `=` is an h1 and joining it would demote it to a paragraph.
-    "^\\s{0,3}(=+|-+|_{3,}|\\*{3,})\\s*$",
-  ].join("|"),
-);
+import { descendants, hasAncestor, parseMdx, unmaskedLines } from "./lib/mdx.mjs";
 
-// List markers. Unlike the rest of BLOCK these DO absorb their continuation
-// lines — `- text` + `  more` is one item and belongs on one line. Joining only
-// the continuations to each other (and not to the marker) would leave a
-// half-wrapped item the rule could never touch again.
-const LIST_ITEM = /^\s{0,3}([-*+]|\d+[.)])\s/;
+// A line ending inside one of these is not interchangeable with a space: JS
+// (expressions, JSX attributes) can carry a `//` comment, TeX a `%` comment, a
+// link title, image alt text or directive attribute keeps its newline, and
+// inline HTML passes through verbatim.
+const VERBATIM_INLINE = new Set([
+  "directiveTextAttributes",
+  "htmlText",
+  "image",
+  "mathText",
+  "mdxJsxTextTag",
+  "mdxTextExpression",
+  "resource",
+]);
 
-// A GFM table delimiter row. Leading/trailing pipes are optional in GFM, so a
-// table can be written without any line matching BLOCK's pipe-led alternative.
-const TABLE_DELIM = /^\s{0,3}[|\s:-]*-[|\s:-]*$/;
+// Blockquote prose would need its `>` markers rewritten, and an HTML block is
+// HTML to CommonMark however much it looks like prose.
+const SKIPPED_CONTAINERS = new Set(["blockQuote", "htmlFlow"]);
 
-// A paragraph line ending in a backslash or two spaces is an intentional hard
-// break; joining it would change what renders.
-const HARD_BREAK = /(\\|\s\s)$/;
+// Inside these a line break is content: it renders, or ends a statement. MDX
+// calls their text a paragraph, at any depth and even mid-line.
+const PREFORMATTED = new Set(["pre", "script", "style", "textarea"]);
 
-const FENCE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
-const ESM_OPEN = /^\s*(import|export)\s/;
+// A line that opens with a tag keeps its own line. Joining it would be
+// render-neutral, but the parser calls `<span>…</span>` lines inside a layout
+// `<div>` a paragraph, and one 300-column line of markup reads worse than five.
+const TAGS = new Set(["htmlText", "mdxJsxTextTag"]);
 
-/** Tag every line as prose / list / blank / block / skip. */
-function classify(lines) {
-  const kind = new Array(lines.length).fill("prose");
-  // Frontmatter only counts when it is actually closed. A lone leading `---` is
-  // a thematic break, and treating it as an unterminated block would mark every
-  // remaining line "skip" and silently disable the rule for the whole file.
-  const hasFrontmatter =
-    lines[0]?.trim() === "---" && lines.slice(1).some((line) => line.trim() === "---");
-  let fence = null;
-  let frontmatter = false;
-  let jsxTag = false;
-  let esm = false;
-  let htmlComment = false;
-  let mathBlock = false;
+// A link reference definition cannot interrupt a paragraph, so one written
+// straight under prose is already broken; joining it would bury it mid-line.
+const DEFINITION = /^[ \t]*\[[^\]]+\]:[ \t]/;
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+const HARD_BREAK = /(\\| {2})$/;
 
-    if (i === 0 && hasFrontmatter) {
-      frontmatter = true;
-      kind[i] = "skip";
-      continue;
+// A code span turns a line ending into one space but keeps the spaces around
+// it (the docs' parser keeps the next line's indent too), and a line ending can
+// be its padding. So the only line ending inside one that is ours to join is a
+// plain one with code, not whitespace, on both sides; container prefixes (a list
+// indent, a `>`) are tokens of their own and don't count.
+function joinableInCode(codeText, line) {
+  const children = codeText.children;
+  const i = children.findIndex((t) => t.type === "lineEnding" && t.startLine === line);
+  if (i < 0) return false;
+  const before = children[i - 1];
+  const after = children.slice(i + 1).find((t) => t.type.startsWith("codeText"));
+  return (
+    before?.type === "codeTextData" &&
+    /[^ \t]$/.test(before.text) &&
+    after?.type === "codeTextData" &&
+    /^[^ \t]/.test(after.text)
+  );
+}
+
+/** In an MDX parse, each line whose line ending falls inside a PREFORMATTED element. */
+function preformattedLineEnds(tokens, lineCount) {
+  const ends = new Set();
+  let depth = 0;
+  let from = 0;
+  for (const tag of descendants(tokens)) {
+    if (tag.type !== "mdxJsxFlowTag" && tag.type !== "mdxJsxTextTag") continue;
+    const child = (suffix) => tag.children.find((t) => t.type === tag.type + suffix);
+    if (!PREFORMATTED.has(child("Name")?.text.trim()) || child("SelfClosingMarker")) continue;
+    if (!child("ClosingMarker")) {
+      if (depth++ === 0) from = tag.endLine;
+    } else if (depth > 0 && --depth === 0) {
+      for (let line = from; line < tag.startLine; line++) ends.add(line);
     }
-    if (frontmatter) {
-      kind[i] = "skip";
-      if (line.trim() === "---") frontmatter = false;
-      continue;
-    }
-
-    const fenceMatch = line.match(FENCE);
-    if (fence) {
-      kind[i] = "skip";
-      // A closing fence is the same character, at least as long, no info string.
-      if (
-        fenceMatch &&
-        fenceMatch[1][0] === fence[0] &&
-        fenceMatch[1].length >= fence.length &&
-        !fenceMatch[2].trim()
-      ) {
-        fence = null;
-      }
-      continue;
-    }
-    if (fenceMatch) {
-      fence = fenceMatch[1];
-      kind[i] = "skip";
-      continue;
-    }
-
-    // $$ display math — remark-math + rehype-katex are wired into
-    // docs/astro.config.mjs, so this is a supported construct here. Tracked
-    // like a fence rather than matched per line: guarding only the delimiters
-    // still lets the expressions between them be joined into one.
-    if (mathBlock) {
-      kind[i] = "skip";
-      if (line.includes("$$")) mathBlock = false;
-      continue;
-    }
-    if (/^\s{0,3}\$\$/.test(line)) {
-      kind[i] = "skip";
-      // A second $$ on the same line closes it there.
-      if (line.split("$$").length - 1 < 2) mathBlock = true;
-      continue;
-    }
-
-    // markdownlint hands rules a MASKED copy of any HTML comment's interior —
-    // every non-whitespace character replaced by `.` — so that rules don't match
-    // inside one. The fix's insertText is built from those same lines, so
-    // joining a line that touches a comment writes the mask back to disk and
-    // destroys the comment's text. Never join one.
-    if (htmlComment) {
-      kind[i] = "skip";
-      if (line.includes("-->")) htmlComment = false;
-      continue;
-    }
-    if (line.includes("<!--")) {
-      kind[i] = "skip";
-      if (!line.includes("-->")) htmlComment = true;
-      continue;
-    }
-
-    if (!line.trim()) {
-      kind[i] = "blank";
-      esm = false; // an ESM block cannot span a blank line in MDX
-      continue;
-    }
-    if (/^(\s{4,}\S|\t)/.test(line)) {
-      kind[i] = "skip"; // indented code block
-      continue;
-    }
-
-    // A multi-line ESM statement: `export const meta = {` … `};`. Only the
-    // opener looks like ESM, so the body must be skipped by state, not shape —
-    // joining it collapses any `//` comment over the rest of the statement and
-    // breaks the MDX parse. The run ends at the blank line that separates ESM
-    // from markdown; counting braces instead would miscount the ones inside
-    // comments and string literals and end the skip early.
-    if (esm) {
-      kind[i] = "skip";
-      continue;
-    }
-    if (ESM_OPEN.test(line)) {
-      kind[i] = "skip";
-      esm = true;
-      continue;
-    }
-
-    // A JSX tag whose attributes span lines: everything up to the closing `>`
-    // is markup, not prose (`<CloudCta`, `variant="band"`, `/>`).
-    if (jsxTag) {
-      kind[i] = "skip";
-      if (/>\s*$/.test(line)) jsxTag = false;
-      continue;
-    }
-    if (/^\s*<[A-Za-z]/.test(line) && !/>\s*$/.test(line)) {
-      kind[i] = "skip";
-      jsxTag = true;
-      continue;
-    }
-
-    // A GFM table, with or without leading pipes. The delimiter row is what
-    // makes it a table, so look ahead one line: everything from the header to
-    // the last contiguous row is off limits. Guarding only the delimiter row
-    // would still let a join START there and swallow the body.
-    if (
-      i + 1 < lines.length &&
-      lines[i + 1].includes("|") &&
-      TABLE_DELIM.test(lines[i + 1]) &&
-      line.includes("|")
-    ) {
-      kind[i] = "block";
-      for (i++; i < lines.length && lines[i].trim() && lines[i].includes("|"); i++)
-        kind[i] = "block";
-      i--;
-      continue;
-    }
-
-    if (LIST_ITEM.test(line)) kind[i] = "list";
-    else if (BLOCK.test(line)) kind[i] = "block";
   }
-  return kind;
+  // micromark does not balance tags, so an element left open (or closed by the
+  // wrong tag) still parses. Like CommonMark's HTML block, it runs to the end.
+  if (depth > 0) for (let line = from; line < lineCount; line++) ends.add(line);
+  return ends;
+}
+
+/** Each `[first, last]` (1-based, inclusive) run of lines that should be one. */
+function wrappedRuns(tokens, lines, preformatted) {
+  const runs = [];
+  for (const paragraph of descendants(tokens)) {
+    if (paragraph.type !== "paragraph" || paragraph.startLine === paragraph.endLine) continue;
+    if (hasAncestor(paragraph, SKIPPED_CONTAINERS)) continue;
+
+    // `breaks` holds line N when line N must not be joined to line N + 1;
+    // `verbatimEnd` the subset whose line ending sits inside verbatim inline
+    // content, where even trailing whitespace is not ours to trim.
+    const breaks = new Set();
+    const verbatimEnd = new Set();
+    const isolate = (from, to) => {
+      for (let line = from - 1; line <= to; line++) breaks.add(line);
+    };
+    for (let line = paragraph.startLine; line < paragraph.endLine; line++) {
+      if (!preformatted.has(line)) continue;
+      breaks.add(line);
+      verbatimEnd.add(line);
+    }
+    const inner = [...descendants(paragraph.children)];
+    for (const token of inner) {
+      if (token.type === "hardBreakEscape" || token.type === "hardBreakTrailing") {
+        breaks.add(token.startLine);
+      } else if (token.type === "htmlText" && token.text.startsWith("<!--")) {
+        // An inline-config comment governs its own line, so it never moves.
+        isolate(token.startLine, token.endLine);
+      } else if (token.type === "lineEnding" && hasAncestor(token, VERBATIM_INLINE, paragraph)) {
+        breaks.add(token.startLine);
+        verbatimEnd.add(token.startLine);
+      } else if (token.type === "codeText") {
+        for (let line = token.startLine; line < token.endLine; line++) {
+          if (joinableInCode(token, line)) continue;
+          breaks.add(line);
+          verbatimEnd.add(line);
+        }
+      }
+    }
+    for (let line = paragraph.startLine; line <= paragraph.endLine; line++) {
+      const text = lines[line - 1];
+      const column =
+        line === paragraph.startLine ? paragraph.startColumn : text.search(/[^ \t]/) + 1;
+      const opensWithTag = inner.some(
+        (t) => TAGS.has(t.type) && t.startLine === line && t.startColumn === column,
+      );
+      if (opensWithTag || (line > paragraph.startLine && DEFINITION.test(text))) {
+        isolate(line, line);
+      }
+    }
+
+    let first = paragraph.startLine;
+    for (let line = first; line <= paragraph.endLine; line++) {
+      if (line < paragraph.endLine && !breaks.has(line)) continue;
+      if (line > first) runs.push({ first, last: line, keepTrailing: verbatimEnd.has(line) });
+      first = line + 1;
+    }
+  }
+  return runs;
 }
 
 export default {
   names: ["WH001", "no-hard-wrapped-prose"],
   description: "Prose paragraphs must not be hard-wrapped (one paragraph = one line)",
   tags: ["whitespace", "prose"],
-  parser: "none",
+  parser: "micromark",
   function: (params, onError) => {
-    const { lines } = params;
-    const kind = classify(lines);
-
-    for (let i = 0; i < lines.length; i++) {
-      if (kind[i] !== "prose" && kind[i] !== "list") continue;
-
-      const first = i;
-      const parts = [lines[i].replace(/\s+$/, "")];
-      // Only plain prose continues a paragraph — a list item starts a new one.
-      while (i + 1 < lines.length && kind[i + 1] === "prose" && !HARD_BREAK.test(lines[i])) {
-        i++;
-        const continuation = lines[i].replace(/^\s+/, "");
-        // The guard above stops the run from continuing PAST a hard break, but
-        // the line carrying it is still absorbed — and trimming its trailing
-        // whitespace would delete the <br> it encodes. Keep it: the loop exits
-        // on the next pass, so such a line is always the last part.
-        parts.push(HARD_BREAK.test(continuation) ? continuation : continuation.replace(/\s+$/, ""));
+    // The fix is built from these lines, so they must be the real ones: in
+    // `params.lines` everything between `<!--` and `-->` is masked, even inside
+    // code spans and across paragraphs. Unrecoverable text gets reports only.
+    const source = unmaskedLines(params);
+    const lines = source ?? params.lines;
+    let tokens = params.parsers.micromark.tokens;
+    let preformatted = new Set();
+    if (params.name.endsWith(".mdx")) {
+      const mdx = parseMdx(lines);
+      if (mdx.error) {
+        onError({
+          lineNumber: Math.min(Math.max(mdx.error.line, 1), lines.length),
+          detail: `not checked: the file does not parse as MDX (${mdx.error.reason})`,
+        });
+        return;
       }
-      if (parts.length === 1) continue;
+      tokens = mdx.tokens;
+      preformatted = preformattedLineEnds(tokens, lines.length);
+    }
 
-      // One insert carrying the whole joined remainder, plus a delete per
+    for (const { first, last, keepTrailing } of wrappedRuns(tokens, lines, preformatted)) {
+      const head = lines[first - 1].replace(/[ \t]+$/, "");
+      const parts = [];
+      for (let line = first + 1; line <= last; line++) {
+        const continuation = lines[line - 1].replace(/^[ \t]+/, "");
+        // The run's last line may carry a hard break (`\` or two spaces) or end
+        // inside verbatim content; either way its trailing whitespace stays.
+        const keep = line === last && (keepTrailing || HARD_BREAK.test(continuation));
+        parts.push(keep ? continuation : continuation.replace(/[ \t]+$/, ""));
+      }
+
+      // One edit carrying the whole joined remainder, plus a delete per
       // continuation line. Appending each line to its immediate predecessor
       // instead would lose text, since that predecessor is itself deleted.
+      const fix = (fixInfo) => (source ? { fixInfo } : {});
       onError({
-        lineNumber: first + 1,
-        detail: `paragraph is hard-wrapped across ${parts.length} lines`,
-        fixInfo: {
-          editColumn: parts[0].length + 1,
-          deleteCount: 0,
-          insertText: ` ${parts.slice(1).join(" ")}`,
-        },
+        lineNumber: first,
+        detail: `paragraph is hard-wrapped across ${parts.length + 1} lines`,
+        ...fix({
+          editColumn: head.length + 1,
+          deleteCount: lines[first - 1].length - head.length,
+          insertText: ` ${parts.join(" ")}`,
+        }),
       });
-      for (let line = first + 1; line <= i; line++) {
+      for (let line = first + 1; line <= last; line++) {
         onError({
-          lineNumber: line + 1,
+          lineNumber: line,
           detail: "continuation of a hard-wrapped paragraph",
-          fixInfo: { deleteCount: -1 },
+          ...fix({ deleteCount: -1 }),
         });
       }
     }

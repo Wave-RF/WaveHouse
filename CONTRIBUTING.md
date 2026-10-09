@@ -90,7 +90,7 @@ test(cache): add tiered cache stampede test
 - **Naming**: Follow [Go naming conventions](https://go.dev/doc/effective_go#names).
 - **Interfaces**: Define interfaces where they are consumed, not where they are implemented.
 - **Errors**: Return errors rather than panicking. Use `fmt.Errorf("context: %w", err)` for wrapping.
-- **Docs prose**: never hard-wrap Markdown — one paragraph is one line. `make lint` enforces it (rule `WH001`) everywhere, and `make fix` applies it in `.md`. In `.mdx` the generic fixers are deliberately never run, so unwrap by hand there. See [Development → Markdown and MDX](https://wavehouse.dev/development#markdown-and-mdx).
+- **Docs prose**: never hard-wrap Markdown — one paragraph is one line. `make lint` checks it (rule `WH001`) and `make fix` applies it, in `.md` and `.mdx` alike, nested list items included. [Development → Markdown and MDX](https://wavehouse.dev/development#markdown-and-mdx) lists the few shapes it leaves alone, blockquotes among them.
 
 ## Code Review
 
