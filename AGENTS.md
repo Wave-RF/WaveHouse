@@ -6,7 +6,7 @@ This file provides context for AI coding agents (Copilot, Cursor, Cody, Aider, e
 
 The non-negotiables, ordered by how often agents miss them. Each links to its detail section — read that before acting. These override convenience: if a rule blocks you, satisfy it; don't work around it.
 
-1. **Validate locally before every push** — run `make ci` the documented way ([§Running `make ci`](#running-make-ci-for-agents)). Don't use CI as your first feedback loop.
+1. **Validate locally before every push** — run `make ci` the documented way, here or on a configured host with `make ci-remote` ([§Running `make ci`](#running-make-ci-for-agents)). Don't use CI as your first feedback loop.
 2. **A PR-branch push needs every pre-push reviewer satisfied** — run **`/prepush`**, which discovers the reviewers from `scripts/pre-push-reviewers.sh`, runs the ones the change needs in parallel (fresh context), skips any with nothing to do *on the record*, and loops until each it ran returns `ship_it`. Every reviewer needs a marker for the commit being pushed — earned by a `ship_it` or a logged skip; the set is the single source of truth and grows over time (code, docs, security, …), so never hardcode it ([§Pre-push self-review](#pre-push-self-review-is-mandatory-on-pr-branches)).
 3. **Every code change updates its docs + `CHANGELOG.md` in the same PR** — a code change without its doc update is incomplete ([§Documentation Sync](#documentation-sync)).
 4. **Address and resolve every review finding** — substantive reply, fix it or track it in an issue, @-mention the bot, then resolve; never silently drop one ([§Review Response](#review-response)).
@@ -169,6 +169,8 @@ NO_COLOR=1 make ci > tmp/ci.log 2>&1
 
 On success `make ci` writes the tree-keyed `tmp/ci-passed-tree-<TREE>` marker (see §Enforced via git hooks for the tree-keying and the commit-after-green rule; `tmp/` is gitignored, so the marker never enters the tree). That's one of the markers a PR-branch push requires — the rest are written by the mandatory review subagents, one per reviewer in `scripts/pre-push-reviewers.sh` (see §Agent PR Discipline → Pre-push self-review). End to end: `make ci` green → commit → run every pre-push reviewer in parallel (fresh context) via `/prepush` → loop until each reaches `ship_it` → push. Re-run `make ci` only if a finding makes you edit a tracked file.
 
+**On another machine.** When a host is configured (an ssh destination, or `docker:<container>`), you may satisfy the pre-push gate with `make ci-remote HOST=<host>` instead. It runs `make ci` for `HEAD` there and writes the same `tmp/ci-passed-tree-<TREE>` marker here only if that run passed for exactly this tree, so the gate's meaning is unchanged. Only `HEAD` travels, so commit first (it refuses a dirty worktree), and don't commit while it runs. Run it in the background exactly like `make ci` (`NO_COLOR=1 make ci-remote HOST=<host> > tmp/ci.log 2>&1`). Host requirements: `docs/src/content/docs/development.md` § Running `make ci` on another machine.
+
 ### Enforced via git hooks
 
 `make tools` installs team-wide git hooks via `git config core.hooksPath .githooks`. They apply to humans and Claude Code alike:
@@ -286,7 +288,7 @@ That's all: the marker is `tmp/<name>-passed-<sha>` automatically, the push gate
 ### Don't bypass the gates
 
 - `--no-verify` on `git commit` / `git push` exists for human WIP / draft pushes. Agents should not use it.
-- Markers are written by tooling, never by hand: `tmp/ci-passed-tree-*` by `make ci`; `tmp/<reviewer>-passed-*` (one per reviewer in `scripts/pre-push-reviewers.sh`) by the `review-marker.sh` SubagentStop hook on `ship_it`, **or** by `scripts/skip-pre-push-review.sh` for a deliberately-skipped reviewer (which logs the reason to `tmp/review-skips-<HEAD>.log`). Don't `touch` / `Write` / `Edit` a marker by hand — to skip a reviewer, use the skip command so the skip is recorded; if you're tempted to hand-write a review marker any other way, the marker is wrong-shaped for your situation. Run `make ci`, run or skip each reviewer, get the verdicts.
+- Markers are written by tooling, never by hand: `tmp/ci-passed-tree-*` by `make ci` or `make ci-remote`; `tmp/<reviewer>-passed-*` (one per reviewer in `scripts/pre-push-reviewers.sh`) by the `review-marker.sh` SubagentStop hook on `ship_it`, **or** by `scripts/skip-pre-push-review.sh` for a deliberately-skipped reviewer (which logs the reason to `tmp/review-skips-<HEAD>.log`). Don't `touch` / `Write` / `Edit` a marker by hand — to skip a reviewer, use the skip command so the skip is recorded; if you're tempted to hand-write a review marker any other way, the marker is wrong-shaped for your situation. Run `make ci`, run or skip each reviewer, get the verdicts.
 
 These are policy, not mechanically enforced. Bash can write a file a dozen ways; an agent can edit `.claude/hooks/agent-bash-gate.sh` itself. Trust beats whack-a-mole regex.
 

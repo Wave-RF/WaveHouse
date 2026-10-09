@@ -4,7 +4,8 @@
 # allowlist CI uses (scripts/classify-paths.sh), so local and CI agree on
 # what a change "is":
 #   - any code change → full `make ci` must have passed (tree-keyed marker
-#     tmp/ci-passed-tree-<tree>), exactly as before;
+#     tmp/ci-passed-tree-<tree>), exactly as before, here or on another
+#     machine via `make ci-remote`;
 #   - docs/prose-only → `make verify` is enough (CI skips the Go/SDK suites
 #     for these too), so only the verify marker is required — no spinning
 #     up the local Docker suites for a typo fix. pre-commit already runs
@@ -38,8 +39,13 @@ block_ci() { # <sha> — require the full make-ci marker
   }
   if [ ! -f "$marker" ]; then
     tree="${marker#tmp/ci-passed-tree-}"
-    echo "🛑 pre-push: 'make ci' has not been run for ${sha:0:8} (tree ${tree:0:8}). Run 'make ci' or 'git push --no-verify'." >&2
+    echo "🛑 pre-push: 'make ci' has not been run for ${sha:0:8} (tree ${tree:0:8}). Run 'make ci' (or 'make ci-remote HOST=<host>') or 'git push --no-verify'." >&2
     exit 1
+  fi
+  # `make ci-remote` leaves a provenance file beside its marker.
+  if [ -f "$marker.provenance" ]; then
+    prov() { sed -n "s/^$1=//p" "$marker.provenance"; }
+    echo "✔ pre-push: make ci passed on $(prov host) ($(prov os)/$(prov arch)) for ${sha:0:8}." >&2
   fi
 }
 

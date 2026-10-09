@@ -37,7 +37,7 @@ Two scripts, both committed to the repo:
 | Hook | Behavior |
 | ---- | -------- |
 | `pre-commit` | Runs `make verify` (the static checks listed in [Development → Makefile Targets](/development#makefile-targets), ~30s) — **blocks on failure**. Skipped if `make ci` or `make verify` already ran for the current tree state (cached via `scripts/ci-marker.sh`). |
-| `pre-push` | Scales the bar to the change set (same classifier CI uses, `scripts/classify-paths.sh`): a **code** change requires the `make ci` marker (`tmp/ci-passed-tree-<TREE-sha>`); a **docs/prose-only** push requires only the `make verify` marker (`tmp/verify-passed-tree-<TREE-sha>`) — CI skips the Go/SDK suites for those too. **Blocks** if the required marker is absent. Fail-closed: an unclassifiable push falls back to requiring `make ci`. |
+| `pre-push` | Scales the bar to the change set (same classifier CI uses, `scripts/classify-paths.sh`): a **code** change requires the `make ci` marker (`tmp/ci-passed-tree-<TREE-sha>`, from `make ci` or `make ci-remote`); a **docs/prose-only** push requires only the `make verify` marker (`tmp/verify-passed-tree-<TREE-sha>`) — CI skips the Go/SDK suites for those too. **Blocks** if the required marker is absent. Fail-closed: an unclassifiable push falls back to requiring `make ci`. |
 
 `--no-verify` is for intentional WIP / draft pushes. Agents should not use it — policy in AGENTS.md §"Agent PR Discipline", not regex-enforced.
 
