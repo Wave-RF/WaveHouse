@@ -218,9 +218,8 @@ export GOTESTSUM_FMT
 # image) silently diverges from CI, and golangci-lint panics type-checking a
 # standard library newer than the Go it was built with. Pin to go.mod's
 # `toolchain` line if it has one, else its `go` line (see the script, which CI
-# and deployments/Dockerfile share). The pin is strict, so `go install` in
-# `make tools` also runs on it: a tool that needs a newer Go fails until
-# go.mod's directive catches up.
+# shares). The pin is strict, so `go install` in `make tools` also runs on it:
+# a tool that needs a newer Go fails until go.mod's directive catches up.
 # Override with `make GOTOOLCHAIN=local ...` (the environment's value is ignored).
 GO_TOOLCHAIN := $(shell scripts/ci/go-toolchain.sh)
 $(if $(GO_TOOLCHAIN),,$(error cannot derive the Go toolchain from go.mod, see above))
@@ -464,6 +463,13 @@ test-release-channel:
 test-go-toolchain:
 	$(call run,go-toolchain test,scripts/ci/go-toolchain.test.sh,)
 
+# check-dockerfile-go: the Dockerfile's golang image tag must equal the Go
+# version go.mod pins (the image sets GOTOOLCHAIN=local, so nothing else
+# enforces it); the behavioral test runs first. A verify leaf.
+.PHONY: check-dockerfile-go
+check-dockerfile-go:
+	$(call run,dockerfile go check,scripts/ci/check-dockerfile-go.test.sh && scripts/ci/check-dockerfile-go.sh,)
+
 # test-tagged-tests: assert scripts/ci/tagged-tests.sh, which picks the tests
 # `make test-integration` runs by build tag, against `go test -list` on a
 # throwaway module: a tagged test it missed would never run. A verify leaf.
@@ -577,11 +583,11 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (18): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# Leaves (19): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
 # for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
-# test-classify-paths, test-release-channel, test-go-toolchain, test-tagged-tests,
+# test-classify-paths, test-release-channel, test-go-toolchain, check-dockerfile-go, test-tagged-tests,
 # test-integration-parts and test-review-gate for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
 # nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
@@ -596,7 +602,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-go-toolchain test-tagged-tests test-integration-parts test-review-gate vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-go-toolchain check-dockerfile-go test-tagged-tests test-integration-parts test-review-gate vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.

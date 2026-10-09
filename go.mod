@@ -1,8 +1,6 @@
 module github.com/Wave-RF/WaveHouse
 
-go 1.26.6
-
-toolchain go1.26.9
+go 1.26.9
 
 tool (
 	github.com/Zxilly/go-size-analyzer/cmd/gsa

@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
 # Stage 1: Build
-FROM golang:1.26-alpine AS builder
+# The tag must equal go.mod's Go version: the image sets GOTOOLCHAIN=local, so
+# an older Go refuses to build instead of fetching one. `make verify` checks
+# it (check-dockerfile-go).
+FROM golang:1.26.9-alpine AS builder
 WORKDIR /src
 
 # Pass build tags as an argument (defaults to empty)
@@ -10,17 +13,8 @@ ARG BUILD_TAGS=""
 # image sets GOPATH=/go, so `go mod download` writes to /go/pkg/mod — that's
 # the cache mount target. Splitting this into its own layer means dependency
 # changes (go.mod / go.sum) don't bust the source-code COPY layer's cache.
-#
-# The image sets GOTOOLCHAIN=local, which ignores go.mod's `toolchain` line, so
-# every `go` call below pins to go.mod exactly as the Makefile and CI do
-# (scripts/ci/go-toolchain.sh). `tc=$(...) && ...` fails the build if the
-# script does; `GOTOOLCHAIN=$(...) go` would swallow its exit status. A
-# toolchain newer than the image's is fetched into /go/pkg/mod, the cache
-# mount, so warm builds don't refetch it.
 COPY go.mod go.sum ./
-COPY scripts/ci/go-toolchain.sh scripts/ci/
-RUN --mount=type=cache,target=/go/pkg/mod \
-    tc="$(scripts/ci/go-toolchain.sh)" && GOTOOLCHAIN="$tc" go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 # Copy source code
 COPY . .
@@ -31,8 +25,7 @@ COPY . .
 # every `docker build` is a cold compile.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    tc="$(scripts/ci/go-toolchain.sh)" && \
-    CGO_ENABLED=0 GOTOOLCHAIN="$tc" go build -tags="${BUILD_TAGS}" -ldflags="-s -w" -o /bin/wavehouse ./cmd/wavehouse
+    CGO_ENABLED=0 go build -tags="${BUILD_TAGS}" -ldflags="-s -w" -o /bin/wavehouse ./cmd/wavehouse
 
 # Create the parent state and settings directories owned by the nonroot
 # user (UID 65532 in distroless). The binary creates `nats/` and `pebble/`
