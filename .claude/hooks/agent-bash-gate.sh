@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Agent PR workflow gate (PreToolUse Bash). Catches accidental violations of
 # rules that have no human analog:
-#   - gh pr create without --draft
+#   - gh pr create (or its alias gh pr new) without --draft, or with a title
+#     the PR-title lint rejects
 #   - gh pr ready
-#   - gh pr edit --add-reviewer / --add-assignee
-#   - gh api .../requested_reviewers (write verbs)
+#   - gh pr edit --add-reviewer / --add-assignee, and gh pr create / new
+#     --reviewer / --assignee (-r / -a)
 #   - gh pr review --approve / --request-changes
+#   - the gh api forms of these, REST and GraphQL, and of a merge
 #   - git push of a commit missing any pre-push review marker
 #     (one per reviewer in scripts/pre-push-reviewers.sh — code, docs, …)
 #
@@ -36,64 +38,290 @@ cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null) \
   || block "Could not parse hook payload as JSON."
 [ -z "$cmd" ] && exit 0
 
-# Strip quoted segments so commands that mention a blocked pattern in a
-# string don't false-positive. Doesn't cover heredocs — pass long bodies via
-# `-F <file>` if needed.
-stripped=$(printf '%s' "$cmd" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")
-
 # The gh checks resolve repo scripts from the session's checkout; the push
 # check resolves everything from the worktree the push runs in.
 project_dir="${CLAUDE_PROJECT_DIR:-.}"
 
-# gh pr create requires --draft.
-if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+create\b' <<<"$stripped"; then
-  grep -qE '(^|[[:space:]])(--draft|-d)\b' <<<"$stripped" \
-    || block "Agent-opened PRs must use --draft. Only humans publish ready-for-review PRs."
-fi
+# ── gh: the PR actions that are humans-only, and the PR title ────────────────
+#
+# gate_gh runs from the bottom of this file, once the tokenizer below exists.
+# Like the push check it reads the commands the line runs, so a gh command that
+# is only mentioned, in a quoted string, a heredoc body or a comment
+# (`python3 - <<'EOF'` with `# gh pr ready` in it), doesn't count, unless a
+# shell runs it: a $(…), `bash -c '…'`, `eval`, or a heredoc or here-string a
+# shell reads, directly or through a pipe; that code, as written, quotes and
+# heredoc bodies included, is tokenized and judged the same way. Each
+# gh command is judged on its own words: a gh api call by its endpoint (its
+# first argument that isn't a flag) and its fields, never by text elsewhere on
+# the line or inside a field's value, so a comment body that names an endpoint
+# is just a body.
+#
+# gh pr merge is not checked here: it is denied in .claude/settings.json for
+# Claude's own commands, and a person merges with it in shell mode (`!`), which
+# the docs don't say whether this hook sees. Its API forms, below, are blocked.
 
-# gh pr create / gh pr edit --title: validate the title against the SAME
-# Conventional-Commits rule the required `CI` check's `PR title` job enforces
-# (scripts/lint-pr-title.sh is the shared rule) — so a too-long or wrong-format
-# title is caught locally BEFORE the PR exists, not after the required check
-# fails. Extract the quoted --title/-t value from the ORIGINAL command (the
-# `stripped` copy has quotes removed). Fail-open: if no title is parseable
-# (--fill, interactive, unquoted) or the validator is missing, fall through to
-# the CI check rather than block a create we can't confidently judge.
-if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+(create|edit)\b' <<<"$stripped"; then
-  pr_title=$(printf '%s' "$cmd" | sed -nE 's/.*(--title|-t)[[:space:]]+"([^"]*)".*/\2/p')
-  [ -z "$pr_title" ] && pr_title=$(printf '%s' "$cmd" | sed -nE "s/.*(--title|-t)[[:space:]]+'([^']*)'.*/\2/p")
-  if [ -n "$pr_title" ] && [ -x "$project_dir/scripts/lint-pr-title.sh" ]; then
-    if ! reason=$("$project_dir/scripts/lint-pr-title.sh" "$pr_title" 2>&1); then
-      block "$reason"
-    fi
+# lint_title <title>: validate a PR title against the SAME Conventional-Commits
+# rule the required `CI` check's `PR title` job enforces (scripts/lint-pr-title.sh
+# is the shared rule) — so a too-long or wrong-format title is caught locally
+# BEFORE the PR exists, not after the required check fails. Fail-open: with no
+# title to read (--fill, interactive, computed) or no validator, fall through
+# to the CI check rather than block a create we can't confidently judge.
+lint_title() {
+  local reason
+  [ -n "$1" ] && [ -x "$project_dir/scripts/lint-pr-title.sh" ] || return 0
+  reason=$("$project_dir/scripts/lint-pr-title.sh" "$1" 2>&1) || block "$reason"
+}
+
+msg_draft="Agent-opened PRs must use --draft. Only humans publish ready-for-review PRs."
+msg_ready="Only humans flip drafts to ready-for-review. Ask the user."
+msg_reviewers="Adding/removing reviewers is humans-only. Re-trigger bot reviewers via PR comment mention (e.g. @coderabbitai review)."
+msg_reviewers_api="Reviewer-write requests are humans-only. Re-trigger bot reviewers via PR comment mention."
+msg_approve="Only humans approve PRs."
+msg_changes="Agents post inline review comments instead of --request-changes."
+merge_msg="Agents don't merge PRs; a person does. Ask the user."
+
+# truthy <--flag=value>: the value turns a boolean flag on, as gh's flag
+# parser reads it.
+truthy() {
+  case ${1#*=} in 1 | t | T | true | TRUE | True) return 0 ;; esac
+  return 1
+}
+
+# gh_pr <i> <end>: judge `gh pr <TK_VAL[i]> …`, its words up to token <end>.
+gh_pr() {
+  local i=$1 e=$2 j w sub=${TK_VAL[$1]} draft=0 approve=0 changes=0 reviewer=0 people=0 title=""
+  for ((j = i + 1; j < e; j++)); do
+    w=${TK_VAL[j]}
+    case $w in
+      --draft | -d) draft=1 ;;
+      --draft=*) truthy "$w" && draft=1 ;;
+      --approve) approve=1 ;;
+      -a) approve=1; people=1 ;;
+      --approve=*) truthy "$w" && approve=1 ;;
+      --request-changes) changes=1 ;;
+      -r) changes=1; people=1 ;;
+      --request-changes=*) truthy "$w" && changes=1 ;;
+      # `create` reads these as people to request or assign; gh also takes the value glued (-rname, -r=name).
+      --reviewer | --reviewer=* | --assignee | --assignee=* | -r?* | -a?*) people=1 ;;
+      --add-reviewer | --add-reviewer=* | --remove-reviewer | --remove-reviewer=*) reviewer=1 ;;
+      --add-assignee | --add-assignee=* | --remove-assignee | --remove-assignee=*) reviewer=1 ;;
+      --title | -t) [ $((j + 1)) -lt "$e" ] && [ "${TK_DYN[j + 1]}" = 0 ] && title=${TK_VAL[j + 1]} ;;
+      --title=*) [ "${TK_DYN[j]}" = 0 ] && title=${w#--title=} ;;
+    esac
+  done
+  case $sub in
+    create | new)
+      [ "$people" = 0 ] || block "$msg_reviewers"
+      [ "$draft" = 1 ] || block "$msg_draft"
+      lint_title "$title" ;;
+    edit)
+      [ "$reviewer" = 0 ] || block "$msg_reviewers"
+      lint_title "$title" ;;
+    ready) block "$msg_ready" ;;
+    review)
+      [ "$approve" = 0 ] || block "$msg_approve"
+      [ "$changes" = 0 ] || block "$msg_changes" ;;
+  esac
+  return 0
+}
+
+# gh_api <i> <end>: judge `gh api …`, its words from token <i> up to <end>.
+# The endpoint is its first word that isn't a flag or a flag's value; a field
+# is the value of -f, -F, --field or --raw-field. A call writes when it names a
+# method other than GET or, naming none, sends a field or --input, which makes
+# gh POST. A field sent from a file (`-F key=@file`, --input) isn't read.
+gh_api() {
+  local i=$1 e=$2 j w f ep="" method="" fields=0 write=0 path
+  local draft="" title="" event="" query="" qdyn=0 values=""
+  for ((j = i; j < e; j++)); do
+    w=${TK_VAL[j]}
+    f=""
+    case $w in
+      -X | --method) [ $((j + 1)) -lt "$e" ] && { j=$((j + 1)); method=${TK_VAL[j]}; } ;;
+      -X?*) method=${w#-X} ;;
+      --method=*) method=${w#--method=} ;;
+      -f | -F | --field | --raw-field) [ $((j + 1)) -lt "$e" ] && { j=$((j + 1)); f=${TK_VAL[j]}; fields=1; } ;;
+      -f?* | -F?*) f=${w#-?}; fields=1 ;;
+      --field=* | --raw-field=*) f=${w#*=}; fields=1 ;;
+      --input) j=$((j + 1)); fields=1 ;;
+      --input=*) fields=1 ;;
+      -H | --header | -q | --jq | -t | --template | -p | --preview | --hostname | --cache) j=$((j + 1)) ;;
+      -*) ;;
+      *) [ -n "$ep" ] || ep=$w ;;
+    esac
+    [ -n "$f" ] || continue
+    case ${f#*=} in @*) continue ;; esac # its value is a file's contents
+    values+=" ${f#*=}"
+    case $f in
+      draft=*) draft=${f#draft=} ;;
+      title=*) [ "${TK_DYN[j]}" = 0 ] && title=${f#title=} ;;
+      event=*) event=${f#event=} ;;
+      query=*) query=${f#query=}; [ "${TK_DYN[j]}" = 0 ] || qdyn=1 ;;
+    esac
+  done
+  # A computed query (`-f query="$(cat <<'EOF' … EOF)"`) is matched against
+  # the code that computes it, heredoc bodies included.
+  [ "$qdyn" = 0 ] || query=$GH_CODE
+  if [ -n "$method" ]; then
+    case $method in [gG][eE][tT]) ;; *) write=1 ;; esac
+  else
+    write=$fields
   fi
-fi
+  path=${ep#https://api.github.com}
+  path=${path#/}
+  path=${path%%\?*}
+  path=${path%/}
+  if [ "$path" = graphql ]; then
+    case $query in *markPullRequestReadyForReview*) block "$msg_ready" ;; esac
+    case $query in *mergePullRequest* | *enablePullRequestAutoMerge*) block "$merge_msg" ;; esac
+    case $query in *requestReviews*) block "$msg_reviewers_api" ;; esac
+    case $query in
+      *addPullRequestReview* | *submitPullRequestReview*)
+        case "$query$values" in *APPROVE*) block "$msg_approve" ;; esac
+        case "$query$values" in *REQUEST_CHANGES*) block "$msg_changes" ;; esac ;;
+    esac
+    case $query in
+      *createPullRequest*)
+        [[ $query =~ draft:[[:space:]]*true || $draft == true ]] \
+          || block "Agent-opened PRs must be drafts; in GraphQL, send draft: true. Only humans publish ready-for-review PRs." ;;
+    esac
+    return 0
+  fi
+  if [ "$write" = 1 ]; then
+    case $path in
+      repos/*/pulls/*/requested_reviewers) block "$msg_reviewers_api" ;;
+      repos/*/pulls/*/merge) block "$merge_msg" ;;
+      repos/*/pulls)
+        [ "$draft" = true ] \
+          || block "Agent-opened PRs must be drafts; through the API, send -F draft=true. Only humans publish ready-for-review PRs."
+        lint_title "$title" ;;
+      repos/*/pulls/*/*) ;;
+      repos/*/pulls/*) lint_title "$title" ;;
+    esac
+  fi
+  case $path in
+    repos/*/pulls/*/reviews | repos/*/pulls/*/reviews/*/events)
+      case $event in
+        [aA][pP][pP][rR][oO][vV][eE]) block "$msg_approve" ;;
+        [rR][eE][qQ][uU][eE][sS][tT]_[cC][hH][aA][nN][gG][eE][sS]) block "$msg_changes" ;;
+      esac ;;
+  esac
+  return 0
+}
 
-# gh pr ready is humans-only.
-if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+ready\b' <<<"$stripped"; then
-  block "Only humans flip drafts to ready-for-review. Ask the user."
-fi
+# shell_code_at <i> <end>: SHELL_CODE = the token index of the code a shell
+# whose arguments start at token <i> runs with -c (its first argument after
+# the options), or -1 when it isn't given -c. Steps over options and the value
+# of -o, +o, -O, +O, --rcfile and --init-file; a short-option cluster that
+# contains c (-c, -lc, -euc) counts as -c, a long option (--norc) doesn't.
+shell_code_at() {
+  local m=$1 e=$2 c=0
+  SHELL_CODE=-1
+  while [ "$m" -lt "$e" ]; do
+    case ${TK_VAL[m]} in
+      --) m=$((m + 1)); break ;;
+      --rcfile | --init-file) m=$((m + 1)) ;;
+      --*) ;;
+      [-+]*[oO]*)
+        case ${TK_VAL[m]} in -*c*) c=1 ;; esac
+        m=$((m + 1)) ;;
+      -*c*) c=1 ;;
+      [-+]?*) ;;
+      *) break ;;
+    esac
+    m=$((m + 1))
+  done
+  if [ "$c" = 1 ] && [ "$m" -lt "$e" ]; then SHELL_CODE=$m; fi
+}
 
-# gh pr edit --add-reviewer / --add-assignee is humans-only.
-if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+edit\b' <<<"$stripped" \
-   && grep -qE '(^|[[:space:]])--(add|remove)-(reviewer|assignee)\b' <<<"$stripped"; then
-  block "Adding/removing reviewers is humans-only. Re-trigger bot reviewers via PR comment mention (e.g. @coderabbitai review)."
-fi
+# gh_scan: judge every gh pr and gh api command in the current tokens, and
+# queue in GH_QUEUE the code a shell will run: each $(…) and `…`, the code a
+# shell is handed with -c or eval, and a heredoc or here-string a shell reads,
+# directly or through a pipe.
+gh_scan() {
+  local i j k m n=${#TK_VAL[@]} w line="" start=0 s
+  local -a lines=() starts=() ends=()
+  for ((i = 0; i <= n; i++)); do
+    if [ "$i" -eq "$n" ] || [ "${TK_OP[i]}" = 1 ]; then
+      lines+=("$line"); starts+=("$start"); ends+=("$i")
+      line=""; start=$((i + 1))
+      continue
+    fi
+    w=${TK_VAL[i]}
+    case $w in *[[:space:]]*) w=Q ;; esac
+    [ "${TK_DYN[i]}" = 0 ] || w=Q
+    line+=" $w"
+  done
+  for ((k = 0; k < ${#lines[@]}; k++)); do
+    for ((j = starts[k]; j < ends[k]; j++)); do
+      w=${TK_VAL[j]##*/}
+      if [ "$w" = gh ] && [ "${TK_DYN[j]}" = 0 ]; then
+        # gh takes -R/--repo before the command too: `gh -R o/r pr ready 12`.
+        m=$((j + 1))
+        while [ "$m" -lt "${ends[k]}" ]; do
+          case ${TK_VAL[m]} in
+            -R | --repo) m=$((m + 2)) ;;
+            -R?* | --repo=*) m=$((m + 1)) ;;
+            *) break ;;
+          esac
+        done
+        if [ "$m" -lt "${ends[k]}" ]; then
+          case ${TK_VAL[m]} in
+            pr) [ $((m + 1)) -lt "${ends[k]}" ] && gh_pr $((m + 1)) "${ends[k]}" ;;
+            api) gh_api $((m + 1)) "${ends[k]}" ;;
+          esac
+        fi
+        break
+      fi
+      # Code handed to a shell: `bash -c '…'` (or -lc, -e -c, …), or eval's words.
+      case $w in
+        sh | bash | dash | zsh | ksh)
+          shell_code_at $((j + 1)) "${ends[k]}"
+          [ "$SHELL_CODE" -lt 0 ] || GH_QUEUE+=("${TK_VAL[SHELL_CODE]}") ;;
+        eval)
+          s=""
+          for ((i = j + 1; i < ends[k]; i++)); do s+=" ${TK_VAL[i]}"; done
+          GH_QUEUE+=("$s") ;;
+      esac
+    done
+  done
+  for ((j = 0; j < ${#TK_CODE[@]}; j++)); do
+    GH_QUEUE+=("${TK_CODE[j]}")
+  done
+  for ((j = 0; j < ${#TK_IN[@]}; j++)); do
+    for ((k = 0; k < ${#lines[@]}; k++)); do
+      [ "${starts[k]}" = "${TK_IN_AT[j]}" ] || continue
+      if [[ ${lines[k]} =~ $shell_re ]] \
+        || { [ $((k + 1)) -lt "${#lines[@]}" ] && [[ ${TK_VAL[ends[k]]} == '|'* ]] && [[ ${lines[k + 1]} =~ $shell_re ]]; }; then
+        GH_QUEUE+=("${TK_IN[j]}")
+      fi
+      break
+    done
+  done
+}
 
-# gh api .../requested_reviewers write verbs (API form of --add-reviewer).
-if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+api\b' <<<"$stripped" \
-   && grep -qE 'requested_reviewers' <<<"$stripped" \
-   && grep -qE '(-X[[:space:]]*(POST|PUT|PATCH)|--method[[:space:]]*(POST|PUT|PATCH)|[[:space:]]-f[[:space:]]+reviewers=|[[:space:]]-F[[:space:]]+reviewers=)' <<<"$stripped"; then
-  block "Reviewer-write requests are humans-only. Re-trigger bot reviewers via PR comment mention."
-fi
-
-# gh pr review --approve / --request-changes are humans-only.
-if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+review\b' <<<"$stripped"; then
-  grep -qE '(^|[[:space:]])(--approve|-a)\b' <<<"$stripped" \
-    && block "Only humans approve PRs."
-  grep -qE '(^|[[:space:]])(--request-changes|-r)\b' <<<"$stripped" \
-    && block "Agents post inline review comments instead of --request-changes."
-fi
+# gate_gh: judge the line, then each piece of code it hands a shell, in turn.
+# It follows 64 pieces, a bound on code that nests itself; past that, any piece
+# left that mentions a gh pr or gh api command is refused, unjudged. So is a
+# line it can't parse that mentions one: it can't tell what runs.
+gate_gh() {
+  local q
+  grep -qE '(^|[^[:alnum:]_-])gh[[:space:]]' <<<"$cmd" || return 0
+  GH_QUEUE=("$cmd")
+  for ((q = 0; q < ${#GH_QUEUE[@]} && q < 64; q++)); do
+    GH_CODE=${GH_QUEUE[q]}
+    if tokenize "$GH_CODE"; then
+      gh_scan
+    elif grep -qE "$gh_cmd_re" <<<"$GH_CODE"; then
+      block "can't parse this command (an unterminated quote or substitution?), so can't tell what it does to a PR. Fix the quoting, or run the gh command on its own."
+    fi
+  done
+  for (( ; q < ${#GH_QUEUE[@]}; q++)); do
+    grep -qE "$gh_cmd_re" <<<"${GH_QUEUE[q]}" \
+      && block "this command nests more code than the gate follows (64 pieces), and some of what's left runs gh. Split it into separate commands."
+  done
+  return 0
+}
 
 # ── git push: the commit each refspec publishes needs a review marker ────────
 #
@@ -138,7 +366,9 @@ reviewers_script="scripts/pre-push-reviewers.sh"
 # TK_OP, TK_IN / TK_IN_AT with each heredoc body and here-string and the token
 # index of the simple command that reads it, and TK_SUBS with the text of every
 # $(…) and `…`, wherever its word went (an argument, a here-string, a redirect
-# target), each quoted part inside a $(…) wrapped in \002…\003; returns 1 on an
+# target), each quoted part inside a $(…) wrapped in \002…\003, and TK_CODE
+# with the code inside each one exactly as written, quotes and heredoc bodies
+# included, for the gh checks to tokenize in turn; returns 1 on an
 # unterminated quote or substitution.
 
 tk_flush() {
@@ -183,7 +413,7 @@ tk_ansi() {
 }
 
 tk_dquote() {
-  local c c2
+  local c c2 rest part
   _inw=1; _i=$((_i + 1))
   [ "$_insub" = 0 ] || _w+=$'\002'
   while [ "$_i" -lt "$_n" ]; do
@@ -199,20 +429,26 @@ tk_dquote() {
         _i=$((_i + 2)) ;;
       '$') tk_dollar || return 1 ;;
       '`') tk_backtick || return 1 ;;
-      *) _w+=$c; _i=$((_i + 1)) ;;
+      *)
+        # Everything up to the next character with a meaning here, in one step:
+        # a PR body is often tens of KB of plain text in double quotes.
+        rest=${_s:_i}
+        part=${rest%%[\"\\\$\`]*}
+        _w+=$part; _i=$((_i + ${#part})) ;;
     esac
   done
   return 1
 }
 
 tk_dollar() {
-  local rest part s0=${#_w}
+  local rest part s0=${#_w} start=$_i
   _inw=1; _dyn=1
   case ${_s:_i+1:1} in
     '(')
       _w+='$'; _i=$((_i + 1)); _insub=$((_insub + 1))
       tk_paren || return 1
-      _insub=$((_insub - 1)); TK_SUBS+=("${_w:s0}") ;;
+      _insub=$((_insub - 1)); TK_SUBS+=("${_w:s0}")
+      TK_CODE+=("${_s:start+2:_i-start-3}") ;;
     '{')
       rest=${_s:_i}
       case $rest in *'}'*) ;; *) return 1 ;; esac
@@ -225,12 +461,15 @@ tk_dollar() {
 }
 
 tk_backtick() {
-  local c s0=${#_w}
+  local c s0=${#_w} start=$_i
   _inw=1; _dyn=1; _w+='`'; _i=$((_i + 1))
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
     case $c in
-      '`') _w+=$c; _i=$((_i + 1)); TK_SUBS+=("${_w:s0}"); return 0 ;;
+      '`')
+        _w+=$c; _i=$((_i + 1)); TK_SUBS+=("${_w:s0}")
+        TK_CODE+=("${_s:start+1:_i-start-2}")
+        return 0 ;;
       \\) _w+=${_s:_i:2}; _i=$((_i + 2)) ;;
       *) _w+=$c; _i=$((_i + 1)) ;;
     esac
@@ -340,7 +579,7 @@ tokenize() {
   local LC_ALL=C c c2 rest line
   _s=$1; _n=${#1}; _i=0
   _w=""; _inw=0; _dyn=0; _skip=0; _cmd0=0; _insub=0
-  TK_VAL=(); TK_DYN=(); TK_OP=(); TK_IN=(); TK_IN_AT=(); TK_SUBS=(); _hd_delim=(); _hd_strip=(); _hd_at=()
+  TK_VAL=(); TK_DYN=(); TK_OP=(); TK_IN=(); TK_IN_AT=(); TK_SUBS=(); TK_CODE=(); _hd_delim=(); _hd_strip=(); _hd_at=()
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
     case $c in
@@ -697,6 +936,10 @@ git_re='(^|[[:space:];|&(`])git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:spac
 # shellcheck disable=SC2016
 end_re='([[:space:]]|$|[;|&)`])'
 push_re=${git_re}push$end_re
+# shellcheck disable=SC2016
+gh_re='(^|[[:space:];|&(`])gh[[:space:]]+'
+# A gh pr or gh api command, -R/--repo before it allowed, anywhere in a text.
+gh_cmd_re=${gh_re}'((-R|--repo)(=|[[:space:]]*)[^[:space:]]+[[:space:]]+)*(pr|api)'$end_re
 head_re=${git_re}'(commit|merge|rebase|reset|checkout|switch|cherry-pick|revert|am|pull)'$end_re
 # shellcheck disable=SC2016
 shell_re='(^|[[:space:];|&(`])(eval|([^[:space:];|&]*/)?(ba|z|da|k)?sh)([[:space:]<]|$)'
@@ -759,6 +1002,8 @@ unfollowed_push() {
   done
   return 1
 }
+
+gate_gh
 
 # Cheap filter first, so most commands are never tokenized: quoted strings on a
 # line become a placeholder word (`git -C "<path>" stash push` reads as a

@@ -127,6 +127,8 @@ The package ships a CommonJS build at `dist/index.cjs` (the `"require"` conditio
 const { createClient } = require('@wavehouse/sdk');
 ```
 
+TypeScript projects under `node16`/`nodenext` resolution get the matching `dist/index.d.cts` declarations through the same `require` condition, so a CommonJS project type-checks without importing ESM-typed declarations.
+
 ### IIFE global (`<script src>`)
 
 For pages that cannot use ES modules, `dist/index.global.js` is a self-contained minified bundle that exposes every export on a `WaveHouse` global (`window.WaveHouse`). CDNs serve it via the `unpkg`/`jsdelivr` fields in `package.json`:

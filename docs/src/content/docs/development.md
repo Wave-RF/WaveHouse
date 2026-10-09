@@ -19,7 +19,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse and a Redis via testcontainers (no compose file), the integration suite also dynamodb-local, and the integration suite also runs the shared cache backend against Redis, Valkey, Dragonfly (pulled from `docker.dragonflydb.io`) and a one-node Redis Cluster | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
 | **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make tools`, `make verify`, `make lint`, `make fmt`, `make fix`, `make ci`, `make build-ts`, `make dev-ts`, `make test-ts`, `make test-e2e`, `make test-all`, `make check-docs`, `make build-docs`, `make build-all`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` (`make tools` itself runs `pnpm install`, and `make verify` is what the pre-commit hook runs, so a Go-only contributor needs pnpm too) | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
-| **git** + **curl** + **jq** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` and `shellcheck` binaries into `.bin/` and, for `make build-ts`, the oldest Node that `engines.node` admits; `jq` is needed by `make verify` (the review-gate hook tests) and by the Claude Code hooks | usually preinstalled (`jq` ships with macOS 15+); otherwise `apt install jq` / `brew install jq` |
+| **git** + **curl** + **jq** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` and `shellcheck` binaries into `.bin/` and, for `make build-ts`, the oldest Node that `engines.node` admits; `jq` is needed by `make verify` (the hook tests) and by the Claude Code hooks | usually preinstalled (`jq` ships with macOS 15+); otherwise `apt install jq` / `brew install jq` |
 
 ### Auto-installed by `make tools`
 
@@ -340,6 +340,22 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 
 **Build cache across worktrees**: `make` exports `GOFLAGS=-trimpath` (your own `GOFLAGS` are kept), so compiled packages don't embed the checkout's path and every worktree of the same source shares one build cache entry per package and variant, instead of building its own. Opt out with `GOFLAGS=-trimpath=false make …`. `make build` is the exception: its debug binary keeps absolute source paths, so a debugger finds the files. Release and coverage binaries and test binaries built through `make` are trimmed; their frames read `github.com/Wave-RF/WaveHouse/internal/…` (standard-library frames are plain import paths such as `runtime/proc.go`), so map the module path to your checkout, for example, at the `(dlv)` prompt, `config substitute-path github.com/Wave-RF/WaveHouse /absolute/path/to/your/checkout` (or a `substitute-path` entry with `from` and `to` in `~/.config/dlv/config.yml`, or your editor's `substitutePath`). Code that needs a file from the repository finds it from the working directory, never from `runtime.Caller`, whose paths are module-relative under `-trimpath`.
 
+### Running `make ci` on another machine
+
+`make ci-remote HOST=<host>` runs `make ci` for your `HEAD` commit on another machine and streams its output back, so the heavy suites can run off your laptop, or on another OS or architecture than yours (CI runs on Linux amd64).
+
+```bash
+make ci-remote HOST=build-box                  # any ssh destination: user@host, a ~/.ssh/config alias
+make ci-remote HOST=docker:wavehouse-dev       # a running local container or devcontainer
+make ci-remote HOST=build-box KEEP=1 REMOTE_DIR=/scratch/wavehouse-ci
+```
+
+Only the commit travels, so the worktree must be clean: `HEAD` is streamed as a `git bundle` over the ssh or `docker exec` connection, and nothing is pushed. The host checks it out in a fresh directory under `REMOTE_DIR` (default `.cache/wavehouse-ci`; a relative path is under the host's home), runs `make tools && make ci` there, and removes the directory afterwards unless `KEEP=1`. After the local `==> make ci on …` line, the first line the host prints is its `uname -sm`, and each run keeps a copy of its log in `tmp/ci-remote-<tree>-<run>.log`, so two runs of one tree, say on two architectures at once, don't overwrite each other. If `make ci-remote` is stopped, by Ctrl-C or a signal, the host stops its `make ci` within a second or two: the host's end of the connection stays open only while the local command runs, and the host stops the run when it closes.
+
+The host needs what a local `make ci` needs: bash, git, curl, jq, GNU Make 4+, Go, Node and pnpm from [Prerequisites](#prerequisites), network access for `make tools`, and a Docker daemon for the integration and e2e suites. Over ssh the commands run in a non-interactive login shell, so the tools must be on the `PATH` the host's profile sets; in a container they must be on the container's own `PATH`, and the container must reach a Docker daemon (a mounted socket or Docker-in-Docker). If `make ci` runs inside a container on the host's network, testcontainers may try to reach the suites' containers through the Docker bridge gateway and time out; setting `TESTCONTAINERS_HOST_OVERRIDE=localhost` in the host's environment points it at the published ports instead. A Linux host without Chromium's system libraries needs them installed once for the docs build, as Prerequisites describes (`pnpm --filter wavehouse-docs exec playwright install-deps chromium`).
+
+**How the pre-push gate treats it.** The gate's meaning doesn't change: a code push still needs `tmp/ci-passed-tree-<tree>`, which says `make ci` passed for exactly that tree. `make ci-remote` writes it (and the verify marker) only if the host exits 0, the tree the host reports having checked out equals your `HEAD^{tree}`, `make ci` left the host's checkout clean, and your worktree is still clean and on that tree when the run ends; otherwise it writes nothing. Beside the marker, `tmp/ci-passed-tree-<tree>.provenance` records the host, its OS and architecture, the start and end times and the log path, and the pre-push hook prints `make ci passed on <host> (<os>/<arch>)` from it. A marker from a local `make ci` has no provenance file and works exactly as before.
+
 ### Test Structure
 
 | Category | Location | Docker? | Command |
@@ -533,13 +549,13 @@ Run `make help` to see all targets. Key ones:
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
 | `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) + Markdown/MDX (markdownlint) + prose (misspell) |
 | `make vulncheck` | Run `govulncheck -scan package` (`V=1`: the default symbol-level scan, with example traces) |
-| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + go-toolchain fixtures + Dockerfile Go-version check + tagged-test selector and integration-parts fixtures + PR build-cache prune fixtures + review-gate hook tests + docs type-check (`astro check` — not a full build, so link validation is left to `make build-docs`, which `make ci` runs); a bare `make verify` runs these in parallel |
+| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) + Markdown/MDX (markdownlint + rule fixtures) + prose (misspell) + shell (shellcheck) + workflows (actionlint) + path-classifier fixtures + release-channel fixtures + go-toolchain fixtures + Dockerfile Go-version check + tagged-test selector and integration-parts fixtures + PR build-cache prune fixtures + review-gate hook tests + git-hook tests (`.githooks/`) + Claude Code hook-command tests (`.claude/settings.json`) + `make ci-remote` tests + docs type-check (`astro check` — not a full build, so link validation is left to `make build-docs`, which `make ci` runs); a bare `make verify` runs these in parallel |
 | `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint `--fix`), MDX (`fix-mdx-fences` only — the generic fixers never run over `.mdx`), and docs-prose spelling (misspell, both) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
 | `make build-release` | Stripped release-style build → `bin/wavehouse-release` |
 | `make build-cover` | Coverage-instrumented build → `bin/wavehouse-cov` (used by E2E) |
-| `make build-ts` | Build TypeScript SDK → `clients/ts/dist/`, then smoke-load its ESM, CJS and IIFE entry points at the oldest Node `engines.node` admits |
+| `make build-ts` | Build TypeScript SDK → `clients/ts/dist/`, then smoke-load its ESM, CJS and IIFE entry points at the oldest Node `engines.node` admits, and type-check a CommonJS and an ESM consumer against the built declarations with `tsc --module node16` |
 | **Test** | |
 | `make test` | Alias for `test-unit` |
 | `make test-unit` | Go unit tests + render coverage + gate suite threshold |
@@ -549,6 +565,7 @@ Run `make help` to see all targets. Key ones:
 | `make test-e2e` | E2E SDK suite against `bin/wavehouse-cov` + coverage gate |
 | `make test-all` | All four suites sequentially + merged coverage gate |
 | `make ci` | Full pipeline: parallel `verify` + builds + unit/SDK tests, then integration + E2E + cov |
+| `make ci-remote HOST=<host>` | `make ci` for `HEAD` on an ssh host or `docker:<container>`; writes the same marker if it passes there for this exact tree ([details](#running-make-ci-on-another-machine)) |
 | **Release** (see [Cutting a release](#cutting-a-release)) | |
 | `make release-server VERSION=X.Y.Z` | Tag a server release — binaries + container image |
 | `make release-sdk-ts VERSION=X.Y.Z` | Tag a TypeScript SDK release — npm |

@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-bash-gate.sh",
+            "command": "h=\"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-bash-gate.sh\"; [ -f \"$h\" ] && [ -x \"$h\" ] && exec \"$h\"; c=$(jq -r '.tool_input.command // empty' 2>/dev/null) || { c='git push'; cat >/dev/null; }; m() { printf '%s\\n' \"$c\" | grep -Eq '(^|[^[:alnum:]_.-])('\"$1\"')([^[:alnum:]_.-]|$)'; }; if { m git && m push; } || { m gh && { { m pr && m 'create|new|edit|ready|review|merge'; } || { m api && m 'pulls|graphql'; }; }; }; then echo \"🛑 Claude PR discipline gate: $h is missing or not executable, so this push or PR change can't be checked and is blocked (without jq, every command is). If this session's checkout was removed, restart Claude Code from a live checkout.\" >&2; exit 2; fi",
             "timeout": 30
           }
         ]
@@ -48,11 +48,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/gofumpt-on-save.sh"
+            "command": "h=\"$CLAUDE_PROJECT_DIR/.claude/hooks/gofumpt-on-save.sh\"; [ -f \"$h\" ] && [ -x \"$h\" ] && exec \"$h\"; cat >/dev/null; echo \"⚠️ $h is missing or not executable, so the file was not auto-formatted (the edit itself went through). If this session's checkout was removed, restart Claude Code from a live checkout.\" >&2; exit 2"
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/markdown-on-save.sh"
+            "command": "h=\"$CLAUDE_PROJECT_DIR/.claude/hooks/markdown-on-save.sh\"; [ -f \"$h\" ] && [ -x \"$h\" ] && exec \"$h\"; cat >/dev/null; echo \"⚠️ $h is missing or not executable, so the file was not auto-formatted (the edit itself went through). If this session's checkout was removed, restart Claude Code from a live checkout.\" >&2; exit 2"
           }
         ]
       }
@@ -62,7 +62,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/review-marker.sh"
+            "command": "h=\"$CLAUDE_PROJECT_DIR/.claude/hooks/review-marker.sh\"; [ -f \"$h\" ] && [ -x \"$h\" ] && exec \"$h\"; cat >/dev/null; echo \"⚠️ $h is missing or not executable, so a reviewer that finishes now writes no marker and a push will find none. If this session's checkout was removed, restart Claude Code from a live checkout.\" >&2; exit 1"
           }
         ]
       }

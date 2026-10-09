@@ -4,19 +4,24 @@
 # allowlist CI uses (scripts/classify-paths.sh), so local and CI agree on
 # what a change "is":
 #   - any code change → full `make ci` must have passed (tree-keyed marker
-#     tmp/ci-passed-tree-<tree>), exactly as before;
+#     tmp/ci-passed-tree-<tree>), exactly as before, here or on another
+#     machine via `make ci-remote`;
 #   - docs/prose-only → `make verify` is enough (CI skips the Go/SDK suites
 #     for these too), so only the verify marker is required — no spinning
 #     up the local Docker suites for a typo fix. pre-commit already runs
 #     `make verify`, so this is usually a zero-extra-work push.
 # Fail-closed: if the change set can't be classified (no resolvable base,
 # classifier error), fall back to requiring the full `make ci` marker.
+# A pushed commit with no Makefile holds no code to validate (an orphan branch
+# that keeps a tool's state, say), so it passes; one with a Makefile, pushed
+# from a worktree that lacks scripts/ci-marker.sh, is blocked.
 # Bypass: `git push --no-verify` (humans only).
 
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
 zero=0000000000000000000000000000000000000000
+marker_script=scripts/ci-marker.sh
 
 # Net changed files for a pushed ref (base..tip), one per line. New branch
 # (no remote tip) → diff against the merge-base with origin/main. Returns
@@ -33,19 +38,32 @@ changed_files() {
 
 block_ci() { # <sha> — require the full make-ci marker
   local sha="$1" marker tree
-  marker=$(scripts/ci-marker.sh path-for-commit "$sha" 2>/dev/null) || {
+  marker=$("$marker_script" path-for-commit "$sha" 2>/dev/null) || {
     echo "🛑 pre-push: can't resolve tree for ${sha:0:8}." >&2; exit 1
   }
   if [ ! -f "$marker" ]; then
     tree="${marker#tmp/ci-passed-tree-}"
-    echo "🛑 pre-push: 'make ci' has not been run for ${sha:0:8} (tree ${tree:0:8}). Run 'make ci' or 'git push --no-verify'." >&2
+    echo "🛑 pre-push: 'make ci' has not been run for ${sha:0:8} (tree ${tree:0:8}). Run 'make ci' (or 'make ci-remote HOST=<host>') or 'git push --no-verify'." >&2
     exit 1
+  fi
+  # `make ci-remote` leaves a provenance file beside its marker.
+  if [ -f "$marker.provenance" ]; then
+    prov() { sed -n "s/^$1=//p" "$marker.provenance"; }
+    echo "✔ pre-push: make ci passed on $(prov host) ($(prov os)/$(prov arch)) for ${sha:0:8}." >&2
   fi
 }
 
 while read -r _ local_sha _ remote_sha; do
   [ -z "${local_sha:-}" ] && continue
   [ "$local_sha" = "$zero" ] && continue # branch deletion — nothing to validate
+  if ! git rev-parse --verify --quiet "$local_sha:Makefile" >/dev/null; then
+    echo "pre-push: ${local_sha:0:8} has no Makefile, so no code to validate." >&2
+    continue
+  fi
+  if [ ! -x "$marker_script" ]; then
+    echo "🛑 pre-push: $marker_script is missing or not executable in $PWD, so the validation marker for ${local_sha:0:8} can't be checked. Push from a worktree that has it." >&2
+    exit 1
+  fi
 
   # Classify the push, failing closed to a code change on any hiccup.
   code=true
@@ -57,7 +75,7 @@ while read -r _ local_sha _ remote_sha; do
   fi
 
   if [ "$code" = false ]; then
-    marker=$(scripts/ci-marker.sh verify-path-for-commit "$local_sha" 2>/dev/null) || {
+    marker=$("$marker_script" verify-path-for-commit "$local_sha" 2>/dev/null) || {
       echo "🛑 pre-push: can't resolve tree for ${local_sha:0:8}." >&2; exit 1
     }
     if [ ! -f "$marker" ]; then
