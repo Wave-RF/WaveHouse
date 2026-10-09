@@ -1379,7 +1379,7 @@ func TestNew_UnreachableJWKSBootsFailClosed(t *testing.T) {
 	assert.Less(t, time.Since(started), 5*time.Second, "boot must not wait on the endpoint")
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/p", nil)
-	// Signed with the boot secret: the HMAC family, which a JWKS tenant never
+	// Signed with an HMAC secret: the HMAC family, which a JWKS tenant never
 	// accepts, fetched or not.
 	req.Header.Set("Authorization", "Bearer "+testutil.MakeJWT(t, map[string]any{"role": "analyst"}))
 	rec := httptest.NewRecorder()
@@ -1440,7 +1440,7 @@ func TestNew_VerifierPerTenant(t *testing.T) {
 	eventuallyVerified("globex", globexToken)
 	assert.False(t, verified("globex", acmeToken), "acme's token is refused under globex's header")
 	assert.False(t, verified("acme", globexToken))
-	assert.False(t, verified("acme", testutil.MakeJWT(t, map[string]any{"role": "analyst"})), "the boot secret's HMAC family never verifies under a JWKS tenant")
+	assert.False(t, verified("acme", testutil.MakeJWT(t, map[string]any{"role": "analyst"})), "an HMAC token never verifies under a JWKS tenant")
 
 	// acme moves to globex's provider; globex's folder is untouched.
 	rewriteSettings(t, filepath.Join(root, "acme"), authPatch(globex.URL))
