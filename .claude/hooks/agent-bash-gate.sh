@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Agent PR workflow gate (PreToolUse Bash). Catches accidental violations of
 # rules that have no human analog:
-#   - gh pr create without --draft
+#   - gh pr create (or its alias gh pr new) without --draft, or with a title
+#     the PR-title lint rejects
 #   - gh pr ready
 #   - gh pr edit --add-reviewer / --add-assignee
-#   - gh api .../requested_reviewers (write verbs)
 #   - gh pr review --approve / --request-changes
+#   - the gh api forms of these, REST and GraphQL, and of a merge
 #   - git push of a commit missing any pre-push review marker
 #     (one per reviewer in scripts/pre-push-reviewers.sh — code, docs, …)
 #
@@ -36,64 +37,213 @@ cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null) \
   || block "Could not parse hook payload as JSON."
 [ -z "$cmd" ] && exit 0
 
-# Strip quoted segments so commands that mention a blocked pattern in a
-# string don't false-positive. Doesn't cover heredocs — pass long bodies via
-# `-F <file>` if needed.
-stripped=$(printf '%s' "$cmd" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")
-
 # The gh checks resolve repo scripts from the session's checkout; the push
 # check resolves everything from the worktree the push runs in.
 project_dir="${CLAUDE_PROJECT_DIR:-.}"
 
-# gh pr create requires --draft.
-if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+create\b' <<<"$stripped"; then
-  grep -qE '(^|[[:space:]])(--draft|-d)\b' <<<"$stripped" \
-    || block "Agent-opened PRs must use --draft. Only humans publish ready-for-review PRs."
-fi
+# ── gh: the PR actions that are humans-only, and the PR title ────────────────
+#
+# gate_gh runs from the bottom of this file, once the tokenizer below exists.
+# Like the push check it reads the commands the line runs, so a gh command that
+# is only mentioned, in a quoted string, a heredoc body or a comment
+# (`python3 - <<'EOF'` with `# gh pr ready` in it), doesn't count, unless a
+# shell runs it: a $(…), `bash -c '…'`, or a heredoc or here-string a shell
+# reads, directly or through a pipe. A heredoc read by a shell inside a $(…) is
+# not followed.
+#
+# gh pr merge is not checked here: it is denied in .claude/settings.json for
+# Claude's own commands, and a person merges with it in shell mode (`!`), which
+# the docs don't say whether this hook sees. Its API forms, below, are blocked.
 
-# gh pr create / gh pr edit --title: validate the title against the SAME
-# Conventional-Commits rule the required `CI` check's `PR title` job enforces
-# (scripts/lint-pr-title.sh is the shared rule) — so a too-long or wrong-format
-# title is caught locally BEFORE the PR exists, not after the required check
-# fails. Extract the quoted --title/-t value from the ORIGINAL command (the
-# `stripped` copy has quotes removed). Fail-open: if no title is parseable
-# (--fill, interactive, unquoted) or the validator is missing, fall through to
-# the CI check rather than block a create we can't confidently judge.
-if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+(create|edit)\b' <<<"$stripped"; then
-  pr_title=$(printf '%s' "$cmd" | sed -nE 's/.*(--title|-t)[[:space:]]+"([^"]*)".*/\2/p')
-  [ -z "$pr_title" ] && pr_title=$(printf '%s' "$cmd" | sed -nE "s/.*(--title|-t)[[:space:]]+'([^']*)'.*/\2/p")
-  if [ -n "$pr_title" ] && [ -x "$project_dir/scripts/lint-pr-title.sh" ]; then
-    if ! reason=$("$project_dir/scripts/lint-pr-title.sh" "$pr_title" 2>&1); then
-      block "$reason"
+# lint_title <title>: validate a PR title against the SAME Conventional-Commits
+# rule the required `CI` check's `PR title` job enforces (scripts/lint-pr-title.sh
+# is the shared rule) — so a too-long or wrong-format title is caught locally
+# BEFORE the PR exists, not after the required check fails. Fail-open: with no
+# title to read (--fill, interactive, computed) or no validator, fall through
+# to the CI check rather than block a create we can't confidently judge.
+lint_title() {
+  local reason
+  [ -n "$1" ] && [ -x "$project_dir/scripts/lint-pr-title.sh" ] || return 0
+  reason=$("$project_dir/scripts/lint-pr-title.sh" "$1" 2>&1) || block "$reason"
+}
+
+# gh_scan: from the tokens, GH_VIEW = the commands the line runs, one simple
+# command a line, each word that has a space in it or is computed read as Q
+# (a quoted string); plus the text of each $(…) and `…` (its quoted parts as
+# Q), and, word for word, the code a shell is handed and any heredoc or
+# here-string a shell reads. GH_API = the gh api calls among them, word for
+# word. GH_TITLE = the --title/-t of a gh pr create, new or edit; GH_API_TITLE
+# = the title= field of a gh api call; each empty when absent or computed.
+gh_scan() {
+  local i j k n=${#TK_VAL[@]} w line="" raw="" start=0 s
+  local -a lines=() raws=() starts=() ends=()
+  GH_VIEW=""; GH_API=""; GH_TITLE=""; GH_API_TITLE=""
+  for ((i = 0; i <= n; i++)); do
+    if [ "$i" -eq "$n" ] || [ "${TK_OP[i]}" = 1 ]; then
+      lines+=("$line"); raws+=("$raw"); starts+=("$start"); ends+=("$i")
+      line=""; raw=""; start=$((i + 1))
+      continue
+    fi
+    w=${TK_VAL[i]}
+    raw+=" $w"
+    case $w in *[[:space:]]*) w=Q ;; esac
+    [ "${TK_DYN[i]}" = 0 ] || w=Q
+    line+=" $w"
+  done
+  for ((k = 0; k < ${#lines[@]}; k++)); do
+    GH_VIEW+="${lines[k]}"$'\n'
+    if [[ ${lines[k]} =~ $shell_re ]]; then GH_VIEW+="${raws[k]}"$'\n'; fi
+    if [[ ${lines[k]} =~ ${gh_re}pr[[:space:]]+(create|new|edit)$end_re ]]; then
+      for ((j = starts[k]; j < ends[k]; j++)); do
+        case ${TK_VAL[j]} in
+          --title | -t)
+            [ $((j + 1)) -lt "${ends[k]}" ] && [ "${TK_DYN[j + 1]}" = 0 ] && GH_TITLE=${TK_VAL[j + 1]} ;;
+          --title=*) [ "${TK_DYN[j]}" = 0 ] && GH_TITLE=${TK_VAL[j]#--title=} ;;
+        esac
+      done
+    fi
+    if [[ ${lines[k]} =~ ${gh_re}api$end_re ]]; then
+      GH_API+="${raws[k]}"$'\n'
+      for ((j = starts[k]; j < ends[k]; j++)); do
+        case ${TK_VAL[j]} in
+          title=@*) ;; # -F title=@file: the file's contents
+          title=*) [ "${TK_DYN[j]}" = 0 ] && GH_API_TITLE=${TK_VAL[j]#title=} ;;
+        esac
+      done
+    fi
+  done
+  for s in "${TK_SUBS[@]}"; do
+    unquote "$s"
+    GH_VIEW+="$UNQ"$'\n'
+    s=${s//$'\002'/}; s=${s//$'\003'/}
+    if [[ $s =~ ${gh_re}api$end_re ]]; then GH_API+="$s"$'\n'; fi
+  done
+  # A heredoc or here-string counts when its reader is a shell, or pipes into one.
+  for ((j = 0; j < ${#TK_IN[@]}; j++)); do
+    for ((k = 0; k < ${#lines[@]}; k++)); do
+      [ "${starts[k]}" = "${TK_IN_AT[j]}" ] || continue
+      if [[ ${lines[k]} =~ $shell_re ]] \
+        || { [ $((k + 1)) -lt "${#lines[@]}" ] && [[ ${TK_VAL[ends[k]]} == '|'* ]] && [[ ${lines[k + 1]} =~ $shell_re ]]; }; then
+        GH_VIEW+="${TK_IN[j]}"$'\n'
+        if [[ ${TK_IN[j]} =~ ${gh_re}api$end_re ]]; then GH_API+="${TK_IN[j]}"$'\n'; fi
+      fi
+      break
+    done
+  done
+}
+
+# api_title: the title= field of a gh api call in an unparsed line.
+api_title() {
+  local t
+  t=$(sed -nE 's/.*[[:space:]](title="([^"]*)"|"title=([^"]*)").*/\2\3/p' <<<"$cmd")
+  [ -n "$t" ] || t=$(sed -nE "s/.*[[:space:]](title='([^']*)'|'title=([^']*)').*/\2\3/p" <<<"$cmd")
+  printf '%s' "$t"
+}
+
+gate_gh() {
+  local pr method api_write=0 pulls stripped
+  pr="${gh_re}pr[[:space:]]+"
+  grep -qE '(^|[^[:alnum:]_-])gh[[:space:]]' <<<"$cmd" || return 0
+  if tokenize "$cmd"; then
+    gh_scan
+  else
+    # An unterminated quote or substitution: read the line with its quoted
+    # segments removed, heredoc bodies and comments included.
+    stripped=$(printf '%s' "$cmd" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")
+    GH_VIEW=$stripped; GH_API=""; GH_TITLE=""; GH_API_TITLE=""
+    if grep -qE "${gh_re}api$end_re" <<<"$stripped"; then
+      GH_API=$(printf '%s' "$cmd" | tr -d "'\"")
+      GH_API_TITLE=$(api_title)
+    fi
+    GH_TITLE=$(printf '%s' "$cmd" | sed -nE 's/.*(--title|-t)[[:space:]]+"([^"]*)".*/\2/p')
+    [ -n "$GH_TITLE" ] || GH_TITLE=$(printf '%s' "$cmd" | sed -nE "s/.*(--title|-t)[[:space:]]+'([^']*)'.*/\2/p")
+  fi
+
+  # gh pr create (and its alias gh pr new) requires --draft.
+  if grep -qE "${pr}(create|new)$end_re" <<<"$GH_VIEW"; then
+    grep -qE '(^|[[:space:]])(--draft|-d)([[:space:]]|$)' <<<"$GH_VIEW" \
+      || block "Agent-opened PRs must use --draft. Only humans publish ready-for-review PRs."
+  fi
+
+  # gh pr create / new / edit --title: the PR-title lint.
+  if grep -qE "${pr}(create|new|edit)$end_re" <<<"$GH_VIEW"; then
+    lint_title "$GH_TITLE"
+  fi
+
+  # gh pr ready is humans-only.
+  if grep -qE "${pr}ready$end_re" <<<"$GH_VIEW"; then
+    block "Only humans flip drafts to ready-for-review. Ask the user."
+  fi
+
+  # gh pr edit --add-reviewer / --add-assignee is humans-only.
+  if grep -qE "${pr}edit$end_re" <<<"$GH_VIEW" \
+    && grep -qE '(^|[[:space:]])--(add|remove)-(reviewer|assignee)([[:space:]=]|$)' <<<"$GH_VIEW"; then
+    block "Adding/removing reviewers is humans-only. Re-trigger bot reviewers via PR comment mention (e.g. @coderabbitai review)."
+  fi
+
+  # gh pr review --approve / --request-changes are humans-only.
+  if grep -qE "${pr}review$end_re" <<<"$GH_VIEW"; then
+    grep -qE '(^|[[:space:]])(--approve|-a)([[:space:]]|$)' <<<"$GH_VIEW" \
+      && block "Only humans approve PRs."
+    grep -qE '(^|[[:space:]])(--request-changes|-r)([[:space:]]|$)' <<<"$GH_VIEW" \
+      && block "Agents post inline review comments instead of --request-changes."
+  fi
+
+  # gh api: the REST and GraphQL forms of the actions above, and of a merge.
+  # Like the rest of the gate this reads the command line only: fields sent
+  # through --input or `-F field=@file` go unseen. A call writes when it names
+  # a method other than GET or, naming none, sends fields (-f, -F, --field,
+  # --raw-field, --input), which make gh POST.
+  [ -n "$GH_API" ] || return 0
+  method=$(sed -nE 's/.*[[:space:]](-X|--method)[[:space:]=]*([A-Za-z]+).*/\2/p' <<<"$GH_API" | tr '[:lower:]' '[:upper:]')
+  if [ -n "$method" ]; then
+    case $method in GET) ;; *) api_write=1 ;; esac
+  elif grep -qE '[[:space:]](-[fF]|--field|--raw-field|--input)' <<<"$GH_API"; then
+    api_write=1
+  fi
+  pulls='repos/[^/[:space:]]+/[^/[:space:]]+/pulls'
+  if [ "$api_write" = 1 ]; then
+    # POST or DELETE …/requested_reviewers: --add-reviewer / --remove-reviewer.
+    grep -q 'requested_reviewers' <<<"$GH_API" \
+      && block "Reviewer-write requests are humans-only. Re-trigger bot reviewers via PR comment mention."
+    # PUT …/pulls/N/merge.
+    grep -qE "$pulls/[^/[:space:]]+/merge([?[:space:]]|\$)" <<<"$GH_API" && block "$merge_msg"
+    # POST …/pulls is gh pr create: a draft.
+    if grep -qE "$pulls([?[:space:]]|\$)" <<<"$GH_API"; then
+      grep -qE '(^|[[:space:]])draft=true([[:space:]]|$)' <<<"$GH_API" \
+        || block "Agent-opened PRs must be drafts; through the API, send -F draft=true. Only humans publish ready-for-review PRs."
+    fi
+    # POST …/pulls or PATCH …/pulls/N with a title: the PR-title lint.
+    if grep -qE "$pulls(/[^/[:space:]?]+)?([?[:space:]]|\$)" <<<"$GH_API"; then
+      lint_title "$GH_API_TITLE"
     fi
   fi
-fi
-
-# gh pr ready is humans-only.
-if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+ready\b' <<<"$stripped"; then
-  block "Only humans flip drafts to ready-for-review. Ask the user."
-fi
-
-# gh pr edit --add-reviewer / --add-assignee is humans-only.
-if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+edit\b' <<<"$stripped" \
-   && grep -qE '(^|[[:space:]])--(add|remove)-(reviewer|assignee)\b' <<<"$stripped"; then
-  block "Adding/removing reviewers is humans-only. Re-trigger bot reviewers via PR comment mention (e.g. @coderabbitai review)."
-fi
-
-# gh api .../requested_reviewers write verbs (API form of --add-reviewer).
-if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+api\b' <<<"$stripped" \
-   && grep -qE 'requested_reviewers' <<<"$stripped" \
-   && grep -qE '(-X[[:space:]]*(POST|PUT|PATCH)|--method[[:space:]]*(POST|PUT|PATCH)|[[:space:]]-f[[:space:]]+reviewers=|[[:space:]]-F[[:space:]]+reviewers=)' <<<"$stripped"; then
-  block "Reviewer-write requests are humans-only. Re-trigger bot reviewers via PR comment mention."
-fi
-
-# gh pr review --approve / --request-changes are humans-only.
-if grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+review\b' <<<"$stripped"; then
-  grep -qE '(^|[[:space:]])(--approve|-a)\b' <<<"$stripped" \
-    && block "Only humans approve PRs."
-  grep -qE '(^|[[:space:]])(--request-changes|-r)\b' <<<"$stripped" \
-    && block "Agents post inline review comments instead of --request-changes."
-fi
+  # …/pulls/N/reviews (or a pending review's /events) with a verdict.
+  if grep -qE "$pulls/[^[:space:]]*/reviews" <<<"$GH_API"; then
+    grep -qiE '(^|[[:space:]])event=APPROVE([[:space:]]|$)' <<<"$GH_API" && block "Only humans approve PRs."
+    grep -qiE '(^|[[:space:]])event=REQUEST_CHANGES([[:space:]]|$)' <<<"$GH_API" \
+      && block "Agents post inline review comments instead of --request-changes."
+  fi
+  # The GraphQL mutations that do the same.
+  if grep -qE '[[:space:]]graphql([[:space:]]|$)' <<<"$GH_API"; then
+    grep -q 'markPullRequestReadyForReview' <<<"$GH_API" \
+      && block "Only humans flip drafts to ready-for-review. Ask the user."
+    grep -qE 'mergePullRequest|enablePullRequestAutoMerge' <<<"$GH_API" && block "$merge_msg"
+    grep -q 'requestReviews' <<<"$GH_API" \
+      && block "Reviewer-write requests are humans-only. Re-trigger bot reviewers via PR comment mention."
+    if grep -qE '(add|submit)PullRequestReview' <<<"$GH_API"; then
+      grep -q 'APPROVE' <<<"$GH_API" && block "Only humans approve PRs."
+      grep -q 'REQUEST_CHANGES' <<<"$GH_API" \
+        && block "Agents post inline review comments instead of --request-changes."
+    fi
+    if grep -q 'createPullRequest' <<<"$GH_API"; then
+      grep -qE 'draft:[[:space:]]*true' <<<"$GH_API" \
+        || block "Agent-opened PRs must be drafts; in GraphQL, send draft: true. Only humans publish ready-for-review PRs."
+    fi
+  fi
+  return 0
+}
+merge_msg="Agents don't merge PRs; a person does. Ask the user."
 
 # ── git push: the commit each refspec publishes needs a review marker ────────
 #
@@ -183,7 +333,7 @@ tk_ansi() {
 }
 
 tk_dquote() {
-  local c c2
+  local c c2 rest part
   _inw=1; _i=$((_i + 1))
   [ "$_insub" = 0 ] || _w+=$'\002'
   while [ "$_i" -lt "$_n" ]; do
@@ -199,7 +349,12 @@ tk_dquote() {
         _i=$((_i + 2)) ;;
       '$') tk_dollar || return 1 ;;
       '`') tk_backtick || return 1 ;;
-      *) _w+=$c; _i=$((_i + 1)) ;;
+      *)
+        # Everything up to the next character with a meaning here, in one step:
+        # a PR body is often tens of KB of plain text in double quotes.
+        rest=${_s:_i}
+        part=${rest%%[\"\\\$\`]*}
+        _w+=$part; _i=$((_i + ${#part})) ;;
     esac
   done
   return 1
@@ -697,6 +852,8 @@ git_re='(^|[[:space:];|&(`])git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:spac
 # shellcheck disable=SC2016
 end_re='([[:space:]]|$|[;|&)`])'
 push_re=${git_re}push$end_re
+# shellcheck disable=SC2016
+gh_re='(^|[[:space:];|&(`])gh[[:space:]]+'
 head_re=${git_re}'(commit|merge|rebase|reset|checkout|switch|cherry-pick|revert|am|pull)'$end_re
 # shellcheck disable=SC2016
 shell_re='(^|[[:space:];|&(`])(eval|([^[:space:];|&]*/)?(ba|z|da|k)?sh)([[:space:]<]|$)'
@@ -759,6 +916,8 @@ unfollowed_push() {
   done
   return 1
 }
+
+gate_gh
 
 # Cheap filter first, so most commands are never tokenized: quoted strings on a
 # line become a placeholder word (`git -C "<path>" stash push` reads as a
