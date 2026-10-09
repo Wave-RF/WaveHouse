@@ -93,7 +93,7 @@ func TestNew_OpsOnlyRouter(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FilePolicies), []byte(`{"admin_role": "admin", "tables": {}}`), 0o600))
 	cfg := testConfig(t, dir)
 	cfg.Auth.OperatorKey = "unit-test-operator-key"
-	admin := hs256(t, cfg.Auth.JWTSecret, "admin")
+	admin := hs256(t, testJWTSecret, "admin")
 	do := func(a *App, method, target, header, value string) *httptest.ResponseRecorder {
 		req := httptest.NewRequestWithContext(t.Context(), method, target, nil)
 		if header != "" {

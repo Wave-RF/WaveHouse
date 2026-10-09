@@ -5,6 +5,7 @@
     "http_scheme": "http",
     "database": "default",
     "username": "default",
+    "password": "",
     "query_timeout": 30,
     "tls": {
       "enabled": false,
@@ -20,6 +21,7 @@
   },
   "auth": {
     "jwks_url": "",
+    "jwt_secret": "sdk-dev-secret",
     "role_claim": "role"
   },
   "dedupe": {

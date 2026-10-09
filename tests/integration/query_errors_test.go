@@ -117,15 +117,14 @@ func TestQueryErrors_ClickHouseDown(t *testing.T) {
 	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	cfg := &config.Config{
-		DataDir:    storedir.New(t),
-		Server:     config.Server{ShutdownTimeout: 10},
-		ClickHouse: config.ClickHouse{Password: testCHPassword},
-		MQ:         config.MQ{Backend: config.MQEmbedded},
-		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
-		Dedupe:     config.Dedupe{Backend: config.DedupePebble},
-		Coord:      config.Coord{Backend: config.CoordLocal},
-		Roles:      config.AllRoles(),
-		Settings:   config.Settings{Dir: settingsDir},
+		DataDir:  storedir.New(t),
+		Server:   config.Server{ShutdownTimeout: 10},
+		MQ:       config.MQ{Backend: config.MQEmbedded},
+		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
+		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
+		Coord:    config.Coord{Backend: config.CoordLocal},
+		Roles:    config.AllRoles(),
+		Settings: config.Settings{Dir: settingsDir},
 	}
 	a, err := app.New(ctx, app.Options{Config: cfg, Listener: ln})
 	require.NoError(t, err)

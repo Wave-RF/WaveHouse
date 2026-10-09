@@ -133,13 +133,14 @@ func (s *Store) DedupeRetentions() map[string]time.Duration {
 
 // ClickHouse is the adopted connection wiring, resolved as one value from
 // one snapshot so a reconnect never mixes the address of one document with
-// the database of another. The password is not here — it is boot config.
+// the database of another.
 type ClickHouse struct {
 	Addr         string
 	HTTPPort     int
 	HTTPScheme   string
 	Database     string
 	Username     string
+	Password     string
 	QueryTimeout time.Duration
 	TLS          TLS
 	// Headers is this reader's own copy of the HTTP-interface headers.
@@ -167,6 +168,7 @@ func (s *Store) ClickHouse() ClickHouse {
 		HTTPScheme:   *c.HTTPScheme,
 		Database:     *c.Database,
 		Username:     *c.Username,
+		Password:     *c.Password,
 		QueryTimeout: time.Duration(*c.QueryTimeout) * time.Second,
 		TLS: TLS{
 			Enabled:            *c.TLS.Enabled,
@@ -182,16 +184,18 @@ func (s *Store) ClickHouse() ClickHouse {
 	}
 }
 
-// Auth is the adopted verifier wiring (secrets excluded — boot config).
+// Auth is the adopted verifier wiring, HMAC secret included (the operator
+// key is boot config).
 type Auth struct {
 	JWKSURL   string
+	JWTSecret string
 	RoleClaim string
 }
 
 // Auth returns the adopted verifier wiring.
 func (s *Store) Auth() Auth {
 	a := s.doc().Config.Auth
-	return Auth{JWKSURL: *a.JWKSURL, RoleClaim: *a.RoleClaim}
+	return Auth{JWKSURL: *a.JWKSURL, JWTSecret: *a.JWTSecret, RoleClaim: *a.RoleClaim}
 }
 
 // DLQFor reports whether a poison row for table is parked on the DLQ (true)

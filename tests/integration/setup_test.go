@@ -174,15 +174,14 @@ func setup() (int, func()) {
 	dataDir := mustTempDir()
 	cleanups.push(func() { _ = os.RemoveAll(dataDir) })
 	cfg := &config.Config{
-		DataDir:    dataDir,
-		Server:     config.Server{ShutdownTimeout: 10},
-		ClickHouse: config.ClickHouse{Password: testCHPassword},
-		MQ:         config.MQ{Backend: config.MQEmbedded},
-		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 30}, // 1 GB
-		Dedupe:     config.Dedupe{Backend: config.DedupePebble},
-		Coord:      config.Coord{Backend: config.CoordLocal},
-		Roles:      config.AllRoles(),
-		Settings:   config.Settings{Dir: settingsDir},
+		DataDir:  dataDir,
+		Server:   config.Server{ShutdownTimeout: 10},
+		MQ:       config.MQ{Backend: config.MQEmbedded},
+		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 30}, // 1 GB
+		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
+		Coord:    config.Coord{Backend: config.CoordLocal},
+		Roles:    config.AllRoles(),
+		Settings: config.Settings{Dir: settingsDir},
 	}
 	a, err := app.New(ctx, app.Options{Config: cfg, Listener: ln})
 	if err != nil {
@@ -258,7 +257,7 @@ func tenantSettings(ch *chInstance, database string) (map[string][]byte, error) 
 	patch := map[string]any{
 		"clickhouse": map[string]any{
 			"addr": ch.nativeAddr(), "http_port": mustAtoi(ch.httpPort), "http_scheme": "http",
-			"database": database, "username": testCHUser, "query_timeout": 30,
+			"database": database, "username": testCHUser, "password": testCHPassword, "query_timeout": 30,
 			"tls":     map[string]any{"enabled": false, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": false, "server_name": ""},
 			"headers": map[string]any{}, "max_open_conns": 10, "max_idle_conns": 5,
 		},

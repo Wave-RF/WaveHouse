@@ -144,10 +144,10 @@ func TestStore_TypedAccessors(t *testing.T) {
 func TestStore_ClickHouseAndAuthAccessors(t *testing.T) {
 	t.Parallel()
 	s := newLoadedStore(t, map[string]string{
-		FileConfig: configJSON(`{"clickhouse": {"addr": "ch.internal:9440", "http_port": 8443, "http_scheme": "https", "database": "analytics", "username": "wh", "query_timeout": 5}, "auth": {"jwks_url": "https://idp.example/.well-known/jwks.json", "role_claim": "app_metadata.role"}}`),
+		FileConfig: configJSON(`{"clickhouse": {"addr": "ch.internal:9440", "http_port": 8443, "http_scheme": "https", "database": "analytics", "username": "wh", "password": "s3cret", "query_timeout": 5}, "auth": {"jwks_url": "https://idp.example/.well-known/jwks.json", "jwt_secret": "hmac-secret", "role_claim": "app_metadata.role"}}`),
 	})
-	assert.Equal(t, ClickHouse{Addr: "ch.internal:9440", HTTPPort: 8443, HTTPScheme: "https", Database: "analytics", Username: "wh", QueryTimeout: 5 * time.Second, Headers: map[string]string{}, MaxOpenConns: 10, MaxIdleConns: 5}, s.ClickHouse())
-	assert.Equal(t, Auth{JWKSURL: "https://idp.example/.well-known/jwks.json", RoleClaim: "app_metadata.role"}, s.Auth())
+	assert.Equal(t, ClickHouse{Addr: "ch.internal:9440", HTTPPort: 8443, HTTPScheme: "https", Database: "analytics", Username: "wh", Password: "s3cret", QueryTimeout: 5 * time.Second, Headers: map[string]string{}, MaxOpenConns: 10, MaxIdleConns: 5}, s.ClickHouse())
+	assert.Equal(t, Auth{JWKSURL: "https://idp.example/.well-known/jwks.json", JWTSecret: "hmac-secret", RoleClaim: "app_metadata.role"}, s.Auth())
 }
 
 func TestStore_DLQFor_Cascade(t *testing.T) {

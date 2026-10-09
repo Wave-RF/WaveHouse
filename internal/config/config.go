@@ -131,29 +131,28 @@ type Server struct {
 	ShutdownTimeout int `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT"`
 }
 
-// ClickHouse holds the password and the connection ceiling. The wiring —
-// address, HTTP port and scheme, database, username, query timeout, TLS,
-// headers, pool size — is the settings directory's `clickhouse` block
-// (hot-reloadable: a change swaps the connection). The password stays here
-// because secrets don't belong in a tracked JSON file; it is combined with
-// the adopted wiring on every (re)connect. The ceiling stays here because
-// it is capacity, sized once per process, not wiring.
+// ClickHouse holds the connection ceiling. The wiring — address, HTTP port
+// and scheme, database, username, password, query timeout, TLS, headers,
+// pool size — is the settings directory's `clickhouse` block (hot-reloadable:
+// a change swaps the connection; the password is a tenant's own, #529). The
+// ceiling stays here because it is capacity, sized once per process, not
+// wiring.
 type ClickHouse struct {
-	Password string `yaml:"password" env:"WH_CH_PASSWORD"`
 	// MaxTotalConns caps the native connections the process may hold open
 	// across its pools: the settings directory's clickhouse.max_open_conns
 	// must not exceed it. 0, the default, is no ceiling.
 	MaxTotalConns int `yaml:"max_total_conns" env:"WH_CH_MAX_TOTAL_CONNS"`
 }
 
-// Auth holds the authentication secrets. The verifier wiring — `jwks_url`,
-// `role_claim` — is the settings directory's `auth` block (hot-reloadable:
-// a change rebuilds the verifier). There is no on/off switch: the middleware always runs. A request
-// with no token, or an invalid/expired one, falls back to the policy
-// default_role; elevated access requires a valid token whose role claim
-// matches a granted role (or the policy admin_role). With neither JWTSecret
-// nor a jwks_url set, no token can validate, so every request is the default
-// role — a pure public deployment.
+// Auth holds the platform's own credential. The verifier wiring — `jwks_url`,
+// `jwt_secret`, `role_claim` — is the settings directory's `auth` block
+// (hot-reloadable: a change rebuilds the tenant's verifier; the HMAC secret
+// is a tenant's own, #529). There is no on/off switch: the middleware always
+// runs. A request with no token, or an invalid/expired one, falls back to the
+// policy default_role; elevated access requires a valid token whose role
+// claim matches a granted role (or the policy admin_role). With neither
+// jwt_secret nor jwks_url set, no token can validate, so every request is
+// the default role — a pure public deployment.
 //
 // OperatorKey is an optional non-JWT credential for the operator running the
 // deployment: a request presenting it via an "Authorization: Operator <key>"
@@ -162,7 +161,6 @@ type ClickHouse struct {
 // policy is missing/deleted (break-glass recovery, e.g. fixing policies.json). Empty (the default) disables
 // it. Treat it as an admin secret.
 type Auth struct {
-	JWTSecret   string `yaml:"jwt_secret" env:"WH_AUTH_JWT_SECRET"`
 	OperatorKey string `yaml:"operator_key" env:"WH_AUTH_OPERATOR_KEY"`
 }
 

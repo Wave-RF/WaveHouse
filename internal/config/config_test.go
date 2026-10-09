@@ -38,7 +38,6 @@ func TestLoad_Defaults(t *testing.T) {
 
 	assert.Equal(t, 8080, cfg.Server.Port)
 	assert.Equal(t, 10, cfg.Server.ShutdownTimeout)
-	assert.Equal(t, "", cfg.ClickHouse.Password)
 	assert.Equal(t, 0, cfg.ClickHouse.MaxTotalConns, "no connection ceiling by default")
 	assert.Empty(t, cfg.Auth.OperatorKey, "operator key is empty by default (feature off)")
 	assert.Equal(t, "./data", cfg.DataDir)
@@ -57,10 +56,8 @@ func TestLoad_FromYAML(t *testing.T) {
 server:
   port: 9090
 clickhouse:
-  password: "ch-pass"
   max_total_conns: 40
 auth:
-  jwt_secret: "test-secret"
   operator_key: "op-key"
 `
 	path := filepath.Join(dir, "config.yaml")
@@ -70,9 +67,7 @@ auth:
 	require.NoError(t, err)
 
 	assert.Equal(t, 9090, cfg.Server.Port)
-	assert.Equal(t, "ch-pass", cfg.ClickHouse.Password)
 	assert.Equal(t, 40, cfg.ClickHouse.MaxTotalConns)
-	assert.Equal(t, "test-secret", cfg.Auth.JWTSecret)
 	assert.Equal(t, "op-key", cfg.Auth.OperatorKey)
 }
 
@@ -395,6 +390,7 @@ dlq:
 clickhouse:
   addr: localhost:9000
   password: x
+  max_total_conns: 1
 settings:
   dir: ./settings
 `
@@ -404,9 +400,10 @@ settings:
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown key(s)")
 	assert.Contains(t, err.Error(), "clickhouse.addr")
+	assert.Contains(t, err.Error(), "clickhouse.password", "the password moved to the settings directory with the rest of the wiring (#529)")
 	assert.Contains(t, err.Error(), "dlq")
 	assert.Contains(t, err.Error(), "server.cors_allowed_origins")
-	assert.NotContains(t, err.Error(), "clickhouse.password", "declared keys are never reported")
+	assert.NotContains(t, err.Error(), "clickhouse.max_total_conns", "declared keys are never reported")
 	assert.NotContains(t, err.Error(), "settings.dir")
 }
 

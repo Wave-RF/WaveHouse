@@ -259,7 +259,7 @@ func (a *App) wireObservability(ctx context.Context) {
 
 // wireClickHouse opens the ClickHouse pools: one per distinct address,
 // database, user, password and tls tuple among the served tenants' clickhouse
-// blocks (with the boot-config password), shared by the tenants naming it and
+// blocks, shared by the tenants naming it and
 // sized to their largest ask (#583 story 6). Every reload reconciles them —
 // a new tuple opens (no dial), a tenant whose tuple changed is repointed, a
 // tuple no tenant names is released after its grace — under the boot
@@ -280,7 +280,7 @@ func (a *App) wireClickHouse() error {
 			c := store.ClickHouse()
 			ms = append(ms, chconn.Member{Tenant: id, Params: chconn.Params{
 				Addr: c.Addr, HTTPPort: c.HTTPPort, HTTPScheme: c.HTTPScheme,
-				Database: c.Database, Username: c.Username, Password: a.cfg.ClickHouse.Password,
+				Database: c.Database, Username: c.Username, Password: c.Password,
 				QueryTimeout: c.QueryTimeout,
 				TLS:          chconn.TLS(c.TLS),
 				Headers:      c.Headers,
@@ -834,9 +834,10 @@ func (a *App) wireIngestWorker() {
 }
 
 // wireAuth builds the JWT middleware: one verifier per tenant being served,
-// from that tenant's auth block (jwks_url, role_claim), with the secrets from
-// boot config shared by all. A tenant's verifier is rebuilt after a reload
-// that adopts it with changed wiring, kept when the wiring is unchanged, and
+// from that tenant's auth block (jwks_url, jwt_secret, role_claim), with the
+// operator key from boot config shared by all. A tenant's verifier is
+// rebuilt after a reload that adopts it with changed wiring, kept when the
+// wiring is unchanged, and
 // dropped once the tenant stops being served, removed or rejected alike — no
 // work runs for a tenant that is not served, and a folder adopted again is
 // rebuilt from scratch. A JWKS key set is fetched off the
@@ -847,27 +848,20 @@ func (a *App) wireIngestWorker() {
 // The verifiers are released with the other components.
 //
 // There is no on/off switch — the middleware always runs. With neither a
-// secret (boot config) nor a JWKS URL (that tenant's settings), no token can
-// validate for that tenant, so its every request falls back to its policy
-// default_role (a public tenant). That's a valid posture, so it warns per
-// tenant rather than fails.
+// secret nor a JWKS URL in a tenant's settings, no token can validate for
+// that tenant, so its every request falls back to its policy default_role (a
+// public tenant). That's a valid posture, so it warns per tenant rather than
+// fails.
 func (a *App) wireAuth() func(http.Handler) http.Handler {
-	cfg := a.cfg
-	switch cfg.Auth.JWTSecret {
-	case "":
-		// Per tenant: with no boot secret each tenant is as public as its own
-		// jwks_url leaves it, and one tenant's provider says nothing about
-		// another's.
-		for id, store := range a.tenants.All() {
-			if store.Auth().JWKSURL == "" {
-				slog.Warn("no auth.jwt_secret (boot config) and no auth.jwks_url in this tenant's settings: no token can be validated for it, so its every request resolves to its policy default_role (public access)", "tenant", id)
-			}
+	// Per tenant: each is as public as its own auth block leaves it, and one
+	// tenant's secret says nothing about another's.
+	for id, store := range a.tenants.All() {
+		if s := store.Auth(); s.JWKSURL == "" && s.JWTSecret == "" {
+			slog.Warn("no auth.jwt_secret and no auth.jwks_url in this tenant's settings: no token can be validated for it, so its every request resolves to its policy default_role (public access)", "tenant", id)
 		}
-	case "change-me-in-production":
-		slog.Warn("WH_AUTH_JWT_SECRET is using the default insecure value")
 	}
 
-	operatorKey := strings.TrimSpace(cfg.Auth.OperatorKey)
+	operatorKey := strings.TrimSpace(a.cfg.Auth.OperatorKey)
 	switch {
 	case operatorKey == "" && a.tenants.Nested():
 		// Not the recovery concern below: over a nested directory the key is
@@ -897,14 +891,14 @@ func (a *App) wireAuth() func(http.Handler) http.Handler {
 		}
 		return store.Tenant(), true
 	}
-	authn := auth.NewAuthenticator(auth.Config{JWTSecret: cfg.Auth.JWTSecret, OperatorKey: operatorKey}, tenantOf, policies)
+	authn := auth.NewAuthenticator(auth.Config{OperatorKey: operatorKey}, tenantOf, policies)
 	a.add(component{name: "auth", close: func(context.Context) error {
 		authn.Close()
 		return nil
 	}})
 	wiring := func(store *settings.Store) auth.Wiring {
 		s := store.Auth()
-		return auth.Wiring{JWKSURL: s.JWKSURL, RoleClaim: s.RoleClaim}
+		return auth.Wiring{JWKSURL: s.JWKSURL, JWTSecret: s.JWTSecret, RoleClaim: s.RoleClaim}
 	}
 	for id, store := range a.tenants.All() {
 		authn.Reconfigure(id, wiring(store))
