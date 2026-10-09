@@ -4,7 +4,8 @@
 #   - gh pr create (or its alias gh pr new) without --draft, or with a title
 #     the PR-title lint rejects
 #   - gh pr ready
-#   - gh pr edit --add-reviewer / --add-assignee
+#   - gh pr edit --add-reviewer / --add-assignee, and gh pr create / new
+#     --reviewer / --assignee (-r / -a)
 #   - gh pr review --approve / --request-changes
 #   - the gh api forms of these, REST and GraphQL, and of a merge
 #   - git push of a commit missing any pre-push review marker
@@ -88,16 +89,20 @@ truthy() {
 
 # gh_pr <i> <end>: judge `gh pr <TK_VAL[i]> …`, its words up to token <end>.
 gh_pr() {
-  local i=$1 e=$2 j w sub=${TK_VAL[$1]} draft=0 approve=0 changes=0 reviewer=0 title=""
+  local i=$1 e=$2 j w sub=${TK_VAL[$1]} draft=0 approve=0 changes=0 reviewer=0 people=0 title=""
   for ((j = i + 1; j < e; j++)); do
     w=${TK_VAL[j]}
     case $w in
       --draft | -d) draft=1 ;;
       --draft=*) truthy "$w" && draft=1 ;;
-      --approve | -a) approve=1 ;;
+      --approve) approve=1 ;;
+      -a) approve=1; people=1 ;;
       --approve=*) truthy "$w" && approve=1 ;;
-      --request-changes | -r) changes=1 ;;
+      --request-changes) changes=1 ;;
+      -r) changes=1; people=1 ;;
       --request-changes=*) truthy "$w" && changes=1 ;;
+      # `create` reads these as people to request or assign; gh also takes the value glued (-rname, -r=name).
+      --reviewer | --reviewer=* | --assignee | --assignee=* | -r?* | -a?*) people=1 ;;
       --add-reviewer | --add-reviewer=* | --remove-reviewer | --remove-reviewer=*) reviewer=1 ;;
       --add-assignee | --add-assignee=* | --remove-assignee | --remove-assignee=*) reviewer=1 ;;
       --title | -t) [ $((j + 1)) -lt "$e" ] && [ "${TK_DYN[j + 1]}" = 0 ] && title=${TK_VAL[j + 1]} ;;
@@ -106,6 +111,7 @@ gh_pr() {
   done
   case $sub in
     create | new)
+      [ "$people" = 0 ] || block "$msg_reviewers"
       [ "$draft" = 1 ] || block "$msg_draft"
       lint_title "$title" ;;
     edit)

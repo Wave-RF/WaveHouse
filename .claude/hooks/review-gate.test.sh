@@ -596,6 +596,21 @@ expect_allow "gh pr review --approve=false --comment" "$repo" 'gh pr review 12 -
 expect_block "gh pr review --request-changes=true" "$repo" 'gh pr review 12 --request-changes=true -b "see inline"' "instead of --request-changes"
 expect_block "gh pr edit --add-reviewer=someone" "$repo" 'gh pr edit 12 --add-reviewer=someone' "Adding/removing reviewers"
 
+# gh pr create / new can request reviewers or assign people at creation; on gh pr review -r / -a stay --request-changes / --approve.
+for c in create new; do
+  expect_block "gh pr $c --reviewer x" "$repo" "gh pr $c --draft --title \"feat: x\" --reviewer x" "Adding/removing reviewers"
+  expect_block "gh pr $c --reviewer=x" "$repo" "gh pr $c --draft --title \"feat: x\" --reviewer=x" "Adding/removing reviewers"
+  expect_block "gh pr $c -r x" "$repo" "gh pr $c --draft --title \"feat: x\" -r x" "Adding/removing reviewers"
+  expect_block "gh pr $c -rx (glued)" "$repo" "gh pr $c --draft --title \"feat: x\" -rx" "Adding/removing reviewers"
+  expect_block "gh pr $c --assignee x" "$repo" "gh pr $c --draft --title \"feat: x\" --assignee x" "Adding/removing reviewers"
+  expect_block "gh pr $c --assignee=x" "$repo" "gh pr $c --draft --title \"feat: x\" --assignee=x" "Adding/removing reviewers"
+  expect_block "gh pr $c -a x" "$repo" "gh pr $c --draft --title \"feat: x\" -a x" "Adding/removing reviewers"
+  expect_block "gh pr $c -a=x (glued)" "$repo" "gh pr $c --draft --title \"feat: x\" -a=x" "Adding/removing reviewers"
+done
+expect_allow "a plain gh pr create --draft" "$repo" 'gh pr create --draft --title "feat: x"'
+expect_block "gh pr review -a is still --approve" "$repo" 'gh pr review 12 -a' "Only humans approve"
+expect_block "gh pr review -r is still --request-changes" "$repo" 'gh pr review 12 -r -b "see inline"' "instead of --request-changes"
+
 # Each gh api call is judged by its own endpoint and fields, not by text in a
 # field's value or in another command on the line.
 expect_allow "a review-thread reply that quotes a merge endpoint" "$repo" "gh api repos/o/r/pulls/12/comments/34/replies -f body='Merging is PUT repos/o/r/pulls/12/merge and only a person runs it.'"
