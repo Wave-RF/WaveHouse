@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 )
@@ -42,22 +44,33 @@ func (b *BootState) Err() error {
 	return b.err
 }
 
+// Check is one dependency Readiness consults, named for the 503 body: the
+// ClickHouse pools, the external message queue.
+type Check struct {
+	Name string
+	// Run reports why the dependency cannot do its part, nil while it can.
+	Run func(context.Context) error
+}
+
 // HealthHandler provides liveness and readiness probes.
 type HealthHandler struct {
-	// Ping is Readiness's ClickHouse check (chconn.Pools.Ping in production:
-	// every open pool at once, ready at the first answer, 503 with every
-	// pool's error when none answers). Nil skips the check.
-	Ping func(context.Context) error
+	// Checks are Readiness's dependency checks, every one run on every call
+	// so the 503 names each one that failed, not just the first. Which
+	// dependencies a process has is internal/app's to wire: the ClickHouse
+	// pools (chconn.Pools.Ping: every open pool at once, ready at the first
+	// answer) and the external NATS; a handler with none is ready once
+	// booted.
+	Checks []Check
 	// Boot is consulted by both Liveness and Readiness. When non-nil and
 	// its Err() is non-nil, both endpoints report 503 with the diagnostic
 	// — used while boot-time schema discovery is still failing in the
 	// retry loop. A nil Boot preserves the pre-retry-loop behaviour
-	// (Liveness always 200; Readiness 503 only on Ping failure).
+	// (Liveness always 200; Readiness 503 only on a failed check).
 	Boot *BootState
 }
 
-func NewHealthHandler(ping func(context.Context) error) *HealthHandler {
-	return &HealthHandler{Ping: ping}
+func NewHealthHandler(checks ...Check) *HealthHandler {
+	return &HealthHandler{Checks: checks}
 }
 
 func (h *HealthHandler) Liveness(w http.ResponseWriter, _ *http.Request) {
@@ -85,12 +98,16 @@ func (h *HealthHandler) Readiness(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if h.Ping != nil {
-		if err := h.Ping(r.Context()); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "not ready", "error": err.Error()})
-			return
+	var failed []error
+	for _, c := range h.Checks {
+		if err := c.Run(r.Context()); err != nil {
+			failed = append(failed, fmt.Errorf("%s: %w", c.Name, err))
 		}
+	}
+	if len(failed) > 0 {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "not ready", "error": errors.Join(failed...).Error()})
+		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
 }

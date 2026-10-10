@@ -237,7 +237,7 @@ UID 65532 is the canonical distroless `nonroot` user; the same number works rega
 API servers in standalone mode expose liveness and readiness endpoints under the Kubernetes-convention names `/livez` and `/readyz`:
 
 - `GET /livez` — Liveness probe. Returns 200 once the gateway has discovered ClickHouse table schemas at least once. Returns 503 with a diagnostic body while the boot-time schema discovery retry loop is still running (e.g. ClickHouse unreachable, target database missing). After successful boot, `/livez` stays 200 — transient ClickHouse blips at runtime are reflected in `/readyz`, not `/livez`. Over a [nested settings directory](#the-nested-settings-directory) it is 503 while no tenant has completed a first discovery, and 200 from the first tenant's success on.
-- `GET /readyz` — Readiness probe. Returns 200 if the gateway is fully booted and ClickHouse is currently reachable, 503 otherwise. Over a nested directory every open ClickHouse pool is pinged at once and one that answers is enough; the 503 names every pool that did not.
+- `GET /readyz` — Readiness probe. Returns 200 if the gateway is fully booted and every backend it cannot do its job without is answering, 503 otherwise, naming each check that failed: `clickhouse` (every open pool is pinged at once and one that answers is enough; the failure names every pool that did not), `mq` under [`mq.backend: nats`](#external-nats) (the connection is down, or the topology failed its last check — the lease bucket of `coord.backend: nats` included). The shared cache and the dedupe stores are not checks: a tripped breaker falls back to ClickHouse, and a dedupe store that is not answering fails that tenant's ingest closed per request. Full behavior in the [API reference](/api#get-readyz--readiness-probe).
 
 `/healthz` remains registered as a **permanent alias** of `/livez` (it's the most widely-recognized name); `/health` and `/ready` are **deprecated aliases** for the v0.1.x line and will be removed in v0.2.0. Point new deployments at the `/livez` / `/readyz` names.
 
@@ -371,7 +371,7 @@ The generated manifests satisfy every required finding (pass `--dedupe-lease` wh
 - Each shard durable needs `max_deliver: -1`. With a limit, a row that failed that many times would stay on its partition and never be delivered again.
 - Each shard durable must filter exactly its shard's subjects and use `pinned_client` in the group `wavehouse`, with a pinned TTL of at least 10 seconds. The server renews a pin only when its holder sends a new pull, so a shorter TTL lets a live holder that is at its share of held rows, or stopping, lose its pin between its 5-second renewals. A TTL of 15 seconds or more is recommended against: a dead holder's shard is received by another process only once its pin lapses.
 
-WaveHouse checks the topology again every five minutes and never repairs it. If you delete a partition, its publishes answer `503` with `Retry-After: 5`. If you delete one of the N×V configured shard durables (`wh-ingest-0` to `wh-ingest-<V−1>` on each of the N partitions), or the connection is closed for good (for example, its credentials are revoked), the ingest worker ends and the process exits, so that the orchestrator restarts it and the next boot names what is missing. An ingest worker that stayed up without its queue would leave the API accepting events that nothing writes.
+WaveHouse checks the topology again every five minutes, and as soon as it reconnects to the cluster, and never repairs it. If you delete a partition, its publishes answer `503` with `Retry-After: 5`. If you delete one of the N×V configured shard durables (`wh-ingest-0` to `wh-ingest-<V−1>` on each of the N partitions), or the connection is closed for good (for example, its credentials are revoked), the ingest worker ends and the process exits, so that the orchestrator restarts it and the next boot names what is missing. An ingest worker that stayed up without its queue would leave the API accepting events that nothing writes.
 
 ### Sizing the file store
 
@@ -460,12 +460,12 @@ Two things the automated tests do not cover. Check them once on your own cluster
 
 ### Monitoring
 
-These gauges are exported through [OpenTelemetry or Prometheus](#observability) under `mq.backend: nats`:
+These gauges are exported through [OpenTelemetry or Prometheus](#observability) under `mq.backend: nats`; `/readyz` fails, naming `mq`, while either of the first two reads `0`, so the orchestrator moves traffic away from a process the cluster has dropped ([Health Checks](#health-checks)):
 
 | Gauge | Meaning |
 | --- | --- |
 | `wavehouse_mq_connected` | `1` while this process is connected to the cluster, else `0`. |
-| `wavehouse_mq_topology_ok` | `1` while the last check found every required stream, consumer and (under `coord.backend: nats`) the lease bucket, and found that the `wavehouse` user may pull from and unpin every shard durable, else `0`. It drops at once when a publish finds a partition deleted, or when the server refuses a consumer request (see [Permissions](#permissions)). |
+| `wavehouse_mq_topology_ok` | `1` while the last check found every required stream, consumer and (under `coord.backend: nats`) the lease bucket, and found that the `wavehouse` user may pull from and unpin every shard durable, else `0`. It drops at once when a publish finds a partition deleted, or when the server refuses a consumer request (see [Permissions](#permissions)), and the check runs again as soon as the process reconnects, so a cluster that came back without a stream is caught without waiting for the next periodic check. |
 | `wavehouse_mq_history_behind_seconds` | How far the history's newest row trails the newest row any partition stored, read every 30 seconds. A value that stays up or keeps growing means the history is not taking the rows the partitions republish, so SSE replay and live events miss them; it returns to about `0` with the next row the history takes, and rows missed before that are not counted. A missing history reads as the last value while `wavehouse_mq_topology_ok` goes to `0`. It never affects ingest. |
 
 The ingest processes export these for their shards:
@@ -502,7 +502,7 @@ A split needs backends that every process can reach: a shared `mq.backend`, so t
 
 Run every role in one process, the default, until you need more than one.
 
-A pod without the `api` role serves an ops listener on `:8080`: `/livez`, `/readyz` and their aliases, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404 (under `/v1/ops`, 403 without the operator key, and 401 for a bearer token). Point the same probes at it as at an API pod. `/livez` does not wait for schema discovery there, because only the API runs it. `/readyz` checks ClickHouse in an ingest pod. Every pod reads the settings directory, so mount it in every Deployment. The reload route on the ops listener accepts only the operator key, so whatever reloads your API pods over HTTP must send the operator key to the worker pods too, or rely on `SIGHUP` (or, over a flat directory, the directory watcher) instead.
+A pod without the `api` role serves an ops listener on `:8080`: `/livez`, `/readyz` and their aliases, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404 (under `/v1/ops`, 403 without the operator key, and 401 for a bearer token). Point the same probes at it as at an API pod. `/livez` does not wait for schema discovery there, because only the API runs it. `/readyz` checks ClickHouse in an ingest pod, and the NATS connection in every pod. Every pod reads the settings directory, so mount it in every Deployment. The reload route on the ops listener accepts only the operator key, so whatever reloads your API pods over HTTP must send the operator key to the worker pods too, or rely on `SIGHUP` (or, over a flat directory, the directory watcher) instead.
 
 Give each pod a stable `WH_INSTANCE_ID` only if you need one in the logs or in the lease's `holder`. The default, the pod's hostname with a random suffix, already names each pod uniquely.
 

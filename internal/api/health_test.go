@@ -26,7 +26,7 @@ func (c pingFailConn) Ping(_ context.Context) error { return c.err }
 
 func TestHealth_Liveness(t *testing.T) {
 	t.Parallel()
-	h := NewHealthHandler(nil)
+	h := NewHealthHandler()
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/livez", nil)
@@ -43,7 +43,7 @@ func TestHealth_Liveness(t *testing.T) {
 
 func TestHealth_Readiness_NilConn(t *testing.T) {
 	t.Parallel()
-	h := NewHealthHandler(nil)
+	h := NewHealthHandler()
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil)
@@ -65,7 +65,7 @@ func TestHealth_Readiness_PingFails(t *testing.T) {
 	// without a test for the failure path a future refactor that moves
 	// header setup into the success branch would silently drop them on
 	// 503 responses.
-	h := NewHealthHandler(pingFailConn{err: errors.New("ch ping failed")}.Ping)
+	h := NewHealthHandler(Check{Name: "clickhouse", Run: pingFailConn{err: errors.New("ch ping failed")}.Ping})
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil)
@@ -77,7 +77,46 @@ func TestHealth_Readiness_PingFails(t *testing.T) {
 	var resp map[string]string
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "not ready", resp["status"])
-	assert.Equal(t, "ch ping failed", resp["error"])
+	assert.Equal(t, "clickhouse: ch ping failed", resp["error"])
+}
+
+// Every check runs on every call, and the 503 names each one that failed —
+// an operator reading the body sees the whole picture, not the first
+// failure — while a check that passed is not in it.
+func TestHealth_Readiness_NamesEveryFailedCheck(t *testing.T) {
+	t.Parallel()
+	ran := map[string]int{}
+	check := func(name string, err error) Check {
+		return Check{Name: name, Run: func(context.Context) error { ran[name]++; return err }}
+	}
+	h := NewHealthHandler(
+		check("clickhouse", errors.New("no ClickHouse pool is open")),
+		check("mq", errors.New("not connected to nats")),
+	)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil)
+	h.Readiness(w, r)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "not ready", resp["status"])
+	assert.Equal(t, "clickhouse: no ClickHouse pool is open\nmq: not connected to nats", resp["error"])
+	assert.Equal(t, map[string]int{"clickhouse": 1, "mq": 1}, ran, "a failure does not stop the checks after it")
+
+	h.Checks = []Check{check("clickhouse", nil), check("mq", errors.New("not connected to nats"))}
+	w = httptest.NewRecorder()
+	h.Readiness(w, r)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "mq: not connected to nats", resp["error"], "a check that passed is not named")
+
+	h.Checks = []Check{check("clickhouse", nil), check("mq", nil)}
+	w = httptest.NewRecorder()
+	h.Readiness(w, r)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{"status":"ready"}`, w.Body.String())
 }
 
 func TestBootState_DefaultIsReady(t *testing.T) {
@@ -105,7 +144,7 @@ func TestHealth_Liveness_BootDegraded(t *testing.T) {
 	// the diagnostic in the JSON body. This is the behavior the gateway
 	// relies on so an operator can `curl /livez` during a boot-time
 	// ClickHouse outage instead of grepping a restart-loop log.
-	h := NewHealthHandler(nil)
+	h := NewHealthHandler()
 	h.Boot = NewBootState(errors.New("schema discovery: dial tcp 127.0.0.1:9000: connect: connection refused"))
 
 	w := httptest.NewRecorder()
@@ -126,7 +165,7 @@ func TestHealth_Liveness_BootReadyFlipsTo200(t *testing.T) {
 	// Once the retry loop succeeds, BootState.Set(nil) flips Liveness back
 	// to 200 — the "normal serving begins" half of the issue's contract.
 	bs := NewBootState(errors.New("schema discovery: still failing"))
-	h := NewHealthHandler(nil)
+	h := NewHealthHandler()
 	h.Boot = bs
 
 	w := httptest.NewRecorder()
@@ -150,7 +189,7 @@ func TestHealth_Readiness_BootDegradedReports503(t *testing.T) {
 	// Readiness should also surface boot degradation: a kubelet readiness
 	// probe needs to see "not ready" while schema discovery is still
 	// failing, even if the ClickHouse ping path would otherwise succeed.
-	h := NewHealthHandler(nil)
+	h := NewHealthHandler()
 	h.Boot = NewBootState(errors.New("schema discovery: code: 81, Database wavehouse does not exist"))
 
 	w := httptest.NewRecorder()
@@ -174,7 +213,7 @@ func TestHealth_Online(t *testing.T) {
 	// is that nothing is JSON-encoded or cached per request.
 	t.Run("past boot -> 200 empty", func(t *testing.T) {
 		t.Parallel()
-		h := NewHealthHandler(nil) // nil Boot = boot completed
+		h := NewHealthHandler() // nil Boot = boot completed
 		w := httptest.NewRecorder()
 		h.Online(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/health", nil))
 		assert.Equal(t, http.StatusOK, w.Code)
@@ -182,7 +221,7 @@ func TestHealth_Online(t *testing.T) {
 	})
 	t.Run("boot-degraded -> 503 empty", func(t *testing.T) {
 		t.Parallel()
-		h := NewHealthHandler(nil)
+		h := NewHealthHandler()
 		h.Boot = NewBootState(errors.New("schema discovery: connection refused"))
 		w := httptest.NewRecorder()
 		h.Online(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/health", nil))

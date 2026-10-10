@@ -216,7 +216,7 @@ Every admin-gated endpoint — raw SQL, pipe inspection, settings reload, schema
 WaveHouse serves Kubernetes-convention probes on `:8080` (full behavior in [Deployment → Health Checks](/deployment#health-checks)):
 
 - **`/livez`** — liveness; sticky-200 after first successful boot. Does not touch ClickHouse.
-- **`/readyz`** — readiness; pings every open ClickHouse pool on **every** call. Point your load balancer's (internal) health check here so it routes around an instance whose ClickHouse is unreachable.
+- **`/readyz`** — readiness; pings every open ClickHouse pool on **every** call, and consults the external queue's connection where the process has one. Point your load balancer's (internal) health check here so it routes around an instance whose ClickHouse or queue is unreachable.
 - **`/healthz`** — permanent alias of `/livez`.
 - **`/v1/health`** — the SDK's content-free liveness ping; mirrors `/livez` (200 once booted) and never touches ClickHouse.
 
