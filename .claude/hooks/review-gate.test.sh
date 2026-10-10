@@ -862,6 +862,9 @@ git push origin feat-a"
 timed "a 60 KB file heredoc, then a push of the unreviewed branch" block "$repo" "cat > f <<'EOF'
 ${big}EOF
 git push origin feat-c"
+timed "a 60 KB --body from a heredoc inside \$(…)" allow "$wtb" "gh pr comment 1 --body \"\$(cat <<'EOF'
+${big}EOF
+)\""
 
 if [ "$fails" -gt 0 ]; then
   printf '\n%d case(s) failed\n' "$fails" >&2
