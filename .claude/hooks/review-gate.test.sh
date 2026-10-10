@@ -755,8 +755,8 @@ git push origin feat-c' "missing pre-push review marker"
 # shellcheck disable=SC2016
 expect_block "a gh pr ready in a \$(…) inside \$[…]" "$repo" 'n=$[ $(gh pr ready 12 | wc -l) + 1 ]' "ready-for-review"
 # shellcheck disable=SC2016
-expect_allow "a \$[…] with an array subscript, then a gh read" "$repo" 'x=$[ a[1] << 2 ]
-gh pr view 12'
+expect_block "a \$[…] with an array subscript, then a gh pr ready" "$repo" 'x=$[ a[1] << 2 ]
+gh pr ready 12' "ready-for-review"
 
 # The push check follows a heredoc a shell reads inside $(…), as the gh
 # checks do.
@@ -836,9 +836,14 @@ EOF
 markPullRequestReadyForReview is for people
 EOF
 )\""
-expect_allow "…sent from a heredoc, beside a variable that names one" "$repo" "note='markPullRequestReadyForReview is for people'
+expect_allow "…sent from an unquoted heredoc, beside a variable that names one" "$repo" "note='markPullRequestReadyForReview is for people'
+gh api graphql -F query=@- <<EOF
+query(\\\$n: Int!) { viewer { repositories(first: \\\$n) { nodes { name } } } }
+EOF"
+# A quoted heredoc is static: a \$ in it is text, not a shell variable.
+expect_allow "a quoted heredoc query with a \$ in a string, beside a variable that names a mutation" "$repo" "note='markPullRequestReadyForReview is for people'
 gh api graphql -F query=@- <<'EOF'
-query(\$n: Int!) { viewer { repositories(first: \$n) { nodes { name } } } }
+query { repository(owner: \"o\", name: \"\$HOME\") { id } }
 EOF"
 expect_block "a shell variable beside GraphQL variables in an unquoted heredoc query" "$repo" "m=markPullRequestReadyForReview; gh api graphql -f query=\"\$(cat <<EOF
 mutation(\\\$id: ID!) { \$m(input: {pullRequestId: \\\$id}) { clientMutationId } }
