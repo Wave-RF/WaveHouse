@@ -38,6 +38,7 @@ func natsConfig(t *testing.T, url string) *config.Config {
 // consumes the operator's durable; the operator deleting it ends the worker,
 // and with it Run, naming the component.
 func TestNew_NATSBackend(t *testing.T) {
+	t.Parallel()
 	srv := natstest.Start(t)
 	cfg := natsConfig(t, srv.URL())
 	cfg.Roles = []config.Role{config.RoleAPI, config.RoleIngest}
@@ -81,9 +82,8 @@ func TestNew_NATSWiresNoSweeper(t *testing.T) { //nolint:paralleltest // capture
 	a := newApp(t, cfg, Options{})
 	assert.NotContains(t, componentNames(a), "sweeper")
 
-	// New's observability wiring replaced the default logger; capture after.
-	// The boot check already warned for this window, so reloading it again
-	// warns nobody: only a changed window does.
+	// Captured after New: the boot check already warned for this window, so
+	// reloading it again warns nobody: only a changed window does.
 	logs := logtest.Capture(t, slog.LevelWarn)
 	warned := func() int { return strings.Count(logs.String(), "keeps less than this tenant's gap window") }
 	_, adopted := a.tenants.Reload("test")
@@ -99,7 +99,7 @@ func TestNew_NATSWiresNoSweeper(t *testing.T) { //nolint:paralleltest // capture
 
 // A cluster never reached within topology_wait refuses boot as unavailable.
 func TestNew_NATSUnreachable(t *testing.T) {
-	guardGlobals(t)
+	t.Parallel()
 	cfg := natsConfig(t, "nats://"+closedAddr(t))
 	cfg.MQ.NATS.TopologyWait = time.Millisecond
 	_, err := New(t.Context(), Options{Config: cfg})
@@ -109,9 +109,9 @@ func TestNew_NATSUnreachable(t *testing.T) {
 
 // The operator's topology missing a piece refuses boot with the finding.
 func TestNew_NATSTopologyMissing(t *testing.T) {
+	t.Parallel()
 	srv := natstest.Start(t)
 	require.NoError(t, srv.Operator.JetStream().DeleteStream(t.Context(), "WH_DLQ"))
-	guardGlobals(t)
 	cfg := natsConfig(t, srv.URL())
 	cfg.MQ.NATS.TopologyWait = time.Millisecond
 	_, err := New(t.Context(), Options{Config: cfg})

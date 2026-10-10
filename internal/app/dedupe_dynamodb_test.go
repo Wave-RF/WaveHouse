@@ -344,6 +344,7 @@ func TestRun_DynamoDBDedupeRetriesTheTableCheck(t *testing.T) {
 	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	a := newApp(t, cfg, Options{Listener: ln})
+	a.dynamoRetry = 10 * time.Millisecond
 	acme := a.dedup.For("acme")
 	require.False(t, acme.Open())
 
