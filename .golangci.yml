@@ -112,3 +112,8 @@ formatters:
 
 run:
   timeout: 5m
+  # Test-only build tags; without them the files behind them are never
+  # type-checked or linted (#709). Keep in sync with the //go:build lines.
+  build-tags:
+    - integration
+    - dynamobench

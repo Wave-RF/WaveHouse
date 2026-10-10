@@ -155,6 +155,7 @@ func TestQueryErrors_ClickHouseDown(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			got := call()
 			assertQueryError(t, got, http.StatusServiceUnavailable, "clickhouse.unavailable", true)
 			assert.Equal(t, "5", got.retryAfter)

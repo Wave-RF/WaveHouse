@@ -106,13 +106,14 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 			// the statement.
 			for _, id := range tt.rowIDs {
 				body := fmt.Sprintf(`{"id":%q,"page":"/about"}`, id)
-				resp, err := http.Post(
+				resp, err := httpPost(
+					t.Context(),
 					e.baseURL+"/v1/ingest?table="+url.QueryEscape(table),
 					"application/json",
 					strings.NewReader(body),
 				)
 				require.NoError(t, err)
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				require.Equal(t, http.StatusOK, resp.StatusCode)
 			}
 
@@ -133,13 +134,14 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 			}, 30*time.Second, 500*time.Millisecond, "all seed inserts should land before the mutation")
 
 			mutationBody, _ := json.Marshal(map[string]string{"sql": tt.mutationSQL(table)})
-			qResp, err := http.Post(
+			qResp, err := httpPost(
+				t.Context(),
 				e.baseURL+"/v1/ops/query",
 				"application/json",
 				bytes.NewReader(mutationBody),
 			)
 			require.NoError(t, err)
-			defer qResp.Body.Close()
+			defer func() { _ = qResp.Body.Close() }()
 
 			respBytes, err := io.ReadAll(qResp.Body)
 			require.NoError(t, err)

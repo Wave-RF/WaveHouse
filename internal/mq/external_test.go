@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -309,7 +310,12 @@ func TestExternalNATS_Recheck(t *testing.T) {
 	require.NoError(t, err)
 	history := h.CachedInfo().Config
 	full := history
-	full.MaxMsgs, full.Discard = int64(h.CachedInfo().State.Msgs), jetstream.DiscardNew
+	msgs := h.CachedInfo().State.Msgs
+	if msgs > math.MaxInt64 {
+		t.Fatalf("history holds %d messages", msgs)
+	}
+	// The guard above bounds the conversion; gosec does not read it.
+	full.MaxMsgs, full.Discard = int64(msgs), jetstream.DiscardNew //nolint:gosec // G115: bounded by the check above
 	_, err = f.admin.UpdateStream(t.Context(), full)
 	require.NoError(t, err)
 	time.Sleep(50 * time.Millisecond) // a gap the gauge can see

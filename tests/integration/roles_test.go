@@ -57,7 +57,7 @@ func buildWavehouseBinary() {
 	if os.Getenv("GOCOVERDIR") != "" {
 		args = append(args, "-cover", "-coverpkg=./...")
 	}
-	cmd := exec.Command("go", append(args, "./cmd/wavehouse")...) //nolint:gosec // G204: fixed arguments
+	cmd := exec.CommandContext(context.Background(), "go", append(args, "./cmd/wavehouse")...) //nolint:gosec // G204: fixed arguments
 	// go test runs in the package directory, two levels below the module root.
 	cmd.Dir = filepath.Join("..", "..")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -131,7 +131,7 @@ func startProcess(t *testing.T, name string, vars map[string]string) *whProcess 
 	for k, v := range vars {
 		env[k] = v
 	}
-	cmd := exec.Command(wavehouseBinary(t)) //nolint:gosec // G204: the binary this test built
+	cmd := exec.CommandContext(context.Background(), wavehouseBinary(t)) //nolint:gosec // G204: the binary this test built
 	cmd.Env = childEnv(env)
 	w := &lockedWriter{w: &bytes.Buffer{}}
 	cmd.Stdout, cmd.Stderr = w, w

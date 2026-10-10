@@ -29,6 +29,7 @@ import (
 // storage narrowing — Float32/Float64 rounding, Decimal scale truncation — is
 // ClickHouse's own, not a lookalike.
 func TestRowFilterNumeric_DifferentialAgainstClickHouse(t *testing.T) {
+	t.Parallel()
 	shapes := []struct {
 		name      string
 		ddl       string
@@ -148,7 +149,7 @@ func TestRowFilterNumeric_DifferentialAgainstClickHouse(t *testing.T) {
 				for _, constant := range sh.constants {
 					for _, op := range ops {
 						stream := streamVerdict(t, table, op, constant, payload, spec)
-						sql, sqlErr := storedVerdict(t, table, uint32(id), op, constant)
+						sql, sqlErr := storedVerdict(t, table, id, op, constant)
 						if stream != sql {
 							t.Errorf("%s: payload %v %s %q — stream says %v, ClickHouse says %v (query err: %v)",
 								sh.ddl, payload, op, constant, stream, sql, sqlErr)
@@ -158,7 +159,7 @@ func TestRowFilterNumeric_DifferentialAgainstClickHouse(t *testing.T) {
 				for _, constant := range sh.looseConstants {
 					for _, op := range ops {
 						stream := streamVerdict(t, table, op, constant, payload, spec)
-						sql, sqlErr := storedVerdict(t, table, uint32(id), op, constant)
+						sql, sqlErr := storedVerdict(t, table, id, op, constant)
 						if stream && !sql {
 							t.Errorf("%s: payload %v %s %q — stream admits where ClickHouse hides (query err: %v)",
 								sh.ddl, payload, op, constant, sqlErr)
@@ -211,7 +212,7 @@ func streamVerdict(t *testing.T, table, op, constant string, payload any, spec p
 // with the constant bound as a positional parameter exactly like
 // predicatesToSQL emits it. A query error (an exact-domain cast rejecting the
 // constant's spelling) means the role reads no rows on that path.
-func storedVerdict(t *testing.T, table string, id uint32, op, constant string) (bool, error) {
+func storedVerdict(t *testing.T, table string, id int, op, constant string) (bool, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

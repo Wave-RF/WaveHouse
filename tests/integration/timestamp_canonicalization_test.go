@@ -27,6 +27,7 @@ import (
 // exact HTTP surface (JSONEachRow, date_time_input_format=best_effort), so the
 // oracle is the production parse, not a lookalike.
 func TestTimestampCanonicalization_DifferentialAgainstClickHouse(t *testing.T) {
+	t.Parallel()
 	colTypes := []struct {
 		name string
 		ddl  string
