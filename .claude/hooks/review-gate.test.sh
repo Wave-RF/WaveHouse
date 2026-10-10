@@ -882,8 +882,17 @@ EOF" "Only humans approve"
 expect_allow "…a COMMENT review whose body is a \$(jq -Rs …)" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews --input - <<EOF
 {\"event\": \"COMMENT\", \"body\": \$(jq -Rs . notes.md)}
 EOF"
-expect_allow "a draft PR whose expanded --input - body is a \$(jq -Rs …)" "$repo" "gh api -X POST repos/o/r/pulls --input - <<EOF
+CLAUDE_PROJECT_DIR=$root expect_allow "a draft PR whose expanded --input - body is a \$(jq -Rs …)" "$repo" "gh api -X POST repos/o/r/pulls --input - <<EOF
 {\"title\": \"fix(ingest): drop duplicate events\", \"head\": \"b\", \"base\": \"main\", \"draft\": true, \"body\": \$(jq -Rs . body.md)}
+EOF"
+CLAUDE_PROJECT_DIR=$root expect_block "…with a title the lint refuses" "$repo" "gh api -X POST repos/o/r/pulls --input - <<EOF
+{\"title\": \"Drop duplicate events.\", \"head\": \"b\", \"base\": \"main\", \"draft\": true, \"body\": \$(jq -Rs . body.md)}
+EOF" "PR title"
+expect_block "a GraphQL review whose expanded --input - body computes the event" "$repo" "gh api graphql --input - <<EOF
+{\"query\": \"mutation(\\\$input: AddPullRequestReviewInput!) { addPullRequestReview(input: \\\$input) { clientMutationId } }\", \"variables\": {\"input\": {\"pullRequestId\": \"PR_x\", \"event\": \"\$ev\"}}}
+EOF" "can't be checked"
+expect_allow "…a COMMENT review whose body is a \$(jq -Rs …)" "$repo" "gh api graphql --input - <<EOF
+{\"query\": \"mutation(\\\$input: AddPullRequestReviewInput!) { addPullRequestReview(input: \\\$input) { clientMutationId } }\", \"variables\": {\"input\": {\"pullRequestId\": \"PR_x\", \"event\": \"COMMENT\", \"body\": \$(jq -Rs . notes.md)}}}
 EOF"
 expect_block "…not a draft" "$repo" "gh api -X POST repos/o/r/pulls --input - <<EOF
 {\"title\": \"fix(ingest): drop duplicate events\", \"head\": \"b\", \"base\": \"main\", \"body\": \$(jq -Rs . body.md)}

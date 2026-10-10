@@ -273,8 +273,11 @@ gh_api() {
   if [ "$input" = 1 ] && [ -n "$stdin" ]; then
     if [ "$path" = graphql ]; then
       query+=" $stdin"
-      # One the shell expands may hold the review's event.
-      [ "$sdyn" = 0 ] || vdyn=1
+      # One the shell expands may hold the review's event, read from its text.
+      if [ "$sdyn" = 1 ]; then
+        vdyn=1
+        [[ $stdin =~ \"event$json_str_re ]] || { [[ $stdin =~ \"event\"[[:space:]]*: ]] && edyn=1; }
+      fi
       [ "$sdyn" = 1 ] && reads_var "$stdin" && qvar=1
     elif [ "$sdyn" = 0 ] && jq . <<<"$stdin" >/dev/null 2>&1; then
       { read -r draft; read -r event; IFS= read -r title; } < <(jq -r \
