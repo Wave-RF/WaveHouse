@@ -677,6 +677,144 @@ gh pr ready 12
 EOF
 )" "ready-for-review"
 
+# gh takes -R/--repo between pr and its subcommand too.
+expect_block "gh pr -R o/r ready" "$repo" 'gh pr -R o/r ready 12' "ready-for-review"
+expect_block "gh pr --repo o/r create without --draft" "$repo" 'gh pr --repo o/r create --title "fix: x"' "must use --draft"
+expect_block "gh pr --repo=o/r review --approve" "$repo" 'gh pr --repo=o/r review 12 --approve' "Only humans approve"
+expect_block "gh pr -Ro/r edit --add-reviewer" "$repo" 'gh pr -Ro/r edit 12 --add-reviewer someone' "Adding/removing reviewers"
+expect_allow "gh pr -R o/r view" "$repo" 'gh pr -R o/r view 12'
+
+# A quoted gh command left past the 64 pieces is refused too, and a $(…) in a
+# ${…} default is code like any other.
+expect_block "a quoted gh pr ready past the 64 the gate follows is refused" "$repo" "echo$pad63 \$(bash -c 'gh pr ready 12')" "nests more code"
+# shellcheck disable=SC2016 # literal ${…}s, for the gate to read
+expect_block "a gh pr ready in a \${x:-\$(…)} default" "$repo" 'echo "${x:-$(gh pr ready 12)}"' "ready-for-review"
+# shellcheck disable=SC2016
+expect_block "…unquoted" "$repo" 'echo ${x:-$(gh pr ready 12)}' "ready-for-review"
+
+# A field read from stdin (-F key=@-, --input -) is read from a heredoc or
+# here-string the gh command itself reads.
+expect_block "GraphQL ready sent as -F query=@- from a heredoc" "$repo" "gh api graphql -F query=@- <<'EOF'
+mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }
+EOF" "ready-for-review"
+expect_block "…from a here-string" "$repo" "gh api graphql -F query=@- <<< 'mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'" "ready-for-review"
+expect_block "GraphQL ready sent through --input - from a heredoc" "$repo" "gh api graphql --input - <<'EOF'
+{\"query\": \"mutation { markPullRequestReadyForReview(input: {pullRequestId: \\\"PR_x\\\"}) { clientMutationId } }\"}
+EOF" "ready-for-review"
+expect_block "an approval sent through --input - from a heredoc" "$repo" "gh api repos/o/r/pulls/12/reviews --input - <<'EOF'
+{\"event\": \"APPROVE\"}
+EOF" "Only humans approve"
+expect_block "a non-draft PR opened through --input -" "$repo" "gh api repos/o/r/pulls --input - <<'EOF'
+{\"head\": \"feat\", \"base\": \"main\", \"title\": \"fix: x\"}
+EOF" "must be drafts"
+CLAUDE_PROJECT_DIR=$root expect_allow "a draft PR opened through --input - with a good title" "$repo" "gh api repos/o/r/pulls --input - <<'EOF'
+{\"head\": \"feat\", \"base\": \"main\", \"title\": \"fix: add the thing\", \"draft\": true}
+EOF"
+expect_allow "a GraphQL read sent as -F query=@-" "$repo" "gh api graphql -F query=@- <<'EOF'
+query { viewer { login } }
+EOF"
+expect_allow "a COMMENT review sent through --input -" "$repo" "gh api repos/o/r/pulls/12/reviews --input - <<'EOF'
+{\"event\": \"COMMENT\", \"body\": \"APPROVE is for people\"}
+EOF"
+
+# A << inside arithmetic is a shift, not a heredoc whose delimiter swallows
+# the lines after it.
+# shellcheck disable=SC2016 # literal $((…))s, for the gate to read
+expect_block "a << shift in \$((…)), then a gh pr ready" "$repo" 'n=$(( 1 << 3 ))
+gh pr ready 12' "ready-for-review"
+expect_block "…in a (( … )) command" "$repo" '(( n = 1 << 3 ))
+gh pr ready 12' "ready-for-review"
+# shellcheck disable=SC2016
+expect_block "…in a \$((…)) inside \$(…)" "$repo" 'x=$(echo $(( 1 << 3 )))
+gh pr ready 12' "ready-for-review"
+# shellcheck disable=SC2016
+expect_block "…then a push" "$repo" 'n=$(( 1 << 3 ))
+git push origin feat-c' "missing pre-push review marker"
+# shellcheck disable=SC2016
+expect_block "a gh pr ready in a \$(…) inside \$((…))" "$repo" 'n=$(( $(gh pr ready 12 | wc -l) + 1 ))' "ready-for-review"
+expect_allow "a for (( … )) loop with << in it, then a gh read" "$repo" 'for (( i = 1; i < 1 << 3; i <<= 1 )); do :; done
+gh pr view 12'
+expect_block "a subshell in a process substitution is still a push" "$repo" "cat <((git push origin feat-c))" "missing pre-push review marker"
+
+# The push check follows a heredoc a shell reads inside $(…), as the gh
+# checks do.
+expect_block "a push in a heredoc read by bash inside \$(…)" "$repo" "out=\$(bash <<'EOF'
+git -C ../wt-b push
+EOF
+)" "can't follow"
+expect_block "…piped into sh inside \$(…)" "$repo" "out=\$(cat <<'EOF' | sh
+git -C ../wt-b push
+EOF
+)" "can't follow"
+
+# An unquoted heredoc's body runs its $(…) and `…`; a quoted one's doesn't.
+expect_block "a gh pr ready in a \$(…) in an unquoted heredoc body" "$repo" "cat <<EOF
+Ready: \$(gh pr ready 12)
+EOF" "ready-for-review"
+expect_block "…in backticks" "$repo" "cat <<EOF
+\`gh pr ready 12\`
+EOF" "ready-for-review"
+expect_block "…in a heredoc inside \$(…)" "$repo" "msg=\$(cat <<EOF
+\$(gh pr ready 12)
+EOF
+)" "ready-for-review"
+expect_block "a push in a \$(…) in an unquoted heredoc body" "$repo" "cat <<EOF
+\$(git -C ../wt-b push)
+EOF" "can't follow"
+expect_block "…in a heredoc inside \$(…)" "$repo" "git commit --allow-empty -m \"\$(cat <<EOF
+\$(git -C ../wt-b push)
+EOF
+)\"" "can't follow"
+expect_block "…in a \$(…) that spans lines of the body" "$repo" "cat <<EOF
+Ready: \$(
+gh pr ready 12
+)
+EOF" "ready-for-review"
+expect_block "…after one that spans lines, on the line where it ends" "$repo" "cat <<EOF
+\$(
+echo hi
+) \$(gh pr ready 12)
+EOF" "ready-for-review"
+expect_allow "the same in a quoted heredoc is a mention" "$repo" "cat <<'EOF'
+\$(gh pr ready 12) and \$(git -C ../wt-b push)
+EOF"
+expect_allow "an escaped \\\$(…) in an unquoted heredoc body is text" "$repo" "cat <<EOF
+\\\$(gh pr ready 12) and \\\$(git -C ../wt-b push)
+EOF"
+expect_allow "a gh comment whose unquoted heredoc body runs a read" "$repo" "gh pr comment 12 --body-file - <<EOF
+Fixed in \$(git rev-parse --short HEAD); run \`make ci\` first.
+EOF"
+
+# Inside `…`, a backslash quotes only $, ` and \, so \` nests a substitution.
+# shellcheck disable=SC2016 # literal backticks, for the gate to read
+expect_block "a gh pr ready in nested escaped backticks" "$repo" 'x=`echo \`gh pr ready 12\``' "ready-for-review"
+# shellcheck disable=SC2016
+expect_block "…a push" "$repo" 'x=`echo \`git -C ../wt-b push\``' "can't follow"
+# shellcheck disable=SC2016
+expect_allow "…and an escaped dollar sign is text" "$repo" 'x=`echo \$\(gh pr ready 12\)`'
+
+# A computed query is matched against its own code, not another field's.
+expect_allow "a computed query beside a body heredoc that names a mutation" "$repo" "gh api graphql -f query=\"\$(cat q.graphql)\" -f body=\"\$(cat <<'EOF'
+markPullRequestReadyForReview is for people
+EOF
+)\""
+expect_block "a query read from a variable is matched against the line that sets it" "$repo" "q='mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'; gh api graphql -f query=\"\$q\"" "ready-for-review"
+
+# Flags on gh pr are read as gh's parser reads them: a short-flag cluster
+# letter by letter, and a flag's value never as a flag.
+for c in create new; do
+  expect_block "gh pr $c -fr x (fill, then a reviewer)" "$repo" "gh pr $c --draft -fr x" "Adding/removing reviewers"
+  expect_block "gh pr $c -fa x (fill, then an assignee)" "$repo" "gh pr $c --draft -fa x" "Adding/removing reviewers"
+done
+expect_block "gh pr create -dfrx" "$repo" 'gh pr create -dfrx' "Adding/removing reviewers"
+expect_allow "gh pr create -df (draft in a cluster)" "$repo" 'gh pr create -df'
+CLAUDE_PROJECT_DIR=$root expect_block "a title given in a cluster is linted" "$repo" 'gh pr create -dt "Bad title."' "PR title"
+expect_allow "a create body that starts with -a" "$repo" 'gh pr create --draft --title "feat: x" -b "-a thing"'
+expect_allow "…a --body that starts with -r" "$repo" 'gh pr create --draft --title "feat: x" --body "-r x"'
+expect_allow "a title that starts with -r is a title" "$repo" 'gh pr create --draft -t "-rx"'
+expect_allow "a review body that says --approve" "$repo" 'gh pr review 12 --comment -b "--approve"'
+expect_block "a review's -a in a cluster (-ab: approve, with a body)" "$repo" 'gh pr review 12 -ab "lgtm"' "Only humans approve"
+
 if [ "$fails" -gt 0 ]; then
   printf '\n%d case(s) failed\n' "$fails" >&2
   exit 1

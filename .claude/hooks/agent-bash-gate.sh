@@ -48,8 +48,9 @@ project_dir="${CLAUDE_PROJECT_DIR:-.}"
 # Like the push check it reads the commands the line runs, so a gh command that
 # is only mentioned, in a quoted string, a heredoc body or a comment
 # (`python3 - <<'EOF'` with `# gh pr ready` in it), doesn't count, unless a
-# shell runs it: a $(…), `bash -c '…'`, `eval`, or a heredoc or here-string a
-# shell reads, directly or through a pipe; that code, as written, quotes and
+# shell runs it: a $(…) (in an argument, a ${…} default, arithmetic or an
+# unquoted heredoc's body), `bash -c '…'`, `eval`, or a heredoc or here-string
+# a shell reads, directly or through a pipe; that code, as written, quotes and
 # heredoc bodies included, is tokenized and judged the same way. Each
 # gh command is judged on its own words: a gh api call by its endpoint (its
 # first argument that isn't a flag) and its fields, never by text elsewhere on
@@ -80,33 +81,63 @@ msg_approve="Only humans approve PRs."
 msg_changes="Agents post inline review comments instead of --request-changes."
 merge_msg="Agents don't merge PRs; a person does. Ask the user."
 
-# truthy <--flag=value>: the value turns a boolean flag on, as gh's flag
-# parser reads it.
+# truthy <value>: the value turns a boolean flag on, as gh's flag parser reads it.
 truthy() {
-  case ${1#*=} in 1 | t | T | true | TRUE | True) return 0 ;; esac
+  case $1 in 1 | t | T | true | TRUE | True) return 0 ;; esac
   return 1
 }
 
-# gh_pr <i> <end>: judge `gh pr <TK_VAL[i]> …`, its words up to token <end>.
+# gh_pr <i> <end>: judge `gh pr <TK_VAL[i]> …`, its words up to token <end>,
+# reading its flags as gh's parser does: each letter of a short-flag cluster
+# is a flag (-df is -d -f); the first that takes a value takes the rest of the
+# word, after an optional "=", or else the next word (-fr x is --fill
+# --reviewer x); and a flag's value is never read as a flag (-b "-a x" is a
+# body).
 gh_pr() {
-  local i=$1 e=$2 j w sub=${TK_VAL[$1]} draft=0 approve=0 changes=0 reviewer=0 people=0 title=""
+  local i=$1 e=$2 j k w c v d sub=${TK_VAL[$1]} short long
+  local draft=0 approve=0 changes=0 reviewer=0 people=0 title=""
+  # The flags that take a value; any other is a switch.
+  case $sub in
+    create | new)
+      short=aBbFHlmpRrTt
+      long=" assignee attach base body body-file head label milestone project recover repo reviewer template title " ;;
+    edit)
+      short=BbFmRt
+      long=" add-assignee add-label add-project add-reviewer attach base body body-file milestone remove-assignee remove-label remove-project remove-reviewer repo title " ;;
+    review) short=bFR long=" body body-file repo " ;;
+    ready) block "$msg_ready" ;;
+    *) return 0 ;;
+  esac
   for ((j = i + 1; j < e; j++)); do
     w=${TK_VAL[j]}
     case $w in
-      --draft | -d) draft=1 ;;
-      --draft=*) truthy "$w" && draft=1 ;;
-      --approve) approve=1 ;;
-      -a) approve=1; people=1 ;;
-      --approve=*) truthy "$w" && approve=1 ;;
-      --request-changes) changes=1 ;;
-      -r) changes=1; people=1 ;;
-      --request-changes=*) truthy "$w" && changes=1 ;;
-      # `create` reads these as people to request or assign; gh also takes the value glued (-rname, -r=name).
-      --reviewer | --reviewer=* | --assignee | --assignee=* | -r?* | -a?*) people=1 ;;
-      --add-reviewer | --add-reviewer=* | --remove-reviewer | --remove-reviewer=*) reviewer=1 ;;
-      --add-assignee | --add-assignee=* | --remove-assignee | --remove-assignee=*) reviewer=1 ;;
-      --title | -t) [ $((j + 1)) -lt "$e" ] && [ "${TK_DYN[j + 1]}" = 0 ] && title=${TK_VAL[j + 1]} ;;
-      --title=*) [ "${TK_DYN[j]}" = 0 ] && title=${w#--title=} ;;
+      --) break ;;
+      --*=*) pr_flag "${w%%=*}" "${w#*=}" "${TK_DYN[j]}" 1 ;;
+      --?*)
+        case $long in
+          *" ${w#--} "*)
+            j=$((j + 1))
+            [ "$j" -lt "$e" ] && pr_flag "$w" "${TK_VAL[j]}" "${TK_DYN[j]}" 1 ;;
+          *) pr_flag "$w" "" 0 0 ;;
+        esac ;;
+      -?*)
+        for ((k = 1; k < ${#w}; k++)); do
+          c=${w:k:1}
+          if [ "${w:k+1:1}" = = ]; then
+            pr_flag "-$c" "${w:k+2}" "${TK_DYN[j]}" 1
+            break
+          fi
+          case $short in
+            *"$c"*)
+              v=${w:k+1}; d=${TK_DYN[j]}
+              if [ -z "$v" ] && [ $((j + 1)) -lt "$e" ]; then
+                j=$((j + 1)); v=${TK_VAL[j]}; d=${TK_DYN[j]}
+              fi
+              pr_flag "-$c" "$v" "$d" 1
+              break ;;
+          esac
+          pr_flag "-$c" "" 0 0
+        done ;;
     esac
   done
   case $sub in
@@ -117,7 +148,6 @@ gh_pr() {
     edit)
       [ "$reviewer" = 0 ] || block "$msg_reviewers"
       lint_title "$title" ;;
-    ready) block "$msg_ready" ;;
     review)
       [ "$approve" = 0 ] || block "$msg_approve"
       [ "$changes" = 0 ] || block "$msg_changes" ;;
@@ -125,43 +155,87 @@ gh_pr() {
   return 0
 }
 
-# gh_api <i> <end>: judge `gh api …`, its words from token <i> up to <end>.
-# The endpoint is its first word that isn't a flag or a flag's value; a field
-# is the value of -f, -F, --field or --raw-field. A call writes when it names a
-# method other than GET or, naming none, sends a field or --input, which makes
-# gh POST. A field sent from a file (`-F key=@file`, --input) isn't read.
+# pr_flag <flag> <value> <value-is-dynamic> <value-given>: note, in gh_pr's
+# variables, what one flag of its subcommand does. A short flag means what its
+# long form on that subcommand does: -a is --assignee on create, --approve on
+# review.
+pr_flag() {
+  local f=$1
+  case $sub$1 in
+    create-d | new-d) f=--draft ;;
+    create-a | new-a) f=--assignee ;;
+    create-r | new-r) f=--reviewer ;;
+    create-t | new-t | edit-t) f=--title ;;
+    review-a) f=--approve ;;
+    review-r) f=--request-changes ;;
+  esac
+  case $f in
+    --draft) { [ "$4" = 0 ] || truthy "$2"; } && draft=1 ;;
+    --approve) { [ "$4" = 0 ] || truthy "$2"; } && approve=1 ;;
+    --request-changes) { [ "$4" = 0 ] || truthy "$2"; } && changes=1 ;;
+    --reviewer | --assignee) people=1 ;;
+    --add-reviewer | --remove-reviewer | --add-assignee | --remove-assignee) reviewer=1 ;;
+    --title) [ "$3" = 0 ] && title=$2 ;;
+  esac
+  return 0
+}
+
+# gh_api <i> <end> <start>: judge `gh api …`, its words from token <i> up to
+# <end>, in the simple command that starts at token <start>. The endpoint is
+# its first word that isn't a flag or a flag's value; a field is the value of
+# -f, -F, --field or --raw-field. A call writes when it names a method other
+# than GET or, naming none, sends a field or --input, which makes gh POST. A
+# value gh reads from a file (`-F key=@file`, `--input file`) isn't read; one it
+# reads from stdin (`-F key=@-`, `--input -`) is read from the heredoc or
+# here-string the command itself reads.
 gh_api() {
-  local i=$1 e=$2 j w f ep="" method="" fields=0 write=0 path
-  local draft="" title="" event="" query="" qdyn=0 values=""
+  local i=$1 e=$2 j w f ep="" method="" fields=0 write=0 path typed stdin="" input=0
+  local draft="" title="" event="" query="" qvar=0 values=""
+  for ((j = 0; j < ${#TK_IN[@]}; j++)); do
+    [ "${TK_IN_AT[j]}" != "$3" ] || stdin=${TK_IN[j]%$'\n'}
+  done
   for ((j = i; j < e; j++)); do
     w=${TK_VAL[j]}
-    f=""
+    f="" typed=0
     case $w in
       -X | --method) [ $((j + 1)) -lt "$e" ] && { j=$((j + 1)); method=${TK_VAL[j]}; } ;;
       -X?*) method=${w#-X} ;;
       --method=*) method=${w#--method=} ;;
-      -f | -F | --field | --raw-field) [ $((j + 1)) -lt "$e" ] && { j=$((j + 1)); f=${TK_VAL[j]}; fields=1; } ;;
-      -f?* | -F?*) f=${w#-?}; fields=1 ;;
-      --field=* | --raw-field=*) f=${w#*=}; fields=1 ;;
-      --input) j=$((j + 1)); fields=1 ;;
-      --input=*) fields=1 ;;
+      -f | --raw-field) [ $((j + 1)) -lt "$e" ] && { j=$((j + 1)); f=${TK_VAL[j]}; fields=1; } ;;
+      -F | --field) [ $((j + 1)) -lt "$e" ] && { j=$((j + 1)); f=${TK_VAL[j]}; fields=1; typed=1; } ;;
+      -f?*) f=${w#-f}; fields=1 ;;
+      -F?*) f=${w#-F}; fields=1; typed=1 ;;
+      --raw-field=*) f=${w#*=}; fields=1 ;;
+      --field=*) f=${w#*=}; fields=1; typed=1 ;;
+      --input)
+        j=$((j + 1)); fields=1
+        [ "$j" -lt "$e" ] && [ "${TK_VAL[j]}" = - ] && input=1 ;;
+      --input=*) fields=1; [ "$w" = --input=- ] && input=1 ;;
       -H | --header | -q | --jq | -t | --template | -p | --preview | --hostname | --cache) j=$((j + 1)) ;;
       -*) ;;
       *) [ -n "$ep" ] || ep=$w ;;
     esac
     [ -n "$f" ] || continue
-    case ${f#*=} in @*) continue ;; esac # its value is a file's contents
+    if [ "$typed" = 1 ]; then
+      case ${f#*=} in
+        @-) f=${f%%=*}=$stdin ;;
+        @*) continue ;; # a file's contents
+      esac
+    fi
     values+=" ${f#*=}"
     case $f in
       draft=*) draft=${f#draft=} ;;
       title=*) [ "${TK_DYN[j]}" = 0 ] && title=${f#title=} ;;
       event=*) event=${f#event=} ;;
-      query=*) query=${f#query=}; [ "${TK_DYN[j]}" = 0 ] || qdyn=1 ;;
+      query=*)
+        query=${f#query=}
+        [ "${TK_DYN[j]}" = 0 ] || case $query in *'$'[A-Za-z_'{']*) qvar=1 ;; esac ;;
     esac
   done
-  # A computed query (`-f query="$(cat <<'EOF' … EOF)"`) is matched against
-  # the code that computes it, heredoc bodies included.
-  [ "$qdyn" = 0 ] || query=$GH_CODE
+  # A computed query is matched against the code that computes it: its own
+  # word, heredoc bodies included (`-f query="$(cat <<'EOF' … EOF)"`), and,
+  # when it reads a variable, the rest of the code, where that may be set.
+  [ "$qvar" = 0 ] || query+=" $GH_CODE"
   if [ -n "$method" ]; then
     case $method in [gG][eE][tT]) ;; *) write=1 ;; esac
   else
@@ -171,6 +245,17 @@ gh_api() {
   path=${path#/}
   path=${path%%\?*}
   path=${path%/}
+  # A body sent with --input - is the request's JSON: a GraphQL one is matched
+  # as a query is, and a REST one's draft, event and title are read from it.
+  if [ "$input" = 1 ] && [ -n "$stdin" ]; then
+    if [ "$path" = graphql ]; then
+      query+=" $stdin"
+    else
+      { read -r draft; read -r event; IFS= read -r title; } < <(jq -r \
+        '(.draft | tostring), (.event // "" | tostring), (.title // "" | tostring | gsub("\n"; " "))' \
+        <<<"$stdin" 2>/dev/null)
+    fi
+  fi
   if [ "$path" = graphql ]; then
     case $query in *markPullRequestReadyForReview*) block "$msg_ready" ;; esac
     case $query in *mergePullRequest* | *enablePullRequestAutoMerge*) block "$merge_msg" ;; esac
@@ -182,7 +267,8 @@ gh_api() {
     esac
     case $query in
       *createPullRequest*)
-        [[ $query =~ draft:[[:space:]]*true || $draft == true ]] \
+        # `draft: true` in the query, or `"draft": true` in a JSON body's variables.
+        [[ $query =~ draft\"?[[:space:]]*:[[:space:]]*true || $draft == true ]] \
           || block "Agent-opened PRs must be drafts; in GraphQL, send draft: true. Only humans publish ready-for-review PRs." ;;
     esac
     return 0
@@ -234,6 +320,19 @@ shell_code_at() {
   if [ "$c" = 1 ] && [ "$m" -lt "$e" ]; then SHELL_CODE=$m; fi
 }
 
+# past_repo <m> <end>: AT = the first token from <m> that isn't -R/--repo or
+# its value.
+past_repo() {
+  AT=$1
+  while [ "$AT" -lt "$2" ]; do
+    case ${TK_VAL[AT]} in
+      -R | --repo) AT=$((AT + 2)) ;;
+      -R?* | --repo=*) AT=$((AT + 1)) ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
 # gh_scan: judge every gh pr and gh api command in the current tokens, and
 # queue in GH_QUEUE the code a shell will run: each $(…) and `…`, the code a
 # shell is handed with -c or eval, and a heredoc or here-string a shell reads,
@@ -256,19 +355,16 @@ gh_scan() {
     for ((j = starts[k]; j < ends[k]; j++)); do
       w=${TK_VAL[j]##*/}
       if [ "$w" = gh ] && [ "${TK_DYN[j]}" = 0 ]; then
-        # gh takes -R/--repo before the command too: `gh -R o/r pr ready 12`.
-        m=$((j + 1))
-        while [ "$m" -lt "${ends[k]}" ]; do
-          case ${TK_VAL[m]} in
-            -R | --repo) m=$((m + 2)) ;;
-            -R?* | --repo=*) m=$((m + 1)) ;;
-            *) break ;;
-          esac
-        done
+        # gh takes -R/--repo before the command, and before pr's subcommand:
+        # `gh -R o/r pr ready 12`, `gh pr -R o/r ready 12`.
+        past_repo $((j + 1)) "${ends[k]}"
+        m=$AT
         if [ "$m" -lt "${ends[k]}" ]; then
           case ${TK_VAL[m]} in
-            pr) [ $((m + 1)) -lt "${ends[k]}" ] && gh_pr $((m + 1)) "${ends[k]}" ;;
-            api) gh_api $((m + 1)) "${ends[k]}" ;;
+            pr)
+              past_repo $((m + 1)) "${ends[k]}"
+              [ "$AT" -lt "${ends[k]}" ] && gh_pr "$AT" "${ends[k]}" ;;
+            api) gh_api $((m + 1)) "${ends[k]}" "${starts[k]}" ;;
           esac
         fi
         break
@@ -302,10 +398,11 @@ gh_scan() {
 
 # gate_gh: judge the line, then each piece of code it hands a shell, in turn.
 # It follows 64 pieces, a bound on code that nests itself; past that, any piece
-# left that mentions a gh pr or gh api command is refused, unjudged. So is a
-# line it can't parse that mentions one: it can't tell what runs.
+# left that mentions a gh pr or gh api command, quoted or not, is refused,
+# unjudged. So is a line it can't parse that mentions one: it can't tell what
+# runs.
 gate_gh() {
-  local q
+  local q left
   grep -qE '(^|[^[:alnum:]_-])gh[[:space:]]' <<<"$cmd" || return 0
   GH_QUEUE=("$cmd")
   for ((q = 0; q < ${#GH_QUEUE[@]} && q < 64; q++)); do
@@ -316,10 +413,12 @@ gate_gh() {
       block "can't parse this command (an unterminated quote or substitution?), so can't tell what it does to a PR. Fix the quoting, or run the gh command on its own."
     fi
   done
-  for (( ; q < ${#GH_QUEUE[@]}; q++)); do
-    grep -qE "$gh_cmd_re" <<<"${GH_QUEUE[q]}" \
-      && block "this command nests more code than the gate follows (64 pieces), and some of what's left runs gh. Split it into separate commands."
-  done
+  # What's left, in one grep; not through a pipe, which pipefail fails when
+  # grep -q stops reading early.
+  [ "$q" -lt "${#GH_QUEUE[@]}" ] || return 0
+  printf -v left '%s\n' "${GH_QUEUE[@]:q}"
+  grep -qE "$gh_cmd_re" <<<"$left" \
+    && block "this command nests more code than the gate follows (64 pieces), and some of what's left runs gh. Split it into separate commands."
   return 0
 }
 
@@ -360,16 +459,17 @@ reviewers_script="scripts/pre-push-reviewers.sh"
 
 # ── Shell tokenizer ──
 # Splits a command line the way the shell would (quotes, escapes, operators,
-# redirections, heredocs, $(…) and `…`) without expanding or running anything.
-# A word that carries an expansion is flagged dynamic: its value is unknowable
-# here, so a push that depends on one fails closed. Fills TK_VAL / TK_DYN /
-# TK_OP, TK_IN / TK_IN_AT with each heredoc body and here-string and the token
-# index of the simple command that reads it, and TK_SUBS with the text of every
-# $(…) and `…`, wherever its word went (an argument, a here-string, a redirect
-# target), each quoted part inside a $(…) wrapped in \002…\003, and TK_CODE
-# with the code inside each one exactly as written, quotes and heredoc bodies
-# included, for the gh checks to tokenize in turn; returns 1 on an
-# unterminated quote or substitution.
+# redirections, heredocs, arithmetic, $(…) and `…`) without expanding or
+# running anything. A word that carries an expansion is flagged dynamic: its
+# value is unknowable here, so a push that depends on one fails closed. Fills
+# TK_VAL / TK_DYN / TK_OP, TK_IN / TK_IN_AT with each heredoc body and
+# here-string outside a $(…) and the token index of the simple command that
+# reads it, and TK_SUBS with the text of every $(…) and `…`, wherever it went
+# (an argument, a here-string, a redirect target, an unquoted heredoc's body,
+# arithmetic), each quoted part and heredoc body inside a $(…) wrapped in
+# \002…\003, and TK_CODE with the code inside each one exactly as written,
+# quotes and heredoc bodies included, for the gh checks to tokenize in turn;
+# returns 1 on an unterminated quote or substitution.
 
 tk_flush() {
   if [ "$_inw" = 1 ]; then
@@ -445,6 +545,7 @@ tk_dollar() {
   _inw=1; _dyn=1
   case ${_s:_i+1:1} in
     '(')
+      tk_arith && return 0
       _w+='$'; _i=$((_i + 1)); _insub=$((_insub + 1))
       tk_paren || return 1
       _insub=$((_insub - 1)); TK_SUBS+=("${_w:s0}")
@@ -453,25 +554,112 @@ tk_dollar() {
       rest=${_s:_i}
       case $rest in *'}'*) ;; *) return 1 ;; esac
       part=${rest%%'}'*}
+      # A $(…) in a default (`${x:-$(…)}`) runs: the text inside the braces is
+      # queued as code, for its substitution to be found when it's tokenized.
       # shellcheck disable=SC2016 # a literal $( or backtick in ${…:-…}
-      case $part in *'$('* | *'`'*) TK_SUBS+=("$part}") ;; esac
+      case $part in *'$('* | *'`'*) TK_SUBS+=("$part}"); TK_CODE+=("${part:2}") ;; esac
       _w+="$part}"; _i=$((_i + ${#part} + 1)) ;;
     *) _w+='$'; _i=$((_i + 1)) ;;
   esac
 }
 
+# tk_arith: at "$((" or "((" whose parens close as "))", consume the
+# arithmetic into the word, so a "<<" in it is a shift, not a heredoc, and
+# record the substitutions in it. Returns 1, consuming nothing, when the
+# parens close otherwise (a subshell in a substitution or subshell, as bash
+# reads it) or follow "<" or ">" (a process substitution).
+tk_arith() {
+  local p=$_i from depth=0 c rest part
+  if [ "${_s:p:1}" = '$' ]; then
+    p=$((p + 1))
+  elif [ "$p" -gt 0 ]; then
+    case ${_s:p-1:1} in '<' | '>') return 1 ;; esac
+  fi
+  [ "${_s:p:2}" = '((' ] || return 1
+  from=$((p + 2))
+  for ((p = from; p < _n; p++)); do
+    c=${_s:p:1}
+    case $c in
+      '(') depth=$((depth + 1)) ;;
+      ')')
+        [ "$depth" -gt 0 ] || break
+        depth=$((depth - 1)) ;;
+      \\) p=$((p + 1)) ;;
+      "'" | '"')
+        rest=${_s:p+1}
+        case $rest in *"$c"*) ;; *) return 1 ;; esac
+        part=${rest%%"$c"*}; p=$((p + ${#part} + 1)) ;;
+    esac
+  done
+  [ "${_s:p:2}" = '))' ] || return 1
+  _w+=${_s:_i:p+2-_i}; _inw=1; _dyn=1; _i=$((p + 2))
+  tk_expand_subs "$from" "$p" || true # one that doesn't close: bash runs nothing
+}
+
+# tk_expand_subs <from> <to>: text the shell expands as it does a double-quoted
+# string, an unquoted heredoc's body or arithmetic, runs each $(…) and `…` in
+# it; record them as a word's are, reading no further than <to>. Returns 1 on
+# one that doesn't close by then. Each line is read as a string of its own:
+# bash measures the whole string on every ${s:i:n}, so a character loop over a
+# large body would be quadratic. A substitution that runs past its line is read
+# from the whole text, and its last line from where it ends.
+tk_expand_subs() {
+  local ss=$_s si=$_i sn=$_n sw=$_w sinw=$_inw sdyn=$_dyn text=${_s:$1:$2-$1} line off=$1 next=$1 rc=0
+  case $text in *[\$\`]*) ;; *) return 0 ;; esac
+  while IFS= read -r line; do
+    if [ $((off + ${#line})) -ge "$next" ]; then
+      case $line in
+        *[\$\`]*)
+          _s=$line; _n=${#line}; _i=0
+          [ "$next" -le "$off" ] || _i=$((next - off))
+          if ! tk_scan_subs; then
+            _s=$ss; _n=$2; _i=$((off + _i)); _w=""
+            if [ "${_s:_i:1}" = '$' ]; then tk_dollar; else tk_backtick; fi || { rc=1; break; }
+            next=$_i
+          fi ;;
+      esac
+    fi
+    off=$((off + ${#line} + 1))
+  done <<<"$text"
+  _s=$ss; _i=$si; _n=$sn; _w=$sw; _inw=$sinw; _dyn=$sdyn
+  return "$rc"
+}
+
+# tk_scan_subs: record each $(…) and `…` from _i to _n; on one that doesn't
+# close by _n, return 1 with _i at its start.
+tk_scan_subs() {
+  local rest part from
+  while :; do
+    rest=${_s:_i}
+    part=${rest%%[\\\$\`]*}
+    _i=$((_i + ${#part}))
+    [ "$_i" -lt "$_n" ] || return 0
+    from=$_i; _w=""
+    case ${_s:_i:1} in
+      \\) _i=$((_i + 2)) ;;
+      '$') tk_dollar || { _i=$from; return 1; } ;;
+      *) tk_backtick || { _i=$from; return 1; } ;;
+    esac
+  done
+}
+
+# tk_backtick: a `…`. Inside it a backslash quotes only $, ` and \, so the code
+# it runs has \` as a backtick, which nests a substitution (`echo \`…\``).
 tk_backtick() {
-  local c s0=${#_w} start=$_i
+  local c code=""
   _inw=1; _dyn=1; _w+='`'; _i=$((_i + 1))
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
     case $c in
       '`')
-        _w+=$c; _i=$((_i + 1)); TK_SUBS+=("${_w:s0}")
-        TK_CODE+=("${_s:start+1:_i-start-2}")
+        _w+=$c; _i=$((_i + 1))
+        TK_SUBS+=("\`$code\`"); TK_CODE+=("$code")
         return 0 ;;
-      \\) _w+=${_s:_i:2}; _i=$((_i + 2)) ;;
-      *) _w+=$c; _i=$((_i + 1)) ;;
+      \\)
+        _w+=${_s:_i:2}
+        case ${_s:_i+1:1} in '$' | '`' | \\) code+=${_s:_i+1:1} ;; *) code+=${_s:_i:2} ;; esac
+        _i=$((_i + 2)) ;;
+      *) _w+=$c; code+=$c; _i=$((_i + 1)) ;;
     esac
   done
   return 1
@@ -485,7 +673,9 @@ tk_paren() {
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
     case $c in
-      '(') depth=$((depth + 1)); _w+=$c; _i=$((_i + 1)) ;;
+      '(')
+        # Its own "(" opens the substitution; a "((" after that is arithmetic.
+        if [ "$depth" -eq 0 ] || ! tk_arith; then depth=$((depth + 1)); _w+=$c; _i=$((_i + 1)); fi ;;
       ')')
         depth=$((depth - 1)); _w+=$c; _i=$((_i + 1))
         [ "$depth" -eq 0 ] && return 0 ;;
@@ -494,14 +684,18 @@ tk_paren() {
       '"') tk_dquote || return 1 ;;
       '`') tk_backtick || return 1 ;;
       '$')
-        if [ "${_s:_i+1:1}" = "'" ]; then tk_ansi || return 1; else _w+=$c; _i=$((_i + 1)); fi ;;
+        if [ "${_s:_i+1:1}" = "'" ]; then
+          tk_ansi || return 1
+        elif ! tk_arith; then
+          _w+=$c; _i=$((_i + 1))
+        fi ;;
       '<')
         if [ "${_s:_i:3}" = '<<<' ]; then
           _w+='<<< '; _i=$((_i + 3))
         else
           tk_heredoc_op -1 || { _w+=$c; _i=$((_i + 1)); }
         fi ;;
-      $'\n') _w+=$c; _i=$((_i + 1)); tk_heredoc_bodies ;;
+      $'\n') _w+=$c; _i=$((_i + 1)); tk_heredoc_bodies || return 1 ;;
       *) _w+=$c; _i=$((_i + 1)) ;;
     esac
   done
@@ -509,11 +703,11 @@ tk_paren() {
 }
 
 # tk_heredoc_op <at>: at "<<" or "<<-", register the heredoc's delimiter (its
-# body starts after the next newline) and the token index of the command that
-# reads it (-1 inside a substitution: the body isn't kept). Returns 1,
-# consuming nothing, elsewhere.
+# body starts after the next newline), whether any of it is quoted, and the
+# token index of the command that reads it (-1 inside a substitution). Returns
+# 1, consuming nothing, elsewhere.
 tk_heredoc_op() {
-  local strip=0 c d=""
+  local strip=0 c d="" q=0
   case ${_s:_i:3} in
     '<<<') return 1 ;;
     '<<-') strip=1; _i=$((_i + 3)) ;;
@@ -525,38 +719,47 @@ tk_heredoc_op() {
     c=${_s:_i:1}
     case $c in
       ' ' | $'\t' | $'\n' | ';' | '|' | '&' | '<' | '>' | '(' | ')') break ;;
-      "'" | '"' | \\) ;;
+      "'" | '"' | \\) q=1 ;;
       *) d+=$c ;;
     esac
     _i=$((_i + 1))
   done
-  _hd_delim+=("$d"); _hd_strip+=("$strip"); _hd_at+=("$1")
+  _hd_delim+=("$d"); _hd_strip+=("$strip"); _hd_at+=("$1"); _hd_quoted+=("$q")
 }
 
 # tk_heredoc_bodies: just past a newline, step over the bodies of pending
-# heredocs, keeping each top-level one in TK_IN. Inside a $(…), a line that is
-# the delimiter followed by ")" (`EOF)"`) also ends the body, and the ")" closes
-# the substitution.
+# heredocs. A top-level one's body goes to TK_IN; one inside a $(…) joins the
+# substitution's text as a quoted part, an argument unless the substitution
+# hands it to a shell. Inside a $(…), a line that is the delimiter followed by
+# ")" (`EOF)"`) also ends the body, and the ")" closes the substitution. When
+# no part of the delimiter is quoted, the body runs its $(…) and `…`, recorded
+# as a word's are; returns 1 on one that doesn't close in the body.
 tk_heredoc_bodies() {
-  local k rest line start
-  [ "${#_hd_delim[@]}" -gt 0 ] || return 0
-  for ((k = 0; k < ${#_hd_delim[@]}; k++)); do
+  local k nh=${#_hd_delim[@]} rest line start end
+  local -a delim strip at quoted
+  [ "$nh" -gt 0 ] || return 0
+  delim=("${_hd_delim[@]}"); strip=("${_hd_strip[@]}"); at=("${_hd_at[@]}"); quoted=("${_hd_quoted[@]}")
+  _hd_delim=(); _hd_strip=(); _hd_at=(); _hd_quoted=()
+  for ((k = 0; k < nh; k++)); do
     start=$_i
-    while [ "$_i" -lt "$_n" ]; do
+    while end=$_i; [ "$_i" -lt "$_n" ]; do
       rest=${_s:_i}
       line=${rest%%$'\n'*}
       _i=$((_i + ${#line} + 1))
-      [ "${_hd_strip[k]}" = 1 ] && line=${line#"${line%%[!$'\t']*}"}
-      [ "$line" = "${_hd_delim[k]}" ] && break
-      if [ "${_hd_at[k]}" = -1 ] && [ "${line#"${_hd_delim[k]})"}" != "$line" ]; then
-        _i=$((_i - 1 - ${#line} + ${#_hd_delim[k]})); break
+      [ "${strip[k]}" = 1 ] && line=${line#"${line%%[!$'\t']*}"}
+      [ "$line" = "${delim[k]}" ] && break
+      if [ "${at[k]}" = -1 ] && [ "${line#"${delim[k]})"}" != "$line" ]; then
+        _i=$((_i - 1 - ${#line} + ${#delim[k]})); break
       fi
     done
-    if [ "${_hd_at[k]}" -ge 0 ]; then
-      TK_IN+=("${_s:start:_i-start}"); TK_IN_AT+=("${_hd_at[k]}")
+    [ "$end" -le "$_n" ] || end=$_n
+    if [ "${at[k]}" -ge 0 ]; then
+      TK_IN+=("${_s:start:end-start}"); TK_IN_AT+=("${at[k]}")
+    elif [ "$_insub" -gt 0 ]; then
+      _w+=$'\002'${_s:start:end-start}$'\003'
     fi
+    [ "${quoted[k]}" = 1 ] || tk_expand_subs "$start" "$end" || return 1
   done
-  _hd_delim=(); _hd_strip=(); _hd_at=()
 }
 
 # tk_redirect: at "<" or ">" (or the ">" of "&>"). An fd number glued to the
@@ -579,12 +782,13 @@ tokenize() {
   local LC_ALL=C c c2 rest line
   _s=$1; _n=${#1}; _i=0
   _w=""; _inw=0; _dyn=0; _skip=0; _cmd0=0; _insub=0
-  TK_VAL=(); TK_DYN=(); TK_OP=(); TK_IN=(); TK_IN_AT=(); TK_SUBS=(); TK_CODE=(); _hd_delim=(); _hd_strip=(); _hd_at=()
+  TK_VAL=(); TK_DYN=(); TK_OP=(); TK_IN=(); TK_IN_AT=(); TK_SUBS=(); TK_CODE=()
+  _hd_delim=(); _hd_strip=(); _hd_at=(); _hd_quoted=()
   while [ "$_i" -lt "$_n" ]; do
     c=${_s:_i:1}
     case $c in
       ' ' | $'\t') tk_flush; _i=$((_i + 1)) ;;
-      $'\n') tk_op ';'; _i=$((_i + 1)); tk_heredoc_bodies ;;
+      $'\n') tk_op ';'; _i=$((_i + 1)); tk_heredoc_bodies || return 1 ;;
       \\)
         c2=${_s:_i+1:1}
         [ "$c2" = $'\n' ] || { _w+=$c2; _inw=1; }
@@ -607,7 +811,8 @@ tokenize() {
           '&') tk_op '&&'; _i=$((_i + 2)) ;;
           *) tk_op '&'; _i=$((_i + 1)) ;;
         esac ;;
-      '(' | ')') tk_op "$c"; _i=$((_i + 1)) ;;
+      '(') tk_arith || { tk_op "$c"; _i=$((_i + 1)); } ;; # `(( n <<= 1 ))` is arithmetic
+      ')') tk_op "$c"; _i=$((_i + 1)) ;;
       '<' | '>') tk_redirect ;;
       '#')
         if [ "$_inw" = 1 ]; then
@@ -936,10 +1141,10 @@ git_re='(^|[[:space:];|&(`])git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:spac
 # shellcheck disable=SC2016
 end_re='([[:space:]]|$|[;|&)`])'
 push_re=${git_re}push$end_re
-# shellcheck disable=SC2016
-gh_re='(^|[[:space:];|&(`])gh[[:space:]]+'
-# A gh pr or gh api command, -R/--repo before it allowed, anywhere in a text.
-gh_cmd_re=${gh_re}'((-R|--repo)(=|[[:space:]]*)[^[:space:]]+[[:space:]]+)*(pr|api)'$end_re
+# A gh pr or gh api command, -R/--repo before it allowed, anywhere in a text,
+# quoted or not (`bash -c 'gh pr ready 12'`): for code the gate can't parse or
+# doesn't reach, where it can't tell a mention from a command.
+gh_cmd_re='(^|[^[:alnum:]_.-])gh[[:space:]]+((-R|--repo)(=|[[:space:]]*)[^[:space:]]+[[:space:]]+)*(pr|api)([^[:alnum:]_-]|$)'
 head_re=${git_re}'(commit|merge|rebase|reset|checkout|switch|cherry-pick|revert|am|pull)'$end_re
 # shellcheck disable=SC2016
 shell_re='(^|[[:space:];|&(`])(eval|([^[:space:];|&]*/)?(ba|z|da|k)?sh)([[:space:]<]|$)'
