@@ -24,10 +24,11 @@ import (
 // embedded NATS lives.
 func TestDLQ_StatsEmptyOnFreshStart(t *testing.T) {
 	e := env(t)
+	ctx := t.Context()
 
-	resp, err := http.Get(e.baseURL + "/v1/ops/dlq/stats")
+	resp, err := httpGet(ctx, e.baseURL+"/v1/ops/dlq/stats")
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -68,11 +69,11 @@ func TestDLQ_PopulatedOnIngestWorkerFailure(t *testing.T) {
 	// loaded CI runner. The condition polls the API rather than the
 	// stream so this also exercises the read path.
 	assert.Eventually(t, func() bool {
-		resp, err := http.Get(e.baseURL + "/v1/ops/dlq/stats")
+		resp, err := httpGet(ctx, e.baseURL+"/v1/ops/dlq/stats")
 		if err != nil {
 			return false
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		var body map[string]any
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
@@ -111,11 +112,11 @@ func TestDLQ_PopulatedOnIngestWorkerFailureWithBadName(t *testing.T) {
 	// loaded CI runner. The condition polls the API rather than the
 	// stream so this also exercises the read path.
 	assert.Eventually(t, func() bool {
-		resp, err := http.Get(e.baseURL + "/v1/ops/dlq/stats")
+		resp, err := httpGet(ctx, e.baseURL+"/v1/ops/dlq/stats")
 		if err != nil {
 			return false
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		var body map[string]any
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
