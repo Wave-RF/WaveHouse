@@ -861,6 +861,14 @@ I would APPROVE this once CI is green.
 EOF"
 expect_block "a GraphQL approval with the event in a variable" "$repo" "gh api graphql -f query='mutation(\$e: PullRequestReviewEvent!) { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: \$e}) { clientMutationId } }' -f e=APPROVE" "Only humans approve"
 expect_block "…changes requested, the event read from stdin" "$repo" "gh api graphql -f query='mutation(\$r: ID!, \$e: PullRequestReviewEvent!) { submitPullRequestReview(input: {pullRequestReviewId: \$r, event: \$e}) { clientMutationId } }' -f r=PRR_x -F e=@- <<< REQUEST_CHANGES" "instead of --request-changes"
+# An event the shell computes can't be read, so it's refused; a literal one
+# beside a computed body isn't.
+expect_block "a GraphQL review with the event variable's value computed" "$repo" "ev=APPROVE; gh api graphql -f query='mutation(\$e: PullRequestReviewEvent!) { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: \$e}) { clientMutationId } }' -f e=\"\$ev\"" "can't be checked"
+expect_block "…the value read from a here-string the shell expands" "$repo" "gh api graphql -f query='mutation(\$e: PullRequestReviewEvent!) { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: \$e}) { clientMutationId } }' -F e=@- <<< \"\$ev\"" "can't be checked"
+expect_allow "a GraphQL COMMENT review in a variable, beside a computed body" "$repo" "gh api graphql -f query='mutation(\$e: PullRequestReviewEvent!, \$b: String!) { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: \$e, body: \$b}) { clientMutationId } }' -f e=COMMENT -f b=\"\$(cat notes.md)\""
+expect_allow "a GraphQL review with a literal event, beside a computed body" "$repo" "gh api graphql -f query='mutation(\$b: String!) { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: COMMENT, body: \$b}) { clientMutationId } }' -f b=\"\$(cat notes.md)\""
+expect_block "a REST review with a computed event" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews -f event=\"\$ev\" -f body='looks fine'" "can't be checked"
+expect_allow "a REST COMMENT review with a computed body" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews -f event=COMMENT -f body=\"\$(cat notes.md)\""
 
 # Flags on gh pr are read as gh's parser reads them: a short-flag cluster
 # letter by letter, and a flag's value never as a flag.

@@ -80,6 +80,7 @@ msg_reviewers="Adding/removing reviewers is humans-only. Re-trigger bot reviewer
 msg_reviewers_api="Reviewer-write requests are humans-only. Re-trigger bot reviewers via PR comment mention."
 msg_approve="Only humans approve PRs."
 msg_changes="Agents post inline review comments instead of --request-changes."
+msg_event_dyn="A review event the shell computes can't be checked for APPROVE or REQUEST_CHANGES. Write it literally (event=COMMENT)."
 merge_msg="Agents don't merge PRs; a person does. Ask the user."
 
 # truthy <value>: the value turns a boolean flag on, as gh's flag parser reads it.
@@ -204,7 +205,7 @@ reads_var() {
 # here-string the command itself reads.
 gh_api() {
   local i=$1 e=$2 j w f d ep="" method="" fields=0 write=0 path typed stdin="" sdyn=0 input=0
-  local draft="" title="" event="" query="" qvar=0 values=""
+  local draft="" title="" event="" edyn=0 query="" qvar=0 values="" vset=0 vdyn=0
   for ((j = 0; j < ${#TK_IN[@]}; j++)); do
     [ "${TK_IN_AT[j]}" != "$3" ] || { stdin=${TK_IN[j]%$'\n'}; sdyn=${TK_IN_DYN[j]}; }
   done
@@ -238,8 +239,17 @@ gh_api() {
       esac
     fi
     # A field that is a review event may be the GraphQL variable holding one;
-    # a body that mentions APPROVE isn't.
-    case ${f#*=} in APPROVE | REQUEST_CHANGES) values+=" ${f#*=}" ;; esac
+    # a body that mentions APPROVE isn't. A field other than the query that the
+    # shell computes may hold one too, unread.
+    case ${f#*=} in
+      APPROVE | REQUEST_CHANGES) values+=" ${f#*=}" vset=1 ;;
+      COMMENT | DISMISS) vset=1 ;;
+      *) [ "$d" = 0 ] || case ${f%%=*} in
+        query) ;;
+        event) vdyn=1 edyn=1 ;;
+        *) vdyn=1 ;;
+      esac ;;
+    esac
     case $f in
       draft=*) draft=${f#draft=} ;;
       title=*) [ "$d" = 0 ] && title=${f#title=} ;;
@@ -282,7 +292,9 @@ gh_api() {
     case $query in
       *addPullRequestReview | *addPullRequestReview[!A-Za-z0-9_]* | *submitPullRequestReview*)
         case "$query$values" in *APPROVE*) block "$msg_approve" ;; esac
-        case "$query$values" in *REQUEST_CHANGES*) block "$msg_changes" ;; esac ;;
+        case "$query$values" in *REQUEST_CHANGES*) block "$msg_changes" ;; esac
+        # The event in a GraphQL variable no field gives literally.
+        [[ $vset == 0 && $vdyn == 1 && $query =~ event[[:space:]]*:[[:space:]]*[$] ]] && block "$msg_event_dyn" ;;
     esac
     case $query in
       *createPullRequest*)
@@ -306,6 +318,7 @@ gh_api() {
   fi
   case $path in
     repos/*/pulls/*/reviews | repos/*/pulls/*/reviews/*/events)
+      [ "$edyn" = 0 ] || block "$msg_event_dyn"
       case $event in
         [aA][pP][pP][rR][oO][vV][eE]) block "$msg_approve" ;;
         [rR][eE][qQ][uU][eE][sS][tT]_[cC][hH][aA][nN][gG][eE][sS]) block "$msg_changes" ;;
