@@ -869,6 +869,25 @@ expect_allow "a GraphQL COMMENT review in a variable, beside a computed body" "$
 expect_allow "a GraphQL review with a literal event, beside a computed body" "$repo" "gh api graphql -f query='mutation(\$b: String!) { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: COMMENT, body: \$b}) { clientMutationId } }' -f b=\"\$(cat notes.md)\""
 expect_block "a REST review with a computed event" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews -f event=\"\$ev\" -f body='looks fine'" "can't be checked"
 expect_allow "a REST COMMENT review with a computed body" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews -f event=COMMENT -f body=\"\$(cat notes.md)\""
+expect_block "a GraphQL review with a computed input[event] field" "$repo" "gh api graphql -f query='mutation(\$input: AddPullRequestReviewInput!) { addPullRequestReview(input: \$input) { clientMutationId } }' -f 'input[pullRequestId]=PR_x' -f \"input[event]=\$ev\"" "can't be checked"
+expect_block "a GraphQL review payload built by jq, sent through --input -" "$repo" "payload=\$(jq -n --arg e \"\$ev\" '{query: \"mutation(\$e: PullRequestReviewEvent!) { addPullRequestReview(input: {pullRequestId: \\\"PR_x\\\", event: \$e}) { clientMutationId } }\", variables: {e: \$e}}'); gh api graphql --input - <<< \"\$payload\"" "can't be checked"
+# A --input - body the shell expands, or that is JSON only once it has, is read
+# from its text.
+expect_block "a REST review whose expanded --input - body computes the event" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews --input - <<EOF
+{\"event\": \"\$ev\", \"body\": \"looks fine\"}
+EOF" "can't be checked"
+expect_block "…an approval whose body is a \$(jq -Rs …)" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews --input - <<EOF
+{\"event\": \"APPROVE\", \"body\": \$(jq -Rs . notes.md)}
+EOF" "Only humans approve"
+expect_allow "…a COMMENT review whose body is a \$(jq -Rs …)" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews --input - <<EOF
+{\"event\": \"COMMENT\", \"body\": \$(jq -Rs . notes.md)}
+EOF"
+expect_allow "a draft PR whose expanded --input - body is a \$(jq -Rs …)" "$repo" "gh api -X POST repos/o/r/pulls --input - <<EOF
+{\"title\": \"fix(ingest): drop duplicate events\", \"head\": \"b\", \"base\": \"main\", \"draft\": true, \"body\": \$(jq -Rs . body.md)}
+EOF"
+expect_block "…not a draft" "$repo" "gh api -X POST repos/o/r/pulls --input - <<EOF
+{\"title\": \"fix(ingest): drop duplicate events\", \"head\": \"b\", \"base\": \"main\", \"body\": \$(jq -Rs . body.md)}
+EOF" "must be drafts"
 
 # Flags on gh pr are read as gh's parser reads them: a short-flag cluster
 # letter by letter, and a flag's value never as a flag.

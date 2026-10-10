@@ -246,7 +246,7 @@ gh_api() {
       COMMENT | DISMISS) vset=1 ;;
       *) [ "$d" = 0 ] || case ${f%%=*} in
         query) ;;
-        event) vdyn=1 edyn=1 ;;
+        event | *'[event]') vdyn=1 edyn=1 ;;
         *) vdyn=1 ;;
       esac ;;
     esac
@@ -273,11 +273,24 @@ gh_api() {
   if [ "$input" = 1 ] && [ -n "$stdin" ]; then
     if [ "$path" = graphql ]; then
       query+=" $stdin"
+      # One the shell expands may hold the review's event.
+      [ "$sdyn" = 0 ] || vdyn=1
       [ "$sdyn" = 1 ] && reads_var "$stdin" && qvar=1
-    else
+    elif [ "$sdyn" = 0 ] && jq . <<<"$stdin" >/dev/null 2>&1; then
       { read -r draft; read -r event; IFS= read -r title; } < <(jq -r \
         '(.draft | tostring), (.event // "" | tostring), (.title // "" | tostring | gsub("\n"; " "))' \
         <<<"$stdin" 2>/dev/null)
+    else
+      # One the shell expands, or that isn't JSON until it does
+      # (`"body": $(jq -Rs . notes.md)`), is read from its text; an event that
+      # isn't a plain string there is computed.
+      [[ $stdin =~ $json_draft_re ]] && draft=true
+      [[ $stdin =~ \"title$json_str_re ]] && title=${BASH_REMATCH[1]}
+      if [[ $stdin =~ \"event$json_str_re ]]; then
+        event=${BASH_REMATCH[1]}
+      elif [[ $stdin =~ \"event\"[[:space:]]*: ]]; then
+        edyn=1
+      fi
     fi
   fi
   # A computed query is matched against the code that computes it: its own
@@ -293,7 +306,9 @@ gh_api() {
       *addPullRequestReview | *addPullRequestReview[!A-Za-z0-9_]* | *submitPullRequestReview*)
         case "$query$values" in *APPROVE*) block "$msg_approve" ;; esac
         case "$query$values" in *REQUEST_CHANGES*) block "$msg_changes" ;; esac
-        # The event in a GraphQL variable no field gives literally.
+        # A computed event field, or the event in a GraphQL variable no field
+        # gives literally.
+        [ "$edyn" = 0 ] || block "$msg_event_dyn"
         [[ $vset == 0 && $vdyn == 1 && $query =~ event[[:space:]]*:[[:space:]]*[$] ]] && block "$msg_event_dyn" ;;
     esac
     case $query in
@@ -1213,6 +1228,10 @@ push_re=${git_re}push$end_re
 gh_cmd_re='(^|[^[:alnum:]_.-])gh[[:space:]]+((-R|--repo)(=|[[:space:]]*)[^[:space:]]+[[:space:]]+)*(pr|api)([^[:alnum:]_-]|$)'
 head_re=${git_re}'(commit|merge|rebase|reset|checkout|switch|cherry-pick|revert|am|pull)'$end_re
 var_re='[$]([A-Za-z_][A-Za-z0-9_]*|[{])' # a $name or ${
+# A JSON key's value read from a body's text: a plain string, or the key alone.
+# shellcheck disable=SC2016
+json_str_re='"[[:space:]]*:[[:space:]]*"([^"$`\\]*)"'
+json_draft_re='"draft"[[:space:]]*:[[:space:]]*true'
 # shellcheck disable=SC2016
 shell_re='(^|[[:space:];|&(`])(eval|([^[:space:];|&]*/)?(ba|z|da|k)?sh)([[:space:]<]|$)'
 cant_follow="this command runs \`git push\` in a form the gate can't follow (behind a wrapper such as timeout, sudo or env -C, in a command substitution, or in code handed to a shell or eval). Run \`git push\` directly, or as \`git -C <worktree> push …\`."
