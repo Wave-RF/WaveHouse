@@ -815,6 +815,54 @@ expect_allow "a title that starts with -r is a title" "$repo" 'gh pr create --dr
 expect_allow "a review body that says --approve" "$repo" 'gh pr review 12 --comment -b "--approve"'
 expect_block "a review's -a in a cluster (-ab: approve, with a body)" "$repo" 'gh pr review 12 -ab "lgtm"' "Only humans approve"
 
+# A heredoc opened inside a $(…) in an unquoted heredoc body ends inside that
+# text: its delimiter must not stay pending for the rest of the command.
+expect_block "a gh pr ready after a body whose \$(…) opens a heredoc, closing on its line" "$repo" "cat <<EOF
+\$(cat <<X)
+EOF
+echo hi
+gh pr ready 12" "ready-for-review"
+expect_block "a push after the same body" "$repo" "cat <<EOF
+\$(cat <<X)
+EOF
+echo hi
+git push origin feat-c" "missing pre-push review marker"
+expect_allow "a valid nested heredoc spanning lines in an unquoted body" "$repo" "cat <<EOF
+\$(cat <<X
+inner
+X
+)
+EOF
+echo hi
+git push origin feat-a"
+expect_block "…and a gh pr ready after it" "$repo" "cat <<EOF
+\$(cat <<X
+inner
+X
+)
+EOF
+gh pr ready 12" "ready-for-review"
+
+# A large body is judged quickly under the slowest bash: 3.2's ${cmd//…/} was
+# slow on a 60 KB command, and a hook timeout is non-blocking. Realistic text:
+# this repo's own changelog.
+big=""
+while IFS= read -r l && [ "${#big}" -lt 60000 ]; do big+="$l"$'\n'; done <"$root/CHANGELOG.md"
+timed() { # <name> <allow|block> <cwd> <command>
+  local t0=$SECONDS took
+  if [ "$2" = allow ]; then expect_allow "$1" "$3" "$4"; else expect_block "$1" "$3" "$4"; fi
+  took=$((SECONDS - t0))
+  if [ "$took" -ge 10 ]; then fail "$1: took ${took}s, over the 10s budget"; else echo "      (${#4} bytes in ${took}s)"; fi
+}
+timed "a 60 KB comment body from a heredoc" allow "$wtb" "gh pr comment 1 --body-file - <<'EOF'
+${big}EOF"
+timed "a 60 KB file heredoc, then a push from the reviewed worktree" allow "$repo" "cat > f <<'EOF'
+${big}EOF
+git push origin feat-a"
+timed "a 60 KB file heredoc, then a push of the unreviewed branch" block "$repo" "cat > f <<'EOF'
+${big}EOF
+git push origin feat-c"
+
 if [ "$fails" -gt 0 ]; then
   printf '\n%d case(s) failed\n' "$fails" >&2
   exit 1

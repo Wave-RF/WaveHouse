@@ -596,6 +596,14 @@ tk_arith() {
   tk_expand_subs "$from" "$p" || true # one that doesn't close: bash runs nothing
 }
 
+# tk_hd_restore: put back the pending heredocs tk_expand_subs saved (its
+# hd_* locals). The "${a[@]+…}" form is for bash 3.2, whose "${a[@]}" on an
+# empty array fails under set -u.
+tk_hd_restore() {
+  _hd_delim=(${hd_delim[@]+"${hd_delim[@]}"}); _hd_strip=(${hd_strip[@]+"${hd_strip[@]}"})
+  _hd_at=(${hd_at[@]+"${hd_at[@]}"}); _hd_quoted=(${hd_quoted[@]+"${hd_quoted[@]}"})
+}
+
 # tk_expand_subs <from> <to>: text the shell expands as it does a double-quoted
 # string, an unquoted heredoc's body or arithmetic, runs each $(…) and `…` in
 # it; record them as a word's are, reading no further than <to>. Returns 1 on
@@ -605,7 +613,12 @@ tk_arith() {
 # from the whole text, and its last line from where it ends.
 tk_expand_subs() {
   local ss=$_s si=$_i sn=$_n sw=$_w sinw=$_inw sdyn=$_dyn text=${_s:$1:$2-$1} line off=$1 next=$1 rc=0
+  local -a hd_delim hd_strip hd_at hd_quoted
   case $text in *[\$\`]*) ;; *) return 0 ;; esac
+  # A heredoc opened inside the text has its body inside it, so what a scan
+  # leaves pending is dropped.
+  hd_delim=(${_hd_delim[@]+"${_hd_delim[@]}"}); hd_strip=(${_hd_strip[@]+"${_hd_strip[@]}"})
+  hd_at=(${_hd_at[@]+"${_hd_at[@]}"}); hd_quoted=(${_hd_quoted[@]+"${_hd_quoted[@]}"})
   while IFS= read -r line; do
     if [ $((off + ${#line})) -ge "$next" ]; then
       case $line in
@@ -613,10 +626,12 @@ tk_expand_subs() {
           _s=$line; _n=${#line}; _i=0
           [ "$next" -le "$off" ] || _i=$((next - off))
           if ! tk_scan_subs; then
+            tk_hd_restore
             _s=$ss; _n=$2; _i=$((off + _i)); _w=""
             if [ "${_s:_i:1}" = '$' ]; then tk_dollar; else tk_backtick; fi || { rc=1; break; }
             next=$_i
-          fi ;;
+          fi
+          tk_hd_restore ;;
       esac
     fi
     off=$((off + ${#line} + 1))
@@ -1216,7 +1231,8 @@ gate_gh
 # body; the tokenizer then finds no push and lets the command through. Code
 # handed to a shell or eval, and a substitution, are often quoted, so a line
 # that has one and mentions git and push anywhere goes through too.
-squashed=$(printf '%s' "${cmd//$'\\\n'/}" | sed -E "s/'[^']*'/Q/g; s/\"[^\"]*\"/Q/g")
+bsnl=$'\\\n' # outside the $(…): bash 3.2 misreads the pattern inside it and is slow
+squashed=$(printf '%s' "${cmd//"$bsnl"/}" | sed -E "s/'[^']*'/Q/g; s/\"[^\"]*\"/Q/g")
 # shellcheck disable=SC2016 # a literal $( or backtick
 if grep -qE "$push_re" <<<"$squashed" \
   || { [[ $cmd == *git*push* ]] && { [[ $cmd == *'$('* || $cmd == *'`'* ]] || grep -qE "$shell_re" <<<"$squashed"; }; }; then
