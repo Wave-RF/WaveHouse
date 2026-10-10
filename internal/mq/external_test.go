@@ -110,6 +110,24 @@ func TestExternalNATS_Reconnect(t *testing.T) {
 	}
 }
 
+// A reconnect checks the topology at once rather than at the next periodic
+// check: a cluster that came back without a stream fails Ready right away.
+func TestExternalNATS_ReconnectRechecksTopology(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, nil) // the periodic check is minutes away
+	require.NoError(t, f.admin.DeleteStream(t.Context(), "WH_DLQ"))
+	require.NoError(t, e.Ready(), "nothing has looked yet")
+
+	f.stop()
+	require.Eventually(t, func() bool { return !e.connected.Load() }, 5*time.Second, 10*time.Millisecond)
+	require.ErrorIs(t, e.Ready(), ErrUnavailable)
+	f.restart(t)
+	require.Eventually(t, func() bool { return errors.Is(e.Ready(), ErrTopology) }, 15*time.Second, 50*time.Millisecond,
+		"the reconnect's check finds the stream missing")
+	require.True(t, e.connected.Load())
+}
+
 func receive(t *testing.T, got <-chan string) string {
 	t.Helper()
 	select {

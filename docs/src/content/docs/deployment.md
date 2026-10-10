@@ -465,7 +465,7 @@ These gauges are exported through [OpenTelemetry or Prometheus](#observability) 
 | Gauge | Meaning |
 | --- | --- |
 | `wavehouse_mq_connected` | `1` while this process is connected to the cluster, else `0`. |
-| `wavehouse_mq_topology_ok` | `1` while the last check found every required stream, consumer and (under `coord.backend: nats`) the lease bucket, and found that the `wavehouse` user may pull from and unpin every shard durable, else `0`. It drops at once when a publish finds a partition deleted, or when the server refuses a consumer request (see [Permissions](#permissions)). |
+| `wavehouse_mq_topology_ok` | `1` while the last check found every required stream, consumer and (under `coord.backend: nats`) the lease bucket, and found that the `wavehouse` user may pull from and unpin every shard durable, else `0`. It drops at once when a publish finds a partition deleted, or when the server refuses a consumer request (see [Permissions](#permissions)), and the check runs again as soon as the process reconnects, so a cluster that came back without a stream is caught without waiting for the next periodic check. |
 | `wavehouse_mq_history_behind_seconds` | How far the history's newest row trails the newest row any partition stored, read every 30 seconds. A value that stays up or keeps growing means the history is not taking the rows the partitions republish, so SSE replay and live events miss them; it returns to about `0` with the next row the history takes, and rows missed before that are not counted. A missing history reads as the last value while `wavehouse_mq_topology_ok` goes to `0`. It never affects ingest. |
 
 The ingest processes export these for their shards:

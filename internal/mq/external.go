@@ -149,6 +149,9 @@ type ExternalNATS struct {
 	nextID   int
 	stoppers map[int]func()
 
+	// rechecks asks the watch loop for a topology check now: a reconnect
+	// sends one, since the cluster may have come back without a stream.
+	rechecks chan struct{}
 	// stopping ends the watch loop's checks at Close, which waits for
 	// loopDone; connClosed is closed by the client's closed callback.
 	stopping             context.Context
@@ -183,6 +186,7 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 		activeWithin: cfg.activeWithin,
 		perms:        newNATSPermissionWatch(),
 		stoppers:     map[int]func(){},
+		rechecks:     make(chan struct{}, 1),
 		loopDone:     make(chan struct{}),
 		connClosed:   make(chan struct{}),
 	}
@@ -299,6 +303,10 @@ func (e *ExternalNATS) connectOptions(cfg NATSConfig) ([]nats.Option, error) {
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			e.connected.Store(true)
 			slog.Info("mq: reconnected to nats", "component", "nats", "url", nc.ConnectedUrlRedacted())
+			select {
+			case e.rechecks <- struct{}{}:
+			default: // one is already due
+			}
 		}),
 		nats.ClosedHandler(func(*nats.Conn) {
 			e.connected.Store(false)
@@ -421,6 +429,8 @@ func (e *ExternalNATS) watch(recheck, poll time.Duration) {
 			return
 		case <-topology.C:
 			e.recheck()
+		case <-e.rechecks:
+			e.recheck()
 		case <-history.C:
 			ctx, cancel := context.WithTimeout(e.stopping, recheckTimeout)
 			if err := e.readHistory(ctx); err != nil {
@@ -540,7 +550,9 @@ func boolGauge(b bool) int64 {
 // Ready reports whether a publish can get through right now: ErrUnavailable
 // while the connection is down (the client reconnects by itself, so this is
 // the gap between a disconnect and the reconnect, or a server that is gone
-// for good), ErrTopology while the topology failed its last check. The
+// for good), ErrTopology while the topology failed its last check — run
+// every topologyRecheck, and again as soon as the client reconnects, so a
+// cluster that came back without a stream is not ready for long. The
 // readiness probe reads it. Under coord.backend=nats the lease bucket rides
 // this connection and is part of the check, so it is covered too.
 func (e *ExternalNATS) Ready() error {
