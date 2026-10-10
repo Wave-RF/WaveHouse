@@ -105,6 +105,9 @@ type App struct {
 	// and dedupeStats the figures of the one Pebble instance they share.
 	dedup       *dedupe.Stores
 	dedupeStats func() map[string]int64
+	// dynamoRetry is the DynamoDB table check's first retry wait, doubling
+	// up to 30s; tests shorten it.
+	dynamoRetry time.Duration
 	mq          mq.Broker
 	cache       cache.Cache
 	coord       coord.Coordinator
@@ -146,7 +149,7 @@ const (
 // start in Run. A failure releases whatever was already opened and returns the
 // error, so the caller never holds a half-built App.
 func New(ctx context.Context, opts Options) (app *App, err error) {
-	a := &App{cfg: opts.Config, build: opts.Build, logLevel: opts.LogLevel, listener: opts.Listener}
+	a := &App{cfg: opts.Config, build: opts.Build, logLevel: opts.LogLevel, listener: opts.Listener, dynamoRetry: time.Second}
 	if a.logLevel == nil {
 		a.logLevel = &slog.LevelVar{}
 	}
