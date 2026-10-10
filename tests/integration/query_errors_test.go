@@ -147,16 +147,16 @@ func TestQueryErrors_ClickHouseDown(t *testing.T) {
 	stopTimeout := 10 * time.Second
 	require.NoError(t, ch.container.Stop(ctx, &stopTimeout))
 
-	for name, call := range map[string]func() queryError{
-		"raw SQL": func() queryError { return postJSON(t, baseURL+"/v1/ops/query", `{"sql":"SELECT 1"}`) },
+	for name, call := range map[string]func(*testing.T) queryError{
+		"raw SQL": func(t *testing.T) queryError { return postJSON(t, baseURL+"/v1/ops/query", `{"sql":"SELECT 1"}`) },
 		// A filter the first query did not have, so the cache cannot answer.
-		"structured query": func() queryError {
+		"structured query": func(t *testing.T) queryError {
 			return postJSON(t, structured, `{"columns":["id"],"filters":[{"column":"id","op":"eq","value":"x"}]}`)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			got := call()
+			got := call(t)
 			assertQueryError(t, got, http.StatusServiceUnavailable, "clickhouse.unavailable", true)
 			assert.Equal(t, "5", got.retryAfter)
 		})
