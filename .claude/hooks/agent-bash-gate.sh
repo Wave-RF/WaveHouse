@@ -268,6 +268,7 @@ gh_api() {
   path=${path#/}
   path=${path%%\?*}
   path=${path%/}
+  local fq=$query # the query its fields give
   # A body sent with --input - is the request's JSON: a GraphQL one is matched
   # as a query is, and a REST one's draft, event and title are read from it.
   if [ "$input" = 1 ] && [ -n "$stdin" ]; then
@@ -312,7 +313,10 @@ gh_api() {
         # A computed event field, or the event in a GraphQL variable no field
         # gives literally.
         [ "$edyn" = 0 ] || block "$msg_event_dyn"
-        [[ $vset == 0 && $vdyn == 1 && $query =~ event[[:space:]]*:[[:space:]]*[$] ]] && block "$msg_event_dyn" ;;
+        # A query from a field may spell it \$e, as an unquoted heredoc must.
+        [[ $vset == 0 && ($vdyn == 1 || $qvar == 1) &&
+          ($query =~ event[[:space:]]*:[[:space:]]*[$] || $fq =~ event[[:space:]]*:[[:space:]]*\\[$]) ]] &&
+          block "$msg_event_dyn" ;;
     esac
     case $query in
       *createPullRequest*)
