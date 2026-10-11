@@ -691,6 +691,13 @@ expect_block "a quoted gh pr ready past the 64 the gate follows is refused" "$re
 expect_block "a gh pr ready in a \${x:-\$(…)} default" "$repo" 'echo "${x:-$(gh pr ready 12)}"' "ready-for-review"
 # shellcheck disable=SC2016
 expect_block "…unquoted" "$repo" 'echo ${x:-$(gh pr ready 12)}' "ready-for-review"
+# Expanded as in double quotes, a '…' in a default is literal, so its $(…) runs.
+expect_block "a gh pr ready in '…' in a double-quoted \${x:-…} default" "$repo" "echo \"\${x:-'\$(gh pr ready 12)'}\"" "ready-for-review"
+expect_block "…in an unquoted heredoc body" "$repo" "cat <<EOF
+\${x:-'\$(gh pr ready 12)'}
+EOF" "ready-for-review"
+expect_block "…a push" "$repo" "echo \"\${x:-'\$(git -C ../wt-b push)'}\"" "can't follow"
+expect_allow "…unquoted, where '…' quotes it" "$repo" "echo \${x:-'\$(gh pr ready 12)'}"
 
 # A field read from stdin (-F key=@-, --input -) is read from a heredoc or
 # here-string the gh command itself reads.
@@ -735,6 +742,21 @@ expect_block "a gh pr ready in a \$(…) inside \$((…))" "$repo" 'n=$(( $(gh p
 expect_allow "a for (( … )) loop with << in it, then a gh read" "$repo" 'for (( i = 1; i < 1 << 3; i <<= 1 )); do :; done
 gh pr view 12'
 expect_block "a subshell in a process substitution is still a push" "$repo" "cat <((git push origin feat-c))" "missing pre-push review marker"
+# The same for bash's older $[ … ] arithmetic.
+# shellcheck disable=SC2016 # literal $[…]s, for the gate to read
+expect_block "a << shift in \$[…], then a gh pr ready" "$repo" 'x=$[1<<3]
+gh pr ready 12' "ready-for-review"
+# shellcheck disable=SC2016
+expect_block "…in a \$[…] inside \$(…)" "$repo" 'y=$(echo $[1<<3])
+gh pr ready 12' "ready-for-review"
+# shellcheck disable=SC2016
+expect_block "…then a push" "$repo" 'x=$[1<<3]
+git push origin feat-c' "missing pre-push review marker"
+# shellcheck disable=SC2016
+expect_block "a gh pr ready in a \$(…) inside \$[…]" "$repo" 'n=$[ $(gh pr ready 12 | wc -l) + 1 ]' "ready-for-review"
+# shellcheck disable=SC2016
+expect_block "a \$[…] with an array subscript, then a gh pr ready" "$repo" 'x=$[ a[1] << 2 ]
+gh pr ready 12' "ready-for-review"
 
 # The push check follows a heredoc a shell reads inside $(…), as the gh
 # checks do.
@@ -799,6 +821,92 @@ markPullRequestReadyForReview is for people
 EOF
 )\""
 expect_block "a query read from a variable is matched against the line that sets it" "$repo" "q='mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'; gh api graphql -f query=\"\$q\"" "ready-for-review"
+expect_block "…from inside a \$(…)" "$repo" "q='mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'; resp=\$(gh api graphql -f query=\"\$q\")" "ready-for-review"
+expect_block "…sent as -F query=@- from a here-string" "$repo" "q='mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'; gh api graphql -F query=@- <<< \"\$q\"" "ready-for-review"
+expect_block "…from an unquoted heredoc" "$repo" "q='mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'
+gh api graphql -F query=@- <<EOF
+\$q
+EOF" "ready-for-review"
+expect_block "…a GraphQL body sent through --input - from a here-string" "$repo" "b='{\"query\": \"mutation { markPullRequestReadyForReview(input: {pullRequestId: \\\"PR_x\\\"}) { clientMutationId } }\"}'; gh api graphql --input - <<< \"\$b\"" "ready-for-review"
+# A GraphQL variable the query declares (\$id: ID!) isn't a shell variable.
+expect_allow "a query with GraphQL variables beside a body heredoc that names a mutation" "$repo" "gh api graphql -f query=\"\$(cat <<'EOF'
+mutation(\$id: ID!) { resolveReviewThread(input: {threadId: \$id}) { thread { id } } }
+EOF
+)\" -f id=PRRT_x -f body=\"\$(cat <<'EOF'
+markPullRequestReadyForReview is for people
+EOF
+)\""
+expect_allow "…sent from an unquoted heredoc, beside a variable that names one" "$repo" "note='markPullRequestReadyForReview is for people'
+gh api graphql -F query=@- <<EOF
+query(\\\$n: Int!) { viewer { repositories(first: \\\$n) { nodes { name } } } }
+EOF"
+# A quoted heredoc is static: a \$ in it is text, not a shell variable.
+expect_allow "a quoted heredoc query with a \$ in a string, beside a variable that names a mutation" "$repo" "note='markPullRequestReadyForReview is for people'
+gh api graphql -F query=@- <<'EOF'
+query { repository(owner: \"o\", name: \"\$HOME\") { id } }
+EOF"
+expect_block "a shell variable beside GraphQL variables in an unquoted heredoc query" "$repo" "m=markPullRequestReadyForReview; gh api graphql -f query=\"\$(cat <<EOF
+mutation(\\\$id: ID!) { \$m(input: {pullRequestId: \\\$id}) { clientMutationId } }
+EOF
+)\" -f id=PR_x" "ready-for-review"
+
+# A review's event is APPROVE in the query or a field's whole value, not a word
+# in a body, and the other addPullRequestReview… mutations take none.
+expect_allow "a GraphQL thread reply whose body says APPROVE" "$repo" "gh api graphql -f query='mutation { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \"PRRT_x\", body: \"APPROVE once CI is green\"}) { comment { id } } }'"
+expect_allow "…sent from stdin" "$repo" "gh api graphql -f query='mutation(\$t: ID!, \$b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \$t, body: \$b}) { comment { id } } }' -f t=PRRT_x -F b=@- <<'EOF'
+I would APPROVE this once CI is green.
+EOF"
+expect_allow "a GraphQL COMMENT review whose body from stdin says APPROVE" "$repo" "gh api graphql -f query='mutation(\$p: ID!, \$b: String!) { addPullRequestReview(input: {pullRequestId: \$p, event: COMMENT, body: \$b}) { pullRequestReview { id } } }' -f p=PR_x -F b=@- <<'EOF'
+I would APPROVE this once CI is green.
+EOF"
+expect_block "a GraphQL approval with the event in a variable" "$repo" "gh api graphql -f query='mutation(\$e: PullRequestReviewEvent!) { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: \$e}) { clientMutationId } }' -f e=APPROVE" "Only humans approve"
+expect_block "…changes requested, the event read from stdin" "$repo" "gh api graphql -f query='mutation(\$r: ID!, \$e: PullRequestReviewEvent!) { submitPullRequestReview(input: {pullRequestReviewId: \$r, event: \$e}) { clientMutationId } }' -f r=PRR_x -F e=@- <<< REQUEST_CHANGES" "instead of --request-changes"
+# An event the shell computes can't be read, so it's refused; a literal one
+# beside a computed body isn't.
+expect_block "a GraphQL review with the event variable's value computed" "$repo" "ev=APPROVE; gh api graphql -f query='mutation(\$e: PullRequestReviewEvent!) { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: \$e}) { clientMutationId } }' -f e=\"\$ev\"" "can't be checked"
+expect_block "…the value read from a here-string the shell expands" "$repo" "gh api graphql -f query='mutation(\$e: PullRequestReviewEvent!) { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: \$e}) { clientMutationId } }' -F e=@- <<< \"\$ev\"" "can't be checked"
+expect_allow "a GraphQL COMMENT review in a variable, beside a computed body" "$repo" "gh api graphql -f query='mutation(\$e: PullRequestReviewEvent!, \$b: String!) { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: \$e, body: \$b}) { clientMutationId } }' -f e=COMMENT -f b=\"\$(cat notes.md)\""
+expect_allow "a GraphQL review with a literal event, beside a computed body" "$repo" "gh api graphql -f query='mutation(\$b: String!) { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: COMMENT, body: \$b}) { clientMutationId } }' -f b=\"\$(cat notes.md)\""
+expect_block "a REST review with a computed event" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews -f event=\"\$ev\" -f body='looks fine'" "can't be checked"
+expect_allow "a REST COMMENT review with a computed body" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews -f event=COMMENT -f body=\"\$(cat notes.md)\""
+expect_block "a GraphQL review with a computed input[event] field" "$repo" "gh api graphql -f query='mutation(\$input: AddPullRequestReviewInput!) { addPullRequestReview(input: \$input) { clientMutationId } }' -f 'input[pullRequestId]=PR_x' -f \"input[event]=\$ev\"" "can't be checked"
+expect_block "a GraphQL review payload built by jq, sent through --input -" "$repo" "payload=\$(jq -n --arg e \"\$ev\" '{query: \"mutation(\$e: PullRequestReviewEvent!) { addPullRequestReview(input: {pullRequestId: \\\"PR_x\\\", event: \$e}) { clientMutationId } }\", variables: {e: \$e}}'); gh api graphql --input - <<< \"\$payload\"" "can't be checked"
+# A --input - body the shell expands, or that is JSON only once it has, is read
+# from its text.
+expect_block "a REST review whose expanded --input - body computes the event" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews --input - <<EOF
+{\"event\": \"\$ev\", \"body\": \"looks fine\"}
+EOF" "can't be checked"
+expect_block "…an approval whose body is a \$(jq -Rs …)" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews --input - <<EOF
+{\"event\": \"APPROVE\", \"body\": \$(jq -Rs . notes.md)}
+EOF" "Only humans approve"
+expect_allow "…a COMMENT review whose body is a \$(jq -Rs …)" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews --input - <<EOF
+{\"event\": \"COMMENT\", \"body\": \$(jq -Rs . notes.md)}
+EOF"
+CLAUDE_PROJECT_DIR=$root expect_allow "a draft PR whose expanded --input - body is a \$(jq -Rs …)" "$repo" "gh api -X POST repos/o/r/pulls --input - <<EOF
+{\"title\": \"fix(ingest): drop duplicate events\", \"head\": \"b\", \"base\": \"main\", \"draft\": true, \"body\": \$(jq -Rs . body.md)}
+EOF"
+CLAUDE_PROJECT_DIR=$root expect_block "…with a title the lint refuses" "$repo" "gh api -X POST repos/o/r/pulls --input - <<EOF
+{\"title\": \"Drop duplicate events.\", \"head\": \"b\", \"base\": \"main\", \"draft\": true, \"body\": \$(jq -Rs . body.md)}
+EOF" "PR title"
+expect_block "a GraphQL review whose expanded --input - body computes the event" "$repo" "gh api graphql --input - <<EOF
+{\"query\": \"mutation(\\\$input: AddPullRequestReviewInput!) { addPullRequestReview(input: \\\$input) { clientMutationId } }\", \"variables\": {\"input\": {\"pullRequestId\": \"PR_x\", \"event\": \"\$ev\"}}}
+EOF" "can't be checked"
+expect_allow "…a COMMENT review whose body is a \$(jq -Rs …)" "$repo" "gh api graphql --input - <<EOF
+{\"query\": \"mutation(\\\$input: AddPullRequestReviewInput!) { addPullRequestReview(input: \\\$input) { clientMutationId } }\", \"variables\": {\"input\": {\"pullRequestId\": \"PR_x\", \"event\": \"COMMENT\", \"body\": \$(jq -Rs . notes.md)}}}
+EOF"
+expect_block "a GraphQL review with a shell variable in the query's event slot" "$repo" "gh api graphql -f query=\"mutation { addPullRequestReview(input: {pullRequestId: \\\"PR_x\\\", event: \$ev}) { clientMutationId } }\"" "can't be checked"
+expect_block "…the query read from an unquoted heredoc" "$repo" "gh api graphql -F query=@- <<EOF
+mutation { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: \$ev}) { clientMutationId } }
+EOF" "can't be checked"
+expect_block "a GraphQL review whose unquoted heredoc query spells the variable \\\$e, given by a computed field" "$repo" "gh api graphql -F query=@- -f e=\"\$ev\" <<EOF
+mutation(\\\$e: PullRequestReviewEvent!) { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: \\\$e}) { clientMutationId } }
+EOF" "can't be checked"
+expect_allow "…given a literal COMMENT in an expanded --input - body's variables" "$repo" "gh api graphql --input - <<EOF
+{\"query\": \"mutation(\\\$e: PullRequestReviewEvent!, \\\$b: String!) { addPullRequestReview(input: {pullRequestId: \\\"PR_x\\\", event: \\\$e, body: \\\$b}) { clientMutationId } }\", \"variables\": {\"e\": \"COMMENT\", \"b\": \$(jq -Rs . notes.md)}}
+EOF"
+expect_block "…not a draft" "$repo" "gh api -X POST repos/o/r/pulls --input - <<EOF
+{\"title\": \"fix(ingest): drop duplicate events\", \"head\": \"b\", \"base\": \"main\", \"body\": \$(jq -Rs . body.md)}
+EOF" "must be drafts"
 
 # Flags on gh pr are read as gh's parser reads them: a short-flag cluster
 # letter by letter, and a flag's value never as a flag.
