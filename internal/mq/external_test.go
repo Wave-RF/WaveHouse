@@ -787,11 +787,13 @@ func TestExternalNATS_ShardUnits(t *testing.T) {
 	topic := Topic{Tenant: "acme", Table: "events"}
 	require.NoError(t, e.Publish(t.Context(), topic, []byte("x")))
 	p, s := natsRoute(topic, 4, 8)
-	c, err := f.admin.Consumer(t.Context(), shippedPartition(p), natsShardDurable("wh-ingest", s))
-	require.NoError(t, err)
-	assert.Equal(t, uint64(1), c.CachedInfo().NumPending, "the row waits on its shard's durable")
+	// A consumer's pending count can trail the publish's ack, so poll it.
+	require.Eventually(t, func() bool {
+		c, err := f.admin.Consumer(t.Context(), shippedPartition(p), natsShardDurable("wh-ingest", s))
+		return err == nil && c.CachedInfo().NumPending == 1
+	}, 10*time.Second, 10*time.Millisecond, "the row waits on its shard's durable")
 
-	_, err = e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable, Units: []string{"WH_INGEST_9/wh-ingest-0"}})
+	_, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable, Units: []string{"WH_INGEST_9/wh-ingest-0"}})
 	require.ErrorIs(t, err, ErrUnitsUnsupported)
 }
 
