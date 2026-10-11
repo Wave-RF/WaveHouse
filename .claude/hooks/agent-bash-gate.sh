@@ -205,7 +205,8 @@ reads_var() {
 # here-string the command itself reads.
 gh_api() {
   local i=$1 e=$2 j w f d ep="" method="" fields=0 write=0 path typed stdin="" sdyn=0 input=0
-  local draft="" title="" event="" edyn=0 query="" qvar=0 values="" vset=0 vdyn=0
+  local draft="" title="" event="" edyn=0 query="" qvar=0 values="" vset=0 vdyn=0 evname="" k
+  local fn=() fv=() fd=()
   for ((j = 0; j < ${#TK_IN[@]}; j++)); do
     [ "${TK_IN_AT[j]}" != "$3" ] || { stdin=${TK_IN[j]%$'\n'}; sdyn=${TK_IN_DYN[j]}; }
   done
@@ -238,18 +239,12 @@ gh_api() {
         @*) continue ;; # a file's contents
       esac
     fi
-    # A field that is a review event may be the GraphQL variable holding one;
-    # a body that mentions APPROVE isn't. A field other than the query that the
-    # shell computes may hold one too, unread.
-    case ${f#*=} in
-      APPROVE | REQUEST_CHANGES) values+=" ${f#*=}" vset=1 ;;
-      COMMENT | DISMISS) vset=1 ;;
-      *) [ "$d" = 0 ] || case ${f%%=*} in
-        query) ;;
-        event | *'[event]') vdyn=1 edyn=1 ;;
-        *) vdyn=1 ;;
-      esac ;;
-    esac
+    # Which field holds the review's event is known once the query is; one
+    # other than the query that the shell computes may hold it, unread.
+    if [ "${f%%=*}" != query ]; then
+      fn+=("${f%%=*}") fv+=("${f#*=}") fd+=("$d")
+      [ "$d" = 0 ] || vdyn=1
+    fi
     case $f in
       draft=*) draft=${f#draft=} ;;
       title=*) [ "$d" = 0 ] && title=${f#title=} ;;
@@ -269,6 +264,18 @@ gh_api() {
   path=${path%%\?*}
   path=${path%/}
   local fq=$query # the query its fields give
+  # The review's event is a field named event or …[event], or the one the
+  # query's event takes (`event: $e`, `\$e` in an unquoted heredoc); a body
+  # that is the word APPROVE or COMMENT isn't.
+  [[ $fq =~ event[[:space:]]*:[[:space:]]*\\?[$]([A-Za-z_][A-Za-z0-9_]*) ]] && evname=${BASH_REMATCH[1]}
+  for ((k = 0; k < ${#fn[@]}; k++)); do
+    case ${fn[k]} in event | *'[event]') ;; *) [ "${fn[k]}" = "$evname" ] || continue ;; esac
+    case ${fv[k]} in
+      APPROVE | REQUEST_CHANGES) values+=" ${fv[k]}" vset=1 ;;
+      COMMENT | DISMISS) vset=1 ;;
+      *) [ "${fd[k]}" = 0 ] || edyn=1 ;;
+    esac
+  done
   # A body sent with --input - is the request's JSON: a GraphQL one is matched
   # as a query is, and a REST one's draft, event and title are read from it.
   if [ "$input" = 1 ] && [ -n "$stdin" ]; then
