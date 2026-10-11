@@ -850,8 +850,9 @@ mutation(\\\$id: ID!) { \$m(input: {pullRequestId: \\\$id}) { clientMutationId }
 EOF
 )\" -f id=PR_x" "ready-for-review"
 
-# A review's event is APPROVE in the query or a field's whole value, not a word
-# in a body, and the other addPullRequestReview… mutations take none.
+# A review's event is APPROVE in the query or the whole value of the event's own
+# field, not a word in a body, and the other addPullRequestReview… mutations
+# take none.
 expect_allow "a GraphQL thread reply whose body says APPROVE" "$repo" "gh api graphql -f query='mutation { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \"PRRT_x\", body: \"APPROVE once CI is green\"}) { comment { id } } }'"
 expect_allow "…sent from stdin" "$repo" "gh api graphql -f query='mutation(\$t: ID!, \$b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \$t, body: \$b}) { comment { id } } }' -f t=PRRT_x -F b=@- <<'EOF'
 I would APPROVE this once CI is green.
@@ -872,6 +873,19 @@ expect_allow "a REST COMMENT review with a computed body" "$repo" "gh api -X POS
 # Only the event's own field counts: a body that is the bare word is a body.
 expect_allow "a GraphQL COMMENT review whose body is the word APPROVE" "$repo" "gh api graphql -f query='mutation(\$b: String!) { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: COMMENT, body: \$b}) { clientMutationId } }' -f b=APPROVE"
 expect_block "a computed event variable beside a body that is the word COMMENT" "$repo" "ev=APPROVE; gh api graphql -f query='mutation(\$e: PullRequestReviewEvent!, \$b: String!) { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: \$e, body: \$b}) { clientMutationId } }' -f b=COMMENT -f e=\"\$ev\"" "can't be checked"
+# Every mutation's event counts, and a query held in a variable is read where
+# the variable is set.
+expect_block "a COMMENT review then an approval in one request" "$repo" "gh api graphql -f query='mutation(\$a: ID!, \$b: ID!, \$c: PullRequestReviewEvent!, \$d: PullRequestReviewEvent!) { one: addPullRequestReview(input: {pullRequestId: \$a, event: \$c}) { clientMutationId } two: addPullRequestReview(input: {pullRequestId: \$b, event: \$d}) { clientMutationId } }' -f a=PR_1 -f b=PR_2 -f c=COMMENT -f d=APPROVE" "Only humans approve"
+expect_block "…a COMMENT review then changes requested" "$repo" "gh api graphql -f query='mutation(\$c: PullRequestReviewEvent!, \$d: PullRequestReviewEvent!) { one: addPullRequestReview(input: {pullRequestId: \"PR_1\", event: \$c}) { clientMutationId } two: submitPullRequestReview(input: {pullRequestReviewId: \"PRR_2\", event: \$d}) { clientMutationId } }' -f c=COMMENT -f d=REQUEST_CHANGES" "instead of --request-changes"
+expect_allow "a COMMENT review whose query is held in a variable" "$repo" "QUERY='mutation(\$id: ID!, \$verdict: PullRequestReviewEvent!, \$body: String!) { addPullRequestReview(input: {pullRequestId: \$id, event: \$verdict, body: \$body}) { clientMutationId } }'
+gh api graphql -f query=\"\$QUERY\" -f id=\"\$PR_ID\" -f verdict=COMMENT -f body=\"\$(cat review.md)\""
+expect_allow "…the variable set from a quoted heredoc in \$(…)" "$repo" "q=\$(cat <<'EOF'
+mutation(\$ev: PullRequestReviewEvent!, \$b: String!) {
+  addPullRequestReview(input: {pullRequestId: \"PR_x\", event: \$ev, body: \$b}) { clientMutationId }
+}
+EOF
+)
+gh api graphql -f query=\"\$q\" -f ev=COMMENT -f b='looks fine'"
 expect_block "a GraphQL review with a computed input[event] field" "$repo" "gh api graphql -f query='mutation(\$input: AddPullRequestReviewInput!) { addPullRequestReview(input: \$input) { clientMutationId } }' -f 'input[pullRequestId]=PR_x' -f \"input[event]=\$ev\"" "can't be checked"
 expect_block "a GraphQL review payload built by jq, sent through --input -" "$repo" "payload=\$(jq -n --arg e \"\$ev\" '{query: \"mutation(\$e: PullRequestReviewEvent!) { addPullRequestReview(input: {pullRequestId: \\\"PR_x\\\", event: \$e}) { clientMutationId } }\", variables: {e: \$e}}'); gh api graphql --input - <<< \"\$payload\"" "can't be checked"
 # A --input - body the shell expands, or that is JSON only once it has, is read

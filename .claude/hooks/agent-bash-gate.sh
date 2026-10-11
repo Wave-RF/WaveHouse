@@ -205,7 +205,7 @@ reads_var() {
 # here-string the command itself reads.
 gh_api() {
   local i=$1 e=$2 j w f d ep="" method="" fields=0 write=0 path typed stdin="" sdyn=0 input=0
-  local draft="" title="" event="" edyn=0 query="" qvar=0 values="" vset=0 vdyn=0 evname="" k
+  local draft="" title="" event="" edyn=0 query="" qvar=0 values="" vset=0 vdyn=0 k
   local fn=() fv=() fd=()
   for ((j = 0; j < ${#TK_IN[@]}; j++)); do
     [ "${TK_IN_AT[j]}" != "$3" ] || { stdin=${TK_IN[j]%$'\n'}; sdyn=${TK_IN_DYN[j]}; }
@@ -264,18 +264,6 @@ gh_api() {
   path=${path%%\?*}
   path=${path%/}
   local fq=$query # the query its fields give
-  # The review's event is a field named event or …[event], or the one the
-  # query's event takes (`event: $e`, `\$e` in an unquoted heredoc); a body
-  # that is the word APPROVE or COMMENT isn't.
-  [[ $fq =~ event[[:space:]]*:[[:space:]]*\\?[$]([A-Za-z_][A-Za-z0-9_]*) ]] && evname=${BASH_REMATCH[1]}
-  for ((k = 0; k < ${#fn[@]}; k++)); do
-    case ${fn[k]} in event | *'[event]') ;; *) [ "${fn[k]}" = "$evname" ] || continue ;; esac
-    case ${fv[k]} in
-      APPROVE | REQUEST_CHANGES) values+=" ${fv[k]}" vset=1 ;;
-      COMMENT | DISMISS) vset=1 ;;
-      *) [ "${fd[k]}" = 0 ] || edyn=1 ;;
-    esac
-  done
   # A body sent with --input - is the request's JSON: a GraphQL one is matched
   # as a query is, and a REST one's draft, event and title are read from it.
   if [ "$input" = 1 ] && [ -n "$stdin" ]; then
@@ -308,6 +296,22 @@ gh_api() {
   # word, heredoc bodies included (`-f query="$(cat <<'EOF' … EOF)"`), and,
   # when it reads a variable, the whole line, where that may be set.
   [ "$qvar" = 0 ] || query+=" $cmd"
+  # The review's event is a field named event or …[event], or one the query's
+  # event: takes (`event: $e`, `\$e` in an unquoted heredoc) in any mutation the
+  # request runs; a body that is the word APPROVE or COMMENT isn't.
+  local rest=$query evnames=" "
+  while [[ $rest =~ event[[:space:]]*:[[:space:]]*\\?[$]([A-Za-z_][A-Za-z0-9_]*) ]]; do
+    evnames+="${BASH_REMATCH[1]} "
+    rest=${rest#*"${BASH_REMATCH[0]}"}
+  done
+  for ((k = 0; k < ${#fn[@]}; k++)); do
+    case ${fn[k]} in event | *'[event]') ;; *) [[ $evnames == *" ${fn[k]} "* ]] || continue ;; esac
+    case ${fv[k]} in
+      APPROVE | REQUEST_CHANGES) values+=" ${fv[k]}" vset=1 ;;
+      COMMENT | DISMISS) vset=1 ;;
+      *) [ "${fd[k]}" = 0 ] || edyn=1 ;;
+    esac
+  done
   if [ "$path" = graphql ]; then
     case $query in *markPullRequestReadyForReview*) block "$msg_ready" ;; esac
     case $query in *mergePullRequest* | *enablePullRequestAutoMerge*) block "$merge_msg" ;; esac
