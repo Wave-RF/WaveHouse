@@ -25,7 +25,7 @@ const maxRequestIDLen = 128
 // so a repeated header cannot pick which value the logs carry.
 func requestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := ""
+		var id string
 		if values := r.Header.Values(requestIDHeader); len(values) == 1 && validRequestID(values[0]) {
 			id = values[0]
 		} else {
