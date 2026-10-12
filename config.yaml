@@ -13,7 +13,7 @@ data_dir: ./data
 # coord.backend: nats (there is no sweeper under nats); separate api and ingest processes also need
 # cache.backend: redis. Boot refuses a split the backends cannot serve.
 roles: [api, ingest, sweeper]
-# Names this process: on every log line, as service.instance.id in its
+# Names this process: on every log line after boot config loads, as service.instance.id in its
 # telemetry, and a lease's holder under coord.backend: nats. Empty means <hostname>-<8 hex>, fresh at every boot.
 instance_id: ""
 

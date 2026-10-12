@@ -12,7 +12,7 @@ import (
 func TestIdentity_NamesTheBuildInstanceAndRoles(t *testing.T) {
 	t.Parallel()
 	a := &App{
-		cfg:   &config.Config{InstanceID: "pod-a-1234abcd", Roles: []config.Role{config.RoleAPI, config.RoleIngest}},
+		cfg:   &config.Config{InstanceID: "pod-a-1234abcd", Roles: []config.Role{config.RoleIngest, config.RoleAPI}},
 		build: BuildInfo{Version: "v1.2.3", GitCommit: "abc123", BuildTime: "2026-10-12T00:00:00Z"},
 	}
 	assert.Equal(t, observability.Identity{

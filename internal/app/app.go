@@ -181,7 +181,7 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	for _, w := range a.cfg.Warnings() {
 		slog.Warn(w)
 	}
-	slog.Info("process roles", "roles", a.cfg.Roles, "instance_id", a.cfg.InstanceID)
+	slog.Info("process roles", "roles", a.cfg.Roles)
 	// What each role wires; config.Validate refused a set these cannot serve.
 	// The API's discovery, dedupe, auth verifiers, hub bridge and keepalive
 	// wheels are per process: every API process runs its own.
