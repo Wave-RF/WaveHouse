@@ -23,7 +23,7 @@ WaveHouse is pre-1.0, so a minor release can change configuration, wire formats 
    jq . policy-0.1.0.json pipes-0.1.0.json > /dev/null && echo exported
    ```
 
-3. **Audit your policy and tables against the stricter ingest checks.** A policy insert `check` that names a column the table does not have, or a `MATERIALIZED`, `ALIAS` or `EPHEMERAL` column, now refuses every insert by that role with `403`. A value sent for a `MATERIALIZED` or `ALIAS` column is now refused with `400`. An omitted key for a `Nullable(T) DEFAULT …` column now stores `NULL` rather than the default. [Upgrading across the v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope) lists what to check, and [Insert checks](/access-control#insert-checks) explains the rule.
+3. **Audit your policy and tables against the stricter ingest checks.** A policy insert `check` that names a column the table does not have, or a `MATERIALIZED`, `ALIAS` or `EPHEMERAL` column, now refuses every insert by that role: `403` for a single record, or, in a batch, `200` with the error in each record's `results` entry. A value sent for a `MATERIALIZED` or `ALIAS` column is refused the same way, with `400` for a single record. An omitted key for a `Nullable(T) DEFAULT …` column now stores `NULL` rather than the default. [Upgrading across the v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope) lists what to check, and [Insert checks](/access-control#insert-checks) explains the rule.
 
 ### Build the settings directory
 
@@ -84,6 +84,6 @@ Ingest pauses for these steps.
 
 ### Versions
 
-- **ClickHouse:** 0.2.0 is tested against ClickHouse 26.6. ClickHouse 26.8 changed how it reads a bare number in a `DateTime64` column, and 0.2.0 does not yet account for it ([#536](https://github.com/Wave-RF/WaveHouse/issues/536)), so stay on 26.6 for now.
+- **ClickHouse:** 0.2.0 is tested against ClickHouse 26.6. ClickHouse 26.8 changed how it reads a bare number in a `DateTime64` column, and 0.2.0 does not yet account for it ([#536](https://github.com/Wave-RF/WaveHouse/issues/536)), so stay on 26.6 for now. The 0.1.0 compose file ran `clickhouse-server:latest`, so a deployment built from it may already be on 26.8 or later; 0.2.0 behaves there as 0.1.0 did. Send `DateTime64` values as strings rather than bare numbers, and pin the compose file's ClickHouse image to the version you already run: the 0.2.0 compose file pins 26.6, and this guide does not cover moving an existing ClickHouse data volume back to an older version.
 - **NATS:** only an external NATS, which is new in 0.2.0 (`mq.backend: nats`), needs a version: 2.14 or later. See [External NATS](/deployment#external-nats).
 - **Go:** building from source or with `go install` needs Go 1.26.9 or later.
