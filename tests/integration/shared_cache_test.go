@@ -134,7 +134,7 @@ func tryStructuredQuery(baseURL, table string) (int, string, string, error) {
 
 func ingestRow(t *testing.T, baseURL, table, user string) {
 	t.Helper()
-	resp, err := http.Post(baseURL+"/v1/ingest?table="+url.QueryEscape(table), "application/json",
+	resp, err := httpPost(t.Context(), baseURL+"/v1/ingest?table="+url.QueryEscape(table), "application/json",
 		strings.NewReader(fmt.Sprintf(`{"user_id":%q,"value":1}`, user)))
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()

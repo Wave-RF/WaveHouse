@@ -104,7 +104,7 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 				func(*settings.Store) driver.Conn { return e.chConn }, nil, func(*settings.Store) *discovery.SchemaRegistry { return e.registry }, func(*settings.Store) *policy.Policy { return p }, func(*settings.Store) int { return 60 }, func(*settings.Store) time.Duration { return 30 * time.Second }, nil,
 			)
 
-			req := httptest.NewRequest(http.MethodPost,
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost,
 				"/v1/query?table="+table, strings.NewReader(`{"select_all":true}`))
 			req = req.WithContext(auth.WithRole(req.Context(), "viewer"))
 			// The handler is served without the router, so the test stands in

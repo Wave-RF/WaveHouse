@@ -71,7 +71,7 @@ func (f *faultyHTTP) Do(r *http.Request) (*http.Response, error) {
 	if resp, err, ok := f.fault(r.Header.Get("X-Amz-Target")); ok {
 		return resp, err
 	}
-	return f.next.Do(r)
+	return f.next.Do(r) //nolint:gosec // G704: forwards the AWS SDK's own request to the local dynamodb
 }
 
 // awsError is a DynamoDB JSON error response.
@@ -94,7 +94,7 @@ type landThenFail struct {
 }
 
 func (l *landThenFail) Do(r *http.Request) (*http.Response, error) {
-	resp, err := l.next.Do(r)
+	resp, err := l.next.Do(r) //nolint:gosec // G704: forwards the AWS SDK's own request to the local dynamodb
 	if err != nil || r.Header.Get("X-Amz-Target") != putItem || !l.failed.CompareAndSwap(false, true) {
 		return resp, err
 	}

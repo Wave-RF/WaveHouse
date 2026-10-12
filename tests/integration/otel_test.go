@@ -218,9 +218,9 @@ func TestOTel_PrometheusScrape_ExposesMetrics(t *testing.T) {
 	server := httptest.NewServer(promHandler)
 	t.Cleanup(server.Close)
 
-	resp, err := http.Get(server.URL)
+	resp, err := httpGet(t.Context(), server.URL)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	body, err := io.ReadAll(resp.Body)

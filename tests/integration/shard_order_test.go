@@ -238,7 +238,7 @@ func TestShardClaims_BlockedOwnerKeepsItsShard(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		now, d, _ := unitState(t, srv, unit)
 		require.Equal(t, pin, now, "the pin moved %s into the block", time.Since(blocked).Round(time.Millisecond))
-		require.LessOrEqual(t, d-delivered, uint64(time.Since(blocked)/(5*time.Second))+1, "at most one row past the share per renewal")
+		require.LessOrEqual(t, d-delivered, uint64(time.Since(blocked).Seconds()/5)+1, "at most one row past the share per renewal")
 		if time.Since(blocked) > 11*time.Second {
 			n, err := a.broker.Unowned(t.Context())
 			require.NoError(t, err)
@@ -248,7 +248,7 @@ func TestShardClaims_BlockedOwnerKeepsItsShard(t *testing.T) {
 		}
 	}
 	_, d, ackPending := unitState(t, srv, unit)
-	assert.Equal(t, int(d), ackPending, "every row delivered is still the owner's, none reset")
+	assert.EqualValues(t, d, ackPending, "every row delivered is still the owner's, none reset")
 	t.Logf("%d rows past the share delivered over %s of renewals", d-delivered, time.Since(blocked).Round(time.Second))
 
 	blockedFor := time.Since(blocked)

@@ -29,13 +29,14 @@ func TestIngest_FlowsToClickHouseWithoutDLQ(t *testing.T) {
 	)
 
 	body := `{"user_id":"alice","event_type":"click","value":42.5}`
-	resp, err := http.Post(
+	resp, err := httpPost(
+		ctx,
 		e.baseURL+"/v1/ingest?table="+url.QueryEscape(table),
 		"application/json",
 		strings.NewReader(body),
 	)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var ingestResp map[string]any
@@ -54,9 +55,9 @@ func TestIngest_FlowsToClickHouseWithoutDLQ(t *testing.T) {
 	// Confirm the success path didn't tee anything into the DLQ for this
 	// table — that's the actual contract we're asserting (no silent
 	// duplicate parking on the DLQ alongside the real INSERT).
-	dlqResp, err := http.Get(e.baseURL + "/v1/ops/dlq/stats")
+	dlqResp, err := httpGet(ctx, e.baseURL+"/v1/ops/dlq/stats")
 	require.NoError(t, err)
-	defer dlqResp.Body.Close()
+	defer func() { _ = dlqResp.Body.Close() }()
 
 	var stats map[string]any
 	require.NoError(t, json.NewDecoder(dlqResp.Body).Decode(&stats))
@@ -90,13 +91,14 @@ func TestIngest_ComputedColumns_FlowToClickHouse(t *testing.T) {
 	)
 
 	body := `{"user_id":"carol","value":21}`
-	resp, err := http.Post(
+	resp, err := httpPost(
+		ctx,
 		e.baseURL+"/v1/ingest?table="+url.QueryEscape(table),
 		"application/json",
 		strings.NewReader(body),
 	)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	assert.Eventually(t, func() bool {
@@ -131,13 +133,14 @@ func TestIngest_SuppliedComputedColumn_Rejected(t *testing.T) {
 		"ORDER BY user_id",
 	)
 
-	resp, err := http.Post(
+	resp, err := httpPost(
+		t.Context(),
 		e.baseURL+"/v1/ingest?table="+url.QueryEscape(table),
 		"application/json",
 		strings.NewReader(`{"user_id":"dave","digest":"forged"}`),
 	)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 
 	var body map[string]any
