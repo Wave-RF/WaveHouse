@@ -133,7 +133,7 @@ By default one process does all the work. `roles` splits it, so that the API and
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `roles` | `WH_ROLES` | `api,ingest,sweeper` | The roles this process runs: a YAML list, or a comma-separated variable. Order does not matter. An empty list, an empty entry, an unknown role, or a role named twice refuses boot. |
-| `instance_id` | `WH_INSTANCE_ID` | *(empty)* | Names this process: it is logged at boot (the `process roles` line), and under `coord.backend=nats` it is the `holder` a lease's value names, so you can see which process holds a lease. Empty resolves at boot to `<hostname>-<8 hex>`, with a fresh random suffix every time, so a restarted process is a new instance. |
+| `instance_id` | `WH_INSTANCE_ID` | *(empty)* | Names this process: every log line carries it as `instance_id`, its spans, metric series and OTLP log records carry it as the `service.instance.id` resource attribute (see [OTel](#otel)), and under `coord.backend=nats` it is the `holder` a lease's value names, so you can see which process holds a lease. Empty resolves at boot to `<hostname>-<8 hex>`, with a fresh random suffix every time, so a restarted process is a new instance. |
 
 | Role | Runs |
 | --- | --- |
@@ -289,13 +289,15 @@ The master switch is `otel.enabled`. When `true`, each signal (traces/metrics/lo
 
 **Direct-to-cloud OTLP.** The OTLP destination is configured through the standard [`OTEL_EXPORTER_OTLP_*` environment variables](https://opentelemetry.io/docs/specs/otel/protocol/exporter/) read by the OpenTelemetry SDK, not WaveHouse config: `OTEL_EXPORTER_OTLP_ENDPOINT` (always include a scheme — `https://` selects TLS via system root CAs, `http://` selects plaintext), `OTEL_EXPORTER_OTLP_HEADERS` for per-RPC auth, `OTEL_EXPORTER_OTLP_CERTIFICATE` to trust a custom/private CA, and `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` / `OTEL_EXPORTER_OTLP_CLIENT_KEY` for mutual TLS. Without a scheme the SDK misreads the endpoint and each signal handles it differently (the logs exporter, for one, can be left with no destination at all), so always write the scheme. An unset endpoint means **TLS** to `localhost:4317`, so a plaintext local collector needs `http://localhost:4317`, or `OTEL_EXPORTER_OTLP_INSECURE=true` with the endpoint left unset. The custom/private CA and mutual TLS variables apply to all three signals (traces, metrics and logs). With these set, WaveHouse ships telemetry straight to a TLS-protected cloud gateway (Grafana Cloud's OTLP gateway, Honeycomb, etc.) — no sidecar required (a sidecar is still useful for egress queuing, batching, and tail-based sampling; it's just no longer mandatory). A malformed entry in `OTEL_EXPORTER_OTLP_HEADERS` never fails startup, but the signals treat it differently: traces and metrics log and skip just that entry, while the logs exporter logs it and discards the whole variable, so logs are sent with no headers at all and an authenticating gateway rejects them. Datadog has no public direct-to-cloud OTLP endpoint — use the local DDOT Collector path in the [deployment guide](/deployment#observability). See [Deployment → Observability](/deployment#observability) for worked Honeycomb / Grafana Cloud examples.
 
+**Which process sent it.** Every span, metric series and OTLP log record carries the process's identity as OpenTelemetry resource attributes: `service.name` (`wavehouse`), `service.version`, `service.instance.id` (the [`instance_id`](#process-roles)), `wavehouse.roles` (the [`roles`](#process-roles), comma-separated, such as `api,ingest`), `wavehouse.git_commit` and `wavehouse.build_time`. Set the standard `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` environment variables to override any of them or add your own (`OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod`); they win on a shared key. A malformed `OTEL_RESOURCE_ATTRIBUTES` never fails startup: the entries that can be read apply, and the error is logged. The Prometheus endpoint reports the resource as `target_info`, and every metrics pipeline exports `wavehouse_build_info` (see [Deployment → Telling processes apart](/deployment#telling-processes-apart)).
+
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `otel.enabled` | `WH_OTEL_ENABLED` | `false` | Master switch. When `false`, no signals are initialized regardless of the sub-toggles below. The OTLP endpoint, TLS, custom CA, mutual TLS, and auth headers are configured via the standard `OTEL_EXPORTER_OTLP_*` env vars (see the note above), not a WaveHouse key. |
 | `otel.traces.enabled` | `WH_OTEL_TRACES_ENABLED` | `true` | Export traces via OTLP gRPC. |
 | `otel.traces.sample_rate` | `WH_OTEL_TRACES_SAMPLE_RATE` | `1.0` | Head-based trace sampling rate in `[0.0, 1.0]`. `1.0` exports every trace; `0.0` exports none. Defaults to 100% (matches the OpenTelemetry SDK default); lower it for high-QPS production services where collector or backend cost is a concern. Best practice is "100% at the source, downsample at the collector" via tail-based sampling. Validated at config load. |
 | `otel.metrics.enabled` | `WH_OTEL_METRICS_ENABLED` | `true` | Export metrics + Go runtime metrics via OTLP gRPC. Periodic reader interval is fixed at 15s. Metrics are pre-aggregated so there is no sampling knob. |
-| `otel.logs.enabled` | `WH_OTEL_LOGS_ENABLED` | `true` | Export logs via OTLP gRPC. Disabling it leaves stdout with 100% of records, but from the plain boot logger: lines lose `trace_id`/`span_id`, `component`, `source` and the build fields. |
+| `otel.logs.enabled` | `WH_OTEL_LOGS_ENABLED` | `true` | Export logs via OTLP gRPC. Disabling it leaves stdout with 100% of records, but from the plain boot logger: lines lose `trace_id`/`span_id`, `component`, `source` and the build fields, and keep `instance_id`. |
 | `otel.logs.sample_rate` | `WH_OTEL_LOGS_SAMPLE_RATE` | `1.0` | OTLP export rate for `DEBUG`/`INFO` records, in `[0.0, 1.0]`. Validated at config load. `WARN` and `ERROR` records always export at 100% — dropping them silently during incidents is too dangerous to expose as a knob. **Stdout always receives 100% of records regardless of this rate** (see the scraper note above). |
 
 ### Prometheus
@@ -325,7 +327,7 @@ Every key, with its default. Save the YAML as `config.yaml` next to the binary (
 data_dir: ./data         # nats → ./data/nats, pebble → ./data/pebble
 
 roles: [api, ingest, sweeper]   # the work this process runs; a split needs shared backends
-instance_id: ""          # logged at boot; empty = <hostname>-<8 hex>, fresh at every boot
+instance_id: ""          # on every log line and span; empty = <hostname>-<8 hex>, fresh at every boot
 
 server:
   port: 8080

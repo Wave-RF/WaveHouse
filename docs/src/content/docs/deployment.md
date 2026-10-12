@@ -504,7 +504,7 @@ Run every role in one process, the default, until you need more than one.
 
 A pod without the `api` role serves an ops listener on `:8080`: `/livez`, `/readyz` and their aliases, `/version`, the metrics path when `prometheus.port` is `0`, and `POST /v1/ops/settings/reload`. Every other route answers 404 (under `/v1/ops`, 403 without the operator key, and 401 for a bearer token). Point the same probes at it as at an API pod. `/livez` does not wait for schema discovery there, because only the API runs it. `/readyz` checks ClickHouse in an ingest pod, and the NATS connection in every pod. Every pod reads the settings directory, so mount it in every Deployment. The reload route on the ops listener accepts only the operator key, so whatever reloads your API pods over HTTP must send the operator key to the worker pods too, or rely on `SIGHUP` (or, over a flat directory, the directory watcher) instead.
 
-Give each pod a stable `WH_INSTANCE_ID` only if you need one in the logs or in the lease's `holder`. The default, the pod's hostname with a random suffix, already names each pod uniquely.
+Give each pod a stable `WH_INSTANCE_ID` only if you need one in the logs, the telemetry or the lease's `holder`. The default, the pod's hostname with a random suffix, already names each pod uniquely.
 
 ## Behind a reverse proxy
 
@@ -799,6 +799,16 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
 ```
 
 For the metrics path specifically: WaveHouse uses the OTel SDK's Prometheus exporter under the hood, which translates OTel metric names to Prometheus conventions automatically (dots and dashes become underscores; counters get a `_total` suffix). Existing OTel instruments don't need renaming.
+
+### Telling processes apart
+
+Every span, metric series and OTLP log record names the process that sent it, so replicas of one role, or two builds during a rollout, never merge into one source. The identity rides as resource attributes: `service.name` (`wavehouse`), `service.version`, `service.instance.id` (the boot config's `instance_id`), `wavehouse.roles`, `wavehouse.git_commit` and `wavehouse.build_time`. A Prometheus-compatible backend that ingests OTLP (Mimir, Grafana Cloud) maps `service.name` and `service.instance.id` to a series' `job` and `instance` labels; the Prometheus endpoint reports them on `target_info`. Override any of them, or add your own, with the standard `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` environment variables, which win on a shared key; on Kubernetes, `OTEL_RESOURCE_ATTRIBUTES=k8s.pod.name=$(POD_NAME)` from the downward API is the usual addition. Every log line carries `instance_id` as a field too, stdout included.
+
+Which build each process runs is the `wavehouse_build_info` gauge, always `1`, labeled `version`, `git_commit`, `build_time` and `roles`. A mixed-version rollout shows as more than one `version`:
+
+```promql
+count by (version) (wavehouse_build_info)
+```
 
 ### Separating the `/metrics` listener
 

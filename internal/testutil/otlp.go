@@ -8,7 +8,7 @@
 //
 //	r := testutil.NewFakeOTLP(t)
 //	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+r.Addr())
-//	shutdown, _, _ := observability.InitProvider(ctx, "svc", observability.ProviderConfig{...})
+//	shutdown, _, _ := observability.InitProvider(ctx, observability.Identity{ServiceName: "svc"}, observability.ProviderConfig{...})
 //	... emit spans/metrics/logs ...
 //	_ = shutdown(ctx)  // forces a final flush
 //	assert.Equal(t, expected, r.SpanCount())

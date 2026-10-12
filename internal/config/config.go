@@ -24,9 +24,9 @@ type Config struct {
 	// Roles are the components this process runs (every role by default);
 	// a Deployment per role differs only in this. See Role.
 	Roles []Role `yaml:"roles" env:"WH_ROLES"`
-	// InstanceID names this process: logged at boot, and the holder a
-	// coord.backend=nats lease names. Empty resolves to <hostname>-<8 hex> at
-	// Load.
+	// InstanceID names this process: a field on every log line,
+	// service.instance.id in its telemetry, and the holder a coord.backend=nats
+	// lease names. Empty resolves to <hostname>-<8 hex> at Load.
 	InstanceID string     `yaml:"instance_id" env:"WH_INSTANCE_ID"`
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`
