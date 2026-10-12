@@ -120,6 +120,7 @@ func NewRouter(deps Dependencies) http.Handler {
 			if deps.Tenants != nil && deps.Tenants.Nested() {
 				adminPolicy = nil
 			}
+			r.Use(opsRequestTenant)
 			r.Use(deps.AuthMW)
 			r.Use(refuseUnverifiable)
 			r.Use(RequireAdmin(adminPolicy))
@@ -258,6 +259,7 @@ func NewOpsRouter(deps OpsDependencies) http.Handler {
 	r := newProbeRouter(nil, deps.Health, deps.Version, deps.MetricsHandler, deps.MetricsPath)
 	if deps.Settings != nil {
 		r.Route("/v1/ops", func(r chi.Router) {
+			r.Use(opsRequestTenant)
 			r.Use(deps.AuthMW)
 			r.Use(refuseUnverifiable)
 			r.Use(RequireAdmin(nil))

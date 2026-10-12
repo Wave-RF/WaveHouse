@@ -194,3 +194,77 @@ func TestNewRouter_EchoesRequestID(t *testing.T) {
 		assert.Regexp(t, `^[0-9a-f]{32}$`, w.Header().Get(requestIDHeader), path)
 	}
 }
+
+// The dead-letter read serves tenant 0 when ?tenant= names none, and its
+// lines say so.
+func TestDLQStats_StampsTheDefaultTenant(t *testing.T) {
+	buf := captureCorrelated(t)
+	req := httptest.NewRequestWithContext(observability.WithRequest(t.Context(), "req-dlq"), http.MethodGet, "/v1/ops/dlq/stats", nil)
+	NewDLQHandler(&testutil.MockDeadLetterStats{}).Stats(httptest.NewRecorder(), req)
+	slog.InfoContext(req.Context(), "dlq read")
+
+	recs := records(t, buf, "dlq read")
+	require.Len(t, recs, 1)
+	assert.Equal(t, tenant.Default.String(), recs[0][observability.TenantKey])
+}
+
+// An ops request's ?tenant= is on its lines from authentication on, so the
+// operator-key audit line carries it; one naming no tenant, or one opsTenant
+// refuses, carries none there.
+func TestNewRouter_OpsLogsCarryTheNamedTenant(t *testing.T) {
+	tests := []struct {
+		query string
+		want  any
+	}{
+		{query: "?tenant=acme", want: "acme"},
+		{query: "", want: nil},
+		{query: "?tenant=acme&tenant=globex", want: nil},
+		{query: "?tenant=..%2Fetc", want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			buf := captureCorrelated(t)
+			auth := func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					slog.InfoContext(r.Context(), "auth ran")
+					next.ServeHTTP(w, r)
+				})
+			}
+			reg := testRegistry(t)
+			routers := map[string]http.Handler{
+				"api": NewRouter(Dependencies{
+					Tenants:      testTenants(),
+					Ingest:       NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
+					Query:        &QueryHandler{},
+					SSE:          NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
+					Health:       &HealthHandler{},
+					Version:      NewVersionHandler("test", "test", "test"),
+					Schema:       schemaHandlerOver(reg, testTenants()),
+					AuthMW:       auth,
+					PolicySource: policy.Static(&policy.Policy{}),
+				}),
+				"ops": NewOpsRouter(OpsDependencies{
+					Health:   &HealthHandler{},
+					Version:  NewVersionHandler("test", "test", "test"),
+					Settings: &SettingsHandler{},
+					AuthMW:   auth,
+				}),
+			}
+			paths := map[string]string{"api": "/v1/ops/schema", "ops": "/v1/ops/settings/reload"}
+			for name, router := range routers {
+				method := http.MethodGet
+				if name == "ops" {
+					method = http.MethodPost
+				}
+				router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), method, paths[name]+tt.query, nil))
+			}
+
+			recs := records(t, buf, "auth ran")
+			require.Len(t, recs, 2)
+			for _, rec := range recs {
+				assert.Equal(t, tt.want, rec[observability.TenantKey])
+				assert.NotEmpty(t, rec[observability.RequestIDKey])
+			}
+		})
+	}
+}

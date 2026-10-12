@@ -4,8 +4,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"net/url"
 
 	"github.com/Wave-RF/WaveHouse/internal/observability"
+	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
 // requestIDHeader carries the request id both ways: an upstream proxy's id
@@ -53,6 +55,24 @@ func newRequestID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:]) // never fails (crypto/rand.Read)
 	return hex.EncodeToString(b[:])
+}
+
+// opsRequestTenant records the tenant an ops request names in ?tenant=
+// before authentication, so the operator-key audit line and an admin-gate
+// denial carry it. It writes nothing: a query opsTenant refuses is still
+// answered by the handler, and a request naming no tenant is left without
+// one here, since a reload naming none acts on every tenant.
+func opsRequestTenant(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if params, err := url.ParseQuery(r.URL.RawQuery); err == nil {
+			if values := params[opsTenantParam]; len(values) == 1 {
+				if id, err := tenant.Parse(values[0]); err == nil {
+					observability.SetRequestTenant(r.Context(), id.String())
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // annotateSpan copies the request scope onto the server span, which the
