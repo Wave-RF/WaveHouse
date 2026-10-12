@@ -92,4 +92,4 @@ if (result.ok) {
 
 With `auth` configured, the ping carries your token, so while the tenant's JWKS has not been fetched yet it fails with `HTTP_503` (`token verifier not ready`), after waiting out `Retry-After: 30` on each retry — the server is up, but cannot check the token yet. See [API → Authentication](/api#authentication).
 
-> Readiness (`/readyz`) is intentionally **not** exposed through the SDK — it runs a ClickHouse query per call and is a load-balancer / reverse-proxy concern, not the client's. Probe `/readyz` directly from your orchestrator if you need it.
+> Readiness (`/readyz`) is intentionally **not** exposed through the SDK — it consults every backend the process cannot do its job without on each call (ClickHouse, and the external queue under `mq.backend: nats`) and is a load-balancer / reverse-proxy concern, not the client's. Probe `/readyz` directly from your orchestrator if you need it.
