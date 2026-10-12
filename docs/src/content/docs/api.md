@@ -142,7 +142,7 @@ Over a [nested settings directory](/deployment#the-nested-settings-directory) th
 
 ### `GET /readyz` — Readiness Probe
 
-> Canonical name (current Kubernetes convention). Also served at **`/ready`** — a deprecated alias kept for v0.1.x and scheduled for removal in v0.2.0.
+> Canonical name (current Kubernetes convention). Also served at **`/ready`** — a deprecated alias, still served in v0.2.0 and to be removed in a later release.
 
 Returns `200 OK` if the process is fully booted (schema discovery complete) and every backend it cannot do its job without is currently answering. Returns `503 Service Unavailable` otherwise, with `error` listing each check that failed, each starting with its name (`clickhouse: …`, `mq: …`) on a new line; the `clickhouse` failure continues over one line per pool that did not answer. No authentication required. The checks, every one run on every call:
 
