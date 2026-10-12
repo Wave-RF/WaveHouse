@@ -256,7 +256,7 @@ gate_push() {
 
   [ "${#specs[@]}" -gt 0 ] || specs=(HEAD)
   for spec in "${specs[@]}"; do
-    spec=${spec#+}
+    case $spec in +*) block "the refspec '${spec}' force-updates its destination (the leading '+'). Force-push is denied here; push normally, and ask the user if history must be rewritten." ;; esac
     [ "$spec" = : ] && block "the refspec ':' pushes every branch that exists on both sides, so the gate can't check each one's review. Push one branch at a time."
     src=${spec%%:*}
     [ -z "$src" ] && continue # ":<dst>" deletes a remote ref; nothing is published

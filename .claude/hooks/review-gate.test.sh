@@ -300,6 +300,7 @@ expect_block "-f" "$repo" "git push -f origin feat-a" "Force-push"
 expect_block "-uf" "$repo" "git push -uf origin feat-a" "Force-push"
 expect_block "--force-with-lease" "$repo" "git push --force-with-lease origin feat-a" "Force-push"
 expect_block "--force-if-includes" "$repo" "git push --force-if-includes origin feat-a" "Force-push"
+expect_block "a +refspec, which force-updates its destination" "$repo" "git push origin +feat-a" "Force-push"
 expect_block "a cwd outside any worktree" "$scratch" "git push" "not inside a git worktree"
 if jq -nc --arg c "git push" '{tool_input: {command: $c}}' | "$gate" 2>"$scratch/gate.err"; then
   fail "no cwd in the payload: blocked" "$(cat "$scratch/gate.err")"

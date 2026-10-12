@@ -252,7 +252,7 @@ The gate also catches the alias and API forms (`gh pr new`, `gh api` calls and G
 
 ### Human reviewer assignment is humans-only
 
-Adding/removing human reviewers (`gh pr edit --add-reviewer <login>`, `gh pr edit --add-assignee <login>`, `--reviewer` / `--assignee` (or `-r` / `-a`) on `gh pr create` / `gh pr new`, any `gh api` write to `/repos/.../pulls/<N>/requested_reviewers`, or the GraphQL `requestReviews` mutation) is blocked for agents. Reviewer assignment is handled natively by GitHub — the `required_reviewers` rule requests the `@Wave-RF/wavehouse-admins` team and the team's code-review assignment picks the member; humans handle anything else.
+Adding/removing human reviewers (`gh pr edit --add-reviewer <login>`, `gh pr edit --add-assignee <login>`, `--reviewer` / `--assignee` on `gh pr create` / `gh pr new`, any `gh api` write to `/repos/.../pulls/<N>/requested_reviewers`, or the GraphQL `requestReviews` mutation) is blocked for agents. Reviewer assignment is handled natively by GitHub — the `required_reviewers` rule requests the `@Wave-RF/wavehouse-admins` team and the team's code-review assignment picks the member; humans handle anything else.
 
 ### Bot reviewer re-triggers go through PR comments
 
