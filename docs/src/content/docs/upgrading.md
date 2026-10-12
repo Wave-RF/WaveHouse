@@ -13,7 +13,8 @@ WaveHouse is pre-1.0, so a minor release can change configuration, wire formats 
 
 ### Export and audit, while 0.1.0 runs
 
-1. **Export the live policy and pipes.** 0.1.0 kept both in NATS KV: the policy was seeded from `policy.file_path` only while KV was empty, and pipes from `pipes.dir` only for names KV did not already hold, so KV holds the current versions and the files may be stale. 0.2.0 never reads KV and has no endpoint to read them back, so export them now. Authenticate with the operator key if `auth.operator_key` is set (it is off by default in 0.1.0), or with a bearer token carrying the admin role:
+1. **Pin the SDK now if it floats.** A page that loads `@wavehouse/sdk` from a bare CDN URL or an `@0` range, or an app on an npm `^0` or `latest` range, picks up 0.2.x as soon as it is published, whatever the server runs, and its streams then deliver nothing against 0.1.0. Pin `@0.1` until the switch-over, then move it to `@0.2` with the server.
+2. **Export the live policy and pipes.** 0.1.0 kept both in NATS KV: the policy was seeded from `policy.file_path` only while KV was empty, and pipes from `pipes.dir` only for names KV did not already hold, so KV holds the current versions and the files may be stale. 0.2.0 never reads KV and has no endpoint to read them back, so export them now. Authenticate with the operator key if `auth.operator_key` is set (it is off by default in 0.1.0), or with a bearer token carrying the admin role:
 
    ```bash
    AUTH="Authorization: Operator $WH_AUTH_OPERATOR_KEY"   # or: AUTH="Authorization: Bearer $ADMIN_TOKEN"
@@ -22,12 +23,12 @@ WaveHouse is pre-1.0, so a minor release can change configuration, wire formats 
    jq . policy-0.1.0.json pipes-0.1.0.json > /dev/null && echo exported
    ```
 
-2. **Audit your policy and tables against the stricter ingest checks.** A policy insert `check` that names a column the table does not have, or a `MATERIALIZED`, `ALIAS` or `EPHEMERAL` column, now refuses every insert by that role with `403`. A value sent for a `MATERIALIZED` or `ALIAS` column is now refused with `400`. An omitted key for a `Nullable(T) DEFAULT …` column now stores `NULL` rather than the default. [Upgrading across the v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope) lists what to check, and [Insert checks](/access-control#insert-checks) explains the rule.
+3. **Audit your policy and tables against the stricter ingest checks.** A policy insert `check` that names a column the table does not have, or a `MATERIALIZED`, `ALIAS` or `EPHEMERAL` column, now refuses every insert by that role with `403`. A value sent for a `MATERIALIZED` or `ALIAS` column is now refused with `400`. An omitted key for a `Nullable(T) DEFAULT …` column now stores `NULL` rather than the default. [Upgrading across the v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope) lists what to check, and [Insert checks](/access-control#insert-checks) explains the rule.
 
 ### Build the settings directory
 
-1. **Write a starter directory** with `wavehouse bootstrap <dir>`. It writes `config.json`, `roles.json`, `policies.json` and `pipes.json` with every key at its default. Its `policies.json` is `{}`, which denies every token-based request until you replace it.
-2. **Port your settings into `config.json`.** Every key except `dedupe.retention` is required. Copy each value from your 0.1.0 `config.yaml` or environment variable:
+1. **Write a starter directory** with `wavehouse bootstrap <dir>`. It writes `config.json`, `roles.json`, `policies.json` and `pipes.json` with every key at its default. Its `policies.json` is `{}`, which denies every request until you replace it; only the operator key gets through.
+2. **Port your settings into `config.json`.** Every key except `dedupe.retention` and the per-table overrides (`dedupe.tables`, `dlq.tables`) is required. Copy each value from your 0.1.0 `config.yaml` or environment variable:
 
    | 0.1.0 key (variable) | 0.2.0 `config.json` key | Change |
    | --- | --- | --- |
@@ -75,11 +76,11 @@ Ingest pauses for these steps.
 
 ### What changes for clients
 
-- **`@wavehouse/sdk` moves to 0.2.x with the server.** The SSE stream now sends an `event: schema` frame followed by positional rows. A 0.1.x SDK against a 0.2.0 server, or the reverse, delivers no usable rows and raises no error, and no version speaks both, so expect a gap in streaming during the switch. A `^0.1` range does not reach 0.2.x. A page that loads the SDK from a bare CDN URL or an `@0` range picks up 0.2.x as soon as it is published, whatever the server runs: pin `@0.1` until the server is on 0.2.0, then move both. See [Transport Behavior](/sdk/streaming#transport-behavior).
+- **`@wavehouse/sdk` moves to 0.2.x with the server.** The SSE stream now sends an `event: schema` frame followed by positional rows. A 0.1.x SDK against a 0.2.0 server, or the reverse, delivers no usable rows and raises no error, and no version speaks both, so expect a gap in streaming during the switch. A `^0.1` range does not reach 0.2.x. A page that loads it from a bare CDN URL or an `@0` range should already be pinned, from the first step. See [Transport Behavior](/sdk/streaming#transport-behavior).
 - **Raw `/v1/stream` readers** that parse the SSE themselves must read the new frames: an `event: schema` frame naming the columns, then rows as positional arrays instead of objects. See [Client-Facing Format (SSE)](/api#client-facing-format-sse).
 - **The policy and pipe write APIs are gone.** `GET`/`PUT /v1/ops/policy`, `POST /v1/ops/policy/validate`, and `PUT`/`DELETE /v1/ops/pipes/{name}` are removed, and so are the SDK's `wh.policy`, `wh.pipes.set()` and `wh.pipes.delete()`. Edit the files instead; the server picks up a change to the directory by itself, or reload it with `wh.settings.reload()`, `POST /v1/ops/settings/reload` or `SIGHUP`. See [Managing the policy](/access-control#managing-the-policy).
 - **Every ingest request needs a `Content-Type`** if you call the HTTP API directly. A request without a supported one now gets `415`. The SDK already sends one.
-- **Error responses are more specific.** A ClickHouse failure on a query or pipe now maps to `400`, `403`, `502` or `503` with a `code` and a `retryable` flag, instead of a flat `500`. See [ClickHouse errors on the query paths](/api#clickhouse-errors-on-the-query-paths).
+- **Error responses are more specific.** A ClickHouse failure on a query or pipe now maps to `400`, `403`, `502` or `503` with a `code` and a `retryable` flag. In 0.1.0 it was a flat `500` on `/v1/query` and pipes, and `400` or `502` on `/v1/ops/query`, chosen by ClickHouse's own HTTP status, so a raw-SQL syntax error there moves from `502` to `400`. See [ClickHouse errors on the query paths](/api#clickhouse-errors-on-the-query-paths).
 
 ### Versions
 
