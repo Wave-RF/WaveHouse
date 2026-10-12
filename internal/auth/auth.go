@@ -523,7 +523,8 @@ func middleware(current func(context.Context) (tenant.ID, *verifier), operatorKe
 					// other unauthenticated caller. WARN + a counter because a
 					// mismatch is a strong probing/brute-force signal: nobody
 					// sends a wrong operator key by accident. Same correlation-field
-					// deferral (request_id / client IP → #333) as the audit line above.
+					// handling as the audit line above: request_id and tenant from
+					// TraceHandler, the client IP in #333.
 					operatorKeyFailures.Add(r.Context(), 1)
 					slog.LogAttrs(r.Context(), slog.LevelWarn, "operator key authentication failed",
 						slog.String("path", r.URL.Path),
