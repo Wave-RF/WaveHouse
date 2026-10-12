@@ -80,6 +80,8 @@ This contract holds for:
 
 Historically some error paths defaulted to `text/plain` because they were emitted via `http.Error` or chi's default handlers; those paths now route through a shared `writeJSONError` helper so strict clients can branch on `Content-Type` consistently.
 
+Every response, success or failure, also carries `X-Request-Id`: the id the request is logged and traced under. A request that sends one `X-Request-Id` of 1 to 128 printable ASCII characters, with no spaces, gets its own back; any other gets a fresh random 32-hex-character id. Quote it when reporting a failure ([Following one request or one tenant](/deployment#following-one-request-or-one-tenant)).
+
 The per-endpoint error tables below list the bodies you can expect for each status code; the `Content-Type` and `X-Content-Type-Options` headers above apply uniformly and are not repeated.
 
 :::caution[Streaming / partial-write responses]

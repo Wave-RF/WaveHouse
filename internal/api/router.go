@@ -163,7 +163,7 @@ func NewRouter(deps Dependencies) http.Handler {
 func newProbeRouter(origins func(*http.Request) []string, health *HealthHandler, version *VersionHandler, metrics http.Handler, metricsPath string) chi.Router {
 	r := chi.NewRouter()
 
-	r.Use(middleware.RequestID)
+	r.Use(requestID)
 	// No middleware.RealIP: it rewrites r.RemoteAddr from spoofable forwarded
 	// headers on every request (chi deprecated it for the IP-spoofing GHSAs),
 	// and nothing here reads RemoteAddr — WaveHouse does no per-IP logic (that's
@@ -210,6 +210,7 @@ func newProbeRouter(origins func(*http.Request) []string, health *HealthHandler,
 			otelhttp.NewMiddleware("wavehouse-api")(next).ServeHTTP(w, r)
 		})
 	})
+	r.Use(annotateSpan)
 
 	// Public endpoints. /livez and /readyz are the canonical probe names
 	// (current Kubernetes convention — the kube-apiserver split that replaced

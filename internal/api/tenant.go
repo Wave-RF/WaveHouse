@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
@@ -98,6 +99,7 @@ func opsTenant(w http.ResponseWriter, r *http.Request) (id tenant.ID, named, ok 
 		writeJSONError(w, http.StatusBadRequest, "invalid ?"+opsTenantParam+": "+err.Error())
 		return "", false, false
 	}
+	observability.SetRequestTenant(r.Context(), id.String())
 	return id, true, true
 }
 
@@ -111,6 +113,7 @@ func opsStore(w http.ResponseWriter, r *http.Request, tenants *settings.Registry
 	}
 	if !named {
 		id = tenant.Default
+		observability.SetRequestTenant(r.Context(), id.String())
 	}
 	return resolveStore(w, tenants, id)
 }
@@ -151,6 +154,7 @@ func TenantMW(tenants *settings.Registry) func(http.Handler) http.Handler {
 				writeJSONError(w, http.StatusBadRequest, err.Error())
 				return
 			}
+			observability.SetRequestTenant(r.Context(), id.String())
 			store, ok := resolveStore(w, tenants, id)
 			if !ok {
 				return
