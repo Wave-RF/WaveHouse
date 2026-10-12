@@ -1136,7 +1136,7 @@ func TestNewOpsRouter(t *testing.T) {
 	const key = "ops-key"
 	authMW := auth.NewAuthenticator(auth.Config{OperatorKey: key}, nil, nil).Middleware()
 	deps := OpsDependencies{
-		Health:   NewHealthHandler(nil),
+		Health:   NewHealthHandler(),
 		Version:  NewVersionHandler("v", "c", "t"),
 		Settings: NewSettingsHandler(tenants),
 		AuthMW:   authMW,

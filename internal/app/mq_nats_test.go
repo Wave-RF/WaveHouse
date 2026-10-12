@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,6 +96,28 @@ func TestNew_NATSWiresNoSweeper(t *testing.T) { //nolint:paralleltest // capture
 	_, adopted = a.tenants.Reload("test")
 	require.True(t, adopted)
 	assert.Equal(t, 1, warned(), "a reload checks the new window")
+}
+
+// /readyz consults the external broker in every process that has one, the
+// ops listener of a process without the api role included: ready while the
+// connection is up, 503 naming the queue once it is gone, and the ClickHouse
+// pools answer for themselves either way.
+func TestNew_NATSReadiness(t *testing.T) {
+	srv := natstest.Start(t)
+	cfg := natsConfig(t, srv.URL())
+	cfg.Roles = []config.Role{config.RoleIngest}
+	cfg.Coord.Backend = config.CoordNATS
+	a := newApp(t, cfg, Options{})
+
+	rec := get(t, a.Handler(), "/readyz")
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), "clickhouse: ", "no pool answers")
+	assert.NotContains(t, rec.Body.String(), "mq: ", "the queue is connected")
+
+	srv.Shutdown()
+	require.Eventually(t, func() bool {
+		return strings.Contains(get(t, a.Handler(), "/readyz").Body.String(), "mq: message queue unavailable: not connected to nats")
+	}, 10*time.Second, 20*time.Millisecond, "the disconnect makes the process unready, naming the queue")
 }
 
 // A cluster never reached within topology_wait refuses boot as unavailable.

@@ -97,7 +97,7 @@ func TestBoot_Chain_DegradedThenRecovers(t *testing.T) {
 	require.Error(t, err, "Refresh against unreachable CH must fail")
 	bootState.Set(fmt.Errorf("schema discovery: %w", err))
 
-	handler := NewHealthHandler(nil)
+	handler := NewHealthHandler()
 	handler.Boot = bootState
 
 	// Phase 1 — /livez surfaces the diagnostic verbatim with 503. This is

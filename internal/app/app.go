@@ -112,6 +112,9 @@ type App struct {
 	hub         *stream.Hub
 	keepalives  *keepalives
 	handler     http.Handler
+	// readiness is what /readyz consults beyond the ClickHouse pools, added
+	// by the wiring of a backend that can stop answering: the external NATS.
+	readiness []api.Check
 
 	// components in wiring order; Close walks them backwards.
 	components []component

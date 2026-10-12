@@ -515,3 +515,19 @@ func smallTopology(t *testing.T) *fixtureTopology {
 	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o600))
 	return loadNATSManifests(t, path)
 }
+
+// Ready follows the two gauges the watch keeps: the connection, then the
+// topology, each with the error the publish path would give.
+func TestExternalNATS_Ready(t *testing.T) {
+	t.Parallel()
+	e := &ExternalNATS{}
+	require.ErrorIs(t, e.Ready(), ErrUnavailable, "never connected")
+	e.connected.Store(true)
+	require.ErrorIs(t, e.Ready(), ErrTopology, "connected, topology not passed yet")
+	e.topologyOK.Store(true)
+	require.NoError(t, e.Ready())
+	e.connected.Store(false)
+	err := e.Ready()
+	require.ErrorIs(t, err, ErrUnavailable, "a disconnect outranks the topology")
+	assert.NotErrorIs(t, err, ErrTopology)
+}
