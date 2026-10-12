@@ -239,7 +239,7 @@ API servers in standalone mode expose liveness and readiness endpoints under the
 - `GET /livez` — Liveness probe. Returns 200 once the gateway has discovered ClickHouse table schemas at least once. Returns 503 with a diagnostic body while the boot-time schema discovery retry loop is still running (e.g. ClickHouse unreachable, target database missing). After successful boot, `/livez` stays 200 — transient ClickHouse blips at runtime are reflected in `/readyz`, not `/livez`. Over a [nested settings directory](#the-nested-settings-directory) it is 503 while no tenant has completed a first discovery, and 200 from the first tenant's success on.
 - `GET /readyz` — Readiness probe. Returns 200 if the gateway is fully booted and every backend it cannot do its job without is answering, 503 otherwise, naming each check that failed: `clickhouse` (every open pool is pinged at once and one that answers is enough; the failure names every pool that did not), `mq` under [`mq.backend: nats`](#external-nats) (the connection is down, or the topology failed its last check — the lease bucket of `coord.backend: nats` included). The shared cache and the dedupe stores are not checks: a tripped breaker falls back to ClickHouse, and a dedupe store that is not answering fails that tenant's ingest closed per request. Full behavior in the [API reference](/api#get-readyz--readiness-probe).
 
-`/healthz` remains registered as a **permanent alias** of `/livez` (it's the most widely-recognized name); `/health` and `/ready` are **deprecated aliases**: still served in v0.2.0, and to be removed in a later release. Point new deployments at the `/livez` / `/readyz` names.
+`/healthz` remains registered as a **permanent alias** of `/livez` (it's the most widely-recognized name); `/health` and `/ready` are **deprecated aliases**: still served in v0.2.0, and to be removed in a later release ([#818](https://github.com/Wave-RF/WaveHouse/issues/818)). Point new deployments at the `/livez` / `/readyz` names.
 
 Configure your load balancer or orchestrator to use these endpoints.
 
@@ -626,7 +626,7 @@ WaveHouse discovers this schema on startup and refreshes it every `schema.refres
 
 The dedupe key now carries the table as well as the tenant ([#222](https://github.com/Wave-RF/WaveHouse/issues/222)), so **an id deduped before the upgrade is not recognized after it**: a record carrying it is accepted once more. Nothing is migrated. The old keys never count as seen, and the dedupe sweep deletes them: its first pass runs about a minute after the instance opens, and `wavehouse_dedupe_swept_keys_total{reason="version_0"}` counts them ([#220](https://github.com/Wave-RF/WaveHouse/issues/220)). Pebble returns their disk space as it compacts, not at once. Only a tenant with `dedupe.enabled` on is affected, and only by a record sent both before and after the upgrade — typically a producer retrying across the restart. To avoid duplicate rows, let retrying producers finish, or pause them, before upgrading.
 
-The same release adds an optional **`dedupe.retention`** key. No upgrade step is needed: a `config.json` without it keeps every id forever, as before. See [Deduplication](/settings-directory#deduplication) for a finite one.
+0.2.0 also adds an optional **`dedupe.retention`** key. No upgrade step is needed: a `config.json` without it keeps every id forever, as before. See [Deduplication](/settings-directory#deduplication) for a finite one.
 
 ## A shared dedupe table on DynamoDB
 
@@ -711,7 +711,7 @@ For development against dynamodb-local, set `dedupe.dynamodb.endpoint` (for exam
 
 ## Upgrading across the v2 ingest envelope
 
-The NATS envelope changed shape in this release: the row now travels positionally, with `format`, `columns` and `row` replacing `data` — and the queue changed layout with it: boot deletes the earlier build's queue (below), so nothing an older version published reaches the new worker, which could not read it anyway (it carries no `format`, so there is no way to say which value belongs to which column). **Drain first** to keep what the old build had not yet inserted.
+The NATS envelope changed shape in 0.2.0: the row now travels positionally, with `format`, `columns` and `row` replacing `data` — and the queue changed layout with it: boot deletes the earlier build's queue (below), so nothing an older version published reaches the new worker, which could not read it anyway (it carries no `format`, so there is no way to say which value belongs to which column). **Drain first** to keep what the old build had not yet inserted.
 
 The streaming surface loses something too, more quietly. SSE gap-fill (`?since=` / `Last-Event-ID`) replays from the queue, so the deletion takes the replay history with it, even after a *correct* drain: any replay spanning the upgrade silently omits the pre-upgrade events, with **no error and no frame**. Clients that need them should backfill over REST.
 

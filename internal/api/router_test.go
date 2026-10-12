@@ -358,7 +358,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		// Canonical K8s-convention probes. Roleless: a 200 proves ungated.
 		{http.MethodGet, "/livez", "", http.StatusOK},
 		{http.MethodGet, "/readyz", "", http.StatusOK},
-		// Deprecated aliases (kept for v0.1.x, removed in v0.2.0).
+		// Deprecated aliases (still served; removal is #818).
 		{http.MethodGet, "/healthz", "", http.StatusOK},
 		{http.MethodGet, "/health", "", http.StatusOK},
 		{http.MethodGet, "/ready", "", http.StatusOK},
