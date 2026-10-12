@@ -31,7 +31,7 @@ var testIdentity = Identity{
 func attrs(res *resource.Resource) map[attribute.Key]string {
 	m := map[attribute.Key]string{}
 	for _, kv := range res.Attributes() {
-		m[kv.Key] = kv.Value.Emit()
+		m[kv.Key] = kv.Value.String()
 	}
 	return m
 }
