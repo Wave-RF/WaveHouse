@@ -2,8 +2,8 @@
 # can't self-checkout, so the consuming job must checkout first. Each CI
 # job opts into exactly the toolchains it needs via the inputs below.
 #
-# Caching is OWNED here end-to-end: no save steps in ci.yml. The Go, pnpm
-# and Playwright caches (the large ones) SAVE ONLY ON `main`: there each is
+# Caching is OWNED here end-to-end: no save steps in ci.yml. The Go, pnpm,
+# Playwright and smoke-test Node caches (the large ones) SAVE ONLY ON `main`: there each is
 # an `actions/cache` step, whose automatic post-job step saves on an
 # exact-key miss. Everywhere else (pull requests, merge-queue refs,
 # branches) the same cache is a restore-only `actions/cache/restore`, which
@@ -66,6 +66,11 @@
 #      lockfile + astro.config.mjs. Speeds up warm `astro check` /
 #      `astro build` — unchanged content skips the parse + transform
 #      pipeline. See #132. Saved from any ref, like golangci: a few KB.
+#   7. The oldest Node `make smoke-ts-dist` runs the SDK dist smoke on
+#      (`.bin/<os>_<arch>/node-v<x.y.z>-<os>-<arch>/`, ~175 MB unpacked,
+#      ~45 MB stored), keyed on that version. Only the jobs that run
+#      `make build-ts` need it (e2e). Large, so `main` saves and every
+#      other ref restores. See #750.
 name: Setup CI environment
 description: Caches (restore everywhere, save on main) and toolchains for WaveHouse CI
 
@@ -90,6 +95,9 @@ inputs:
     default: "false"
   astro:
     description: "Cache the Astro content collections (docs check/build)"
+    default: "false"
+  smoke-node:
+    description: "Cache the oldest-Node download that `make smoke-ts-dist` fetches into .bin/ (needs `node`; the jobs that run `make build-ts`: e2e)"
     default: "false"
 
 # Exact-key cache-hit flags, for consumers that want to skip work on a
@@ -351,3 +359,36 @@ runs:
       if: ${{ inputs.node == 'true' }}
       with:
         node-version-file: ".nvmrc"
+
+    # The oldest Node `make smoke-ts-dist` runs on, which fetch-node.sh
+    # downloads (~45 MB, from nodejs.org) into .bin/ on first use. The
+    # directory is a pure function of the version and platform, so the key
+    # is exact and carries no restore-keys: a stale version is no use to a
+    # new floor. The version comes from the same script the Makefile asks,
+    # which is why this sits after setup-node. The glob matches the one
+    # <os>_<arch> directory the Makefile names, without repeating its
+    # os/arch derivation. `main` saves, as the other large caches do.
+    - name: Resolve the smoke-test Node version
+      if: ${{ inputs.smoke-node == 'true' && inputs.node == 'true' }}
+      id: smoke-node
+      shell: bash
+      run: |
+        v=$(node clients/ts/scripts/smoke-dist.mjs --min-node) && [ -n "$v" ] || {
+          echo "::error title=setup-env::smoke-dist.mjs --min-node printed no version; cannot key the smoke-node cache." >&2
+          exit 1
+        }
+        echo "version=$v" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.smoke-node == 'true' && inputs.node == 'true' && github.ref == 'refs/heads/main' }}
+      id: smoke-node-cache
+      with:
+        path: .bin/*/node-v${{ steps.smoke-node.outputs.version }}-*
+        key: smoke-node-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.smoke-node.outputs.version }}
+
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.smoke-node == 'true' && inputs.node == 'true' && github.ref != 'refs/heads/main' }}
+      id: smoke-node-cache-restore
+      with:
+        path: .bin/*/node-v${{ steps.smoke-node.outputs.version }}-*
+        key: smoke-node-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.smoke-node.outputs.version }}
