@@ -13,7 +13,7 @@ WaveHouse is pre-1.0, so a minor release can change configuration, wire formats 
 
 ### Export and audit, while 0.1.0 runs
 
-1. **Pin the SDK now if it floats.** A page that loads `@wavehouse/sdk` from a bare CDN URL or an `@0` range, or an app on an npm `^0` or `latest` range, picks up 0.2.x as soon as it is published, whatever the server runs, and its streams then deliver nothing against 0.1.0. Pin `@0.1` until the switch-over, then move it to `@0.2` with the server.
+1. **Pin the SDK now if it floats.** Some clients float to the newest release: a page that loads `@wavehouse/sdk` from a bare CDN URL or an `@0` range, or an app on an npm `^0` or `latest` range. Such a client picks up 0.2.x as soon as it is published, whatever the server runs. Its streams then deliver nothing against 0.1.0. Pin `@0.1` until the switch-over, then move it to `@0.2` with the server.
 2. **Export the live policy and pipes.** 0.1.0 kept both in NATS KV: the policy was seeded from `policy.file_path` only while KV was empty, and pipes from `pipes.dir` only for names KV did not already hold, so KV holds the current versions and the files may be stale. 0.2.0 never reads KV and has no endpoint to read them back, so export them now. Authenticate with the operator key if `auth.operator_key` is set (it is off by default in 0.1.0), or with a bearer token carrying the admin role. If neither is configured, as in the 0.1.0 reference compose file, set `WH_AUTH_OPERATOR_KEY` (or `auth.operator_key`) and restart 0.1.0 first; the policy and pipes survive the restart, because what is in KV wins over `policy.file_path` and `pipes.dir`:
 
    ```bash
