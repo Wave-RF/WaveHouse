@@ -576,6 +576,8 @@ The folder name is the tenant id, and each folder is a complete settings directo
 
 ### Upgrading behind a proxy that already sends `X-Tenant-ID`
 
+This is one step of [upgrading from 0.1.0](/upgrading#from-010-to-020); follow that page for the full order, which includes exporting the policy and pipes while 0.1.0 still runs.
+
 `X-Tenant-ID` is a generic name, and some gateways and service meshes stamp one on every request. WaveHouse used to ignore it; now, over a settings directory that holds the four files, any value other than `0` names an unknown tenant, so **every `/v1` route outside `/v1/ops/*` answers `404 unknown tenant: <id>`** (a `400` when the value is not a tenant id at all, a dotted hostname, say) — the SDK's `/v1/health` reachability ping included, while the bare probes and the admin surface stay green. Strip the inbound header at the edge ([header forwarding](/reverse-proxy#header-and-auth-forwarding)) unless you are using it deliberately.
 
 ## Multiple instances and the shared cache
@@ -623,6 +625,8 @@ ORDER BY (page);
 WaveHouse discovers this schema on startup and refreshes it every `schema.refresh_interval` seconds (settings directory; seed default 60). You can also trigger an immediate refresh via `POST /v1/ops/schema/refresh` (admin-only).
 
 ## Upgrading across the dedupe key change
+
+This is one step of [upgrading from 0.1.0](/upgrading#from-010-to-020); follow that page for the full order, which includes exporting the policy and pipes while 0.1.0 still runs.
 
 The dedupe key now carries the table as well as the tenant ([#222](https://github.com/Wave-RF/WaveHouse/issues/222)), so **an id deduped before the upgrade is not recognized after it**: a record carrying it is accepted once more. Nothing is migrated. The old keys never count as seen, and the dedupe sweep deletes them: its first pass runs about a minute after the instance opens, and `wavehouse_dedupe_swept_keys_total{reason="version_0"}` counts them ([#220](https://github.com/Wave-RF/WaveHouse/issues/220)). Pebble returns their disk space as it compacts, not at once. Only a tenant with `dedupe.enabled` on is affected, and only by a record sent both before and after the upgrade — typically a producer retrying across the restart. To avoid duplicate rows, let retrying producers finish, or pause them, before upgrading.
 
@@ -711,6 +715,8 @@ For development against dynamodb-local, set `dedupe.dynamodb.endpoint` (for exam
 
 ## Upgrading across the v2 ingest envelope
 
+This is one step of [upgrading from 0.1.0](/upgrading#from-010-to-020); follow that page for the full order, which includes exporting the policy and pipes while 0.1.0 still runs.
+
 The NATS envelope changed shape in 0.2.0: the row now travels positionally, with `format`, `columns` and `row` replacing `data` — and the queue changed layout with it: boot deletes the earlier build's queue (below), so nothing an older version published reaches the new worker, which could not read it anyway (it carries no `format`, so there is no way to say which value belongs to which column). **Drain first** to keep what the old build had not yet inserted.
 
 The streaming surface loses something too, more quietly. SSE gap-fill (`?since=` / `Last-Event-ID`) replays from the queue, so the deletion takes the replay history with it, even after a *correct* drain: any replay spanning the upgrade silently omits the pre-upgrade events, with **no error and no frame**. Clients that need them should backfill over REST.
@@ -730,7 +736,7 @@ To drain before upgrading:
 1. **Stop the producers**, or cut `/v1/ingest` at the reverse proxy. Nothing new should enter the stream.
 2. **Wait for the in-flight batches to flush.** A table's batch closes on size or after `maxWait` (5s by default), so a few seconds after the last write is enough; give it longer if ClickHouse is slow.
 3. **Confirm nothing is left unconsumed** before swapping binaries. Not that the stream is empty: it is dual-use, and deliberately retains ACKed messages for the SSE replay window, so a non-zero depth right after a clean drain is expected. Rows landing in ClickHouse is a success signal, **not proof the queue is drained** — when the DLQ is off, a row that fails its retry is skipped without being acked, so NATS keeps redelivering it while its neighbors land. Check that nothing is still failing or redelivering, and note which signal covers which case: [`GET /v1/ops/dlq/stats`](/api#get-v1opsdlqstats--dlq-statistics) is non-zero only where the DLQ is **on**; on a build that exposes it (from the v2 envelope on), `wavehouse_ingest_poison_total` counts unreadable envelopes on **either** setting, told apart by its `disposition` label (`parked` / `dropped`); and for a twice-failed row with the DLQ off — the case just described — the **only** signal is the `ERROR` log: `isolated bad row, DLQ disabled for table` on a build with the per-table switch, or, on v0.1.0, `isolated bad row, sending to DLQ` followed by `NATS DLQ publish failed`. A clean `dlq/stats` with the DLQ off proves nothing. There is no queue-depth gauge today ([#544](https://github.com/Wave-RF/WaveHouse/issues/544) tracks the related in-flight accounting), and `wavehouse_nats_in_msgs_total` going flat is a supporting signal rather than a guarantee. Enabling the DLQ is not itself a drain: a parked row is not inserted, and the upgrade deletes it.
-4. **Upgrade**, then re-enable ingest.
+4. **Upgrade** as [Upgrading → Switch over](/upgrading#switch-over) describes, then re-enable ingest.
 
 If you skipped the drain, the boot's `WARN` line for each deleted stream (`deleted the stream an earlier build kept for every tenant together`) says how many messages went with it: for `WAVEHOUSE_DLQ`, the parked rows lost; for `WAVEHOUSE`, a count that includes the acknowledged history kept for replay, already in ClickHouse — so it bounds the events lost rather than counting them, and is non-zero even after a clean drain.
 
