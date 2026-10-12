@@ -249,6 +249,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Before the job's first pull: Docker Hub images come through a mirror,
+      # with Docker Hub as the daemon's fallback (#805). A failure here leaves
+      # the daemon pulling from Docker Hub as before, so it must not fail the job.
+      - name: Pull Docker Hub images through a mirror
+        continue-on-error: true
+        run: scripts/ci/docker-hub-mirror.sh
       # Background pull overlaps the ~25s of cache restores below, so
       # testcontainers finds the image already local (a concurrent pull of
       # the same tag is safe — dockerd dedupes layer downloads). Image tag
@@ -297,6 +303,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Before the first pull, as in the integration job (#805).
+      - name: Pull Docker Hub images through a mirror
+        continue-on-error: true
+        run: scripts/ci/docker-hub-mirror.sh
       # Background pull overlaps the ~35s of setup + build below, so the
       # orchestrator finds the image already local (a concurrent pull of
       # the same tag is safe — dockerd dedupes layer downloads). Image tag
