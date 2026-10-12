@@ -26,6 +26,7 @@ import (
 // process's. New does not validate, so the embedded MQ stands in for the
 // shared one a split needs (config.Validate refuses it outside tests).
 func TestNew_RolesChooseTheComponents(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		roles []config.Role
@@ -58,6 +59,7 @@ func TestNew_RolesChooseTheComponents(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			cfg := testConfig(t, writeSettings(t, nil))
 			cfg.Roles = tc.roles
 			a := newApp(t, cfg, Options{})
@@ -67,7 +69,7 @@ func TestNew_RolesChooseTheComponents(t *testing.T) {
 }
 
 func TestNew_RefusesAConfigWithoutRoles(t *testing.T) {
-	guardGlobals(t)
+	t.Parallel()
 	cfg := testConfig(t, writeSettings(t, nil))
 	cfg.Roles = nil
 	_, err := New(t.Context(), Options{Config: cfg})
@@ -88,6 +90,7 @@ func hs256(t *testing.T, secret, role string) string {
 // token verifier runs there, so even an admin token the API would admit is
 // refused. Every tenant route, and the rest of /v1/ops, is not there.
 func TestNew_OpsOnlyRouter(t *testing.T) {
+	t.Parallel()
 	dir := writeSettings(t, nil)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileRoles), []byte(`{"roles": ["admin"]}`), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FilePolicies), []byte(`{"admin_role": "admin", "tables": {}}`), 0o600))
@@ -147,6 +150,7 @@ func TestNew_OpsOnlyRouter(t *testing.T) {
 // ClickHouse pool answers (here none can), a sweeper-only one once booted.
 // Liveness never waits on schema discovery, which only the API runs.
 func TestNew_OpsOnlyReadiness(t *testing.T) {
+	t.Parallel()
 	cfg := testConfig(t, writeSettings(t, nil))
 	cfg.Roles = []config.Role{config.RoleIngest}
 	a := newApp(t, cfg, Options{})
@@ -159,6 +163,7 @@ func TestNew_OpsOnlyReadiness(t *testing.T) {
 // A reload that moves the tenant repoints the pool of a process without the
 // api role, which has no schema registry to start over.
 func TestReload_OpsOnlyMovedTenant(t *testing.T) {
+	t.Parallel()
 	addr := closedAddr(t)
 	dir := writeSettings(t, databaseSettings(addr, "default"))
 	cfg := testConfig(t, dir)
@@ -173,6 +178,7 @@ func TestReload_OpsOnlyMovedTenant(t *testing.T) {
 }
 
 func TestNew_OpsOnlyPrometheusInline(t *testing.T) {
+	guardGlobals(t)
 	cfg := testConfig(t, writeSettings(t, nil))
 	cfg.Roles = []config.Role{config.RoleIngest}
 	cfg.Prometheus = config.Prometheus{Enabled: true, Path: "/metrics"}
@@ -185,6 +191,7 @@ func TestNew_OpsOnlyPrometheusInline(t *testing.T) {
 // A sweeper-only process serves its listener and runs the sweeper under the
 // lease, as the all-roles one does.
 func TestRun_SweeperOnlyProcess(t *testing.T) {
+	t.Parallel()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)

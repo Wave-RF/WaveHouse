@@ -37,6 +37,9 @@ type discoveries struct {
 	// and onLoaded the first success: what /livez is driven by.
 	onAttempt func(tenant.ID, error)
 	onLoaded  func(tenant.ID)
+	// backoff is the boot retry's first backoff, doubling up to 60s; tests
+	// shorten it.
+	backoff time.Duration
 
 	mu  sync.Mutex // serializes reconcile, drop, adopt and close
 	cur atomic.Pointer[map[tenant.ID]*tenantDiscovery]
@@ -55,7 +58,7 @@ type tenantDiscovery struct {
 }
 
 func newDiscoveries(ctx context.Context, build func(tenant.ID, *settings.Store) *discovery.SchemaRegistry, onAttempt func(tenant.ID, error), onLoaded func(tenant.ID)) *discoveries {
-	d := &discoveries{ctx: ctx, build: build, onAttempt: onAttempt, onLoaded: onLoaded}
+	d := &discoveries{ctx: ctx, build: build, onAttempt: onAttempt, onLoaded: onLoaded, backoff: 2 * time.Second}
 	d.cur.Store(&map[tenant.ID]*tenantDiscovery{})
 	return d
 }
@@ -139,10 +142,11 @@ func (d *discoveries) adopt(id tenant.ID, reg *discovery.SchemaRegistry) {
 func (d *discoveries) start(id tenant.ID, reg *discovery.SchemaRegistry) *tenantDiscovery {
 	ctx, cancel := context.WithCancel(d.ctx) //nolint:gosec // G118: held on the tenantDiscovery, called by reconcile or close
 	td := &tenantDiscovery{id: id, registry: reg, cancel: cancel, done: make(chan struct{})}
+	backoff := d.backoff
 	go func() {
 		defer close(td.done)
 		if !reg.Loaded() {
-			err := reg.RetryRefresh(ctx, 2*time.Second, 60*time.Second, func(err error) { d.onAttempt(id, err) })
+			err := reg.RetryRefresh(ctx, backoff, 60*time.Second, func(err error) { d.onAttempt(id, err) })
 			if err != nil {
 				// ctx cancelled before success — the process is stopping, or
 				// the tenant is no longer served.

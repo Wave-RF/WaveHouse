@@ -108,7 +108,7 @@ func (a *App) wireDynamoDedupe(ctx context.Context) error {
 				"table", c.Table, "error", err)
 		}
 		a.add(component{name: "dedupe table check", run: func(ctx context.Context) error {
-			for wait := time.Second; ready() != nil; wait = min(2*wait, 30*time.Second) {
+			for wait := a.dynamoRetry; ready() != nil; wait = min(2*wait, 30*time.Second) {
 				select {
 				case <-ctx.Done():
 					return nil

@@ -45,11 +45,12 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 )
 
-// None of these tests run in parallel: New installs a process-wide default
-// logger and, with Prometheus on, the global OTel providers. Every app boots
-// against a ClickHouse address that is guaranteed closed, so the boot-time
-// schema discovery fails fast and deterministically (the degraded path) no
-// matter what is listening on the developer's :9000.
+// A test that touches process-wide state stays serial: the default logger
+// (capturing it, or New replacing it with otel logs on), the global OTel
+// providers (Prometheus or otel on), the environment, or signals. Every app
+// boots against a ClickHouse address that is guaranteed closed, so the
+// boot-time schema discovery fails fast and deterministically (the degraded
+// path) no matter what is listening on the developer's :9000.
 
 // closedAddr returns a 127.0.0.1 address nothing listens on: bind an
 // ephemeral port, then release it.
@@ -124,8 +125,9 @@ func testConfig(t *testing.T, settingsDir string) *config.Config {
 	}
 }
 
-// guardGlobals restores the process-wide state New may replace: the default
-// logger, and the OTel providers when Prometheus/OTLP is on.
+// guardGlobals restores the process-wide state New may replace — the default
+// logger, and the OTel providers when Prometheus/OTLP is on — for a serial
+// test that turns them on or swaps the logger itself.
 func guardGlobals(t *testing.T) {
 	t.Helper()
 	savedLogger := slog.Default()
@@ -138,12 +140,10 @@ func guardGlobals(t *testing.T) {
 		otel.SetTracerProvider(savedTP)
 		otel.SetMeterProvider(savedMP)
 	})
-	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func newApp(t *testing.T, cfg *config.Config, opts Options) *App {
 	t.Helper()
-	guardGlobals(t)
 	opts.Config = cfg
 	a, err := New(t.Context(), opts)
 	require.NoError(t, err)
@@ -159,6 +159,7 @@ func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
 }
 
 func TestNew_DegradedBootServesDiagnostics(t *testing.T) {
+	t.Parallel()
 	cfg := testConfig(t, writeSettings(t, nil))
 	a := newApp(t, cfg, Options{Build: BuildInfo{Version: "1.2.3", GitCommit: "abc", BuildTime: "now"}})
 
@@ -182,6 +183,7 @@ func TestNew_DegradedBootServesDiagnostics(t *testing.T) {
 // answer — boot is degraded without ClickHouse — so it proves the tenant
 // resolved.
 func TestNew_TenantHeaderResolvesAgainstTheRegistry(t *testing.T) {
+	t.Parallel()
 	a := newApp(t, testConfig(t, writeSettings(t, nil)), Options{})
 
 	tests := []struct {
@@ -196,6 +198,7 @@ func TestNew_TenantHeaderResolvesAgainstTheRegistry(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, tt.path, nil)
 			if tt.header != "" {
 				req.Header.Set(tenant.Header, tt.header)
@@ -220,6 +223,7 @@ func TestAsyncGetters_RegistryMiss(t *testing.T) {
 }
 
 func TestNew_DedupeFollowsSettings(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		enabled bool
@@ -229,6 +233,7 @@ func TestNew_DedupeFollowsSettings(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			dir := writeSettings(t, map[string]any{"dedupe": map[string]any{
 				"enabled": tt.enabled, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{},
 			}})
@@ -252,6 +257,7 @@ func rewriteSettings(t *testing.T, dir string, patch map[string]any) {
 }
 
 func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
+	t.Parallel()
 	// Hooks are registered in New and fired by the reload triggers Run
 	// starts; a direct Reload stands in for any of the three triggers and
 	// pins that the relocated hooks still follow the adopted document.
@@ -353,6 +359,7 @@ func TestNew_NestedDirectory(t *testing.T) {
 // admin token cannot — over a nested directory the ops routes reach every
 // tenant, so the operator key alone opens them.
 func TestNew_NestedOperatorReloadsOneTenant(t *testing.T) {
+	t.Parallel()
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "broken": invalidQuery})
 	cfg := testConfig(t, root)
 	cfg.Auth.OperatorKey = "unit-test-operator-key"
@@ -427,6 +434,7 @@ func TestNew_NestedWithoutAnOperatorKeyWarnsTheOpsTreeIsClosed(t *testing.T) {
 // request, so a lost 0 folder is felt at once on the routes that read tenant
 // 0's list.
 func TestReload_NestedHooksFollowEachTenant(t *testing.T) {
+	t.Parallel()
 	dedupeOn := map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}
 	grown := map[string]any{"dedupe": dedupeOn, "mq": map[string]any{"max_bytes_gb": 2}}
 	root := writeNestedSettings(t, map[string]map[string]any{
@@ -500,6 +508,7 @@ func TestReload_NestedHooksFollowEachTenant(t *testing.T) {
 // reopened over the same seen ids when the folder is back. The instance is
 // open while some tenant's store is, and Close releases it.
 func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
+	t.Parallel()
 	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}}
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn, "globex": nil, "broken": invalidQuery})
 	cfg := testConfig(t, root)
@@ -562,6 +571,7 @@ func TestNew_NestedDedupeStoreFollowsEachTenant(t *testing.T) {
 // is reached only by a Config built by hand; it must refuse boot, not wire
 // nothing.
 func TestNew_RefusesALayerWithoutABackend(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		key   string
 		unset func(*config.Config)
@@ -572,7 +582,7 @@ func TestNew_RefusesALayerWithoutABackend(t *testing.T) {
 		{"coord.backend", func(c *config.Config) { c.Coord.Backend = "" }},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
-			guardGlobals(t)
+			t.Parallel()
 			cfg := testConfig(t, writeSettings(t, nil))
 			tc.unset(cfg)
 			_, err := New(t.Context(), Options{Config: cfg})
@@ -587,6 +597,7 @@ func TestNew_RefusesALayerWithoutABackend(t *testing.T) {
 // instance — their ingest answers 503 until a reload or a restart opens it —
 // while the process, and every tenant with dedupe off, carries on.
 func TestNew_DedupeOpenFailure(t *testing.T) {
+	t.Parallel()
 	dedupeOn := map[string]any{"dedupe": map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}}
 	// A regular file where the instance's directory should be is what Pebble
 	// refuses to open.
@@ -595,13 +606,14 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(dataDir, "pebble"), nil, 0o600))
 	}
 	t.Run("flat refuses boot", func(t *testing.T) {
-		guardGlobals(t)
+		t.Parallel()
 		cfg := testConfig(t, writeSettings(t, dedupeOn))
 		block(t, cfg.DataDir)
 		_, err := New(t.Context(), Options{Config: cfg})
 		require.ErrorContains(t, err, "dedupe open")
 	})
 	t.Run("nested fails closed", func(t *testing.T) {
+		t.Parallel()
 		root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn, "globex": dedupeOn, "initech": nil})
 		cfg := testConfig(t, root)
 		block(t, cfg.DataDir)
@@ -625,6 +637,7 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 // force the failure, as TestNew_DedupeOpenFailure does Pebble's. The failed
 // open clears it, so the next publish opens the queue: each one tries again.
 func TestNew_QueueOpenFailure(t *testing.T) {
+	t.Parallel()
 	block := func(t *testing.T, dataDir, stream string) {
 		t.Helper()
 		p := filepath.Join(dataDir, "nats", "jetstream", "$G", "streams", stream)
@@ -632,13 +645,14 @@ func TestNew_QueueOpenFailure(t *testing.T) {
 		require.NoError(t, os.WriteFile(p, nil, 0o600))
 	}
 	t.Run("flat refuses boot", func(t *testing.T) {
-		guardGlobals(t)
+		t.Parallel()
 		cfg := testConfig(t, writeSettings(t, nil))
 		block(t, cfg.DataDir, "DLQ_0")
 		_, err := New(t.Context(), Options{Config: cfg})
 		require.ErrorContains(t, err, "mq open")
 	})
 	t.Run("nested costs the tenant alone", func(t *testing.T) {
+		t.Parallel()
 		// globex, not acme: opened first, acme's streams keep the streams
 		// directory occupied through globex's failed open, which the server
 		// would otherwise remove on a goroutine of its own while the next
@@ -657,7 +671,7 @@ func TestNew_QueueOpenFailure(t *testing.T) {
 // Boot opens each served tenant's queue under New's context, as New's doc
 // says: a stop signaled during boot is not held up by one open per tenant.
 func TestNew_QueueSetupHonorsTheBootContext(t *testing.T) {
-	guardGlobals(t)
+	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	_, err := New(ctx, Options{Config: testConfig(t, writeSettings(t, nil))})
@@ -704,6 +718,7 @@ func TestSharedTables_InvalidatesTheTenantsSharingTheTables(t *testing.T) {
 // the wiring orphans its cache as it comes back; a tenant that stayed is
 // never touched, and a reload that changes nothing bumps nobody.
 func TestReload_ReadmittedTenantCacheIsOrphaned(t *testing.T) {
+	t.Parallel()
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
 	a := newApp(t, testConfig(t, root), Options{})
 	// The hooks read a.cache at reload time: a recording cache from here on.
@@ -755,6 +770,7 @@ func (p *pruneRecorder) last() map[tenant.ID]bool {
 // Every reload prunes the cache's version index down to the tenants served,
 // so a tenant rejected or removed stops holding it (#262).
 func TestReload_PrunesCacheIndexToServedTenants(t *testing.T) {
+	t.Parallel()
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
 	a := newApp(t, testConfig(t, root), Options{})
 	_, ok := a.cache.(pruner)
@@ -792,6 +808,7 @@ func redisTestConfig(t *testing.T, settingsDir, addr string) *config.Config {
 // reached does not refuse boot: the cache starts bypassed, and the reload
 // hook that prunes an in-process index leaves it alone.
 func TestNew_RedisCacheBootsBypassedWhenUnreachable(t *testing.T) {
+	t.Parallel()
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
 	a := newApp(t, redisTestConfig(t, root, closedAddr(t)), Options{})
 	_, ok := a.cache.(*cache.RedisCache)
@@ -810,7 +827,7 @@ func TestNew_RedisCacheBootsBypassedWhenUnreachable(t *testing.T) {
 // A TLS file that went missing between validation and wiring refuses boot,
 // naming the key.
 func TestNew_RedisCacheRefusesAnUnreadableTLSFile(t *testing.T) {
-	guardGlobals(t)
+	t.Parallel()
 	cfg := redisTestConfig(t, writeSettings(t, nil), closedAddr(t))
 	cfg.Cache.Redis.TLS = config.CacheRedisTLS{Enabled: true, CAFile: filepath.Join(t.TempDir(), "gone.pem")}
 	_, err := New(t.Context(), Options{Config: cfg})
@@ -912,7 +929,7 @@ func nudges(sub *stream.Subscriber) int {
 // where it was due, and a reload of a tenant's own interval reshapes its
 // wheel in place with its open stream still on it.
 func TestKeepalives_EachTenantAtItsOwnInterval(t *testing.T) {
-	guardGlobals(t)
+	t.Parallel()
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": keepalive(30, 3), "globex": keepalive(10, 2)})
 	synctest.Test(t, func(t *testing.T) {
 		tenants, k := hookedKeepalives(t, root)
@@ -969,7 +986,7 @@ func TestKeepalives_EachTenantAtItsOwnInterval(t *testing.T) {
 // directory's interval, its wheel reshaped in place by a reload that changes
 // the pair, and left as it is by a reload the directory rejects.
 func TestKeepalives_FlatDirectory(t *testing.T) {
-	guardGlobals(t)
+	t.Parallel()
 	dir := writeSettings(t, keepalive(30, 3))
 	synctest.Test(t, func(t *testing.T) {
 		tenants, k := hookedKeepalives(t, dir)
@@ -1006,7 +1023,7 @@ func TestKeepalives_FlatDirectory(t *testing.T) {
 // over on another when it is served again; the component's stop leaves no
 // wheel turning, and none starts after it.
 func TestKeepalives_FollowTheTenantsServed(t *testing.T) {
-	guardGlobals(t)
+	t.Parallel()
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": keepalive(5, 1), "globex": keepalive(5, 1)})
 	synctest.Test(t, func(t *testing.T) {
 		tenants, k := hookedKeepalives(t, root)
@@ -1074,7 +1091,7 @@ func TestKeepalives_FollowTheTenantsServed(t *testing.T) {
 // and some of them wait on a queue or a cache. It is handed a wheel all the
 // same, the one the hook then keeps.
 func TestKeepalives_LookupAheadOfTheReloadHook(t *testing.T) {
-	guardGlobals(t)
+	t.Parallel()
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": keepalive(30, 3)})
 	tenants, findings := settings.Open(root)
 	require.NotNil(t, tenants, "findings: %v", findings)
@@ -1160,6 +1177,7 @@ func turningWheel(t *testing.T, a *App, id tenant.ID) *tenantWheel {
 // none ever arrives on one whose tenant asks for a day, which only another
 // tenant's cadence could send.
 func TestRun_KeepsEachTenantsStreamsAliveAtItsOwnInterval(t *testing.T) {
+	t.Parallel()
 	const day = 24 * 60 * 60
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": keepalive(2, 1), "globex": keepalive(day, 1)})
 	var lc net.ListenConfig
@@ -1234,19 +1252,21 @@ func gapWindow(minutes int) map[string]any {
 // (mq.Purger.PurgeAcked). A flat directory's single tenant gets exactly its
 // own window.
 func TestGapWindows(t *testing.T) {
+	t.Parallel()
 	open := func(t *testing.T, dir string) *settings.Registry {
 		t.Helper()
-		guardGlobals(t)
 		tenants, findings := settings.Open(dir)
 		require.NotNil(t, tenants, "findings: %v", findings)
 		return tenants
 	}
 
 	t.Run("flat directory", func(t *testing.T) {
+		t.Parallel()
 		assert.Equal(t, map[tenant.ID]time.Duration{tenant.Default: 45 * time.Minute}, gapWindows(open(t, writeSettings(t, gapWindow(45)))))
 	})
 
 	t.Run("nested directory", func(t *testing.T) {
+		t.Parallel()
 		root := writeNestedSettings(t, map[string]map[string]any{"acme": gapWindow(15), "globex": gapWindow(60), "initech": gapWindow(30)})
 		tenants := open(t, root)
 		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "globex": 60 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants))
@@ -1263,6 +1283,7 @@ func TestGapWindows(t *testing.T) {
 	})
 
 	t.Run("a folder rejected since boot keeps everything", func(t *testing.T) {
+		t.Parallel()
 		// globex is what lets boot open the directory at all.
 		root := writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery, "globex": gapWindow(30)})
 		tenants := open(t, root)
@@ -1278,7 +1299,7 @@ func TestGapWindows(t *testing.T) {
 // A finding about a nested directory itself — a loose file beside the tenant
 // folders — refuses boot, like an invalid flat directory.
 func TestNew_NestedLooseFileRefusesBoot(t *testing.T) {
-	guardGlobals(t)
+	t.Parallel()
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil})
 	require.NoError(t, os.WriteFile(filepath.Join(root, "notes.txt"), []byte("scratch"), 0o600))
 	a, err := New(t.Context(), Options{Config: testConfig(t, root)})
@@ -1288,7 +1309,7 @@ func TestNew_NestedLooseFileRefusesBoot(t *testing.T) {
 }
 
 func TestNew_RefusesInvalidSettingsDirectory(t *testing.T) {
-	guardGlobals(t)
+	t.Parallel()
 	cfg := testConfig(t, t.TempDir()) // empty: every required file is missing
 	a, err := New(t.Context(), Options{Config: cfg})
 	require.Error(t, err)
@@ -1347,7 +1368,7 @@ func analystPipe(t *testing.T, dir string) {
 // place) once the dedupe store is already open, and a second New on the same
 // data_dir must find the Pebble lock released.
 func TestNew_LateBootFailureReleasesEverything(t *testing.T) {
-	guardGlobals(t)
+	t.Parallel()
 	dir := writeSettings(t, map[string]any{"dedupe": map[string]any{
 		"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{},
 	}})
@@ -1372,6 +1393,7 @@ func TestNew_LateBootFailureReleasesEverything(t *testing.T) {
 // than evaluated under the default_role, and the process serves everything
 // else.
 func TestNew_UnreachableJWKSBootsFailClosed(t *testing.T) {
+	t.Parallel()
 	dir := writeSettings(t, authPatch("http://"+closedAddr(t)+"/jwks.json"))
 	analystPipe(t, dir)
 	started := time.Now()
@@ -1402,6 +1424,7 @@ func TestNew_UnreachableJWKSBootsFailClosed(t *testing.T) {
 // is refused under globex's header, and pointing acme's folder at another
 // provider and reloading it swaps acme's verifier alone.
 func TestNew_VerifierPerTenant(t *testing.T) {
+	t.Parallel()
 	acme, acmeKey, _ := jwksServer(t, "acme-1")
 	globex, globexKey, globexFetches := jwksServer(t, "globex-1")
 	root := writeNestedSettings(t, map[string]map[string]any{
@@ -1478,6 +1501,7 @@ func TestNew_VerifierPerTenant(t *testing.T) {
 }
 
 func TestNew_PrometheusInlineMountsOnRouter(t *testing.T) {
+	guardGlobals(t)
 	cfg := testConfig(t, writeSettings(t, nil))
 	cfg.Prometheus = config.Prometheus{Enabled: true, Path: "/metrics"}
 	a := newApp(t, cfg, Options{})
@@ -1550,6 +1574,7 @@ func TestRun_ServesUntilCancelled(t *testing.T) {
 }
 
 func TestRun_SweeperRunsUnderItsLease(t *testing.T) {
+	t.Parallel()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -1572,6 +1597,7 @@ func TestRun_SweeperRunsUnderItsLease(t *testing.T) {
 }
 
 func TestRun_PrometheusSidecar(t *testing.T) {
+	guardGlobals(t)
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -1604,6 +1630,7 @@ func TestRun_PrometheusSidecar(t *testing.T) {
 }
 
 func TestRun_ListenFailureStopsEverything(t *testing.T) {
+	t.Parallel()
 	// Hold the wildcard address the server binds (":port"), not loopback: a
 	// process already on the port holds the same address, and macOS allows a
 	// wildcard bind while only 127.0.0.1:port is held (Linux refuses both),
@@ -1651,6 +1678,7 @@ func (c dyingConsumer) Consume(func(*mq.Message), int) (func(), <-chan error, er
 }
 
 func TestRun_DeadIngestWorkerStopsEverything(t *testing.T) {
+	t.Parallel()
 	a := newApp(t, testConfig(t, writeSettings(t, nil)), Options{})
 	// The worker takes its consumer from a.mq when Run starts it.
 	a.mq = dyingConsumerBroker{Broker: a.mq, reason: fmt.Errorf("%w: consumer deleted", mq.ErrDeliveryEnded)}
@@ -1666,6 +1694,7 @@ func TestRun_DeadIngestWorkerStopsEverything(t *testing.T) {
 }
 
 func TestClose_AbandonsAStuckCloseAtTheDeadline(t *testing.T) {
+	t.Parallel()
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	a := &App{}
@@ -1738,6 +1767,7 @@ func endsCleanly(t *testing.T, stream io.Reader) {
 // reconnect then meets the tenant's 503 or 404. A flat directory never stops
 // serving tenant 0, so a reload it rejects leaves the stream open.
 func TestRun_StopEndsOpenStreams(t *testing.T) {
+	t.Parallel()
 	start := func(t *testing.T, settingsDir string) (a *App, baseURL string, stop func() error) {
 		t.Helper()
 		var lc net.ListenConfig
@@ -1756,6 +1786,7 @@ func TestRun_StopEndsOpenStreams(t *testing.T) {
 	}
 
 	t.Run("the stop", func(t *testing.T) {
+		t.Parallel()
 		_, baseURL, stop := start(t, writeSettings(t, nil))
 		resp := openStream(t, baseURL, "")
 		started := time.Now()
@@ -1765,6 +1796,7 @@ func TestRun_StopEndsOpenStreams(t *testing.T) {
 	})
 
 	t.Run("a reload that stops serving the tenant", func(t *testing.T) {
+		t.Parallel()
 		root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
 		a, baseURL, stop := start(t, root)
 		defer func() { assert.NoError(t, stop()) }()
@@ -1796,6 +1828,7 @@ func TestRun_StopEndsOpenStreams(t *testing.T) {
 	})
 
 	t.Run("a reload the flat directory rejects", func(t *testing.T) {
+		t.Parallel()
 		dir := writeSettings(t, nil)
 		a, baseURL, stop := start(t, dir)
 		resp := openStream(t, baseURL, "")
@@ -1825,7 +1858,7 @@ func poolSettings(addr string, open int) map[string]any {
 // config and the settings pool must fit under it, so an impossible pair
 // refuses to boot naming both numbers (#530).
 func TestNew_RefusesAPoolAboveTheCeiling(t *testing.T) {
-	guardGlobals(t)
+	t.Parallel()
 	cfg := testConfig(t, writeSettings(t, poolSettings(closedAddr(t), 10)))
 	cfg.ClickHouse.MaxTotalConns = 4
 	_, err := New(t.Context(), Options{Config: cfg})
@@ -1879,6 +1912,7 @@ func chSettings(addr, user string, open int) map[string]any {
 // its own and leaves the other on the very same Manager, resized to its own
 // ask — the worked example of the story.
 func TestNew_NestedPoolsFollowEachTenantsTuple(t *testing.T) {
+	t.Parallel()
 	shared, other := closedAddr(t), closedAddr(t)
 	root := writeNestedSettings(t, map[string]map[string]any{
 		"acme":    chSettings(shared, "default", 10),
@@ -1911,7 +1945,7 @@ func TestNew_NestedPoolsFollowEachTenantsTuple(t *testing.T) {
 // A nested directory's pools must fit the ceiling together: boot is refused
 // naming the sum and the ceiling, like a flat directory's one pool.
 func TestNew_NestedRefusesPoolsAboveTheCeiling(t *testing.T) {
-	guardGlobals(t)
+	t.Parallel()
 	root := writeNestedSettings(t, map[string]map[string]any{
 		"acme":   chSettings(closedAddr(t), "default", 10),
 		"globex": chSettings(closedAddr(t), "default", 10),
@@ -1977,6 +2011,7 @@ func TestReload_CeilingRefusesAThirdTupleThenOpensIt(t *testing.T) {
 // fresh pool, registry and verifier, and an id it sent before the removal is
 // still a duplicate. Its open streams end too: TestRun_StopEndsOpenStreams.
 func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
+	t.Parallel()
 	jwks, _, fetches := jwksServer(t, "acme-1")
 	acmeSettings := authPatch(jwks.URL)
 	acmeSettings["dedupe"] = map[string]any{"enabled": true, "id_field": "event_id", "require_id": false, "retention": "0", "tables": map[string]any{}}
@@ -2057,6 +2092,7 @@ func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 // another tenant's discovery does afterwards; /readyz then pings every open
 // pool and names each one that does not answer.
 func TestNew_NestedProbesFollowTheFirstTenantToLoad(t *testing.T) {
+	t.Parallel()
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})
 	a := newApp(t, testConfig(t, root), Options{})
 
@@ -2093,6 +2129,7 @@ func TestNew_NestedProbesFollowTheFirstTenantToLoad(t *testing.T) {
 // Retry-After, not a 404: in a flat directory during the degraded boot, and
 // in a nested one per tenant.
 func TestNew_SchemaNotLoadedIs503(t *testing.T) {
+	t.Parallel()
 	ingest := func(t *testing.T, a *App, id string) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ingest?table=clicks", strings.NewReader(`{"page": "/"}`))
@@ -2105,6 +2142,7 @@ func TestNew_SchemaNotLoadedIs503(t *testing.T) {
 		return rec
 	}
 	t.Run("flat, degraded boot", func(t *testing.T) {
+		t.Parallel()
 		a := newApp(t, testConfig(t, writeSettings(t, nil)), Options{})
 		rec := ingest(t, a, "")
 		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
@@ -2112,6 +2150,7 @@ func TestNew_SchemaNotLoadedIs503(t *testing.T) {
 		assert.Contains(t, rec.Body.String(), "schema not loaded yet")
 	})
 	t.Run("nested, per tenant", func(t *testing.T) {
+		t.Parallel()
 		a := newApp(t, testConfig(t, writeNestedSettings(t, map[string]map[string]any{"acme": nil})), Options{})
 		rec := ingest(t, a, "acme")
 		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
@@ -2192,6 +2231,7 @@ func databaseSettings(addr, database string) map[string]any {
 // schema.refresh_interval (60 seconds here). The tenant beside it, and a
 // reload that moves nobody, keep the registry and the loop they had.
 func TestReload_MovedTenantDiscoversTheNewDatabase(t *testing.T) {
+	t.Parallel()
 	addr := closedAddr(t)
 	root := writeNestedSettings(t, map[string]map[string]any{
 		"acme":   databaseSettings(addr, "default"),
@@ -2233,6 +2273,7 @@ func TestReload_MovedTenantDiscoversTheNewDatabase(t *testing.T) {
 
 // A flat directory's tenant 0 moves the same way.
 func TestReload_MovedTenantDiscoversTheNewDatabase_Flat(t *testing.T) {
+	t.Parallel()
 	addr := closedAddr(t)
 	dir := writeSettings(t, databaseSettings(addr, "default"))
 	a := newApp(t, testConfig(t, dir), Options{})
@@ -2260,6 +2301,7 @@ func TestReload_MovedTenantFailedDiscoveryIsRetried(t *testing.T) {
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": databaseSettings(addr, "default")})
 	a := newApp(t, testConfig(t, root), Options{})
 	fake := newFakeClickHouse(t, a, map[string][]string{"default": {"events"}})
+	a.discoveries.backoff = 10 * time.Millisecond
 
 	logs := logtest.Capture(t, slog.LevelWarn)
 	// No fake names moved_db: its discovery dials the closed port.
@@ -2309,6 +2351,7 @@ func (c *registryAtInvalidation) InvalidateTenant(ctx context.Context, id tenant
 // pool, and a request arriving meanwhile must not find the previous
 // database's schema.
 func TestReload_MovedTenantRegistryIsDroppedBeforeTheCacheInvalidation(t *testing.T) {
+	t.Parallel()
 	addr := closedAddr(t)
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": databaseSettings(addr, "default")})
 	a := newApp(t, testConfig(t, root), Options{})
@@ -2347,6 +2390,7 @@ func (c *stuckConn) Query(context.Context, string, ...any) (driver.Rows, error) 
 // the reload returns: Close waits for it with the loops of the served
 // tenants, and names its tenant when the release budget ends first.
 func TestClose_WaitsForALoopAReloadStopped(t *testing.T) {
+	t.Parallel()
 	conn := &stuckConn{entered: make(chan struct{}), release: make(chan struct{})}
 	// Released on every way out, so a failed assertion leaves no loop stuck.
 	release := sync.OnceFunc(func() { close(conn.release) })
@@ -2377,6 +2421,7 @@ func TestClose_WaitsForALoopAReloadStopped(t *testing.T) {
 // Close stops every tenant's discovery loop within the release budget, and
 // the pools after them.
 func TestClose_StopsTheDiscoveryLoops(t *testing.T) {
+	t.Parallel()
 	a := newApp(t, testConfig(t, writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil})), Options{})
 	loops := *a.discoveries.cur.Load()
 	require.Len(t, loops, 2)
