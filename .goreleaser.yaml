@@ -26,7 +26,7 @@ builds:
     binary: wavehouse
     env:
       - CGO_ENABLED=0
-    goos: [linux, darwin, windows, freebsd]
+    goos: [linux]
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
@@ -39,16 +39,8 @@ checksum:
 
 archives:
   - name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
-    # Windows gets .zip; everything else keeps GoReleaser's tar.gz default.
-    # Windows has shipped bsdtar since 10 1803, so a .tar.gz is *openable* —
-    # but not from Explorer, which still only double-clicks into .zip. The
-    # convention costs nothing and this is the first release whose asset
-    # names people will script against.
-    format_overrides:
-      - goos: windows
-        formats: [zip]
     # Narrowed from GoReleaser's default, which also globs CHANGELOG* — 324 KB
-    # of development history in every one of the eight archives, for a file
+    # of development history in every archive, for a file
     # that is a click away on GitHub and whose contents are the release notes
     # the download page already shows.
     # NOTICE is not optional: the repo is Apache-2.0 and §4(d) makes every

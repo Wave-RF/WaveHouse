@@ -113,9 +113,8 @@ Releases are built with [GoReleaser](https://goreleaser.com/). The configuration
 | OS | Architecture |
 | -- | ----------- |
 | Linux | amd64, arm64 |
-| macOS | amd64, arm64 |
-| Windows | amd64, arm64 |
-| FreeBSD | amd64, arm64 |
+
+Other systems run the [container image](#docker-images), or build from source with `go install`.
 
 ### Creating a Release
 

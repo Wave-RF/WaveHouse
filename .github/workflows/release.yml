@@ -78,7 +78,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Resolve the moving GHCR tag BEFORE the build, so a malformed tag
-      # fails here rather than after an 8-target cross-compile and a
+      # fails here rather than after a 2-target cross-compile and a
       # multi-arch image push. The script rejects anything that isn't
       # semver-shaped, so a typo can't fall through to `latest`.
       - name: Resolve release channel
@@ -152,7 +152,7 @@ jobs:
           # attestation. Verify them all rather than a representative one —
           # a per-GOOS/GOARCH gap is exactly what this would miss.
           shopt -s nullglob
-          archives=(dist/*.tar.gz dist/*.zip)
+          archives=(dist/*.tar.gz)
           if [ ${#archives[@]} -eq 0 ]; then
             echo "::error::no release archives in dist/ to verify"
             exit 1
