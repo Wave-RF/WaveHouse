@@ -65,7 +65,9 @@ if files[settings.FileConfig], err = json.Marshal(config); err != nil {
 
 doc, findings := settings.ValidateFiles(files)
 for _, f := range findings {
-    fmt.Println(f) // "error: config.json: clickhouse.addr: must be host:port, got ..."
+    // The seed prints one finding, "warning: policies.json: empty document — no policy; ...";
+    // an addr without a port would add "error: config.json: clickhouse.addr: must be host:port, got ...".
+    fmt.Println(f)
 }
 if doc == nil {
     return errors.New("the server would refuse this directory") // an error finding; warnings alone leave doc set
