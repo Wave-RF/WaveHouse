@@ -483,6 +483,14 @@ test-go-toolchain:
 check-dockerfile-go:
 	$(call run,dockerfile go check,scripts/ci/check-dockerfile-go.test.sh && scripts/ci/check-dockerfile-go.sh,)
 
+# check-nats-versions: go.mod's embedded nats-server, the external-NATS test
+# image, the Helm values tag, recommendedNATSMinor and deployment.md must name
+# one MAJOR.MINOR, so a Dependabot bump of go.mod cannot leave the others
+# behind; the behavioral test runs first. A verify leaf.
+.PHONY: check-nats-versions
+check-nats-versions:
+	$(call run,nats versions check,scripts/ci/check-nats-versions.test.sh && scripts/ci/check-nats-versions.sh,)
+
 # test-tagged-tests: assert scripts/ci/tagged-tests.sh, which picks the tests
 # `make test-integration` runs by build tag, against `go test -list` on a
 # throwaway module: a tagged test it missed would never run. A verify leaf.
@@ -628,11 +636,11 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (23): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# Leaves (24): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
 # for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
-# test-classify-paths, test-release-channel, test-go-toolchain, check-dockerfile-go, test-tagged-tests,
+# test-classify-paths, test-release-channel, test-go-toolchain, check-dockerfile-go, check-nats-versions, test-tagged-tests,
 # test-integration-parts, test-prune-pr-build-cache, test-review-gate,
 # test-remote-ci, test-githooks and test-hook-commands for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
@@ -648,7 +656,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-go-toolchain check-dockerfile-go test-tagged-tests test-integration-parts test-prune-pr-build-cache test-review-gate test-remote-ci test-githooks test-hook-commands vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-go-toolchain check-dockerfile-go check-nats-versions test-tagged-tests test-integration-parts test-prune-pr-build-cache test-review-gate test-remote-ci test-githooks test-hook-commands vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.

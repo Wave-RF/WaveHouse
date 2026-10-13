@@ -344,7 +344,7 @@ With `mq.backend: nats`, WaveHouse's message queue is a NATS JetStream cluster y
 
 ### Create the topology
 
-1. **Run NATS 2.14 or later** with JetStream on file storage. The shards need pinned-client priority groups and unpinning, which arrived in 2.11, and a consumer reset to its ack floor, which arrived in 2.14; boot refuses an older server. 2.14.x, the line the external-NATS tests run against, is recommended, and boot warns on a newer line. The embedded broker runs 2.15. [`deployments/nats/values.yaml`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/nats/values.yaml) is a values file for the [NATS Helm chart](https://github.com/nats-io/k8s): a three-node cluster with one account and two users, `nack` for the JetStream controller and `wavehouse` for WaveHouse, whose passwords come from a `nats-users` Secret.
+1. **Run NATS 2.14 or later** with JetStream on file storage. The shards need pinned-client priority groups and unpinning, which arrived in 2.11, and a consumer reset to its ack floor, which arrived in 2.14; boot refuses an older server. 2.15.x, the line the external-NATS tests run against and the embedded broker runs, is recommended, and boot warns on any other line. [`deployments/nats/values.yaml`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/nats/values.yaml) is a values file for the [NATS Helm chart](https://github.com/nats-io/k8s): a three-node cluster with one account and two users, `nack` for the JetStream controller and `wavehouse` for WaveHouse, whose passwords come from a `nats-users` Secret.
 2. **Generate the streams, consumers and lease bucket** as [nack](https://github.com/nats-io/nack) resources (nack's `KeyValue` needs its control-loop mode):
 
    ```bash
