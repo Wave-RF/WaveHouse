@@ -11,11 +11,12 @@
   // deploy jobs consume it from a checkout of trusted `main` — wrangler, the
   // worker source, and this config never come from a PR tree (#305), so PR
   // changes to worker/ or this file take effect on merge, not in previews.
-  // `docs-deploy` runs `wrangler deploy` on pushes to `main` once the whole
-  // pipeline is green (production → wavehouse.dev); `docs-preview` runs
-  // `wrangler versions upload` on PRs right after the build (a per-version
-  // preview URL of the form
-  // `<version-prefix>-wavehouse-docs.wave-rf.workers.dev`, posted on the PR).
+  // Both jobs run the Wave-RF/cloudflare-preview actions. `docs-deploy` runs
+  // `wrangler deploy` on pushes to `main` once the whole pipeline is green
+  // (production → wavehouse.dev); `docs-preview` runs `wrangler versions
+  // upload --preview-alias pr-<N>` on PRs right after the build, and posts
+  // both the stable per-PR URL (`pr-<N>-wavehouse-docs.wave-rf.workers.dev`)
+  // and this version's own URL in a sticky PR comment.
   // Needs CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID repo secrets, and
   // Workers Builds must stay disconnected from this Worker (else it
   // double-deploys and fails the browser-dependent build on every push).

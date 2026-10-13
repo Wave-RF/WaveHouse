@@ -296,15 +296,17 @@ dev: deps-up $(AIR) $(CONFIG_FILES) settings/config.json ## Hot-reload dev serve
 dev-ts: pnpm-install ## Watch-build SDK (tsup --watch)
 	@$(PNPM) --filter $(SDK_NAME) run dev
 
-# dev-docs runs docs/scripts/dev.mjs: a full `astro build` on every save,
-# synced into docs/dist/ and served through `wrangler dev --live-reload` —
-# so the Worker (md twins, pagefind search, llm outputs) behaves exactly like
+# dev-docs runs `cloudflare-md-router dev` (@wave-rf/cloudflare-md-router): a
+# full `astro build` on every save into docs/.dev-dist/, synced into docs/dist/
+# only when it succeeds and served through `wrangler dev --live-reload` — so
+# the Worker (md twins, pagefind search, llm outputs) behaves exactly like
 # production while you edit, and the browser refreshes itself per build.
 # Slower per change than Astro HMR; the raw dev server remains available as
 # `pnpm --filter wavehouse-docs run start` when fidelity doesn't matter.
 # Serves :4321, walking upward if that's taken (ports are machine-wide, so a
-# dev server in another worktree or repo will claim it) — the script prints the
-# port it settled on. DOCS_PORT=… moves the starting point.
+# dev server in another worktree or repo will claim it) — it prints the port
+# it settled on. PORT=… moves the starting point; MD_ROUTER_DEV_STRICT=1 keeps
+# the links validator on in watch builds.
 .PHONY: dev-docs
 dev-docs: install-playwright-docs ## Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321 (next free port if busy)
 	@$(PNPM) --filter $(DOCS_FILTER) run dev

@@ -1,6 +1,5 @@
 ---
 import { relFor, tagFirstParty } from "../config/outbound";
-import { markFirstMentions } from "../config/trademarks";
 import ExternalIcon from "./ExternalIcon.astro";
 import LiveDemo from "./LiveDemo.astro";
 
@@ -40,16 +39,10 @@ const heroData = (data.hero ?? {}) as HeroData;
 const heroTitle = heroData.title || data.title || "";
 const tagline = heroData.tagline;
 const actions = heroData.actions ?? [];
-
-// The tagline is the page's first visible prose, and on the homepage it names
-// ClickHouse — so this, not the body, is where the ® has to land. The hero
-// comes from frontmatter, which never passes through the markdown pipeline, so
-// rehype-trademarks can't reach it; instead that plugin pre-seeds itself from
-// the same frontmatter and skips whatever we mark here. One registry, one
-// first-mention per page, across two rendering paths.
-const marked = markFirstMentions(tagline ?? "", new Set());
-// markFirstMentions returns [] when nothing matched — render the tagline whole.
-const taglineRuns = marked.length > 0 ? marked : [{ text: tagline ?? "" }];
+// The tagline is plain text on purpose: it is the page's first visible prose,
+// and on the homepage it names ClickHouse, so that is where the ® lands. The
+// hero renders inside <main>, where @wave-rf/astro-trademarks marks the first
+// mention of each mark over the finished HTML.
 
 if (import.meta.env.DEV && !heroTitle) {
   // Surfaces breakage immediately when a Starlight minor-version bump renames
@@ -114,12 +107,7 @@ if (import.meta.env.DEV && !heroTitle) {
 
       {tagline && (
         <p class="wh-hero__tagline" data-stagger="2">
-          {taglineRuns.map((run) => (
-            <>
-              {run.text}
-              {run.mark && <span class="wh-tm">{run.mark.symbol}</span>}
-            </>
-          ))}
+          {tagline}
         </p>
       )}
 
