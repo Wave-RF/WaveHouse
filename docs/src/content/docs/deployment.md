@@ -825,6 +825,10 @@ By default, `prometheus.port` is `0`, which mounts `/metrics` on the main API se
 
 For production posture where metrics should not be exposed on the public API listener, set `port` to a separate non-zero value (e.g. `9091`). WaveHouse spins up a dedicated HTTP listener bound to that port serving only `/metrics`. Firewall the port to internal networks only; the main API listener stays where it was. Both listeners participate in graceful shutdown.
 
+### Many tables
+
+Seven metrics carry a `table` label, so each grows by one series per table that sees traffic, multiplied by its other labels. At a few dozen tables that is noise; with table-per-tenant schemas or thousands of tables it shows up in your time-series database's memory and bill. Set `prometheus.per_table_metrics: false` (`WH_METRICS_PER_TABLE=false`) to drop the label and report each metric summed over every table, on the Prometheus endpoint and OTLP push alike. WaveHouse logs one `WARN` naming the setting once its metrics have carried more than 500 distinct tables. See [Configuration → Metric labels](/configuration#metric-labels).
+
 ### Local Observability Stack
 
 We intentionally do not maintain a heavy, multi-node observability cluster (like SigNoz or an ELK stack) for local development. Instead, we use lightweight, ephemeral, single-container tools that boot instantly and clean themselves up.

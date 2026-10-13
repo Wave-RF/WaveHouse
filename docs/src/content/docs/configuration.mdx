@@ -309,6 +309,23 @@ Prometheus exposition is its own top-level config block, independent of `otel.*`
 | `prometheus.enabled` | `WH_PROMETHEUS_ENABLED` | `false` | Expose a Prometheus-format `/metrics` endpoint. Works standalone (no OTel push) or alongside `otel.metrics.enabled`. |
 | `prometheus.path` | `WH_PROMETHEUS_PATH` | `/metrics` | URL path. Must start with `/`, and may not collide with a reserved probe path (`/livez`, `/readyz`, `/healthz`, `/health`, `/ready`). When `port` is `0` (mounted on the main server) it also may not be `/v1` or sit under `/v1/`, which would shadow the authenticated API. An invalid path fails validation at startup. |
 | `prometheus.port` | `WH_PROMETHEUS_PORT` | `0` | Listener port. `0` mounts the endpoint on the main API server (`server.port`) — simplest, no extra port to expose. Non-zero spins up a dedicated HTTP listener, which lets you firewall metrics off the public API surface (common production posture). Must not equal `server.port` when non-zero. |
+| `prometheus.per_table_metrics` | `WH_METRICS_PER_TABLE` | `true` | Keep the `table` label on the metrics that carry one. `false` drops it, so each such metric reports one series summed over every table. Applies to every metric output, OTLP push included, since both share one meter provider. See [Metric labels](#metric-labels). |
+
+#### Metric labels
+
+Every series is a cost in the time-series database that stores it, and the labels a metric carries multiply its series. WaveHouse discovers whatever tables you have and sets no limit on how many, so a label holding a table name grows with your schema: `wavehouse_sse_rows_withheld_total{table, role}` at 2,000 tables and 10 roles is up to 20,000 series. The metrics labeled by `table` are `wavehouse_sse_rows_withheld_total`, `wavehouse_ingest_retries_total`, `wavehouse_ingest_poison_total`, `wavehouse_ingest_dedupe_missing_id_total`, `wavehouse_ingest_dedupe_commit_failed_total`, `wavehouse_ingest_dedupe_disabled_total` and `wavehouse_dedupe_hashed_id_total`.
+
+`prometheus.per_table_metrics: false` drops the `table` label from all of them at once, and each keeps its other labels, summed over every table. It stays `true` by default, because per-table detail is what you want while one table misbehaves. Once the metrics have carried more than 500 distinct table names, the process logs one `WARN` that names this setting; the label stays on until you change it. Turning it off needs a restart.
+
+New metrics follow one rule for their labels:
+
+| Label | Use |
+| ----- | --- |
+| A closed set: `kind`, `role`, `reason`, a status or an error class | Always fine. |
+| `table` | Fine; `prometheus.per_table_metrics` drops it with the rest. |
+| `column` | Avoid: it multiplies against `table`. |
+| `tenant` | Not on a new metric: put it in log fields and span attributes. `wavehouse_schema_refresh_failures_total` predates the rule and still carries it. |
+| A value from a row or a request payload | Never. |
 
 ### Logging
 
@@ -421,6 +438,7 @@ prometheus:
   enabled: false         # independent of otel — works standalone for scrape
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
+  per_table_metrics: true # false = no table label, one series over all tables (OTLP too)
 ```
 
 </TabItem>
@@ -500,6 +518,7 @@ WH_OTEL_LOGS_SAMPLE_RATE=1.0
 WH_PROMETHEUS_ENABLED=false
 WH_PROMETHEUS_PATH=/metrics
 WH_PROMETHEUS_PORT=0
+WH_METRICS_PER_TABLE=true
 ```
 
 </TabItem>

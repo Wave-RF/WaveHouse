@@ -221,6 +221,7 @@ func (a *App) wireObservability(ctx context.Context) {
 		MetricsEnabled:    cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
 		PrometheusEnabled: cfg.Prometheus.Enabled,
 		LogsEnabled:       cfg.OTel.Enabled && cfg.OTel.Logs.Enabled,
+		AggregateTables:   !cfg.Prometheus.PerTableMetrics,
 	})
 	if err != nil {
 		slog.Error("failed to initialize observability, falling back to stdout", "error", err)
