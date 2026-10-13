@@ -25,6 +25,10 @@ export default defineConfig({
   trailingSlash: "never",
   vite: {
     plugins: [tailwindcss()],
+    // Starlight 0.42 imports satteri, a native addon. Bundled into the prerender
+    // chunk it can't find its platform binary, so load it from node_modules
+    // (a direct dependency, so it resolves from dist/ under hoist: false).
+    environments: { prerender: { resolve: { external: ["satteri"] } } },
   },
   markdown: {
     syntaxHighlight: { excludeLangs: ["mermaid"] },
@@ -35,7 +39,13 @@ export default defineConfig({
     // rehypeTrademarks runs last on purpose: it skips the SVG and .katex
     // subtrees the two plugins before it produce, so it has to see them already
     // rendered rather than as ```mermaid fences and $math$.
-    rehypePlugins: [mermaid.rehypeMermaid, rehypeKatex, rehypeTrademarks],
+    // `astro check` renders Markdown since Astro 7.3; the Makefile sets WH_DOCS_CHECK
+    // so it skips rehype-mermaid (no Chromium). build-docs renders the diagrams.
+    rehypePlugins: [
+      ...(process.env.WH_DOCS_CHECK ? [] : [mermaid.rehypeMermaid]),
+      rehypeKatex,
+      rehypeTrademarks,
+    ],
   },
   integrations: [
     starlight({
