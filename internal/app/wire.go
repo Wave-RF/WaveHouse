@@ -215,7 +215,7 @@ func (a *App) wireObservability(ctx context.Context) {
 	if !cfg.OTel.Enabled && !cfg.Prometheus.Enabled {
 		return
 	}
-	shutdown, promHandler, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
+	shutdown, promHandler, err := observability.InitProvider(ctx, a.identity(), observability.ProviderConfig{
 		TracesEnabled:     cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
 		TracesSampleRate:  cfg.OTel.Traces.SampleRate,
 		MetricsEnabled:    cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
@@ -237,9 +237,7 @@ func (a *App) wireObservability(ctx context.Context) {
 	// Prometheus-only mode keeps the stdout-only handler main installed.
 	if cfg.OTel.Enabled && cfg.OTel.Logs.Enabled {
 		slog.SetDefault(observability.NewLogger(serviceName, a.logLevel, true, cfg.OTel.Logs.SampleRate).With(
-			"version", a.build.Version,
-			"build_time", a.build.BuildTime,
-			"git_commit", a.build.GitCommit,
+			a.identity().LogAttrs()...,
 		))
 	}
 	otlpEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")

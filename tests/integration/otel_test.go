@@ -37,6 +37,9 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
+// testIdentity names the process under test in its telemetry.
+var testIdentity = observability.Identity{ServiceName: "wavehouse-test", Version: "v0.0.0-test", InstanceID: "test-1", Roles: []string{"api"}}
+
 // guardOTelGlobals saves and restores the package-global OTel providers so a
 // test's InitProvider call doesn't leak its state into later tests.
 func guardOTelGlobals(t *testing.T) {
@@ -61,7 +64,7 @@ func initAndShutdown(t *testing.T, cfg observability.ProviderConfig) (func(conte
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	shutdown, promHandler, err := observability.InitProvider(ctx, "wavehouse-test", cfg)
+	shutdown, promHandler, err := observability.InitProvider(ctx, testIdentity, cfg)
 	require.NoError(t, err)
 	require.NotNil(t, shutdown)
 	return shutdown, promHandler
@@ -230,6 +233,8 @@ func TestOTel_PrometheusScrape_ExposesMetrics(t *testing.T) {
 	// Counter ending in _total is the standard Prometheus convention; the
 	// OTel exporter applies it automatically.
 	assert.Contains(t, bodyStr, "test_widget_received_total", "/metrics must list the custom counter we recorded")
+	assert.Contains(t, bodyStr, observability.BuildInfoMetric+"{", "/metrics must carry the build_info series")
+	assert.Contains(t, bodyStr, `service_instance_id="test-1"`, "target_info must name the instance")
 	assert.Contains(t, bodyStr, "# HELP", "Prometheus format includes HELP lines")
 	assert.Contains(t, bodyStr, "# TYPE", "Prometheus format includes TYPE lines")
 }
@@ -279,7 +284,7 @@ func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	shutdown, _, err := observability.InitProvider(ctx, "wavehouse-test", cfg)
+	shutdown, _, err := observability.InitProvider(ctx, testIdentity, cfg)
 	require.NoError(t, err, "InitProvider must not fail on unreachable endpoint")
 	require.NotNil(t, shutdown)
 

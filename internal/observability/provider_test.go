@@ -34,7 +34,7 @@ func TestInitProvider_Shutdown(t *testing.T) {
 	// No OTEL_EXPORTER_OTLP_ENDPOINT set → the SDK uses its default target and
 	// the gRPC exporters dial lazily, so InitProvider succeeds regardless of
 	// whether anything is listening.
-	shutdown, promHandler, err := InitProvider(ctx, "wavehouse-test", ProviderConfig{
+	shutdown, promHandler, err := InitProvider(ctx, testIdentity, ProviderConfig{
 		TracesEnabled:    true,
 		TracesSampleRate: 0.10,
 		MetricsEnabled:   true,
@@ -83,7 +83,7 @@ func TestInitProvider_ShutdownParallelBounded(t *testing.T) {
 		otel.SetLoggerProvider(savedLP)
 	})
 
-	shutdown, _, err := InitProvider(context.Background(), "wavehouse-test", ProviderConfig{
+	shutdown, _, err := InitProvider(context.Background(), testIdentity, ProviderConfig{
 		TracesEnabled:  true,
 		MetricsEnabled: true,
 		LogsEnabled:    true,
