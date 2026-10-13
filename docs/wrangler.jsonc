@@ -13,7 +13,8 @@
   // changes to worker/ or this file take effect on merge, not in previews.
   // Both jobs run the Wave-RF/cloudflare-preview actions. `docs-deploy` runs
   // `wrangler deploy` on pushes to `main` once the whole pipeline is green
-  // (production → wavehouse.dev); `docs-preview` runs `wrangler versions
+  // (production → wavehouse.dev, recorded as a GitHub Deployment in the
+  // `production` environment); `docs-preview` runs `wrangler versions
   // upload --preview-alias pr-<N>` on PRs right after the build, and posts
   // both the stable per-PR URL (`pr-<N>-wavehouse-docs.wave-rf.workers.dev`)
   // and this version's own URL in a sticky PR comment.

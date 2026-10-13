@@ -562,6 +562,10 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+      # The deploy is recorded as a GitHub Deployment in the `production`
+      # environment (wavehouse.dev on the Deployments page and on the
+      # commit); GitHub marks the previous production deploy inactive itself.
+      deployments: write
     steps:
       # Push-to-main checkout IS the trusted tree at the pushed commit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -586,6 +590,9 @@ jobs:
           working-directory: docs
           wrangler-command: pnpm exec wrangler
           label: docs
+          github-deployment: "true"
+          environment: production
+          url: https://wavehouse.dev
 
   # ── Aggregator: the ruleset's sole required check ──────────────────
   # Fails when any upstream job failed or was cancelled; treats `skipped`
