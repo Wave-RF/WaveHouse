@@ -90,7 +90,7 @@ func TestStartFlushSpan_LinksEachProducerOnce(t *testing.T) {
 	a, b := producerContext(1), producerContext(2)
 	group := []parsedMsg{tracedMsg(a), tracedMsg(a), tracedMsg(b), tracedMsg(trace.SpanContext{}), {tenant: tenant.Default}}
 
-	_, span := startFlushSpan(context.Background(), "events", group)
+	_, span := otel.Tracer(tracerName).Start(context.Background(), flushSpanName, flushSpanOptions("events", group)...)
 	span.End()
 
 	got := spanNamed(t, rec, "IngestWorker.Flush")
@@ -112,7 +112,7 @@ func TestStartFlushSpan_CapsTheLinksAndCountsEveryProducer(t *testing.T) {
 		group = append(group, tracedMsg(producerContext(byte(i))))
 	}
 
-	_, span := startFlushSpan(context.Background(), "events", group)
+	_, span := otel.Tracer(tracerName).Start(context.Background(), flushSpanName, flushSpanOptions("events", group)...)
 	span.End()
 
 	got := spanNamed(t, rec, "IngestWorker.Flush")

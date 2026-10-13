@@ -754,8 +754,9 @@ func groupByColumns(msgs []parsedMsg) [][]parsedMsg {
 // acked, dead-lettered or left for redelivery: the whole group, or what
 // isolation had not reached. A rejected row is settled; it never makes err.
 func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group []parsedMsg) (unsettled []parsedMsg, err error) {
-	ctx, span := startFlushSpan(ctx, tableName, group)
-	defer func() { endSpan(span, err) }()
+	ctx, span := otel.Tracer(tracerName).Start(ctx, flushSpanName, flushSpanOptions(tableName, group)...)
+	defer span.End()
+	defer func() { recordSpanError(span, err) }()
 	cols := group[0].columns
 
 	err = w.insertToClickHouse(ctx, tableName, cols, group)
@@ -841,8 +842,9 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	if t.URL == "" {
 		return noTargetError(id)
 	}
-	ctx, span := startInsertSpan(ctx, t, tableName, len(msgs))
-	defer func() { endSpan(span, err) }()
+	ctx, span := otel.Tracer(tracerName).Start(ctx, insertSpanName, insertSpanOptions(t, tableName, len(msgs))...)
+	defer span.End()
+	defer func() { recordSpanError(span, err) }()
 	q := url.Values{}
 	q.Set("database", t.Database)
 	q.Set("param_target_table", tableName)
