@@ -830,7 +830,11 @@ For production posture where metrics should not be exposed on the public API lis
 For a memory leak, a goroutine leak or a CPU hotspot in a running process, set `profiling.enabled: true` (`WH_PROFILING_ENABLED=true`). WaveHouse then serves Go's `net/http/pprof` endpoints under `/debug/pprof/` on `profiling.addr`, a listener of its own that is never the API port (see [Configuration → Profiling](/configuration#profiling)). It is off by default. The endpoints take no credential and a heap or goroutine dump shows the process's internals, so the default address is `127.0.0.1:6060`: nothing beyond the host reaches it. On Kubernetes, forward to it rather than exposing it:
 
 ```bash
+# Leave this running; run the commands below in another terminal.
 kubectl port-forward pod/<wavehouse-pod> 6060:6060
+```
+
+```bash
 go tool pprof http://localhost:6060/debug/pprof/heap
 go tool pprof 'http://localhost:6060/debug/pprof/profile?seconds=30'
 curl -s 'http://localhost:6060/debug/pprof/goroutine?debug=2' > goroutines.txt
