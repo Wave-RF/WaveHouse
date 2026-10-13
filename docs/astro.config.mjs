@@ -39,7 +39,13 @@ export default defineConfig({
     // rehypeTrademarks runs last on purpose: it skips the SVG and .katex
     // subtrees the two plugins before it produce, so it has to see them already
     // rendered rather than as ```mermaid fences and $math$.
-    rehypePlugins: [mermaid.rehypeMermaid, rehypeKatex, rehypeTrademarks],
+    // `astro check` renders Markdown since Astro 7.3; the Makefile sets WH_DOCS_CHECK
+    // so it skips rehype-mermaid (no Chromium). build-docs renders the diagrams.
+    rehypePlugins: [
+      ...(process.env.WH_DOCS_CHECK ? [] : [mermaid.rehypeMermaid]),
+      rehypeKatex,
+      rehypeTrademarks,
+    ],
   },
   integrations: [
     starlight({
