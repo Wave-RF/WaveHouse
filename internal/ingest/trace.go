@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"net/url"
+	"strconv"
 
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
@@ -79,8 +80,11 @@ func startInsertSpan(ctx context.Context, t chconn.Target, tableName string, row
 		semconv.DBSQLTable(tableName),
 		attribute.Int("rows", rows),
 	}
-	if u, err := url.Parse(t.URL); err == nil && u.Host != "" {
-		attrs = append(attrs, semconv.ServerAddress(u.Host))
+	if u, err := url.Parse(t.URL); err == nil && u.Hostname() != "" {
+		attrs = append(attrs, semconv.ServerAddress(u.Hostname()))
+		if port, err := strconv.Atoi(u.Port()); err == nil {
+			attrs = append(attrs, semconv.ServerPort(port))
+		}
 	}
 	return otel.Tracer(tracerName).Start(ctx, "clickhouse.insert",
 		trace.WithSpanKind(trace.SpanKindClient),

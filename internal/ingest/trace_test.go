@@ -144,7 +144,8 @@ func TestInsertToClickHouse_SpanIsTheFlushSpansChild(t *testing.T) {
 	assert.Equal(t, "test_db", attr(insert, "db.name").AsString())
 	assert.Equal(t, "INSERT", attr(insert, "db.operation").AsString())
 	assert.Equal(t, "events", attr(insert, "db.sql.table").AsString())
-	assert.Equal(t, "test-clickhouse:8123", attr(insert, "server.address").AsString())
+	assert.Equal(t, "test-clickhouse", attr(insert, "server.address").AsString())
+	assert.Equal(t, int64(8123), attr(insert, "server.port").AsInt64())
 	assert.Equal(t, int64(2), attr(insert, "rows").AsInt64())
 	assert.Equal(t, codes.Unset, insert.Status().Code)
 }
