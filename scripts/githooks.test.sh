@@ -172,6 +172,14 @@ git -C "$repo" commit -q -m v >/dev/null 2>&1 || fail "setup: commit v"
 expect "pre-push: code with no make ci marker is blocked" 1 "'make ci' has not been run" -- "$repo" push -q origin feat2
 in_wt "$repo" env -u CI scripts/ci-marker.sh write
 expect "pre-push: code with a make ci marker for its tree pushes" 0 "!pre-push:" -- "$repo" push -q origin feat2
+git -C "$repo" tag -a v0.0.1 -m release main
+expect "pre-push: a tag of a commit already on origin/main pushes with no marker" 0 "nothing new to validate" -- "$repo" push -q origin v0.0.1
+git -C "$repo" switch -q -c feat3 main
+printf 'package w\n' > "$repo/w.go"
+git -C "$repo" add w.go
+git -C "$repo" commit -q -m w >/dev/null 2>&1 || fail "setup: commit w"
+git -C "$repo" tag -a v0.0.2 -m unreleased
+expect "pre-push: a tag of a commit origin/main lacks still needs its marker" 1 "'make ci' has not been run" -- "$repo" push -q origin v0.0.2
 
 if [ "$fails" -gt 0 ]; then
   printf '\n%d case(s) failed\n' "$fails" >&2
