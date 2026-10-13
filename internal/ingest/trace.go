@@ -57,7 +57,7 @@ func startFlushSpan(ctx context.Context, tableName string, group []parsedMsg) (c
 			links = append(links, trace.Link{SpanContext: sc})
 		}
 	}
-	return otel.Tracer(tracerName).Start(ctx, "IngestWorker.Flush",
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "IngestWorker.Flush",
 		trace.WithSpanKind(trace.SpanKindConsumer),
 		trace.WithLinks(links...),
 		trace.WithAttributes(
@@ -67,6 +67,7 @@ func startFlushSpan(ctx context.Context, tableName string, group []parsedMsg) (c
 			attribute.Int("producers", len(seen)),
 		),
 	)
+	return ctx, span
 }
 
 // startInsertSpan starts the client span of one INSERT into t, a child of the
@@ -86,10 +87,11 @@ func startInsertSpan(ctx context.Context, t chconn.Target, tableName string, row
 			attrs = append(attrs, semconv.ServerPort(port))
 		}
 	}
-	return otel.Tracer(tracerName).Start(ctx, "clickhouse.insert",
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "clickhouse.insert",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(attrs...),
 	)
+	return ctx, span
 }
 
 // endSpan ends span, recording err as its failure when there is one.
