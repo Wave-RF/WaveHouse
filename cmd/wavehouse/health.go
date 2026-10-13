@@ -70,8 +70,8 @@ Exit codes: 0 alive, 1 not alive, 2 usage.
 	// integer-parsed port, literal `/livez`. Gosec's G704 taint
 	// analysis flags the env-var flow regardless of validation, so the
 	// nosec annotations are explicit acknowledgements. Uses the canonical
-	// /livez name rather than a deprecated alias (/healthz, /health) so our
-	// own tooling doesn't break when those aliases are removed in v0.2.0.
+	// /livez name rather than an alias (/healthz, or the deprecated /health)
+	// so our own tooling doesn't break when /health is removed (#818).
 	url := fmt.Sprintf("http://127.0.0.1:%d/livez", port)
 
 	// Short timeout. The /livez handler is in-memory only — no DB, no

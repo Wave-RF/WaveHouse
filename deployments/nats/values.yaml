@@ -111,7 +111,7 @@ config:
 
 container:
   image:
-    tag: 2.14.6-alpine # the server line WaveHouse embeds and tests against
+    tag: 2.14.6-alpine # the server line WaveHouse's external-NATS tests run against
   env:
     NACK_PASSWORD:
       valueFrom:
