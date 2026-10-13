@@ -532,7 +532,7 @@ jobs:
       # after the comment and the Deployment say so, rather than leaving a
       # stale "live" comment.
       - name: Upload docs preview
-        uses: Wave-RF/cloudflare-preview@2d284ab3c5271ae368eee6ff9d9767151a45f835 # v1.0.0
+        uses: Wave-RF/cloudflare-preview@b04a249da74db16d95f746df5bb5e07ad03b604b # v1.1.0
         with:
           cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           cloudflare-account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -564,10 +564,9 @@ jobs:
       contents: read
       # The deploy is recorded as a GitHub Deployment in the `production`
       # environment (wavehouse.dev on the Deployments page and on the
-      # commit). Earlier production records keep their `success` state:
-      # GitHub's auto_inactive covers only non-transient, non-production
-      # environments, and the deploy action doesn't retire them
-      # (Wave-RF/cloudflare-preview#6).
+      # commit). After a successful deploy the action marks the earlier
+      # production records inactive itself (GitHub's auto_inactive skips
+      # production environments), so exactly one stays active.
       deployments: write
     steps:
       # Push-to-main checkout IS the trusted tree at the pushed commit.
@@ -586,7 +585,7 @@ jobs:
           name: docs-dist
           path: docs/dist
       - name: Deploy docs (production)
-        uses: Wave-RF/cloudflare-preview/deploy@2d284ab3c5271ae368eee6ff9d9767151a45f835 # v1.0.0
+        uses: Wave-RF/cloudflare-preview/deploy@b04a249da74db16d95f746df5bb5e07ad03b604b # v1.1.0
         with:
           cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           cloudflare-account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

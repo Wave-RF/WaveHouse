@@ -34,7 +34,7 @@ jobs:
       deployments: write
     steps:
       - name: Retire this PR's docs previews
-        uses: Wave-RF/cloudflare-preview/deployment@2d284ab3c5271ae368eee6ff9d9767151a45f835 # v1.0.0
+        uses: Wave-RF/cloudflare-preview/deployment@b04a249da74db16d95f746df5bb5e07ad03b604b # v1.1.0
         with:
           state: inactive
           label: docs
