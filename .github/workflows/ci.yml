@@ -564,7 +564,10 @@ jobs:
       contents: read
       # The deploy is recorded as a GitHub Deployment in the `production`
       # environment (wavehouse.dev on the Deployments page and on the
-      # commit); GitHub marks the previous production deploy inactive itself.
+      # commit). Earlier production records keep their `success` state:
+      # GitHub's auto_inactive covers only non-transient, non-production
+      # environments, and the deploy action doesn't retire them
+      # (Wave-RF/cloudflare-preview#6).
       deployments: write
     steps:
       # Push-to-main checkout IS the trusted tree at the pushed commit.

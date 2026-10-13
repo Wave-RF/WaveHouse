@@ -39,3 +39,7 @@ jobs:
           state: inactive
           label: docs
           delete: "true"
+          # This job does nothing else, so a failed retire (a permission
+          # regression, an API error) must red it rather than pass as a quiet
+          # warning, the same stance as pr-cache-cleanup.yml.
+          fail-on-error: "true"
