@@ -254,8 +254,9 @@ func hasRequired(findings []Finding) bool {
 var minNATSServer = [3]int{2, 14, 0}
 
 // recommendedNATSMinor is the server line the external-NATS tests run
-// against; the embedded broker runs 2.15 since #806 (#817).
-const recommendedNATSMinor = "2.14."
+// against, which is the embedded broker's line too. check-nats-versions holds
+// it, the test image, the Helm tag, go.mod and deployment.md to one line (#817).
+const recommendedNATSMinor = "2.15."
 
 // topologyVerifier accumulates the findings of one check.
 type topologyVerifier struct {

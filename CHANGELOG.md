@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## Unreleased
 
+### Changed
+
+- **The external-NATS tests, the Helm chart and the recommended server line move to NATS 2.15, the embedded broker's line, and a check keeps them together** (`tests/integration/setup_test.go`, `deployments/nats/values.yaml`, `internal/mq/nats_topology.go` (+ test), `docs/src/content/docs/deployment.md`, `scripts/ci/check-nats-versions.sh` (new, + `.test.sh`), `Makefile`, `docs/src/content/docs/development.md`, `AGENTS.md`): 0.2.0 shipped an embedded nats-server 2.15 beside an external line of 2.14, so the external-NATS suite had never run on the server the embedded broker runs. The test image and the Helm tag are now 2.15.1, boot recommends 2.15.x (a 2.14.x server still boots and now gets the "tested against 2.15.x" advisory; the minimum stays 2.14), and `make check-nats-versions`, a `make verify` leaf, fails when `go.mod`'s nats-server, the test image, the Helm tag, `recommendedNATSMinor` or the External NATS text name different minor lines. Closes [#817](https://github.com/Wave-RF/WaveHouse/issues/817).
+
 ## [0.2.0] - 2026-10-13
 
 Upgrading from 0.1.0 is a conversion, not a binary swap: every behavioural setting moves from `config.yaml` and `WH_*` variables into a settings directory, the policy and pipes move from NATS KV into files in it, the queue is deleted at first boot, and the streaming wire changes, so `@wavehouse/sdk` must move to 0.2.x with the server. [Upgrading](https://wavehouse.dev/upgrading) lists every step in order. In short:
