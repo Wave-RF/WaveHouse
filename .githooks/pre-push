@@ -6,10 +6,13 @@
 #   - any code change → full `make ci` must have passed (tree-keyed marker
 #     tmp/ci-passed-tree-<tree>), exactly as before, here or on another
 #     machine via `make ci-remote`;
-#   - docs/prose-only → `make verify` is enough (CI skips the Go/SDK suites
-#     for these too), so only the verify marker is required — no spinning
-#     up the local Docker suites for a typo fix. pre-commit already runs
-#     `make verify`, so this is usually a zero-extra-work push.
+#   - docs/prose-only → `make verify` is enough locally, so only the verify
+#     marker is required — no spinning up the local Docker suites for a typo
+#     fix. pre-commit already runs `make verify`, so this is usually a
+#     zero-extra-work push. CI classifies a PR by its whole file list, so it
+#     still runs the suites when the PR changed code in an earlier push.
+# A tag of a commit origin/main already contains (a release tag) passes with no
+# marker: there is nothing new to validate.
 # Fail-closed: if the change set can't be classified (no resolvable base,
 # classifier error), fall back to requiring the full `make ci` marker.
 # A pushed commit with no Makefile holds no code to validate (an orphan branch
@@ -53,9 +56,18 @@ block_ci() { # <sha> — require the full make-ci marker
   fi
 }
 
-while read -r _ local_sha _ remote_sha; do
+while read -r _ local_sha remote_ref remote_sha; do
   [ -z "${local_sha:-}" ] && continue
   [ "$local_sha" = "$zero" ] && continue # branch deletion — nothing to validate
+  # A tag of a commit origin/main already has (a release tag) publishes nothing
+  # new to validate: CI ran on that commit when it landed.
+  case $remote_ref in
+    refs/tags/*)
+      if git merge-base --is-ancestor "${local_sha}^{commit}" origin/main 2>/dev/null; then
+        echo "✔ pre-push: ${remote_ref#refs/tags/} tags a commit already on origin/main, so there's nothing new to validate." >&2
+        continue
+      fi ;;
+  esac
   if ! git rev-parse --verify --quiet "$local_sha:Makefile" >/dev/null; then
     echo "pre-push: ${local_sha:0:8} has no Makefile, so no code to validate." >&2
     continue
@@ -82,7 +94,7 @@ while read -r _ local_sha _ remote_sha; do
       echo "🛑 pre-push: docs-only push, but 'make verify' hasn't passed for ${local_sha:0:8}. Run 'make verify' (no Docker) or 'git push --no-verify'." >&2
       exit 1
     fi
-    echo "✔ pre-push: docs/prose-only change — 'make verify' marker present for ${local_sha:0:8} (CI skips the suites too)." >&2
+    echo "✔ pre-push: this push changes only docs/prose, so the 'make verify' marker is enough locally — present for ${local_sha:0:8}." >&2
     continue
   fi
 

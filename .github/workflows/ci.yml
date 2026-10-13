@@ -47,7 +47,8 @@ on:
 
 # Default-deny; each job below redeclares exactly what it needs. Two jobs
 # hold a write scope: docs-preview (sticky PR comment — issues,
-# pull-requests) and coverage (code-quality, for the PR coverage comment).
+# pull-requests; the preview's GitHub Deployment — deployments) and
+# coverage (code-quality, for the PR coverage comment).
 # No job holds contents: write.
 permissions:
   contents: read
@@ -183,7 +184,7 @@ jobs:
       - name: Build docs site
         run: make build-docs
       - name: Upload docs site
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: docs-dist
           path: docs/dist
@@ -222,7 +223,7 @@ jobs:
       - name: Run Go unit tests + SDK vitest tests
         run: make test-unit test-ts COV_DEFER=1
       - name: Upload coverage fragment
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-unit
           path: tmp/coverage
@@ -279,7 +280,7 @@ jobs:
           PART: ${{ matrix.part }}
         run: make "test-integration-$PART" COV_DEFER=1
       - name: Upload coverage fragment
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-integration-${{ matrix.part }}
           path: tmp/coverage
@@ -330,7 +331,7 @@ jobs:
       - name: Build SDK dist + cover binary, run E2E suite
         run: make -j "$(nproc)" test-e2e COV_DEFER=1
       - name: Upload coverage fragment
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-e2e
           path: tmp/coverage
@@ -407,7 +408,7 @@ jobs:
           --producers "$PRODUCERS"
           --timeout 1800
       - name: Download coverage fragments
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: coverage-*
           merge-multiple: true
@@ -439,7 +440,7 @@ jobs:
              github.event.pull_request.head.repo.full_name == github.repository)
           ) }}
         continue-on-error: true
-        uses: actions/upload-code-coverage@d8e329117199404bba6fc81efe8093dc7c015e34 # v1.4.2
+        uses: actions/upload-code-coverage@2b21a77928be8d5168c2b9581a67f2adbebacc52 # v1.4.4
         with:
           file: tmp/coverage/go-coverage.xml
           language: go
@@ -469,12 +470,15 @@ jobs:
   #
   # Cloudflare's own Workers Builds can't build this site (no headless
   # browser at build time for rehype-mermaid), so we ship from here. See
-  # docs/wrangler.jsonc. Both jobs soft-gate on the secrets so a
+  # docs/wrangler.jsonc. Both jobs run Wave-RF/cloudflare-preview, which
+  # soft-gates on the secrets (missing-secrets: skip, its default) so a
   # not-yet-configured repo warns and skips instead of failing CI.
 
-  # PRs: upload a non-active version and post its preview URL as a sticky
-  # comment. Needs only the build artifact, so it publishes right after the
-  # build. NON-GATING: deliberately NOT in the `ci` aggregator's `needs`
+  # PRs: upload a non-active version under the per-PR alias `pr-<N>`,
+  # record a GitHub Deployment (environment preview/docs, the PR's "View
+  # deployment" button) and keep one sticky comment with the alias URL and
+  # this commit's own URL. Needs only the build artifact, so it publishes
+  # right after the build. NON-GATING: deliberately NOT in the `ci` aggregator's `needs`
   # (it is in `timing`'s, for the table) — the preview is a convenience,
   # not a merge gate. `docs-build` already validates the build (and is
   # required); this only deploys MAIN's worker + the static dist to a
@@ -493,16 +497,16 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-      # The sticky-comment endpoint (/repos/.../issues/{num}/comments)
-      # requires `issues: write`; `pull-requests: write` alone doesn't
-      # grant it.
-      issues: write
+      # The sticky comment goes through the issue-comment endpoints, which
+      # `pull-requests: write` alone covers on a PR (measured:
+      # Wave-RF/cloudflare-preview#1), so the job holds no `issues: write`.
       pull-requests: write
+      # The preview's GitHub Deployment record.
+      deployments: write
     steps:
       # Trusted tree: wrangler + worker source + config resolve from main,
-      # not the PR. No persisted credentials — the comment step's fallback
-      # `git fetch origin <sha>` works anonymously on a public repo (PR
-      # heads are advertised under refs/pull/*). Note this also pins
+      # not the PR. No persisted credentials: the preview comment reads the
+      # PR head commit through the API, not git. Note this also pins
       # setup-env itself to main's copy in this job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -516,74 +520,27 @@ jobs:
       - name: Install workspace deps (trusted lockfile)
         run: make pnpm-install
       - name: Download docs site artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: docs-dist
           path: docs/dist
-      - name: Check deploy secrets
-        id: cfsecrets
-        env:
-          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          ACCT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          if [ -n "$TOKEN" ] && [ -n "$ACCT" ]; then
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set — skipping docs preview."
-          fi
-      # A real upload failure (e.g. a misscoped CLOUDFLARE_API_TOKEN →
-      # "Authentication error [code: 10000]") reds the PR instead of hiding
-      # — the retry loop first absorbs transient Cloudflare API blips so a
-      # one-off hiccup doesn't.
+      # Upload with retries (transient Cloudflare API blips; an auth error
+      # is not retried), then the Deployment and the sticky comment, which
+      # adopts the existing `<!-- docs-preview-comment -->` one. A real
+      # upload failure (e.g. a misscoped CLOUDFLARE_API_TOKEN) reds this job
+      # after the comment and the Deployment say so, rather than leaving a
+      # stale "live" comment.
       - name: Upload docs preview
-        id: preview
-        if: steps.cfsecrets.outputs.ok == 'true'
-        working-directory: docs
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          log="$RUNNER_TEMP/wrangler-upload.log"
-          # Retry absorbs transient CF API blips; a persistent failure falls
-          # through to exit 1 and reds the PR.
-          n=0
-          until pnpm exec wrangler versions upload 2>&1 | tee "$log"; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "::error::wrangler versions upload failed after $n attempts — see log above."
-              exit 1
-            fi
-            echo "::warning::wrangler versions upload failed (attempt $n/3) — retrying in 10s."
-            sleep 10
-          done
-          url="$(grep -iE 'Version Preview URL' "$log" | grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' | head -1 || true)"
-          [ -z "$url" ] && url="$(grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' "$log" | head -1 || true)"
-          echo "url=$url" >> "$GITHUB_OUTPUT"
-          if [ -n "$url" ]; then
-            { echo "### 📚 Docs preview"; echo "$url"; } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "::warning::Upload succeeded but no preview URL was parsed from the wrangler output."
-          fi
-
-      # One sticky comment, updated in place (matched by the marker) so
-      # re-pushes don't spam the PR — built by scripts/ci/docs-preview-comment.sh,
-      # which resolves from the trusted MAIN checkout like everything else in
-      # this job. Runs whether the upload succeeded or failed — `!cancelled()`
-      # + an outcome check, since a bare `if:` is implicitly `success()` and
-      # would skip after the upload step's exit 1 — so a failed deploy is
-      # noted rather than leaving a stale "live" comment. Skipped only when
-      # no upload was attempted (outcome == 'skipped').
-      - name: Comment docs preview status
-        if: ${{ !cancelled() && (steps.preview.outcome == 'success' || steps.preview.outcome == 'failure') }}
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
-          URL: ${{ steps.preview.outputs.url }}
-          SHA: ${{ github.event.pull_request.head.sha }}
-          PREVIEW_OUTCOME: ${{ steps.preview.outcome }}
-        run: scripts/ci/docs-preview-comment.sh
+        uses: Wave-RF/cloudflare-preview@62adaa738a5a786c22fe7a0a08a0dd354084326b # v1.1.2
+        with:
+          cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          cloudflare-account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          working-directory: docs
+          wrangler-command: pnpm exec wrangler
+          label: docs
+          comment-marker: "<!-- docs-preview-comment -->"
+          comment-title: "📚 Docs preview"
+          timezone: America/Detroit
 
   # Production: push (or manual dispatch) on main → publish the active
   # version served on wavehouse.dev. Gated on the full pipeline (lint +
@@ -604,6 +561,12 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+      # The deploy is recorded as a GitHub Deployment in the `production`
+      # environment (wavehouse.dev on the Deployments page and on the
+      # commit). After a successful deploy the action marks the earlier
+      # production records inactive itself (GitHub's auto_inactive skips
+      # production environments), so exactly one stays active.
+      deployments: write
     steps:
       # Push-to-main checkout IS the trusted tree at the pushed commit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -616,29 +579,21 @@ jobs:
       - name: Install workspace deps
         run: make pnpm-install
       - name: Download docs site artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: docs-dist
           path: docs/dist
-      - name: Check deploy secrets
-        id: cfsecrets
-        env:
-          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          ACCT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          if [ -n "$TOKEN" ] && [ -n "$ACCT" ]; then
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set — skipping docs deploy."
-          fi
       - name: Deploy docs (production)
-        if: steps.cfsecrets.outputs.ok == 'true'
-        working-directory: docs
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: pnpm exec wrangler deploy
+        uses: Wave-RF/cloudflare-preview/deploy@62adaa738a5a786c22fe7a0a08a0dd354084326b # v1.1.2
+        with:
+          cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          cloudflare-account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          working-directory: docs
+          wrangler-command: pnpm exec wrangler
+          label: docs
+          github-deployment: "true"
+          environment: production
+          url: https://wavehouse.dev
 
   # ── Aggregator: the ruleset's sole required check ──────────────────
   # Fails when any upstream job failed or was cancelled; treats `skipped`

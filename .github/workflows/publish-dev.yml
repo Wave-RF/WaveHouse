@@ -65,15 +65,16 @@ jobs:
           cache: false
 
       # The other half is the reason this job is fast, so cache it on its
-      # own. GoReleaser cross-compiles 8 targets here (4 goos × 2 goarch),
-      # and the last 20 runs split cleanly on whether these objects were
-      # warm: GoReleaser finished in 36-246s with them, 401-446s without.
+      # own. GoReleaser cross-compiles 2 targets here (linux × amd64, arm64).
+      # Measured back when it built 8, the last 20 runs split cleanly on
+      # whether these objects were warm: GoReleaser finished in 36-246s with
+      # them, 401-446s without.
       # (Measured on setup-go's bundled entry, which carried this same
       # ~/.cache/go-build tree — this key is new here.) Dropping them
       # outright would cost roughly 2.5-7 min per push to main (the envelope
       # between those two clusters; mean delta ~4.8 min).
       #
-      # Release-scoped suffix: these objects are cross-compiled for 8
+      # Release-scoped suffix: these objects are cross-compiled for 2
       # GOOS/GOARCH pairs and share nothing with ci.yml's native-only
       # flavors, so `-release` keeps both sides from restoring bytes the
       # other can't use. Same `gobuild-v3` family and key inputs as
@@ -109,7 +110,7 @@ jobs:
       # needed — Dockerfile.goreleaser stages are $BUILDPLATFORM-pinned /
       # COPY-only by design.
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0

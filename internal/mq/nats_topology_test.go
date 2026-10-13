@@ -384,11 +384,12 @@ func TestAwaitNATSTopology_ContextEnds(t *testing.T) {
 func TestVerifyNATSTopology_ServerVersion(t *testing.T) {
 	t.Parallel()
 	cases := map[string]*FindingSeverity{
-		"2.14.6":       nil,
-		"v2.14.0-beta": nil,
+		"2.15.1":       nil,
+		"v2.15.0-beta": nil,
+		"2.14.6":       new(FindingRecommended),
 		"2.10.0":       new(FindingRequired),
 		"2.13.9":       new(FindingRequired),
-		"2.15.1":       new(FindingRecommended),
+		"2.16.0":       new(FindingRecommended),
 		"2.9.25":       new(FindingRequired),
 		"1.4.1":        new(FindingRequired),
 		"garbage":      new(FindingRequired),

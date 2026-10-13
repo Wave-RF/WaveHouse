@@ -113,9 +113,8 @@ Releases are built with [GoReleaser](https://goreleaser.com/). The configuration
 | OS | Architecture |
 | -- | ----------- |
 | Linux | amd64, arm64 |
-| macOS | amd64, arm64 |
-| Windows | amd64, arm64 |
-| FreeBSD | amd64, arm64 |
+
+Other systems run the [container image](#docker-images), or build from source with `go install`.
 
 ### Creating a Release
 
@@ -239,7 +238,7 @@ API servers in standalone mode expose liveness and readiness endpoints under the
 - `GET /livez` — Liveness probe. Returns 200 once the gateway has discovered ClickHouse table schemas at least once. Returns 503 with a diagnostic body while the boot-time schema discovery retry loop is still running (e.g. ClickHouse unreachable, target database missing). After successful boot, `/livez` stays 200 — transient ClickHouse blips at runtime are reflected in `/readyz`, not `/livez`. Over a [nested settings directory](#the-nested-settings-directory) it is 503 while no tenant has completed a first discovery, and 200 from the first tenant's success on.
 - `GET /readyz` — Readiness probe. Returns 200 if the gateway is fully booted and every backend it cannot do its job without is answering, 503 otherwise, naming each check that failed: `clickhouse` (every open pool is pinged at once and one that answers is enough; the failure names every pool that did not), `mq` under [`mq.backend: nats`](#external-nats) (the connection is down, or the topology failed its last check — the lease bucket of `coord.backend: nats` included). The shared cache and the dedupe stores are not checks: a tripped breaker falls back to ClickHouse, and a dedupe store that is not answering fails that tenant's ingest closed per request. Full behavior in the [API reference](/api#get-readyz--readiness-probe).
 
-`/healthz` remains registered as a **permanent alias** of `/livez` (it's the most widely-recognized name); `/health` and `/ready` are **deprecated aliases** for the v0.1.x line and will be removed in v0.2.0. Point new deployments at the `/livez` / `/readyz` names.
+`/healthz` remains registered as a **permanent alias** of `/livez` (it's the most widely-recognized name); `/health` and `/ready` are **deprecated aliases**: still served in v0.2.0, and to be removed in a later release ([#818](https://github.com/Wave-RF/WaveHouse/issues/818)). Point new deployments at the `/livez` / `/readyz` names.
 
 Configure your load balancer or orchestrator to use these endpoints.
 
@@ -344,7 +343,7 @@ With `mq.backend: nats`, WaveHouse's message queue is a NATS JetStream cluster y
 
 ### Create the topology
 
-1. **Run NATS 2.14 or later** with JetStream on file storage. The shards need pinned-client priority groups and unpinning, which arrived in 2.11, and a consumer reset to its ack floor, which arrived in 2.14; boot refuses an older server. 2.14.x, the line WaveHouse embeds, is recommended, and boot warns on a newer line. [`deployments/nats/values.yaml`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/nats/values.yaml) is a values file for the [NATS Helm chart](https://github.com/nats-io/k8s): a three-node cluster with one account and two users, `nack` for the JetStream controller and `wavehouse` for WaveHouse, whose passwords come from a `nats-users` Secret.
+1. **Run NATS 2.14 or later** with JetStream on file storage. The shards need pinned-client priority groups and unpinning, which arrived in 2.11, and a consumer reset to its ack floor, which arrived in 2.14; boot refuses an older server. 2.15.x, the line the external-NATS tests run against and the embedded broker runs, is recommended, and boot warns on any other line. [`deployments/nats/values.yaml`](https://github.com/Wave-RF/WaveHouse/blob/main/deployments/nats/values.yaml) is a values file for the [NATS Helm chart](https://github.com/nats-io/k8s): a three-node cluster with one account and two users, `nack` for the JetStream controller and `wavehouse` for WaveHouse, whose passwords come from a `nats-users` Secret.
 2. **Generate the streams, consumers and lease bucket** as [nack](https://github.com/nats-io/nack) resources (nack's `KeyValue` needs its control-loop mode):
 
    ```bash
@@ -576,6 +575,8 @@ The folder name is the tenant id, and each folder is a complete settings directo
 
 ### Upgrading behind a proxy that already sends `X-Tenant-ID`
 
+This is one step of [upgrading from 0.1.0](/upgrading#from-010-to-020); follow that page for the full order, which includes exporting the policy and pipes while 0.1.0 still runs.
+
 `X-Tenant-ID` is a generic name, and some gateways and service meshes stamp one on every request. WaveHouse used to ignore it; now, over a settings directory that holds the four files, any value other than `0` names an unknown tenant, so **every `/v1` route outside `/v1/ops/*` answers `404 unknown tenant: <id>`** (a `400` when the value is not a tenant id at all, a dotted hostname, say) — the SDK's `/v1/health` reachability ping included, while the bare probes and the admin surface stay green. Strip the inbound header at the edge ([header forwarding](/reverse-proxy#header-and-auth-forwarding)) unless you are using it deliberately.
 
 ## Multiple instances and the shared cache
@@ -624,9 +625,11 @@ WaveHouse discovers this schema on startup and refreshes it every `schema.refres
 
 ## Upgrading across the dedupe key change
 
-The dedupe key now carries the table as well as the tenant ([#222](https://github.com/Wave-RF/WaveHouse/issues/222)), so **an id deduped before the upgrade is not recognized after it**: a record carrying it is accepted once more. Nothing is migrated. The old keys never count as seen, and the dedupe sweep deletes them: its first pass runs about a minute after the instance opens, and `wavehouse_dedupe_swept_keys_total{reason="version_0"}` counts them ([#220](https://github.com/Wave-RF/WaveHouse/issues/220)). Pebble returns their disk space as it compacts, not at once. Only a tenant with `dedupe.enabled` on is affected, and only by a record sent both before and after the upgrade — typically a producer retrying across the restart. To avoid duplicate rows, let retrying producers finish, or pause them, before upgrading.
+This is one step of [upgrading from 0.1.0](/upgrading#from-010-to-020); follow that page for the full order, which includes exporting the policy and pipes while 0.1.0 still runs.
 
-The same release adds an optional **`dedupe.retention`** key. No upgrade step is needed: a `config.json` without it keeps every id forever, as before. See [Deduplication](/settings-directory#deduplication) for a finite one.
+The dedupe key now carries the tenant and the table as well as the id ([#222](https://github.com/Wave-RF/WaveHouse/issues/222)), so **an id deduped before the upgrade is not recognized after it**: a record carrying it is accepted once more. Nothing is migrated. The old keys never count as seen, and the dedupe sweep deletes them: its first pass runs about a minute after the instance opens, and `wavehouse_dedupe_swept_keys_total{reason="version_0"}` counts them ([#220](https://github.com/Wave-RF/WaveHouse/issues/220)). Pebble returns their disk space as it compacts, not at once. Only a tenant with `dedupe.enabled` on is affected, and only by a record sent both before and after the upgrade — typically a producer retrying across the restart. To avoid duplicate rows, let retrying producers finish, or pause them, before upgrading.
+
+0.2.0 also adds an optional **`dedupe.retention`** key. No upgrade step is needed: a `config.json` without it keeps every id forever, as before. See [Deduplication](/settings-directory#deduplication) for a finite one.
 
 ## A shared dedupe table on DynamoDB
 
@@ -711,7 +714,9 @@ For development against dynamodb-local, set `dedupe.dynamodb.endpoint` (for exam
 
 ## Upgrading across the v2 ingest envelope
 
-The NATS envelope changed shape in this release: the row now travels positionally, with `format`, `columns` and `row` replacing `data` — and the queue changed layout with it: boot deletes the earlier build's queue (below), so nothing an older version published reaches the new worker, which could not read it anyway (it carries no `format`, so there is no way to say which value belongs to which column). **Drain first** to keep what the old build had not yet inserted.
+This is one step of [upgrading from 0.1.0](/upgrading#from-010-to-020); follow that page for the full order, which includes exporting the policy and pipes while 0.1.0 still runs.
+
+The NATS envelope changed shape in 0.2.0: the row now travels positionally, with `format`, `columns` and `row` replacing `data` — and the queue changed layout with it: boot deletes the earlier build's queue (below), so nothing an older version published reaches the new worker, which could not read it anyway (it carries no `format`, so there is no way to say which value belongs to which column). **Drain first** to keep what the old build had not yet inserted.
 
 The streaming surface loses something too, more quietly. SSE gap-fill (`?since=` / `Last-Event-ID`) replays from the queue, so the deletion takes the replay history with it, even after a *correct* drain: any replay spanning the upgrade silently omits the pre-upgrade events, with **no error and no frame**. Clients that need them should backfill over REST.
 
@@ -730,7 +735,7 @@ To drain before upgrading:
 1. **Stop the producers**, or cut `/v1/ingest` at the reverse proxy. Nothing new should enter the stream.
 2. **Wait for the in-flight batches to flush.** A table's batch closes on size or after `maxWait` (5s by default), so a few seconds after the last write is enough; give it longer if ClickHouse is slow.
 3. **Confirm nothing is left unconsumed** before swapping binaries. Not that the stream is empty: it is dual-use, and deliberately retains ACKed messages for the SSE replay window, so a non-zero depth right after a clean drain is expected. Rows landing in ClickHouse is a success signal, **not proof the queue is drained** — when the DLQ is off, a row that fails its retry is skipped without being acked, so NATS keeps redelivering it while its neighbors land. Check that nothing is still failing or redelivering, and note which signal covers which case: [`GET /v1/ops/dlq/stats`](/api#get-v1opsdlqstats--dlq-statistics) is non-zero only where the DLQ is **on**; on a build that exposes it (from the v2 envelope on), `wavehouse_ingest_poison_total` counts unreadable envelopes on **either** setting, told apart by its `disposition` label (`parked` / `dropped`); and for a twice-failed row with the DLQ off — the case just described — the **only** signal is the `ERROR` log: `isolated bad row, DLQ disabled for table` on a build with the per-table switch, or, on v0.1.0, `isolated bad row, sending to DLQ` followed by `NATS DLQ publish failed`. A clean `dlq/stats` with the DLQ off proves nothing. There is no queue-depth gauge today ([#544](https://github.com/Wave-RF/WaveHouse/issues/544) tracks the related in-flight accounting), and `wavehouse_nats_in_msgs_total` going flat is a supporting signal rather than a guarantee. Enabling the DLQ is not itself a drain: a parked row is not inserted, and the upgrade deletes it.
-4. **Upgrade**, then re-enable ingest.
+4. **Upgrade** as [Upgrading → Switch over](/upgrading#switch-over) describes, then re-enable ingest.
 
 If you skipped the drain, the boot's `WARN` line for each deleted stream (`deleted the stream an earlier build kept for every tenant together`) says how many messages went with it: for `WAVEHOUSE_DLQ`, the parked rows lost; for `WAVEHOUSE`, a count that includes the acknowledged history kept for replay, already in ClickHouse — so it bounds the events lost rather than counting them, and is non-zero even after a clean drain.
 

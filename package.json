@@ -15,8 +15,8 @@
     "fix:md": "node scripts/fix-mdx-fences.mjs && (markdownlint-cli2 --fix || true) && markdownlint-cli2 --fix"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.8",
-    "markdownlint-cli2": "^0.23.2",
+    "@biomejs/biome": "^2.5.15",
+    "markdownlint-cli2": "^0.23.3",
     "nyc": "^18.0.0"
   }
 }

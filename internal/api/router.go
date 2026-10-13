@@ -217,8 +217,8 @@ func newProbeRouter(origins func(*http.Request) []string, health *HealthHandler,
 	// (current Kubernetes convention — the kube-apiserver split that replaced
 	// the older conflated /healthz). /healthz is kept as a permanent alias of
 	// /livez (it's the most widely-recognized name); /health and /ready are
-	// deprecated aliases, kept for v0.1.x and scheduled for removal in v0.2.0
-	// (see CHANGELOG). The SDK-facing public liveness ping is /v1/health.
+	// deprecated aliases, still served in v0.2.0; their removal is #818.
+	// The SDK-facing public liveness ping is /v1/health.
 	r.Get("/livez", health.Liveness)
 	r.Get("/readyz", health.Readiness)
 	r.Get("/healthz", health.Liveness) // permanent alias of /livez
