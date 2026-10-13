@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"slices"
@@ -845,30 +846,36 @@ func (e *ExternalNATS) ResetOrphaned(ctx context.Context, name string) (bool, er
 	return true, nil
 }
 
-// Unowned implements Sharded: the units whose durable has rows pending or
-// awaiting an ack while no client holds its pin and none was active on it
-// within its pinned_ttl. A live owner keeps its pin by pulling, even with
-// nothing more to fetch, so such a unit has nobody writing it.
-func (e *ExternalNATS) Unowned(ctx context.Context) (int, error) {
+// UnitStates implements Sharded: each durable's pending, ack-pending and
+// redelivered counts, its max_ack_pending, and whether a client holds its
+// pin or was active on it within its pinned_ttl. A live owner keeps its pin
+// by pulling, even with nothing more to fetch, so a unit with rows and no
+// holder has nobody writing it.
+func (e *ExternalNATS) UnitStates(ctx context.Context) ([]UnitState, error) {
 	units := slices.Clone(e.units)
 	if xs := e.extras.Load(); xs != nil {
 		units = append(units, *xs...)
 	}
-	n := 0
+	states := make([]UnitState, 0, len(units))
 	for _, u := range units {
 		c, err := e.js.Consumer(ctx, u.stream, u.durable)
 		if errors.Is(err, jetstream.ErrConsumerNotFound) {
 			continue // the topology check names it
 		}
 		if err != nil {
-			return 0, fmt.Errorf("consumer %s: %w", u.id(), e.apiError(err))
+			return nil, fmt.Errorf("consumer %s: %w", u.id(), e.apiError(err))
 		}
 		info := c.CachedInfo()
-		if (info.NumPending > 0 || info.NumAckPending > 0) && pinnedClient(info) == "" && !e.recentlyActive(info) {
-			n++
-		}
+		states = append(states, UnitState{
+			Unit:          u.id(),
+			Pending:       int(min(info.NumPending, uint64(math.MaxInt))), //nolint:gosec // G115: clamped
+			AckPending:    info.NumAckPending,
+			MaxAckPending: info.Config.MaxAckPending,
+			Redelivered:   info.NumRedelivered,
+			Held:          pinnedClient(info) != "" || e.recentlyActive(info),
+		})
 	}
-	return n, nil
+	return states, nil
 }
 
 // activeWindow is how recently a durable must have delivered or had an ack

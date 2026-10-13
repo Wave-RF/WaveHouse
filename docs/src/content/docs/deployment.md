@@ -474,11 +474,23 @@ The ingest processes export these for their shards:
 | `wavehouse_ingest_shards_owned` | Shards this process holds and consumes. The sum over processes is partitions × shards, plus any extras still draining, once membership has settled. |
 | `wavehouse_ingest_shard_members` | Ingest processes this process last counted. |
 | `wavehouse_ingest_shards_unowned` | Shards with rows waiting that no process holds, and that have delivered nothing and had no ack for the pinned TTL, read every 15 seconds by the lowest-ranked member only (the others report nothing, so take the `max` across processes). Alert when it stays above `0` for a minute or more: rows nobody is writing. A shard whose process is stuck on a hung insert keeps its pin, so it does not count. |
+| `wavehouse_ingest_shard_owned{shard}` | `1` for each shard this process holds and consumes, labeled by the shard's name (`<partition stream>/<durable>`, such as `WH_INGEST_0/wh-ingest-3`), so `max by (shard, instance)` says which process owns which shard, and a shard with no series has no owner. |
+| `wavehouse_ingest_shard_pending{shard}` | Rows stored on the shard and not yet delivered to any process, read every 15 seconds by the lowest-ranked member only, like `wavehouse_ingest_shards_unowned`. A backlog that grows on a shard someone owns is that shard's owner falling behind. |
+| `wavehouse_ingest_shard_ack_pending{shard}` | Rows delivered from the shard and awaiting an ack or a nak, read the same way. Alert when it sits at `wavehouse_ingest_shard_max_ack_pending{shard}`: the server delivers nothing more from the shard until a row settles, so every table in it stops while the rows that fill it (a tenant whose ClickHouse refuses inserts, or one table that keeps failing, whose rows are handed back with a delay and keep their slot) are retried. |
+| `wavehouse_ingest_shard_max_ack_pending{shard}` | The shard durable's `max_ack_pending` (10,000 in the generated manifests), read the same way. |
+| `wavehouse_ingest_shard_redelivered{shard}` | Rows delivered from the shard more than once that still await an ack or a nak, read the same way: rows being retried, or taken over from a process that died. |
 | `wavehouse_ingest_rows_held` | Rows delivered to this process that it has not yet acked or nacked (confirmed or not), and that are younger than `ack_wait`, across its shards; each shard holds about its share at most (see [Scaling ingest processes](#scaling-ingest-processes)). |
 | `wavehouse_ingest_shard_events_total{event}` | `taken`, `released`, `reset` (a dead owner's rows redelivered at takeover), `handover_timeout` (a shard released before its rows were acked or handed back), `lost` (the membership lease ended under the process), `bind_failed` (a shard could not be bound; tried again next tick, and logged as an error once it has failed for a minute). A configured shard durable (one of the N×V) that is gone, with its stream or alone, or that no longer fits the worker (its `ack_wait` shorter than a minute, or no `max_ack_pending`), ends the worker instead, as a durable deleted while it is pulled does; a leftover durable past a lower N or V is only logged. |
 | `wavehouse_ingest_shard_handover_seconds` | From giving a shard up to releasing it. |
 
 `wavehouse_nats_connections` and `wavehouse_nats_in_msgs_total` describe this process's client connection under `nats` (`1` or `0`, and the messages it has received), where under `embedded` they describe the embedded server.
+
+Under `coord.backend: nats` every ingest process exports its lease, labeled by name (`ingest.m<j>`, its membership slot; there is no sweeper lease under this backend):
+
+| Metric | Meaning |
+| --- | --- |
+| `wavehouse_coord_lease_held{lease}` | `1` for each lease this process holds, so `max by (lease, instance)` says which process holds each membership slot. |
+| `wavehouse_coord_lease_renewal_failures_total{lease}` | Renewals of the lease this process could not store: the write failed or got no answer. A holder renews every 2 seconds and steps down once 10 seconds pass without a stored renewal, so a streak that keeps growing ends in the term's loss (`wavehouse_ingest_shard_events_total{event="lost"}` for a membership slot) and a candidate's takeover once it has seen the lease unrenewed for 15 seconds. Each streak is logged as well: `coord: lease renewal failed; trying again until the renew deadline` at `WARN` on its first failure, with the time left to the deadline, and `coord: lease renewed again` at `INFO` when a renewal is stored again. |
 
 ## One Deployment per role
 

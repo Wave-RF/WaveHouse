@@ -240,9 +240,11 @@ func TestShardClaims_BlockedOwnerKeepsItsShard(t *testing.T) {
 		require.Equal(t, pin, now, "the pin moved %s into the block", time.Since(blocked).Round(time.Millisecond))
 		require.LessOrEqual(t, d-delivered, uint64(time.Since(blocked).Seconds()/5)+1, "at most one row past the share per renewal")
 		if time.Since(blocked) > 11*time.Second {
-			n, err := a.broker.Unowned(t.Context())
+			states, err := a.broker.UnitStates(t.Context())
 			require.NoError(t, err)
-			assert.Zero(t, n, "a blocked owner's unit is not unowned")
+			for _, st := range states {
+				assert.False(t, st.Unowned(), "a blocked owner's unit is not unowned: %+v", st)
+			}
 			_, err = other.ResetOrphaned(t.Context(), unit)
 			assert.ErrorIs(t, err, mq.ErrUnitHeld, "nor may another process reset it")
 		}

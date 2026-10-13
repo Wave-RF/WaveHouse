@@ -110,3 +110,24 @@ func TestMessage_OnSettled(t *testing.T) {
 	require.NoError(t, m.Ack())
 	assert.Equal(t, 1, fired, "a message without callbacks settles at once")
 }
+
+func TestUnitState_Unowned(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		state UnitState
+		want  bool
+	}{
+		{"nothing stored", UnitState{}, false},
+		{"rows pending, no holder", UnitState{Pending: 1}, true},
+		{"rows awaiting an ack, no holder", UnitState{AckPending: 1}, true},
+		{"rows pending, held", UnitState{Pending: 1, Held: true}, false},
+		{"rows awaiting an ack, held", UnitState{AckPending: 1, Held: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, tt.state.Unowned())
+		})
+	}
+}

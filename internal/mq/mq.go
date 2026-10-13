@@ -284,10 +284,31 @@ type Sharded interface {
 	// before consuming it, never while consuming it: a reset also redelivers
 	// what the caller itself holds.
 	ResetOrphaned(ctx context.Context, unit string) (bool, error)
-	// Unowned counts the units with rows waiting that no consumer holds and
-	// none has received from or settled a message of for a while: rows
-	// nobody is writing.
-	Unowned(ctx context.Context) (int, error)
+	// UnitStates reads every unit's backlog from the broker, one state per
+	// unit, in IngestUnits' order, leaving out a unit whose consumer is
+	// gone (the topology check reports it): what the ingest processes
+	// export.
+	UnitStates(ctx context.Context) ([]UnitState, error)
+}
+
+// UnitState is one unit's backlog as the broker last read it.
+type UnitState struct {
+	Unit string
+	// Pending is the rows stored and not yet delivered; AckPending the rows
+	// delivered and awaiting a settlement, which the broker caps at
+	// MaxAckPending, delivering nothing more from the unit while it is
+	// reached; Redelivered the rows among them delivered more than once.
+	Pending, AckPending, MaxAckPending, Redelivered int
+	// Held reports a consumer holding the unit, or one that received from
+	// it or settled a message of it recently enough to be judged live.
+	Held bool
+}
+
+// Unowned reports a unit with rows waiting that no consumer holds and none
+// has received from or settled a message of for a while: rows nobody is
+// writing.
+func (s UnitState) Unowned() bool {
+	return (s.Pending > 0 || s.AckPending > 0) && !s.Held
 }
 
 // Releaser is implemented by a consumer of a Sharded broker's units. Release
