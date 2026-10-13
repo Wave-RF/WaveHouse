@@ -497,12 +497,11 @@ func middleware(current func(context.Context) (tenant.ID, *verifier), operatorKe
 					// privileged credential in the system — full data-plane +
 					// admin, honored even when the policy is wiped — so its use
 					// must be visible in production logs (Info+), mirroring the
-					// WARN emitted on an authz denial. Correlation fields
-					// (request_id, and eventually the trusted-proxy client IP) are
-					// deliberately NOT stamped per-call-site — they belong in the
-					// global TraceHandler (internal/observability) so every log line
-					// gets them uniformly; tracked in #333. When OTel is enabled this
-					// line already carries trace_id/span_id from that handler.
+					// WARN emitted on an authz denial. Correlation fields are
+					// deliberately NOT stamped per-call-site: the global
+					// TraceHandler (internal/observability) adds request_id,
+					// tenant and, when a span is active, trace_id/span_id to
+					// every line; the trusted-proxy client IP is #333.
 					slog.LogAttrs(r.Context(), slog.LevelInfo, "operator key authenticated request",
 						slog.String("path", r.URL.Path),
 						slog.String("method", r.Method),
@@ -524,7 +523,8 @@ func middleware(current func(context.Context) (tenant.ID, *verifier), operatorKe
 					// other unauthenticated caller. WARN + a counter because a
 					// mismatch is a strong probing/brute-force signal: nobody
 					// sends a wrong operator key by accident. Same correlation-field
-					// deferral (request_id / client IP → #333) as the audit line above.
+					// handling as the audit line above: request_id and tenant from
+					// TraceHandler, the client IP in #333.
 					operatorKeyFailures.Add(r.Context(), 1)
 					slog.LogAttrs(r.Context(), slog.LevelWarn, "operator key authentication failed",
 						slog.String("path", r.URL.Path),
