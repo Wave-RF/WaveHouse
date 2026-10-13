@@ -81,14 +81,17 @@ importers:
         specifier: ^4.3.3
         version: 4.3.3(vite@8.3.3(@types/node@26.6.4)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
       '@wave-rf/astro-themed-mermaid':
-        specifier: ^0.3.1
-        version: 0.3.1(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))(rehype-mermaid@3.0.0(playwright@1.63.0))
+        specifier: ^0.4.0
+        version: 0.4.0(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))(playwright@1.63.0)(rehype-mermaid@3.0.0(playwright@1.63.0))
+      '@wave-rf/astro-trademarks':
+        specifier: ^0.1.0
+        version: 0.1.0(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
       '@wave-rf/cloudflare-md-router':
         specifier: ^0.3.0
         version: 0.3.0(@cloudflare/workers-types@5.20261006.1)
       '@wave-rf/starlight-llm-tools':
-        specifier: ^0.3.1
-        version: 0.3.1(@astrojs/starlight@0.42.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))(supports-color@10.2.2)(typescript@6.0.3))(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
+        specifier: ^0.3.2
+        version: 0.3.2(@astrojs/starlight@0.42.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))(supports-color@10.2.2)(typescript@6.0.3))(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
       '@wavehouse/sdk':
         specifier: ^0.1.1
         version: 0.1.1
@@ -2156,12 +2159,23 @@ packages:
   '@vtbag/utensil-drawer@1.2.18':
     resolution: {integrity: sha512-Veg1J8lviA2g878otiEHoyiGR2f4PZ5Rc40UyIR4YS95QnD+1+oAZsprhUPR+YudgZPrqWx5chyPNwjkHyA0uw==}
 
-  '@wave-rf/astro-themed-mermaid@0.3.1':
-    resolution: {integrity: sha512-TaNwLERA3B/aCkODILP6m0TDRmfTtOvPXc5Ss52a0PRmjjJGtMcChH0TH6hCArIo1qpDClCzDgFQ2AEbVmFYtg==}
+  '@wave-rf/astro-themed-mermaid@0.4.0':
+    resolution: {integrity: sha512-taJp7KprfyFFdNEr+Eddkm5QEmCirEuy+Lot5uZKwi9NWbOCiTzVLBes2DqPwdQZJ7WNYVDEQc9km70Wj8R9JQ==}
     engines: {node: '>=20'}
+    hasBin: true
     peerDependencies:
       astro: '>=5.0.0'
+      playwright: '>=1.40.0'
       rehype-mermaid: '>=3.0.0'
+    peerDependenciesMeta:
+      playwright:
+        optional: true
+
+  '@wave-rf/astro-trademarks@0.1.0':
+    resolution: {integrity: sha512-RDMejYmucCXsGvhgf1BMgbMllNIya1fVeZEaSiKivDXNRfRXnhJ1m5jjUk7uBg+lFRX+lWoTaHVyL3cQSyJ7FA==}
+    engines: {node: '>=22.12.0'}
+    peerDependencies:
+      astro: '>=6.0.0'
 
   '@wave-rf/cloudflare-md-router@0.3.0':
     resolution: {integrity: sha512-Ht5LM3XN1Ul9/ReDXhy+OfD4IZqWDVvIf5i3V5akDUYWudXDZ/5j0aVirEAIo8Iu1lgciuDPqIxotBtHf/jFYg==}
@@ -2170,8 +2184,8 @@ packages:
     peerDependencies:
       '@cloudflare/workers-types': '>=4.0.0'
 
-  '@wave-rf/starlight-llm-tools@0.3.1':
-    resolution: {integrity: sha512-tKawvLq2sl3FClk9F0G9HbKqqY1rmMUgDrryi7gOwjB+l/PV1HL1cU1MLCMtBy3CwGbX3pMudOduoZmYLPGt+w==}
+  '@wave-rf/starlight-llm-tools@0.3.2':
+    resolution: {integrity: sha512-TzIhCYwWDThB2k6OXVNm8FjiN09wNQZ3o42dnTTG2Ekid3n6oDUCPI4Qoa4UOut06cICZcVGFsNcTi6UWdx3+Q==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
       '@astrojs/starlight': '>=0.36.0'
@@ -3889,6 +3903,9 @@ packages:
 
   parse5@7.3.0:
     resolution: {integrity: sha512-IInvU7fabl34qmi9gY8XOVxhYyMyuH2xUNpb2q8/Y+7552KlejkRvqvD19nMoUW/uQGGbqNpA6Tufu5FL5BZgw==}
+
+  parse5@8.0.1:
+    resolution: {integrity: sha512-z1e/HMG90obSGeidlli3hj7cbocou0/wa5HacvI3ASx34PecNjNQeaHNo5WIZpWofN9kgkqV1q5YvXe3F0FoPw==}
 
   path-browserify@1.0.1:
     resolution: {integrity: sha512-b7uo2UCUOYZcnF/3ID0lulOJi/bafxa1xPe7ZPsammBSpjSWQkjNxlt635YGS2MiR9GjvuXCtz2emr3jbsz98g==}
@@ -6604,17 +6621,25 @@ snapshots:
 
   '@vtbag/utensil-drawer@1.2.18': {}
 
-  '@wave-rf/astro-themed-mermaid@0.3.1(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))(rehype-mermaid@3.0.0(playwright@1.63.0))':
+  '@wave-rf/astro-themed-mermaid@0.4.0(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))(playwright@1.63.0)(rehype-mermaid@3.0.0(playwright@1.63.0))':
     dependencies:
       astro: 7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)
       rehype-mermaid: 3.0.0(playwright@1.63.0)
       unist-util-visit: 5.1.0
+    optionalDependencies:
+      playwright: 1.63.0
+
+  '@wave-rf/astro-trademarks@0.1.0(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))':
+    dependencies:
+      astro: 7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)
+      entities: 8.1.0
+      parse5: 8.0.1
 
   '@wave-rf/cloudflare-md-router@0.3.0(@cloudflare/workers-types@5.20261006.1)':
     dependencies:
       '@cloudflare/workers-types': 5.20261006.1
 
-  '@wave-rf/starlight-llm-tools@0.3.1(@astrojs/starlight@0.42.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))(supports-color@10.2.2)(typescript@6.0.3))(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))':
+  '@wave-rf/starlight-llm-tools@0.3.2(@astrojs/starlight@0.42.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))(supports-color@10.2.2)(typescript@6.0.3))(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))':
     dependencies:
       '@astrojs/starlight': 0.42.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(astro@7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))(supports-color@10.2.2)(typescript@6.0.3)
       astro: 7.3.5(@astrojs/markdown-remark@7.3.1(supports-color@10.2.2))(@types/node@26.6.4)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)
@@ -8923,6 +8948,10 @@ snapshots:
   parse5@7.3.0:
     dependencies:
       entities: 6.0.1
+
+  parse5@8.0.1:
+    dependencies:
+      entities: 8.1.0
 
   path-browserify@1.0.1: {}
 

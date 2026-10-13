@@ -297,7 +297,7 @@
    - Desktop: scale-to-fit. Mermaid stamps `width="100%"` + an inline
      natural max-width on every SVG, so diagrams fill the column up to
      their natural size and SCALE DOWN when wider — never a horizontal
-     scrollbar in the doc flow. Click-to-zoom (MermaidZoom) is the
+     scrollbar in the doc flow. Click-to-zoom (diagramZoom) is the
      full-detail path for dense diagrams.
    - Phones (<= 768px): scale-to-fit of a 2000px-wide diagram means 3px
      labels, so diagrams pin to natural width (--wh-natural-w, stamped
@@ -349,7 +349,7 @@ svg[aria-roledescription^="state"] {
    two side-by-side on wide monitors, which shrank each to ~450px and made the
    denser diagram hard to read — house style is to favour vertical so diagrams
    fit the page (see AGENTS.md "Authoring Mermaid diagrams"). Click-to-zoom
-   (MermaidZoom) covers the rare case where you want a diagram bigger still. */
+   (diagramZoom) covers the rare case where you want a diagram bigger still. */
 .sl-markdown-content .diagram-pair {
   display: flex;
   flex-direction: column;
@@ -673,20 +673,44 @@ footer a[href^="http"]:not(:where(.pagination-links a, .wh-footer__sub a, .wh-cl
   opacity: 0.6;
 }
 
-/* ® / ™ on the first mention of a third-party mark, inserted by
-   src/plugins/rehype-trademarks.ts (registry: src/config/trademarks.ts).
-   Superscripted rather than left at full size — a legal notice mark sitting on
-   the baseline at 100% next to body copy reads as a typo. line-height: 0 keeps
-   the raised glyph from opening up the line it lands on, and because it's real
-   text (not a ::after) it still copies and gets read out. */
-.wh-tm {
-  font-size: 0.62em;
-  line-height: 0;
-  vertical-align: 0.45em;
-  /* The glyph is notation, not part of the sentence — don't let it pick up
-     italics from surrounding emphasis. Weight is inherited on purpose so it
-     doesn't look detached inside bold table cells. */
-  font-style: normal;
+/* Trademarks (@wave-rf/astro-trademarks). The ® / ™ it inserts (.tm-symbol)
+   keeps the package's default style, which is this site's: superscripted at
+   0.62em, line-height 0 so it doesn't open up its line, never italic. The
+   footer notices (<TrademarkNotices class="wh-legal">) are small print, but
+   not unreadably so: 12px at the subtle ink still clears AA (see the
+   --wh-ink-subtle note above). Full footer width, no measure cap: wide and
+   short is the right shape for a notice nobody reads line by line. */
+.wh-legal {
+  --tm-notices-font-size: 0.75rem;
+  --tm-notices-line-height: 1.5;
+  --tm-notices-color: var(--wh-ink-subtle);
+  text-wrap: pretty;
+}
+
+/* Diagram lightbox (@wave-rf/astro-themed-mermaid/zoom). Its stylesheet reads
+   --mermaid-* / --mermaid-zoom-* variables; map them onto the site tokens. The
+   cloned SVG keeps its --wh-mermaid-* fills, so the diagram's colors carry
+   into the overlay. */
+.mermaid-zoom,
+.mermaid-zoomable {
+  --mermaid-surface: var(--wh-mermaid-surface);
+  --mermaid-zoom-backdrop: color-mix(in oklab, var(--wh-bg) 78%, transparent);
+  --mermaid-zoom-surface: var(--wh-surface);
+  --mermaid-zoom-ink: var(--wh-ink);
+  --mermaid-zoom-border: var(--wh-border);
+  --mermaid-zoom-accent: var(--wh-accent-text);
+  --mermaid-zoom-radius: var(--radius-md);
+}
+.mermaid-zoom .mermaid-zoom__tools button:hover {
+  background: var(--wh-surface-elevated);
+}
+.mermaid-zoom .mermaid-zoom__one {
+  font-family: var(--sl-font-mono);
+}
+.mermaid-zoom .mermaid-zoom__one[aria-pressed="true"],
+.mermaid-zoom .mermaid-zoom__bg[aria-pressed="true"] {
+  border-color: var(--wh-accent);
+  color: var(--wh-accent-text);
 }
 
 /* Inline code — denser, branded surface */
