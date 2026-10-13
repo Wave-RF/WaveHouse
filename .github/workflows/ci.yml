@@ -144,10 +144,11 @@ jobs:
           go-cache-suffix: "-lint"
           golangci: "true"
           astro: "true" # check-docs (astro check) reuses the content cache
+          playwright: "true" # astro check renders Markdown; rehype-mermaid needs Chromium
       # tidy + gofumpt + golangci + vulncheck + shellcheck + actionlint +
-      # Biome + markdownlint + misspell + astro check + tsc. No Docker,
-      # no browser. (On main, setup-env's nested actions/cache steps save at
-      # job end on an exact-key miss; elsewhere only golangci/Astro do.)
+      # Biome + markdownlint + misspell + astro check + tsc. No Docker.
+      # (On main, setup-env's nested actions/cache steps save at job end on an
+      # exact-key miss; elsewhere only golangci/Astro do.)
       - name: Run static checks
         run: make verify
 

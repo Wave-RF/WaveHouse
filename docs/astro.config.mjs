@@ -25,6 +25,10 @@ export default defineConfig({
   trailingSlash: "never",
   vite: {
     plugins: [tailwindcss()],
+    // Starlight 0.42 imports satteri, a native addon. Bundled into the prerender
+    // chunk it can't find its platform binary, so load it from node_modules
+    // (a direct dependency, so it resolves from dist/ under hoist: false).
+    environments: { prerender: { resolve: { external: ["satteri"] } } },
   },
   markdown: {
     syntaxHighlight: { excludeLangs: ["mermaid"] },

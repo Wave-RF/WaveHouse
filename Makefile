@@ -742,7 +742,8 @@ smoke-ts-dist: ## Smoke-load the built SDK entry points and type-check CJS and E
 
 # check-docs: astro check — type-checks .astro/.mdx, content-collection frontmatter
 # schemas, and config TS. Catches what `astro build` does NOT (the build strips
-# types without checking). No browser needed. A prereq of both `verify` and
+# types without checking). Needs Chromium (install-playwright-docs): Astro 7.3's check
+# renders the Markdown, and rehype-mermaid draws diagrams in headless Chrome. A prereq of both `verify` and
 # `build-docs`, so make runs it once and serializes it before the build — Astro's
 # content-sync writes docs/.astro/, so check and build must not run concurrently.
 # (Link validation is separate: owned by starlight-links-validator at build.)
@@ -750,7 +751,7 @@ smoke-ts-dist: ## Smoke-load the built SDK entry points and type-check CJS and E
 # pinned in docs/package.json and resolved from the registry (tarball ships its
 # own dist/*.d.ts), so the docs build no longer depends on clients/ts/dist/.
 .PHONY: check-docs
-check-docs: pnpm-install ## Type-check the docs (astro check — types + content schemas)
+check-docs: pnpm-install install-playwright-docs ## Type-check the docs (astro check — types + content schemas)
 	$(call run,check-docs (astro check),NODE_OPTIONS=--no-deprecation $(PNPM) -s --filter $(DOCS_FILTER) run check,)
 
 # build-docs: Astro site → docs/dist/. Pulls in Chromium (install-playwright-docs)

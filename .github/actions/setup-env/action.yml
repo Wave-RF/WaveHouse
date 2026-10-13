@@ -61,7 +61,7 @@
 #   5. Playwright browser cache (~/.cache/ms-playwright) keyed on the
 #      root lockfile. ~130 MB Chromium download otherwise re-fetched
 #      every docs build (rehype-mermaid renders via headless Chrome).
-#      Only the docs-build job needs it. See #132.
+#      Only the jobs that run `astro check`/`build` need it (lint, docs-build). See #132.
 #   6. Astro content-collection cache (docs/.astro/) keyed on the root
 #      lockfile + astro.config.mjs. Speeds up warm `astro check` /
 #      `astro build` — unchanged content skips the parse + transform
@@ -91,7 +91,7 @@ inputs:
     description: "Set up pnpm + Node and cache the pnpm store"
     default: "true"
   playwright:
-    description: "Cache the Playwright Chromium install (docs build only)"
+    description: "Cache the Playwright Chromium install (docs check/build)"
     default: "false"
   astro:
     description: "Cache the Astro content collections (docs check/build)"
