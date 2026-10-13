@@ -14,6 +14,7 @@ It is deliberately detailed: this is a hot, concurrency-heavy path, and the goro
 | File | Contents |
 | --- | --- |
 | `worker.go` | `StartIngestWorker`, the `dispatchLoop`, `parseMsg` (+ `rejectPoison` for an envelope it cannot read), the per-tenant-table `tableBatcher`/`tableLoop`, `flushTable` (splits a batch per column list via `groupByColumns`, or hands the whole batch of a tenant with no ClickHouse connection to `parkBatch`) and `flushGroup` (bulk insert with a row-by-row isolation fallback when ClickHouse rejects the batch, or refuses a multi-row batch for its size — `chconn.Splittable`), `retryLater` (a batch ClickHouse could not take, handed back for a delayed redelivery), `insertToClickHouse` (into the batch's tenant's ClickHouse, `chconn.Pools.Target`), `handleSuccess` (acks, after `invalidate` bumps the tenant's cache namespaces — under every tenant on the same ClickHouse address and database, through the cache `internal/app` hands the worker, since they read the same tables), `sendToDLQ`/`parkOnDLQ` |
+| `trace.go` | The worker's spans: `IngestWorker.Flush` around one group's flush, linked to the span each of its rows was published under (the request's handler span, carried in the queue headers), and `clickhouse.insert` under it around each `INSERT` — see [Tracing a row](#tracing-a-row) |
 | `backoff.go` | The retry backoff per ClickHouse pool: one outage backs off every table on it together, probing once per window; a failure of one table (read-only, too many parts or mutations, a missing grant) backs off that table alone — see [When ClickHouse cannot take an insert](#when-clickhouse-cannot-take-an-insert) |
 | `compact.go` | `EncodeCompactRow` — renders one record as a `JSONCompactEachRow` line over the table's **insertable** columns, in declaration order. Serialization only: it validates nothing and judges no value |
 | `sweeper.go` | The **Active Sweeper** — every minute, asks the MQ to purge the events that are both written to ClickHouse and past the SSE gap window (the purge arithmetic below lives in `internal/mq/purge.go`) |
@@ -167,10 +168,14 @@ flowchart TB
 ```
 
 - **`workerCtx`** is the stop signal. **Only `dispatchLoop` watches it.** Every downstream goroutine stops via channel-close instead, which gives a deterministic drain with no select race that could abandon buffered rows.
-- **`flushCtx` = `context.WithoutCancel(workerCtx)`** carries trace values but is never canceled. A flush that has started must finish, so data already written to ClickHouse gets acked rather than redelivered. It is bounded by the HTTP client timeout (30s); shutdown bounds the *wait* for it with a deadline.
+- **`flushCtx` = `context.WithoutCancel(workerCtx)`** carries values but is never canceled. A flush that has started must finish, so data already written to ClickHouse gets acked rather than redelivered. It is bounded by the HTTP client timeout (30s); shutdown bounds the *wait* for it with a deadline.
 - Each component that drains builds its own **shutdown-deadline context** (`App.shutdownContext` in `internal/app`, `server.shutdown_timeout`), rooted in `context.Background()` so it survives `workerCtx` being canceled. The ingest worker's and the API server's run concurrently, so the drain phase is bounded by one timeout, not their sum.
 
 The principle: **`ctx` cancellation is the stop mechanism for long-running loops; `Close()`/stop-funcs are the mechanism for resources.**
+
+## Tracing a row
+
+The HTTP handler publishes each row under its request's span, and `internal/mq` writes that span's W3C trace context into the row's queue headers and reads it back onto the delivered message's `Ctx`, on the worker's consumer path as on the hub's. The worker starts no span per row: a batch holds rows from many requests, so one span cannot have them all as its parent. Instead, `flushGroup` opens `IngestWorker.Flush` as a root span of its own and **links** it to the span of each distinct request whose rows the group holds (`producers` counts them; the first 128 are linked), with `tenant`, `table` and `rows` as attributes, and `insertToClickHouse` opens `clickhouse.insert` as its child around every `INSERT`, the row-by-row isolation ones included, with the database attributes and `rows`. A flush handed back for retry and an `INSERT` ClickHouse refused end their span with the error recorded. The cache invalidation after a successful insert runs under the flush span too. So in a tracing backend a request's trace ends at its publish, and the flush that wrote its rows is one link away, whichever process ran it ([#774](https://github.com/Wave-RF/WaveHouse/issues/774)).
 
 ## Lifecycle and shutdown
 

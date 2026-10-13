@@ -86,6 +86,7 @@ func Run(t *testing.T, h Harness) {
 		{"IdempotencyKeyDropsARepeat", true, idempotencyKeyDropsARepeat},
 		{"RefusesATopicWithoutATenant", true, refusesATopicWithoutATenant},
 		{"SubscribeCarriesTheTraceContext", true, subscribeCarriesTheTraceContext},
+		{"ConsumeCarriesTheTraceContext", true, consumeCarriesTheTraceContext},
 		{"SubscribeSeesEveryTenant", true, subscribeSeesEveryTenant},
 		{"EachTenantInOrder", true, eachTenantInOrder},
 		{"NakRedelivers", true, nakRedelivers},

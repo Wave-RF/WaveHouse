@@ -754,6 +754,8 @@ func groupByColumns(msgs []parsedMsg) [][]parsedMsg {
 // acked, dead-lettered or left for redelivery: the whole group, or what
 // isolation had not reached. A rejected row is settled; it never makes err.
 func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group []parsedMsg) (unsettled []parsedMsg, err error) {
+	ctx, span := startFlushSpan(ctx, tableName, group)
+	defer func() { endSpan(span, err) }()
 	cols := group[0].columns
 
 	err = w.insertToClickHouse(ctx, tableName, cols, group)
@@ -816,7 +818,7 @@ func (w *IngestWorker) retryLater(ctx context.Context, tableName string, msgs []
 // insertToClickHouse writes one group as a single INSERT naming columns
 // explicitly, so the positional rows land in the right slots. Callers group by
 // column list first: a batch spanning two lists cannot share one statement.
-func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, columns []string, msgs []parsedMsg) error {
+func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, columns []string, msgs []parsedMsg) (err error) {
 	var buf bytes.Buffer
 	for _, m := range msgs {
 		buf.Write(m.row)
@@ -839,6 +841,8 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	if t.URL == "" {
 		return noTargetError(id)
 	}
+	ctx, span := startInsertSpan(ctx, t, tableName, len(msgs))
+	defer func() { endSpan(span, err) }()
 	q := url.Values{}
 	q.Set("database", t.Database)
 	q.Set("param_target_table", tableName)
