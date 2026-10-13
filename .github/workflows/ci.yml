@@ -531,7 +531,7 @@ jobs:
       # after the comment and the Deployment say so, rather than leaving a
       # stale "live" comment.
       - name: Upload docs preview
-        uses: Wave-RF/cloudflare-preview@0b786ecd3495e56a2a90a59cb9070e4cafd848d9 # v1.1.1
+        uses: Wave-RF/cloudflare-preview@62adaa738a5a786c22fe7a0a08a0dd354084326b # v1.1.2
         with:
           cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           cloudflare-account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -584,7 +584,7 @@ jobs:
           name: docs-dist
           path: docs/dist
       - name: Deploy docs (production)
-        uses: Wave-RF/cloudflare-preview/deploy@0b786ecd3495e56a2a90a59cb9070e4cafd848d9 # v1.1.1
+        uses: Wave-RF/cloudflare-preview/deploy@62adaa738a5a786c22fe7a0a08a0dd354084326b # v1.1.2
         with:
           cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           cloudflare-account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
