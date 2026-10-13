@@ -404,9 +404,10 @@ func startClickHouse(ctx context.Context) (*chInstance, error) {
 	return ch, nil
 }
 
-// natsImage is the server line WaveHouse embeds, and the one the shipped
-// Helm values pin.
-const natsImage = "nats:2.14.6-alpine"
+// natsImage is the server line the external-NATS tests run against, and the
+// one the shipped Helm values pin and the embedded broker runs;
+// check-nats-versions keeps them on one line (#817).
+const natsImage = "nats:2.15.1-alpine"
 
 // startNATS starts NATS as deployments/nats/values.yaml configures it — its
 // accounts, users and permissions, JetStream on file storage — and returns

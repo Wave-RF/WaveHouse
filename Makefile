@@ -296,15 +296,17 @@ dev: deps-up $(AIR) $(CONFIG_FILES) settings/config.json ## Hot-reload dev serve
 dev-ts: pnpm-install ## Watch-build SDK (tsup --watch)
 	@$(PNPM) --filter $(SDK_NAME) run dev
 
-# dev-docs runs docs/scripts/dev.mjs: a full `astro build` on every save,
-# synced into docs/dist/ and served through `wrangler dev --live-reload` —
-# so the Worker (md twins, pagefind search, llm outputs) behaves exactly like
+# dev-docs runs `cloudflare-md-router dev` (@wave-rf/cloudflare-md-router): a
+# full `astro build` on every save into docs/.dev-dist/, synced into docs/dist/
+# only when it succeeds and served through `wrangler dev --live-reload` — so
+# the Worker (md twins, pagefind search, llm outputs) behaves exactly like
 # production while you edit, and the browser refreshes itself per build.
 # Slower per change than Astro HMR; the raw dev server remains available as
 # `pnpm --filter wavehouse-docs run start` when fidelity doesn't matter.
 # Serves :4321, walking upward if that's taken (ports are machine-wide, so a
-# dev server in another worktree or repo will claim it) — the script prints the
-# port it settled on. DOCS_PORT=… moves the starting point.
+# dev server in another worktree or repo will claim it) — it prints the port
+# it settled on. PORT=… moves the starting point; MD_ROUTER_DEV_STRICT=1 keeps
+# the links validator on in watch builds.
 .PHONY: dev-docs
 dev-docs: install-playwright-docs ## Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321 (next free port if busy)
 	@$(PNPM) --filter $(DOCS_FILTER) run dev
@@ -483,6 +485,14 @@ test-go-toolchain:
 check-dockerfile-go:
 	$(call run,dockerfile go check,scripts/ci/check-dockerfile-go.test.sh && scripts/ci/check-dockerfile-go.sh,)
 
+# check-nats-versions: go.mod's embedded nats-server, the external-NATS test
+# image, the Helm values tag, recommendedNATSMinor and deployment.md must name
+# one MAJOR.MINOR, so a Dependabot bump of go.mod cannot leave the others
+# behind; the behavioral test runs first. A verify leaf.
+.PHONY: check-nats-versions
+check-nats-versions:
+	$(call run,nats versions check,scripts/ci/check-nats-versions.test.sh && scripts/ci/check-nats-versions.sh,)
+
 # test-tagged-tests: assert scripts/ci/tagged-tests.sh, which picks the tests
 # `make test-integration` runs by build tag, against `go test -list` on a
 # throwaway module: a tagged test it missed would never run. A verify leaf.
@@ -628,11 +638,11 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (23): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# Leaves (24): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
 # for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
-# test-classify-paths, test-release-channel, test-go-toolchain, check-dockerfile-go, test-tagged-tests,
+# test-classify-paths, test-release-channel, test-go-toolchain, check-dockerfile-go, check-nats-versions, test-tagged-tests,
 # test-integration-parts, test-prune-pr-build-cache, test-review-gate,
 # test-remote-ci, test-githooks and test-hook-commands for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
@@ -648,7 +658,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-go-toolchain check-dockerfile-go test-tagged-tests test-integration-parts test-prune-pr-build-cache test-review-gate test-remote-ci test-githooks test-hook-commands vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-go-toolchain check-dockerfile-go check-nats-versions test-tagged-tests test-integration-parts test-prune-pr-build-cache test-review-gate test-remote-ci test-githooks test-hook-commands vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.
@@ -742,7 +752,9 @@ smoke-ts-dist: ## Smoke-load the built SDK entry points and type-check CJS and E
 
 # check-docs: astro check — type-checks .astro/.mdx, content-collection frontmatter
 # schemas, and config TS. Catches what `astro build` does NOT (the build strips
-# types without checking). No browser needed. A prereq of both `verify` and
+# types without checking). No browser needed: Astro 7.3's check renders the Markdown,
+# so the recipe sets WH_DOCS_CHECK=1 and astro.config.mjs then leaves rehype-mermaid
+# out (build-docs renders and checks the diagrams). A prereq of both `verify` and
 # `build-docs`, so make runs it once and serializes it before the build — Astro's
 # content-sync writes docs/.astro/, so check and build must not run concurrently.
 # (Link validation is separate: owned by starlight-links-validator at build.)
@@ -751,7 +763,7 @@ smoke-ts-dist: ## Smoke-load the built SDK entry points and type-check CJS and E
 # own dist/*.d.ts), so the docs build no longer depends on clients/ts/dist/.
 .PHONY: check-docs
 check-docs: pnpm-install ## Type-check the docs (astro check — types + content schemas)
-	$(call run,check-docs (astro check),NODE_OPTIONS=--no-deprecation $(PNPM) -s --filter $(DOCS_FILTER) run check,)
+	$(call run,check-docs (astro check),WH_DOCS_CHECK=1 NODE_OPTIONS=--no-deprecation $(PNPM) -s --filter $(DOCS_FILTER) run check,)
 
 # build-docs: Astro site → docs/dist/. Pulls in Chromium (install-playwright-docs)
 # because rehype-mermaid renders diagrams via headless Chrome at build time

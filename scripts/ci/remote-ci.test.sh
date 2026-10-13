@@ -123,7 +123,10 @@ run() {
   dog=$!
   wait "$pid"
   rc=$?
-  kill "$dog" 2> /dev/null
+  # KILL, not TERM: a run that is refused exits before the watchdog has been
+  # scheduled once, and a subshell signaled that early still handles it with
+  # this script's EXIT trap, which removes the scratch directory.
+  kill -KILL "$dog" 2> /dev/null
   return "$rc"
 }
 

@@ -3,6 +3,9 @@
 import starlight from "@astrojs/starlight";
 import tailwindcss from "@tailwindcss/vite";
 import { themedMermaid } from "@wave-rf/astro-themed-mermaid";
+import { diagramPng } from "@wave-rf/astro-themed-mermaid/png";
+import { diagramZoom } from "@wave-rf/astro-themed-mermaid/zoom";
+import trademarks from "@wave-rf/astro-trademarks";
 import starlightLlmTools from "@wave-rf/starlight-llm-tools";
 import { defineConfig } from "astro/config";
 import rehypeKatex from "rehype-katex";
@@ -11,8 +14,7 @@ import starlightImageZoom from "starlight-image-zoom";
 import starlightLinksValidator from "starlight-links-validator";
 import { mermaidTheme } from "./src/config/mermaid-theme.mjs";
 import { sidebar } from "./src/config/sidebar.ts";
-import { diagramPng } from "./src/integrations/diagram-png.mjs";
-import { rehypeTrademarks } from "./src/plugins/rehype-trademarks.ts";
+import marks from "./src/config/trademarks.ts";
 
 // Color-agnostic Mermaid plugin (astro-themed-mermaid pkg) + WaveHouse's palette
 // (src/config/mermaid-theme). Diagram colors are defined once in global.css
@@ -20,11 +22,20 @@ import { rehypeTrademarks } from "./src/plugins/rehype-trademarks.ts";
 // holds none.
 const mermaid = themedMermaid(mermaidTheme);
 
+// The diagrams the PNG export and the zoom lightbox act on. Both index diagrams
+// by their DOM position among this selector's matches, so they must share it,
+// or Copy/Download would fetch another diagram's PNG.
+const diagramSelector = ".sl-markdown-content svg[data-themed-mermaid]";
+
 export default defineConfig({
   site: "https://wavehouse.dev",
   trailingSlash: "never",
   vite: {
     plugins: [tailwindcss()],
+    // Starlight 0.42 imports satteri, a native addon. Bundled into the prerender
+    // chunk it can't find its platform binary, so load it from node_modules
+    // (a direct dependency, so it resolves from dist/ under hoist: false).
+    environments: { prerender: { resolve: { external: ["satteri"] } } },
   },
   markdown: {
     syntaxHighlight: { excludeLangs: ["mermaid"] },
@@ -32,10 +43,9 @@ export default defineConfig({
     // mermaid.rehypeMermaid = rehype-mermaid behind the package's per-diagram
     // render cache (node_modules/.cache/astro-themed-mermaid/) — rebuilds that
     // don't change a diagram skip Chromium entirely (~6.5s → ~3.7s per build).
-    // rehypeTrademarks runs last on purpose: it skips the SVG and .katex
-    // subtrees the two plugins before it produce, so it has to see them already
-    // rendered rather than as ```mermaid fences and $math$.
-    rehypePlugins: [mermaid.rehypeMermaid, rehypeKatex, rehypeTrademarks],
+    // `astro check` renders Markdown since Astro 7.3; the Makefile sets WH_DOCS_CHECK
+    // so it skips rehype-mermaid (no Chromium). build-docs renders the diagrams.
+    rehypePlugins: [...(process.env.WH_DOCS_CHECK ? [] : [mermaid.rehypeMermaid]), rehypeKatex],
   },
   integrations: [
     starlight({
@@ -164,9 +174,10 @@ export default defineConfig({
         starlightLlmTools(),
         // The validator fails the whole build on a broken link. Right for CI
         // and `make build-docs`; wrong for the rebuild-on-save dev loop
-        // (scripts/dev.mjs sets WAVEHOUSE_DOCS_WATCH=1), where a mid-edit
-        // dangling link would block every rebuild. Output is identical.
-        ...(process.env.WAVEHOUSE_DOCS_WATCH
+        // (`cloudflare-md-router dev` sets MD_ROUTER_DEV=1 unless run with
+        // MD_ROUTER_DEV_STRICT=1), where a mid-edit dangling link would block
+        // every rebuild. Output is identical.
+        ...(process.env.MD_ROUTER_DEV
           ? []
           : [
               starlightLinksValidator({
@@ -177,9 +188,21 @@ export default defineConfig({
       ],
     }),
     mermaid.integration,
+    // Click-to-zoom lightbox for every diagram, with Copy/Download of the PNGs
+    // below. Styled through the --mermaid-zoom-* variables in global.css.
+    diagramZoom({ selector: diagramSelector, filenamePrefix: "wavehouse" }),
     // After build, rasterize each rendered diagram to a light + dark PNG under
-    // dist/diagrams/ (Copy/Download in the zoom lightbox). Runs last so it sees
-    // the finished HTML; reuses the Chromium rehype-mermaid already pulled in.
-    diagramPng(),
+    // dist/diagrams/<slug>/<i>-<theme>[-transparent].png. Listed last so it
+    // sees the finished HTML; reuses the Chromium rehype-mermaid pulled in.
+    diagramPng({
+      selector: diagramSelector,
+      themeStorageKey: "starlight-theme",
+      surfaceVar: "--wh-mermaid-surface",
+    }),
+    // ® / ™ on each mark's first mention in the page's <main>, and the footer's
+    // <TrademarkNotices/> filled with exactly the marks that got one. Runs over
+    // the rendered HTML, so the hero tagline (frontmatter) is covered too. The
+    // footer is `not-content`: its Cloud CTA copy is neither marked nor counted.
+    trademarks({ marks, skipClasses: ["not-content"] }),
   ],
 });

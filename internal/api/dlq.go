@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/tenant"
 )
 
@@ -33,6 +34,7 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	}
 	if !named {
 		id = tenant.Default
+		observability.SetRequestTenant(r.Context(), id.String())
 	}
 	counts, err := h.Counts.DeadLetterCounts(r.Context(), id, r.URL.Query().Get("table"))
 	if err != nil {

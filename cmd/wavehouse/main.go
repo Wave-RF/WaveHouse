@@ -13,6 +13,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/app"
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // Pre-populated build info variables, set via ldflags by the Makefile and by
@@ -160,7 +161,10 @@ Run 'wavehouse <command> -h' for command-specific help.
 func run(ctx context.Context) int {
 	logLevel := &slog.LevelVar{}
 	logLevel.Set(logLevelFromEnv())
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+	// TraceHandler, so a request's lines carry request_id and tenant (and its
+	// trace ids when tracing is on) even when the OTLP logger never replaces
+	// this one.
+	logger := slog.New(&observability.TraceHandler{Handler: slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})})
 	slog.SetDefault(logger)
 
 	logger.Info("starting WaveHouse", "version", Version, "build_time", BuildTime, "git_commit", GitCommit)

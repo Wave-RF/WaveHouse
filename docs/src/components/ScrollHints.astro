@@ -13,8 +13,8 @@
 //    to the right; CSS fades the right edge so cut-off content reads as
 //    "scrollable", not "clipped". The attribute clears as you reach the end.
 //
-// Rendered once from Footer.astro (every page). Same is:inline + window-flag
-// convention as MermaidZoom for view-transition safety.
+// Rendered once from Footer.astro (every page). is:inline + a window flag,
+// for view-transition safety.
 ---
 
 <script is:inline>
@@ -23,7 +23,8 @@
     // so tables always scroll on their .wh-table-wrap (matched via
     // .wh-scroll-x) — a fade stamped on the non-scrolling <table> itself
     // would never clear, since scroll events fire on the wrapper.
-    const SCROLLERS = ".expressive-code pre, .wh-scroll-x, .wh-zoom__stage";
+    // The diagram lightbox's stage fades its own edges (diagramZoom).
+    const SCROLLERS = ".expressive-code pre, .wh-scroll-x";
 
     function wrapScrollables() {
       // Bare svgs in the content flow AND direct svg children of a

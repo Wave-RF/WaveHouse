@@ -12,13 +12,16 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// TraceHandler intercepts every log call to inject OpenTelemetry IDs
+// TraceHandler intercepts every log call to inject OpenTelemetry IDs and the
+// request's correlation fields.
 type TraceHandler struct {
 	slog.Handler
 }
 
-// Handle pulls the trace_id and span_id from the context if they exist
+// Handle pulls the trace_id and span_id from the context if they exist, and
+// request_id and tenant from the request scope (WithRequest) when there is one.
 func (h *TraceHandler) Handle(ctx context.Context, r slog.Record) error {
+	addRequestAttrs(ctx, &r)
 	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
 		r.AddAttrs(
 			slog.String("trace_id", span.SpanContext().TraceID().String()),

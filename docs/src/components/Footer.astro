@@ -6,21 +6,19 @@
 import EditLink from "virtual:starlight/components/EditLink";
 import LastUpdated from "virtual:starlight/components/LastUpdated";
 import Pagination from "virtual:starlight/components/Pagination";
+import TrademarkNotices from "@wave-rf/astro-trademarks/TrademarkNotices.astro";
 import {
   REL_EXTERNAL,
   REL_KEEP_REFERRER,
   cloudLink,
   waveRfLink,
 } from "../config/outbound";
-import { pageText } from "../config/trademarks";
 import CloudCta from "./CloudCta.astro";
 import DocsTracking from "./DocsTracking.astro";
 import Logo from "./Logo.astro";
-import MermaidZoom from "./MermaidZoom.astro";
 import PageFeedback from "./PageFeedback.astro";
 import ReadingProgress from "./ReadingProgress.astro";
 import ScrollHints from "./ScrollHints.astro";
-import Trademarks from "./Trademarks.astro";
 
 const year = new Date().getFullYear();
 
@@ -51,13 +49,14 @@ const cloudCtaPlacement = `docs-${entry.id || "index"}`;
 // ever changes.
 const showFeedback = entry.id !== "404" && !entry.id.endsWith("/404");
 
-// Everything the page turns into visible words, for the per-page trademark
-// notices. pageText() picks the frontmatter fields that actually render (hero
-// tagline, title, this page's Cloud CTA copy) and leaves out the ones that
-// don't — `description` is <meta>-only, sidebar labels are nav chrome. Naming
-// a mark in the footer that the reader never sees on the page would make the
-// notice wrong in the other direction.
-const trademarkSource = pageText(entry.data, entry.body ?? "");
+// Per-page trademark notices: @wave-rf/astro-trademarks' middleware fills this
+// with exactly the marks it marked in this page's <main>, or removes the block
+// when there are none. Same props in both footer variants.
+const trademarkNotices = {
+  catchAll: "All other product names, logos, and brands are the property of their respective owners.",
+  disclaimer:
+    "WaveHouse is an independent open-source project and is not affiliated with, endorsed by, or sponsored by the trademark holders named above.",
+};
 ---
 
 {
@@ -114,7 +113,7 @@ const trademarkSource = pageText(entry.data, entry.body ?? "");
 
         <div class="wh-footer__sign">
           <span class="wh-footer__copyright">© {year} Wave RF. All rights reserved.</span>
-          <Trademarks source={trademarkSource} />
+          <TrademarkNotices class="wh-legal" {...trademarkNotices} />
         </div>
       </div>
     </footer>
@@ -188,18 +187,17 @@ const trademarkSource = pageText(entry.data, entry.body ?? "");
 
         <div class="wh-footer__sign">
           <span class="wh-footer__copyright">© {year} Wave RF. All rights reserved.</span>
-          <Trademarks source={trademarkSource} />
+          <TrademarkNotices class="wh-legal" {...trademarkNotices} />
         </div>
       </div>
     </footer>
   )
 }
 
-{/* Click-to-zoom for Mermaid diagrams + horizontal-scroll affordances, and the
-    site-wide PostHog trackers (search / code copy / 404) — rendered once per
-    page from here (Footer is on every page); self-contained scripts + styles,
-    no markup. */}
-<MermaidZoom />
+{/* Horizontal-scroll affordances, and the site-wide PostHog trackers (search /
+    code copy / 404) — rendered once per page from here (Footer is on every
+    page); self-contained scripts + styles, no markup. The diagram lightbox is
+    the diagramZoom integration (astro.config.mjs), which injects its own. */}
 <ScrollHints />
 <DocsTracking />
 

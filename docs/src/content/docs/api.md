@@ -80,6 +80,8 @@ This contract holds for:
 
 Historically some error paths defaulted to `text/plain` because they were emitted via `http.Error` or chi's default handlers; those paths now route through a shared `writeJSONError` helper so strict clients can branch on `Content-Type` consistently.
 
+Every response, success or failure, also carries `X-Request-Id`: the id the request is logged and traced under. A request that sends one `X-Request-Id` of 1 to 128 printable ASCII characters, with no spaces, gets its own back; any other gets a fresh random 32-hex-character id. Quote it when reporting a failure ([Following one request or one tenant](/deployment#following-one-request-or-one-tenant)).
+
 The per-endpoint error tables below list the bodies you can expect for each status code; the `Content-Type` and `X-Content-Type-Options` headers above apply uniformly and are not repeated.
 
 :::caution[Streaming / partial-write responses]
@@ -113,7 +115,7 @@ On `/v1/query`, when the role sets `max_execution_time`, ClickHouse enforces it 
 
 ### `GET /livez` — Liveness Probe
 
-> Canonical name (current Kubernetes convention — the kube-apiserver split that replaced the older conflated `/healthz`). Also served at **`/healthz`** (a permanent alias — the most widely-recognized name) and **`/health`** (a deprecated alias, scheduled for removal in v0.2.0).
+> Canonical name (current Kubernetes convention — the kube-apiserver split that replaced the older conflated `/healthz`). Also served at **`/healthz`** (a permanent alias — the most widely-recognized name) and **`/health`** (a deprecated alias, still served in v0.2.0 and to be removed in a later release, [#818](https://github.com/Wave-RF/WaveHouse/issues/818)).
 
 Returns `200 OK` once the gateway has discovered ClickHouse table schemas at least once. Returns `503 Service Unavailable` with a diagnostic body while the boot-time schema discovery retry loop is still running (ClickHouse unreachable, target database missing, etc.). No authentication required.
 
@@ -142,7 +144,7 @@ Over a [nested settings directory](/deployment#the-nested-settings-directory) th
 
 ### `GET /readyz` — Readiness Probe
 
-> Canonical name (current Kubernetes convention). Also served at **`/ready`** — a deprecated alias kept for v0.1.x and scheduled for removal in v0.2.0.
+> Canonical name (current Kubernetes convention). Also served at **`/ready`** — a deprecated alias, still served in v0.2.0 and to be removed in a later release ([#818](https://github.com/Wave-RF/WaveHouse/issues/818)).
 
 Returns `200 OK` if the process is fully booted (schema discovery complete) and every backend it cannot do its job without is currently answering. Returns `503 Service Unavailable` otherwise, with `error` listing each check that failed, each starting with its name (`clickhouse: …`, `mq: …`) on a new line; the `clickhouse` failure continues over one line per pool that did not answer. No authentication required. The checks, every one run on every call:
 

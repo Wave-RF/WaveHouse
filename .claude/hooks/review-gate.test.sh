@@ -259,173 +259,77 @@ expect_marker "a fresh review naming the new HEAD by a short sha writes the full
 
 echo "agent-bash-gate.sh:"
 
+# timed <name> <max-seconds> <cwd> <command>: the gate answers within the limit.
+timed() {
+  local s=$SECONDS
+  push "$3" "$4"
+  if [ $((SECONDS - s)) -le "$2" ]; then ok "$1"; else fail "$1: took $((SECONDS - s))s"; fi
+}
+
 # State: repo/feat-a at a2 and wt-b's b1 are reviewed; b2 on top of b1 is not.
 at 600 "$wtb" commit -q --allow-empty -m b2
 
-expect_allow "push from the reviewed session worktree" "$repo" "git push -u origin feat-a"
-expect_allow "push with no refspec" "$repo" "git push"
-expect_allow "push HEAD to a new remote branch" "$repo" "git push origin HEAD:refs/heads/throwaway"
+# ── plain pushes are judged on the worktree they run in ──
+expect_allow "plain push from the reviewed worktree" "$repo" "git push -u origin feat-a"
+expect_allow "plain push, no refspec" "$repo" "git push"
 expect_allow "push from a subdirectory of the worktree" "$repo/scripts" "git push"
-expect_allow "the fd number in 2>&1 is not a refspec" "$repo" "git push origin feat-a 2>&1 | tail -5"
-
-# The session's launch directory (repo) is fully reviewed; the push runs elsewhere.
-expect_block "a sibling worktree's unreviewed branch, pushed from there" "$wtb" "git push origin feat-b" "pushed from $wtb"
-expect_block "…to a throwaway ref" "$wtb" "git push --dry-run origin HEAD:refs/heads/gate-probe-throwaway"
-expect_block "cd into the sibling first" "$repo" "cd ../wt-b && git push origin feat-b"
-expect_block "cd by absolute path" "$repo" "cd '$wtb' && git push"
-expect_block "git -C the sibling" "$repo" "git -C ../wt-b push"
-expect_block "git -C a quoted absolute path" "$repo" "git -C \"$wtb\" push origin feat-b"
-expect_block "a refspec naming the sibling's branch" "$repo" "git push origin feat-b"
-expect_block "…after a heredoc tag message with an apostrophe" "$wtb" "git tag -a v9 -m \"\$(cat <<'EOF'
-Don't (really)
-EOF
-)\" && git push"
-expect_allow "the same from the reviewed worktree" "$repo" "git tag -a v9 -m \"\$(cat <<'EOF'
-Don't (really)
-EOF
-)\" && git push"
-expect_allow "a push inside if … then" "$repo" "if git push origin feat-a; then echo ok; fi"
-expect_block "a push inside a loop is gated, not refused" "$repo" "while false; do git push origin feat-b; done" "missing pre-push review marker"
-
-# The gate runs before the command line does, so a push after a HEAD-moving git
-# command would be judged on the commit before the move.
-expect_block "git commit && git push" "$repo" "git commit --allow-empty -m x && git push" "separate command"
-expect_block "git -C <path> switch; git push" "$repo" "git -C ../wt-b switch -q feat-a; git push origin feat-a" "separate command"
+expect_allow "a refspec resolved to a reviewed commit" "$repo" "git push origin HEAD:refs/heads/throwaway"
+expect_allow "a refspec naming a commit that is no worktree's HEAD" "$repo" "git push origin feat-b~1:refs/heads/b1"
+expect_allow "pushing main itself (no delta, no markers)" "$repo" "git push origin main"
+expect_allow "2>&1 is not a refspec" "$repo" "git push origin feat-a 2>&1"
+expect_allow "| tail -3" "$repo" "git push origin feat-a | tail -3"
+expect_allow "2>&1 | tail -3" "$repo" "git push origin feat-a 2>&1 | tail -3"
+expect_allow "git push --help" "$wtb" "git push --help"
+expect_allow "git stash push is not a push" "$repo" "git stash push -m wip"
+expect_allow "deleting a remote branch, no review" "$wtb" "git push origin --delete old-branch"
+expect_allow "deleting by empty source, no review" "$wtb" "git push origin :old-branch"
 expect_allow "a marker counts from whichever worktree holds it" "$wtb" "git push origin feat-a"
-expect_allow "…including for a commit that is no worktree's HEAD" "$repo" "git push origin feat-b~1:refs/heads/b1"
-expect_allow "a subshell's cd doesn't leak" "$repo" "(cd ../wt-b && true) && git push"
 
-# Fail closed when the gate can't tell.
-expect_block "a cd to a computed path" "$repo" "cd \"\$WT\" && git push" "can't tell which repository"
-expect_block "git -C a computed path" "$repo" "git -C \"\$WT\" push"
-expect_block "cd -" "$repo" "cd - && git push"
-expect_block "GIT_DIR in the environment" "$repo" "GIT_DIR=$wtb/.git git push"
-expect_block "a computed refspec" "$repo" "git push origin \"\$(git branch --show-current)\"" "computed by the shell"
-expect_block "a glob refspec" "$repo" "git push origin 'refs/heads/feat-*'" "glob refspec"
-expect_block "--all" "$repo" "git push --all origin" "every branch"
+expect_block "plain push without markers" "$wtb" "git push origin feat-b" "missing pre-push review marker"
+expect_block "…reporting the worktree it ran in" "$wtb" "git push origin feat-b" "pushed from $wtb"
+expect_block "git -C <sibling worktree> push is judged on that worktree" "$repo" "git -C ../wt-b push" "missing pre-push review marker"
+expect_block "git -C <absolute path> push" "$repo" "git -C $wtb push origin feat-b" "missing pre-push review marker"
+expect_block "a refspec naming the sibling's branch" "$repo" "git push origin feat-b" "missing pre-push review marker"
 expect_block "an unresolvable refspec" "$repo" "git push origin no-such-branch" "can't resolve"
-expect_block "a wrapped push" "$repo" "timeout 60 git push" "can't follow"
-expect_block "a push behind sudo" "$repo" "sudo git push origin feat-a" "can't follow"
-expect_block "a push in a command substitution" "$repo" "out=\$(git push origin feat-b 2>&1)" "can't follow"
-# A followed push on the line doesn't excuse an unfollowed one.
-expect_block "a followed push, then a wrapped one" "$repo" "git push origin feat-a && timeout 60 git push origin feat-b" "can't follow"
-expect_block "a followed push, then one in a substitution" "$repo" "git push origin feat-a; out=\$(git -C ../wt-b push 2>&1)" "can't follow"
-expect_block "a followed push, then one behind sudo" "$repo" "git push origin feat-a && sudo git -C ../wt-b push" "can't follow"
-expect_block "push --help, then a wrapped push" "$repo" "git push --help; timeout 5 git push origin feat-b" "can't follow"
-expect_allow "two followed pushes" "$repo" "git push origin feat-a && git push origin feat-a:refs/heads/copy"
-expect_block "export GIT_DIR before the push" "$repo" "export GIT_DIR=$wtb/.git; git push origin HEAD" "can't tell which repository"
-expect_block "declare -x GIT_WORK_TREE before the push" "$repo" "declare -x GIT_WORK_TREE=$wtb; git push" "can't tell which repository"
-expect_block "a bare GIT_DIR assignment before the push" "$repo" "GIT_DIR=$wtb/.git; git push" "can't tell which repository"
-# An exported GIT_DIR or GIT_WORK_TREE outlives a later cd or git -C; only
-# unset or the end of a subshell clears it.
-expect_block "export GIT_DIR, then cd to a reviewed worktree" "$repo" "export GIT_DIR=$wtb/.git; cd $repo && git push" "can't tell which repository"
-expect_block "export GIT_DIR, then git -C a reviewed worktree" "$repo" "export GIT_DIR=$wtb/.git; git -C $repo push" "can't tell which repository"
-expect_block "export GIT_WORK_TREE, then cd" "$repo" "export GIT_WORK_TREE=$wtb; cd $repo; git push" "can't tell which repository"
-expect_block "export GIT_DIR, then pushd" "$repo" "export GIT_DIR=$wtb/.git; pushd $repo >/dev/null; git push" "can't tell which repository"
-expect_block "…and unsetting one of the two leaves the other" "$repo" "export GIT_DIR=$wtb/.git GIT_WORK_TREE=$wtb; unset GIT_DIR; git push" "can't tell which repository"
-expect_block "git --git-dir, then -C a reviewed worktree" "$repo" "git --git-dir=$wtb/.git -C $repo push" "can't tell which repository"
-expect_allow "export GIT_DIR, then unset it" "$repo" "export GIT_DIR=$wtb/.git; unset GIT_DIR; git push"
-expect_allow "export GIT_DIR in a subshell" "$repo" "(export GIT_DIR=$wtb/.git; true) && git push"
-# A HEAD-moving git command the walk doesn't run directly still moves HEAD.
-expect_block "a wrapped commit, then a push" "$repo" "timeout 60 git commit -m x && git push" "separate command"
-expect_block "a commit in a command substitution, then a push" "$repo" "out=\$(git commit --allow-empty -m x 2>&1) && git push" "separate command"
-# Code handed to a shell or eval is not followed; a process substitution is.
-expect_block "a push in bash -c" "$repo" "bash -c \"git push origin feat-b\"" "can't follow"
-expect_block "a push in sh -c, after a cd" "$repo" "sh -c 'cd ../wt-b && git push'" "can't follow"
-expect_block "a push in eval" "$repo" "eval \"git push origin feat-b\"" "can't follow"
-expect_block "a push in a heredoc read by bash" "$repo" "bash <<'EOF'
-cd ../wt-b
-git push origin feat-b
-EOF" "can't follow"
-expect_block "a push in a here-string read by sh" "$repo" "sh <<< 'git -C ../wt-b push'" "can't follow"
-expect_block "a push in an input process substitution" "$repo" "cat <(git push origin feat-b)" "missing pre-push review marker"
-expect_block "a push in an output process substitution" "$repo" "tee >(git -C ../wt-b push)" "missing pre-push review marker"
-expect_block "a push in a here-string read by sh, inside \$(…)" "$repo" "echo \"\$(sh <<<'git -C ../wt-b push')\"" "can't follow"
-expect_block "a push in bash -c, inside \$(…)" "$repo" "out=\$(bash -c 'git -C ../wt-b push')" "can't follow"
-expect_block "a push in eval, inside \$(…)" "$repo" "out=\$(eval 'git -C ../wt-b push')" "can't follow"
-expect_block "a push with a quoted -C path, inside \$(…)" "$repo" "out=\$(git -C \"\$WT\" push)" "can't follow"
-expect_block "a push in bash -c, inside \$'…' inside \$(…)" "$repo" "out=\$(bash -c \$'git -C ../wt-b push')" "can't follow"
-# A substitution's output handed to a shell is code.
-expect_block "a substitution's output handed to eval" "$repo" "eval \"\$(echo 'git -C ../wt-b push')\"" "can't follow"
-expect_block "…to bash -c" "$repo" "bash -c \"\$(echo 'git -C ../wt-b push')\"" "can't follow"
-expect_block "a push continued over a backslash-newline in bash -c" "$repo" "bash -c 'git -C ../wt-b \\
-push'" "can't follow"
-expect_block "…and in a heredoc read by bash" "$repo" "bash <<'EOF'
-git -C ../wt-b \\
-push
-EOF" "can't follow"
-# A substitution in a here-string or a redirect target runs like any other.
-expect_block "a push in a here-string's substitution" "$repo" "grep -q rejected <<< \"\$(git -C ../wt-b push 2>&1)\"" "can't follow"
-expect_block "a push in a redirect target's substitution" "$repo" "echo hi > \"\$(git -C ../wt-b push >/dev/null; echo /dev/null)\"" "can't follow"
-expect_block "a commit in a here-string's substitution, then a push" "$repo" "grep -q x <<< \"\$(git commit --allow-empty -m x)\"; git push" "separate command"
-expect_allow "a mention of git push beside a substitution" "$wtb" "echo \"\$(date): ran git push\""
-# Quoted text inside a substitution is an argument, not code.
-expect_allow "a substitution that greps for git push" "$wtb" "n=\$(grep -c 'git push' AGENTS.md)"
-expect_allow "…looped over" "$wtb" "for f in \$(rg -l 'git push' docs); do echo \$f; done"
-expect_allow "…double-quoted" "$wtb" "wc -l \$(grep -rl \"git push\" .claude)"
-expect_allow "a commit message from a substitution that mentions git push" "$wtb" "git commit -m \"\$(echo 'docs: explain the git push gate')\""
-expect_allow "a PR comment from printf that mentions git push" "$wtb" "gh pr comment 1 --body \"\$(printf 'Fixed; run git push to update.\\n')\""
-expect_allow "a push, then a substitution that greps for git commit" "$repo" "git push origin feat-a; n=\$(grep -c 'git commit' AGENTS.md)"
-expect_allow "a PR body heredoc that mentions github and pushed" "$wtb" "gh pr create --draft --title \"fix: x\" --body \"\$(cat <<'EOF'
-The branch on github was pushed; it's ready.
-EOF
-)\""
-expect_block "a push after an \$'…' string holding \\'" "$repo" "echo \$'it\\'s' && git push origin feat-b" "missing pre-push review marker"
-expect_allow "…and the same push of a reviewed branch" "$repo" "echo \$'it\\'s' && git push origin feat-a"
-expect_allow "…with the \$'…' string inside \$(…)" "$repo" "out=\$(printf \$'it\\'s pushed\\n') && git push origin feat-a"
-expect_allow "…closed with EOF)\" on one line" "$wtb" "gh pr create --draft --title \"fix: x\" --body \"\$(cat <<'EOF'
-The branch on github was pushed; it's ready.
-EOF)\""
-expect_allow "a script run by bash, then a push" "$repo" "bash scripts/pre-push-reviewers.sh && git push"
-expect_allow "a heredoc read by bash that doesn't push, then a push" "$repo" "bash <<'EOF'
-echo hi
-EOF
-git push"
-# A command longer than a pipe buffer (64 KB) is checked like any other.
-big=$(printf 'line %05d of a long body\n' $(seq 1 4000))
-expect_block "a push ahead of a 100 KB body" "$repo" "git push origin feat-b && gh pr create --draft --body \"\$(cat <<'EOF'
-$big
-EOF
-)\"" "missing pre-push review marker"
-expect_block "a 100 KB gh pr create without --draft" "$repo" "gh pr create --title \"fix: x\" --body \"\$(cat <<'EOF'
-$big
-EOF
-)\"" "--draft"
+expect_block "a glob refspec" "$repo" "git push origin 'refs/heads/feat-*'" "plain command"
+expect_block "an unquoted glob refspec" "$repo" "git push origin refs/heads/feat-*" "plain command"
+expect_block "--all" "$repo" "git push --all origin" "every branch"
 expect_block "the matching refspec ':'" "$repo" "git push origin :" "every branch that exists on both sides"
-expect_block "…and '+:'" "$repo" "git push origin +:" "every branch that exists on both sides"
-expect_block "an unterminated quote" "$repo" "git push origin 'feat-a" "can't parse"
+expect_block "--force" "$repo" "git push --force origin feat-a" "Force-push"
+expect_block "-f" "$repo" "git push -f origin feat-a" "Force-push"
+expect_block "-uf" "$repo" "git push -uf origin feat-a" "Force-push"
+expect_block "--force-with-lease" "$repo" "git push --force-with-lease origin feat-a" "Force-push"
+expect_block "--force-if-includes" "$repo" "git push --force-if-includes origin feat-a" "Force-push"
+expect_block "a +refspec, which force-updates its destination" "$repo" "git push origin +feat-a" "Force-push"
+expect_block "a cwd outside any worktree" "$scratch" "git push" "not inside a git worktree"
 if jq -nc --arg c "git push" '{tool_input: {command: $c}}' | "$gate" 2>"$scratch/gate.err"; then
   fail "no cwd in the payload: blocked" "$(cat "$scratch/gate.err")"
 else
   ok "no cwd in the payload: blocked"
 fi
 
-# Not pushes, or nothing to review.
-expect_allow "git stash push" "$repo" "git stash push -m wip"
-expect_allow "git -C <path> stash push" "$repo" "git -C \"$wtb\" stash push -m wip"
-expect_allow "git push --help" "$wtb" "git push --help"
-expect_allow "a push mentioned in a string" "$wtb" "echo \"git push\""
-# Mentions of a push in a heredoc body, a multi-line string or a comment, from
-# the worktree whose branch is unreviewed: none of these pushes anything.
-expect_allow "a push mentioned in a commit message heredoc" "$wtb" "git commit -m \"\$(cat <<'EOT'
-fix: tidy
-
-Then git push origin feat-b.
-EOT
-)\""
-expect_allow "a push mentioned in a heredoc written to a file" "$wtb" "cat > notes.md <<'EOT'
-run git push origin feat-b
-EOT"
-expect_allow "a push mentioned in a heredoc piped to gh" "$wtb" "gh pr comment 1 --body-file - <<'EOT'
-Please git push origin feat-b
-EOT"
-expect_allow "a push mentioned in a multi-line quoted string" "$wtb" "gh issue comment 1 --body \"first line
+# ── anything but a plain push is refused, with one message ──
+expect_block "cd x && git push" "$repo" "cd ../wt-b && git push origin feat-b" "plain command"
+expect_block "git commit … && git push" "$repo" "git commit --allow-empty -m x && git push" "plain command"
+expect_block "git push; something" "$repo" "git push origin feat-a; echo done" "plain command"
+expect_block "a push in \$(…)" "$repo" "out=\$(git push origin feat-b 2>&1)" "plain command"
+expect_block "a push in bash -c" "$repo" "bash -c 'git push origin feat-b'" "plain command"
+expect_block "a push behind a wrapper" "$repo" "timeout 60 git push" "plain command"
+expect_block "a push in a heredoc" "$repo" "bash <<'EOF'
 git push origin feat-b
-last line\""
-expect_allow "a push mentioned in a comment" "$wtb" "git status # then git push"
-expect_allow "deleting a remote branch" "$wtb" "git push origin --delete old-branch"
-expect_allow "deleting by empty source" "$wtb" "git push origin :old-branch"
-expect_allow "pushing main itself (no delta)" "$repo" "git push origin main"
+EOF" "plain command"
+expect_block "a push on the second line" "$repo" "echo hi
+git push" "plain command"
+expect_block "a push mentioned in a commit message" "$wtb" "git commit -m \"docs: explain git push\"" "plain command"
+expect_block "a quoted refspec" "$repo" "git push origin \"feat-a\"" "plain command"
+expect_block "a computed refspec" "$repo" "git push origin \"\$(git branch --show-current)\"" "plain command"
+expect_block "a variable in -C" "$repo" "git -C \"\$WT\" push" "plain command"
+expect_block "a filter that runs git" "$repo" "git push origin feat-a | git commit --allow-empty -m x" "plain command"
+expect_block "a second pipe" "$repo" "git push origin feat-a | tail -3 | cat" "plain command"
+
+# ── a repository without a reviewer manifest is out of scope ──
+expect_allow "another repository without a manifest" "$other" "git push origin x"
+expect_allow "…even pushed from the session's directory" "$repo" "git -C ../other push origin x"
 
 # The base is origin/main when there is one: a commit made on local main by
 # mistake and then branched from is on local main, but not yet reviewed.
@@ -447,9 +351,6 @@ at 910 "$acc" commit -q --allow-empty -m "on main by mistake"
 at 920 "$acc" switch -q -c feat
 expect_block "commits made on local main, then pushed on a new branch" "$acc" "git push -u origin feat" "missing pre-push review marker"
 expect_allow "…while a commit origin/main has needs no review" "$acc" "git push origin HEAD~1:refs/heads/copy"
-
-expect_allow "another repository without a reviewer manifest is out of scope" "$other" "git push origin x"
-expect_allow "…even pushed from the session's directory" "$repo" "git -C ../other push origin x"
 
 # A worktree of the session's repository whose reviewer manifest is broken or
 # gone fails closed.
@@ -509,173 +410,82 @@ else
   fail "the first-listed reviewer can be skipped while the manifest is still writing" "$(cat "$scratch/skip.err")"
 fi
 
-# The gh checks still resolve the title linter from the session's checkout.
-CLAUDE_PROJECT_DIR=$root expect_block "gh pr create title lint" "$repo" "gh pr create --draft --title \"Bad title.\"" "PR title"
-expect_block "gh pr create without --draft" "$repo" "gh pr create --title \"fix: x\""
+# ── gh: the humans-only PR actions, as plain text ──
+# The title linter resolves from the session's checkout.
+lint() { CLAUDE_PROJECT_DIR=$root "$@"; }
 
-# The alias, REST and GraphQL forms of the humans-only gh pr actions (#790).
+expect_block "gh pr create without --draft" "$repo" 'gh pr create --title "fix: x"' "must use --draft"
 expect_block "gh pr new without --draft" "$repo" 'gh pr new --title "fix: x"' "must use --draft"
-CLAUDE_PROJECT_DIR=$root expect_block "gh pr new title lint" "$repo" 'gh pr new --draft --title "Bad title."' "PR title"
-CLAUDE_PROJECT_DIR=$root expect_block "an unquoted gh pr create title is linted" "$repo" 'gh pr create --draft --title Bad.' "PR title"
-CLAUDE_PROJECT_DIR=$root expect_allow "gh pr new --draft with a good title" "$repo" 'gh pr new --draft --title "fix: add the thing"'
-expect_block "approve through the REST API" "$repo" 'gh api repos/o/r/pulls/12/reviews -f event=APPROVE' "Only humans approve"
-expect_block "request changes through the REST API" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews -f event=REQUEST_CHANGES -f body='see inline'" "instead of --request-changes"
-expect_block "submit a pending review as an approval" "$repo" 'gh api repos/{owner}/{repo}/pulls/12/reviews/34/events -f event=APPROVE' "Only humans approve"
-expect_block "open a PR through the REST API without draft" "$repo" 'gh api repos/o/r/pulls -f head=feat -f base=main -f title="fix: x"' "must be drafts"
-CLAUDE_PROJECT_DIR=$root expect_block "a draft opened through the REST API gets the title lint" "$repo" 'gh api repos/o/r/pulls -f head=feat -f base=main -F draft=true -f title="Bad title."' "PR title"
-CLAUDE_PROJECT_DIR=$root expect_block "a retitle through the REST API gets the title lint" "$repo" 'gh api --method=PATCH repos/o/r/pulls/12 -f "title=Bad title."' "PR title"
-CLAUDE_PROJECT_DIR=$root expect_allow "a draft opened through the REST API with a good title" "$repo" 'gh api repos/o/r/pulls -f head=feat -f base=main -F draft=true -f title="fix: add the thing"'
-expect_block "ready for review through GraphQL" "$repo" "gh api graphql -f query='mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'" "ready-for-review"
-expect_block "request reviewers with reviewers[]= and no -X" "$repo" "gh api repos/o/r/pulls/12/requested_reviewers -f 'reviewers[]=someone'" "Reviewer-write"
-expect_block "remove a requested reviewer" "$repo" "gh api -X DELETE repos/o/r/pulls/12/requested_reviewers -f 'reviewers[]=someone'" "Reviewer-write"
-expect_block "a quoted requested_reviewers path" "$repo" 'gh api -XPOST "repos/o/r/pulls/12/requested_reviewers" -f reviewers[]=someone' "Reviewer-write"
-expect_block "request reviewers through GraphQL" "$repo" "gh api graphql -f query='mutation { requestReviews(input: {pullRequestId: \"PR_x\", userIds: [\"U_x\"]}) { clientMutationId } }'" "Reviewer-write"
-expect_block "approve through GraphQL" "$repo" "gh api graphql -f query='mutation { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: APPROVE}) { clientMutationId } }'" "Only humans approve"
-expect_block "open a non-draft PR through GraphQL" "$repo" "gh api graphql -f query='mutation { createPullRequest(input: {repositoryId: \"R_x\", baseRefName: \"main\", headRefName: \"feat\", title: \"fix: x\"}) { clientMutationId } }'" "must be drafts"
-expect_block "merge through the REST API" "$repo" 'gh api -X PUT repos/o/r/pulls/12/merge -f merge_method=squash' "don't merge"
-expect_block "merge through GraphQL" "$repo" "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'" "don't merge"
-expect_block "auto-merge through GraphQL" "$repo" "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'" "don't merge"
-# gh pr merge itself is left to the deny rule in .claude/settings.json: a
-# person merges with it from shell mode, which this hook may see.
-expect_allow "gh pr merge is left to the settings.json deny rule" "$repo" 'gh pr merge 12 --squash'
-
-# Look-alikes that read, or don't touch a PR, go through.
-expect_allow "read a PR through the REST API" "$repo" 'gh api repos/o/r/pulls/12'
-expect_allow "list PRs" "$repo" "gh api 'repos/o/r/pulls?state=open'"
-expect_allow "list PRs with -X GET and fields" "$repo" 'gh api -X GET repos/o/r/pulls -f state=open'
-expect_allow "read a PR's reviews" "$repo" 'gh api repos/o/r/pulls/12/reviews'
-expect_allow "read its requested reviewers" "$repo" 'gh api repos/o/r/pulls/12/requested_reviewers'
-expect_allow "check whether it merged" "$repo" 'gh api repos/o/r/pulls/12/merge'
-expect_allow "a COMMENT review through the REST API" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews -f event=COMMENT -f body='looks fine'"
-expect_allow "a GraphQL query that reads reviews" "$repo" "gh api graphql -f query='query { repository(owner: \"o\", name: \"r\") { pullRequest(number: 12) { reviews(last: 5) { nodes { state } } } } }'"
-expect_allow "a draft PR opened through GraphQL" "$repo" "gh api graphql -f query='mutation { createPullRequest(input: {repositoryId: \"R_x\", baseRefName: \"main\", headRefName: \"feat\", title: \"fix: x\", draft: true}) { clientMutationId } }'"
-expect_allow "an issue comment that mentions approve and merge" "$repo" "gh api -X POST repos/o/r/issues/12/comments -f body='approve it, then merge'"
-expect_allow "gh pr view" "$repo" 'gh pr view 12'
-
-# A gh command only mentioned in a heredoc body, a comment or a quoted string
-# isn't run; one a shell runs still is.
-expect_allow "a gh pr ready in a comment inside a python heredoc" "$repo" "python3 - <<'EOF'
-# gh pr ready is humans-only.
-print('ok')
-EOF"
-expect_allow "gh pr merge and an API merge in a cat heredoc" "$repo" "cat <<'EOF' >notes.txt
-gh pr merge 12 --squash
-gh api -X PUT repos/o/r/pulls/12/merge
-EOF"
-expect_allow "a gh pr ready in a shell comment" "$repo" 'ls # then gh pr ready 12'
-expect_allow "a gh pr ready in a quoted string" "$repo" 'echo "run gh pr ready 12 when done"'
-expect_allow "a PR body heredoc that mentions gh pr ready" "$repo" "gh pr create --draft --title \"fix: x\" --body \"\$(cat <<'EOF'
-A person runs gh pr ready 12 later.
-EOF
-)\""
-expect_block "a gh pr ready run on its own line" "$repo" "cd .
-gh pr ready 12" "ready-for-review"
-expect_block "a gh pr ready behind a wrapper" "$repo" 'timeout 60 gh pr ready 12' "ready-for-review"
-# shellcheck disable=SC2016 # a literal $(…), for the gate to read
-expect_block "a gh pr ready in a \$(…)" "$repo" 'echo "$(gh pr ready 12)"' "ready-for-review"
-expect_block "a gh pr ready handed to bash -c" "$repo" "bash -c 'gh pr ready 12'" "ready-for-review"
-expect_block "a gh pr ready in a heredoc read by bash" "$repo" "bash <<'EOF'
-gh pr ready 12
-EOF" "ready-for-review"
-expect_block "a gh pr ready in a heredoc piped into sh" "$repo" "cat <<'EOF' | sh
-gh pr ready 12
-EOF" "ready-for-review"
-
-# gh api handed to a shell is judged like any other gh api call.
-expect_block "an API merge handed to bash -c" "$repo" "bash -c 'gh api -X PUT repos/o/r/pulls/12/merge'" "don't merge"
-expect_block "an API approval handed to sh -c" "$repo" 'sh -c "gh api repos/o/r/pulls/12/reviews -f event=APPROVE"' "Only humans approve"
-expect_block "GraphQL ready handed to bash -lc" "$repo" "bash -lc \"gh api graphql -f query='mutation { markPullRequestReadyForReview(input: {pullRequestId: \\\"PR_x\\\"}) { clientMutationId } }'\"" "ready-for-review"
-expect_block "an API merge handed to eval" "$repo" "eval 'gh api -X PUT repos/o/r/pulls/12/merge'" "don't merge"
-expect_allow "a read handed to bash -c" "$repo" "bash -c 'gh api repos/o/r/pulls/12'"
-
-# A boolean flag set with = counts as set when its value is true, and not when false.
-expect_allow "gh pr create --draft=true" "$repo" 'gh pr create --draft=true --title "fix: x"'
+expect_block "gh --repo o/r pr create without --draft" "$repo" 'gh --repo o/r pr create --title "fix: x"' "must use --draft"
 expect_block "gh pr create --draft=false" "$repo" 'gh pr create --draft=false --title "fix: x"' "must use --draft"
-expect_block "gh pr review --approve=true" "$repo" 'gh pr review 12 --approve=true' "Only humans approve"
-expect_allow "gh pr review --approve=false --comment" "$repo" 'gh pr review 12 --approve=false --comment -b "noted"'
-expect_block "gh pr review --request-changes=true" "$repo" 'gh pr review 12 --request-changes=true -b "see inline"' "instead of --request-changes"
-expect_block "gh pr edit --add-reviewer=someone" "$repo" 'gh pr edit 12 --add-reviewer=someone' "Adding/removing reviewers"
+expect_allow "gh pr create --draft=true" "$repo" 'gh pr create --draft=true --title "fix: x"'
+expect_allow "gh pr create -d" "$repo" 'gh pr create -d --title "fix: x"'
+lint expect_allow "gh pr create --draft with a good title" "$repo" 'gh pr create --draft --title "feat(gate): add the thing" --body-file b.md'
+lint expect_block "a bad double-quoted title" "$repo" 'gh pr create --draft --title "Bad title."' "PR title"
+lint expect_block "a bad single-quoted title" "$repo" "gh pr create --draft -t 'Bad title.'" "PR title"
+lint expect_block "a bad --title= title" "$repo" 'gh pr create --draft --title=Bad.' "PR title"
+lint expect_block "a bad title on gh pr edit" "$repo" 'gh pr edit 12 --title "Bad title."' "PR title"
+lint expect_allow "gh pr edit --title with a good title" "$repo" 'gh pr edit 12 --title "fix: add the thing"'
+lint expect_allow "gh pr create --fill: no literal title, fail-open" "$repo" 'gh pr create --draft --fill'
+expect_block "gh pr create --reviewer" "$repo" 'gh pr create --draft --title "feat: x" --reviewer someone' "Adding/removing reviewers"
+expect_block "gh pr new --assignee=x" "$repo" 'gh pr new --draft --title "feat: x" --assignee=x' "Adding/removing reviewers"
+expect_block "gh pr edit --add-reviewer" "$repo" 'gh pr edit 12 --add-reviewer someone' "Adding/removing reviewers"
+expect_block "gh -R o/r pr edit --add-assignee=x" "$repo" 'gh -R o/r pr edit 12 --add-assignee=x' "Adding/removing reviewers"
+expect_block "gh pr ready" "$repo" 'gh pr ready 12' "ready-for-review"
+expect_block "gh pr review --approve" "$repo" 'gh pr review 12 --approve' "Only humans approve"
+expect_block "gh pr review --request-changes" "$repo" 'gh pr review 12 --request-changes -b "see inline"' "instead of --request-changes"
+expect_allow "gh pr review --comment" "$repo" 'gh pr review 12 --comment -b "noted"'
 
-# gh pr create / new can request reviewers or assign people at creation; on gh pr review -r / -a stay --request-changes / --approve.
-for c in create new; do
-  expect_block "gh pr $c --reviewer x" "$repo" "gh pr $c --draft --title \"feat: x\" --reviewer x" "Adding/removing reviewers"
-  expect_block "gh pr $c --reviewer=x" "$repo" "gh pr $c --draft --title \"feat: x\" --reviewer=x" "Adding/removing reviewers"
-  expect_block "gh pr $c -r x" "$repo" "gh pr $c --draft --title \"feat: x\" -r x" "Adding/removing reviewers"
-  expect_block "gh pr $c -rx (glued)" "$repo" "gh pr $c --draft --title \"feat: x\" -rx" "Adding/removing reviewers"
-  expect_block "gh pr $c --assignee x" "$repo" "gh pr $c --draft --title \"feat: x\" --assignee x" "Adding/removing reviewers"
-  expect_block "gh pr $c --assignee=x" "$repo" "gh pr $c --draft --title \"feat: x\" --assignee=x" "Adding/removing reviewers"
-  expect_block "gh pr $c -a x" "$repo" "gh pr $c --draft --title \"feat: x\" -a x" "Adding/removing reviewers"
-  expect_block "gh pr $c -a=x (glued)" "$repo" "gh pr $c --draft --title \"feat: x\" -a=x" "Adding/removing reviewers"
-done
-expect_allow "a plain gh pr create --draft" "$repo" 'gh pr create --draft --title "feat: x"'
-expect_block "gh pr review -a is still --approve" "$repo" 'gh pr review 12 -a' "Only humans approve"
-expect_block "gh pr review -r is still --request-changes" "$repo" 'gh pr review 12 -r -b "see inline"' "instead of --request-changes"
+expect_block "REST approve" "$repo" 'gh api repos/o/r/pulls/12/reviews -f event=APPROVE' "Only humans approve"
+expect_block "REST pending-review approve" "$repo" 'gh api repos/o/r/pulls/12/reviews/34/events -f event=APPROVE' "Only humans approve"
+expect_block "REST request changes" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews -f event=REQUEST_CHANGES -f body='see inline'" "instead of --request-changes"
+expect_block "GraphQL approve" "$repo" "gh api graphql -f query='mutation { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: APPROVE}) { clientMutationId } }'" "Only humans approve"
+expect_block "GraphQL ready" "$repo" "gh api graphql -f query='mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'" "ready-for-review"
+expect_block "GraphQL request reviews" "$repo" "gh api graphql -f query='mutation { requestReviews(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'" "Reviewer-write"
+expect_block "REST requested_reviewers" "$repo" "gh api repos/o/r/pulls/12/requested_reviewers -f 'reviewers[]=someone'" "Reviewer-write"
+expect_block "REST merge" "$repo" 'gh api -X PUT repos/o/r/pulls/12/merge -f merge_method=squash' "don't merge"
+expect_block "GraphQL merge" "$repo" "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'" "don't merge"
+expect_block "GraphQL auto-merge" "$repo" "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'" "don't merge"
+expect_block "GraphQL createPullRequest without draft" "$repo" "gh api graphql -f query='mutation { createPullRequest(input: {repositoryId: \"R_x\", baseRefName: \"main\", headRefName: \"feat\", title: \"fix: x\"}) { clientMutationId } }'" "must be drafts"
+expect_block "REST create without draft" "$repo" 'gh api repos/o/r/pulls -f head=feat -f base=main -f title="fix: x"' "must be drafts"
+lint expect_block "REST draft create gets the title lint" "$repo" 'gh api repos/o/r/pulls -f head=feat -f base=main -F draft=true -f title="Bad title."' "PR title"
 
-# Each gh api call is judged by its own endpoint and fields, not by text in a
-# field's value or in another command on the line.
-expect_allow "a review-thread reply that quotes a merge endpoint" "$repo" "gh api repos/o/r/pulls/12/comments/34/replies -f body='Merging is PUT repos/o/r/pulls/12/merge and only a person runs it.'"
-expect_allow "an issue comment that names requested_reviewers" "$repo" "gh api -X POST repos/o/r/issues/12/comments -f body='requested_reviewers is set by the ruleset'"
-expect_allow "a comment body with event=APPROVE in it" "$repo" "gh api -X POST repos/o/r/issues/12/comments -f body='a review sends event=APPROVE; we do not'"
-expect_allow "a GraphQL comment that mentions a mutation name" "$repo" "gh api graphql -f query='mutation(\$b: String!) { addComment(input: {subjectId: \"I_x\", body: \$b}) { clientMutationId } }' -f b='markPullRequestReadyForReview is for people'"
-expect_allow "a reviewer read, then a comment, on one line" "$repo" 'gh api repos/o/r/pulls/12/requested_reviewers && gh api -X POST repos/o/r/issues/12/comments -f body=ping'
-expect_block "a comment, then a reviewer write, on one line" "$repo" "gh api -X POST repos/o/r/issues/12/comments -f body=ping && gh api repos/o/r/pulls/12/requested_reviewers -f 'reviewers[]=someone'" "Reviewer-write"
-expect_allow "a draft opened through the REST API whose body says draft=false" "$repo" "gh api repos/o/r/pulls -f head=feat -f base=main -F draft=true -f body='not draft=false'"
-expect_block "a non-draft whose body says draft=true" "$repo" "gh api repos/o/r/pulls -f head=feat -f base=main -f body='draft=true'" "must be drafts"
-expect_block "an API merge through a full URL" "$repo" 'gh api --method PUT https://api.github.com/repos/o/r/pulls/12/merge' "don't merge"
-expect_block "an API merge with fields set by -F=" "$repo" 'gh api repos/o/r/pulls/12/merge --field=merge_method=squash' "don't merge"
+expect_allow "gh pr view" "$repo" 'gh pr view 12'
+expect_allow "gh pr list" "$repo" 'gh pr list --state open'
+expect_allow "gh pr checks" "$repo" 'gh pr checks 12'
+expect_allow "gh pr diff" "$repo" 'gh pr diff 12'
+expect_allow "gh pr comment" "$repo" 'gh pr comment 12 --body "looks fine"'
+expect_allow "gh pr merge is left to the settings.json deny rule" "$repo" 'gh pr merge 12 --squash'
+expect_allow "gh api read of a PR" "$repo" 'gh api repos/o/r/pulls/12'
+expect_allow "gh api list of PRs" "$repo" "gh api 'repos/o/r/pulls?state=open'"
+expect_allow "gh api GET with fields" "$repo" 'gh api -X GET repos/o/r/pulls -f state=open'
+expect_allow "gh api read of a PR's reviews" "$repo" 'gh api repos/o/r/pulls/12/reviews'
+lint expect_allow "REST draft create with a good title" "$repo" 'gh api repos/o/r/pulls -f head=feat -f base=main -F draft=true -f title="fix: add the thing"'
+expect_allow "GraphQL draft createPullRequest" "$repo" "gh api graphql -f query='mutation { createPullRequest(input: {repositoryId: \"R_x\", baseRefName: \"main\", headRefName: \"feat\", title: \"fix: x\", draft: true}) { clientMutationId } }'"
+expect_allow "a COMMENT review through REST" "$repo" "gh api -X POST repos/o/r/pulls/12/reviews -f event=COMMENT -f body='looks fine'"
+expect_allow "a COMMENT review through GraphQL" "$repo" "gh api graphql -f query='mutation { addPullRequestReview(input: {pullRequestId: \"PR_x\", event: COMMENT}) { clientMutationId } }'"
+expect_allow "a review-thread reply" "$repo" "gh api repos/o/r/pulls/12/comments/34/replies -f body='fixed in abc123'"
+expect_allow "an issue comment that mentions approve and merge" "$repo" "gh api -X POST repos/o/r/issues/12/comments -f body='approve it, then merge'"
+expect_allow "no gh at all" "$repo" "echo hello; ls"
 
-# The gate follows 64 pieces of nested code; a gh command beyond them is refused.
-# shellcheck disable=SC2016 # literal $(true)s, for the gate to read
-pad62=$(printf ' $(true)%.0s' $(seq 62)) pad63=$(printf ' $(true)%.0s' $(seq 63))
-expect_block "a gh pr ready in the 63rd substitution is judged" "$repo" "echo$pad62 \$(gh pr ready 12)" "ready-for-review"
-expect_block "a gh pr ready past the 64 the gate follows is refused" "$repo" "echo$pad63 \$(gh pr ready 12)" "nests more code"
-expect_allow "a gh read beside 70 substitutions with no gh in them" "$repo" "gh pr view 12 && echo$pad63 \$(true) \$(true) \$(true) \$(true) \$(true) \$(true) \$(true)"
+# The accepted false positive: the text is searched, not parsed. Put long text
+# in a file (--body-file) to avoid it.
+expect_block "a gh pr comment body that names markPullRequestReadyForReview IS blocked" "$repo" "gh pr comment 12 --body 'the markPullRequestReadyForReview mutation is humans-only'" "ready-for-review"
 
-# gh resolves -R/--repo before the command.
-expect_block "gh -R o/r pr ready" "$repo" 'gh -R o/r pr ready 12' "ready-for-review"
-expect_block "gh --repo o/r pr review --approve" "$repo" 'gh --repo o/r pr review 12 --approve' "Only humans approve"
-expect_block "gh --repo=o/r pr create without --draft" "$repo" 'gh --repo=o/r pr create --title "fix: x"' "must use --draft"
-expect_block "gh -Ro/r pr edit --add-reviewer" "$repo" 'gh -Ro/r pr edit 12 --add-reviewer someone' "Adding/removing reviewers"
-expect_block "gh -R o/r api merge" "$repo" 'gh -R o/r api -X PUT repos/o/r/pulls/12/merge' "don't merge"
-expect_allow "gh -R o/r pr view" "$repo" 'gh -R o/r pr view 12'
-
-# A GraphQL query computed by a heredoc inside $(…) is read from that heredoc.
-expect_block "GraphQL ready in a heredoc query" "$repo" "gh api graphql -f query=\"\$(cat <<'EOF'
-mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }
-EOF
-)\"" "ready-for-review"
-expect_allow "a GraphQL read in a heredoc query" "$repo" "gh api graphql -f query=\"\$(cat <<'EOF'
-query { viewer { login } }
+# A command longer than a pipe buffer (64 KB) is checked like any other, quickly.
+big=$(printf 'line %05d of a long body\n' $(seq 1 4000))
+timed "a 100 KB gh pr create is judged within 10 s" 10 "$repo" "gh pr create --draft --title \"fix: x\" --body \"\$(cat <<'EOF'
+$big
 EOF
 )\""
-
-# A shell given options before -c still runs the code after them; the push
-# check and the gh check agree on these forms.
-expect_block "bash -e -c with a gh pr ready" "$repo" "bash -e -c 'gh pr ready 12'" "ready-for-review"
-expect_block "bash -euo pipefail -c with a gh pr ready" "$repo" "bash -euo pipefail -c 'gh pr ready 12'" "ready-for-review"
-expect_block "bash -o pipefail -c with a gh pr ready" "$repo" "bash -o pipefail -c 'gh pr ready 12'" "ready-for-review"
-expect_block "bash +o posix -c with a gh pr ready" "$repo" "bash +o posix -c 'gh pr ready 12'" "ready-for-review"
-expect_block "bash --noprofile --norc -c with an API merge" "$repo" "bash --noprofile --norc -c 'gh api -X PUT repos/o/r/pulls/12/merge'" "don't merge"
-expect_block "bash -e -c with a push" "$repo" "bash -e -c 'git -C ../wt-b push'" "can't follow"
-expect_block "bash -euo pipefail -c with a push" "$repo" "bash -euo pipefail -c 'git -C ../wt-b push'" "can't follow"
-expect_block "bash --noprofile --norc -c with a push" "$repo" "bash --noprofile --norc -c 'git -C ../wt-b push'" "can't follow"
-expect_allow "bash --norc running a script, not -c" "$repo" 'bash --norc scripts/pre-push-reviewers.sh'
-expect_allow "bash -o pipefail -c with a read" "$repo" "bash -o pipefail -c 'gh pr view 12'"
-
-# The code inside a $(…) is judged as written, its quotes kept.
-expect_block "a GraphQL ready mutation captured by \$(…)" "$repo" "resp=\$(gh api graphql -f query='mutation { markPullRequestReadyForReview(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }')" "ready-for-review"
-# shellcheck disable=SC2016 # a literal $(…), for the gate to read
-CLAUDE_PROJECT_DIR=$root expect_allow "a draft PR's URL captured by \$(…), two-word title" "$repo" 'url=$(gh pr create --draft --title "fix: add the thing" --body-file b.md)'
-# shellcheck disable=SC2016
-CLAUDE_PROJECT_DIR=$root expect_allow "a draft PR's URL captured by \$(…), scoped title" "$repo" 'url=$(gh pr create --draft --title "feat(gate): add the thing" --body-file b.md)'
-# shellcheck disable=SC2016
-CLAUDE_PROJECT_DIR=$root expect_block "a bad title inside \$(…) is still linted" "$repo" 'url=$(gh pr create --draft --title "Bad title." --body-file b.md)' "PR title"
-expect_allow "a comment body with an apostrophe inside \$(…)" "$repo" "out=\$(gh pr comment 12 --body \"it's fixed\")"
-expect_allow "a gh pr ready only grepped for inside \$(…)" "$repo" "n=\$(grep -c 'gh pr ready' AGENTS.md)"
-expect_block "a gh pr ready in a heredoc read by bash inside \$(…)" "$repo" "out=\$(bash <<'EOF'
-gh pr ready 12
+expect_block "…and a 100 KB gh pr create without --draft is blocked" "$repo" "gh pr create --title \"fix: x\" --body \"\$(cat <<'EOF'
+$big
 EOF
-)" "ready-for-review"
+)\"" "--draft"
+expect_block "…and a push ahead of a 100 KB body is refused" "$repo" "git push origin feat-b && gh pr create --draft --body \"\$(cat <<'EOF'
+$big
+EOF
+)\"" "plain command"
 
 if [ "$fails" -gt 0 ]; then
   printf '\n%d case(s) failed\n' "$fails" >&2

@@ -98,7 +98,7 @@ jobs:
       # Node 24 ships npm >= 11.5.1 for OIDC trusted publishing, and dodges the
       # broken in-place npm self-upgrade on the Node 22.22.2 runner image
       # (actions/runner-images#13883). The SDK build is Node-version-agnostic.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -215,7 +215,7 @@ jobs:
           run_install: false
 
       # Node 24 ships npm >= 11.5.1 for OIDC trusted publishing — see the dev job.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"

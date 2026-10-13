@@ -1,0 +1,45 @@
+name: Docs preview cleanup
+
+# Retires a pull request's docs previews when it closes (merged or not). The
+# `docs-preview` job in ci.yml records a GitHub Deployment in the shared
+# `preview/docs` environment for every PR commit and deactivates only that same
+# PR's older ones, so without this a closed PR's last preview would stay
+# "active" on the Deployments page forever. Here they are marked inactive and
+# then deleted, so the environment's history doesn't grow without bound. The PR's
+# sticky preview comment still lists its URLs.
+#
+# Cloudflare's side is left alone on purpose: a Worker preview alias can't be
+# deleted (Cloudflare keeps the 1,000 most recent and drops the oldest), and an
+# uploaded version serves no production traffic.
+#
+# `pull_request_target` runs the default branch's copy of this workflow and it
+# checks nothing out, so no PR-authored code holds the write token; the only
+# PR-derived input is the number, which the action reads from the event. Same
+# trust shape as pr-cache-cleanup.yml.
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions: {}
+
+jobs:
+  cleanup:
+    name: Docs preview cleanup
+    # Fork PRs never get a preview (no secrets), so there is nothing to retire.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      deployments: write
+    steps:
+      - name: Retire this PR's docs previews
+        uses: Wave-RF/cloudflare-preview/deployment@62adaa738a5a786c22fe7a0a08a0dd354084326b # v1.1.2
+        with:
+          state: inactive
+          label: docs
+          delete: "true"
+          # This job does nothing else, so a failed retire (a permission
+          # regression, an API error) must red it rather than pass as a quiet
+          # warning, the same stance as pr-cache-cleanup.yml.
+          fail-on-error: "true"

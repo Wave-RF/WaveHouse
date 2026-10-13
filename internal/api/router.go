@@ -120,6 +120,7 @@ func NewRouter(deps Dependencies) http.Handler {
 			if deps.Tenants != nil && deps.Tenants.Nested() {
 				adminPolicy = nil
 			}
+			r.Use(opsRequestTenant)
 			r.Use(deps.AuthMW)
 			r.Use(refuseUnverifiable)
 			r.Use(RequireAdmin(adminPolicy))
@@ -163,7 +164,7 @@ func NewRouter(deps Dependencies) http.Handler {
 func newProbeRouter(origins func(*http.Request) []string, health *HealthHandler, version *VersionHandler, metrics http.Handler, metricsPath string) chi.Router {
 	r := chi.NewRouter()
 
-	r.Use(middleware.RequestID)
+	r.Use(requestID)
 	// No middleware.RealIP: it rewrites r.RemoteAddr from spoofable forwarded
 	// headers on every request (chi deprecated it for the IP-spoofing GHSAs),
 	// and nothing here reads RemoteAddr — WaveHouse does no per-IP logic (that's
@@ -210,13 +211,14 @@ func newProbeRouter(origins func(*http.Request) []string, health *HealthHandler,
 			otelhttp.NewMiddleware("wavehouse-api")(next).ServeHTTP(w, r)
 		})
 	})
+	r.Use(annotateSpan)
 
 	// Public endpoints. /livez and /readyz are the canonical probe names
 	// (current Kubernetes convention — the kube-apiserver split that replaced
 	// the older conflated /healthz). /healthz is kept as a permanent alias of
 	// /livez (it's the most widely-recognized name); /health and /ready are
-	// deprecated aliases, kept for v0.1.x and scheduled for removal in v0.2.0
-	// (see CHANGELOG). The SDK-facing public liveness ping is /v1/health.
+	// deprecated aliases, still served in v0.2.0; their removal is #818.
+	// The SDK-facing public liveness ping is /v1/health.
 	r.Get("/livez", health.Liveness)
 	r.Get("/readyz", health.Readiness)
 	r.Get("/healthz", health.Liveness) // permanent alias of /livez
@@ -257,6 +259,7 @@ func NewOpsRouter(deps OpsDependencies) http.Handler {
 	r := newProbeRouter(nil, deps.Health, deps.Version, deps.MetricsHandler, deps.MetricsPath)
 	if deps.Settings != nil {
 		r.Route("/v1/ops", func(r chi.Router) {
+			r.Use(opsRequestTenant)
 			r.Use(deps.AuthMW)
 			r.Use(refuseUnverifiable)
 			r.Use(RequireAdmin(nil))

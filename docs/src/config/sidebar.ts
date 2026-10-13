@@ -47,6 +47,7 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
       { label: "Configuration", slug: "configuration" },
       { label: "Settings Directory", slug: "settings-directory" },
       { label: "Deployment", slug: "deployment" },
+      { label: "Upgrading", slug: "upgrading" },
       { label: "Durability & Storage", slug: "durability" },
       { label: "Behind a reverse proxy", slug: "reverse-proxy" },
     ],
