@@ -83,6 +83,28 @@ func TestTableView(t *testing.T) {
 	}
 }
 
+// TestTableView_SumsAnObservableUpDownCounter pins "summed" for the
+// asynchronous kind a per-table size metric would use.
+func TestTableView_SumsAnObservableUpDownCounter(t *testing.T) {
+	t.Parallel()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader), sdkmetric.WithView(tableView(true, TableWarnThreshold)))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	_, err := mp.Meter("test").Int64ObservableUpDownCounter("wavehouse_test_bytes",
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(10, metric.WithAttributes(TableAttr.String("clicks")))
+			o.Observe(32, metric.WithAttributes(TableAttr.String("users")))
+			return nil
+		}))
+	require.NoError(t, err)
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(t.Context(), &rm))
+	dps := rm.ScopeMetrics[0].Metrics[0].Data.(metricdata.Sum[int64]).DataPoints
+	require.Len(t, dps, 1)
+	assert.Equal(t, int64(42), dps[0].Value)
+	assert.Equal(t, 0, dps[0].Attributes.Len())
+}
+
 // TestTableView_WarnsOncePastThreshold captures the default logger, so it is
 // serial.
 func TestTableView_WarnsOncePastThreshold(t *testing.T) {

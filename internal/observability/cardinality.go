@@ -22,7 +22,8 @@ const TableWarnThreshold = 500
 // library ones, otelhttp and runtime, carry no table). aggregate drops the
 // table attribute, so each metric reports one series per remaining label set
 // summed over every table; otherwise the attribute is kept and a tableCounter
-// watches how many distinct tables it has carried.
+// watches how many distinct tables it has carried. Only sum-like instruments
+// may carry table: a gauge folded this way keeps one table's last value.
 func tableView(aggregate bool, threshold int) metric.View {
 	filter := attribute.NewDenyKeysFilter(TableAttr)
 	if !aggregate {
