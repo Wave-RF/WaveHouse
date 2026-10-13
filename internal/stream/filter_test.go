@@ -3,7 +3,7 @@ package stream
 import (
 	"testing"
 
-	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
 	"github.com/stretchr/testify/assert"
 )
 

@@ -10,8 +10,8 @@
 # Merged-suites profile produced by `scripts/cov merge` at the end of
 # `make ci`. Contains unit + integration + e2e coverage stitched
 # together, so `threshold.total` below applies to the *project-wide*
-# coverage number — unit alone covers only `./internal/...` packages
-# exercised by `*_test.go` files (below total threshold); merged
+# coverage number — unit alone covers only `./internal/...` and `./pkg/...`
+# packages exercised by `*_test.go` files (below total threshold); merged
 # coverage adds integration- and e2e-only paths and clears it.
 profile: tmp/coverage/total/coverage.txt
 local-prefix: github.com/Wave-RF/WaveHouse
@@ -70,15 +70,18 @@ exclude:
   # config.excludesFor for the wiring.
   per-suite:
     e2e:
-      # internal/settings is mostly validation: the e2e suite (server-
-      # focused) only walks the happy path — boot adopts a valid fixture
-      # directory — which measures ~46% for the package and pulls the e2e
-      # gate to 58.9%, under its 60% floor. The remaining branches (every
-      # rejection path, the seed writer) are unit territory and the unit
-      # suite covers them thoroughly; per-suite excludes don't touch the
-      # merged total, so nothing is hidden project-wide. Same for the
-      # settings CLI entry points (`validate`, `bootstrap`), which e2e
-      # never runs. Revisit if e2e grows a reload-rejection scenario.
+      # pkg/settings is mostly validation, and internal/settings the reload
+      # paths over it: the e2e suite (server-focused) only walks the happy
+      # path — boot adopts a valid fixture directory — which measured ~46%
+      # for the validator and pulled the e2e gate under its 60% floor (58.9%
+      # when it lived in internal/settings, 59.2% at pkg/settings). The
+      # remaining branches (every rejection path, the seed writer) are unit
+      # territory and the unit suite covers them thoroughly; per-suite
+      # excludes don't touch the merged total, so nothing is hidden
+      # project-wide. Same for the settings CLI entry points (`validate`,
+      # `bootstrap`), which e2e never runs. Revisit if e2e grows a
+      # reload-rejection scenario.
+      - ^pkg/settings/
       - ^internal/settings/
       - ^cmd/wavehouse/validate\.go$
       - ^cmd/wavehouse/bootstrap\.go$

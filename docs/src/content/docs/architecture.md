@@ -49,6 +49,8 @@ WaveHouse ships a single binary, `wavehouse`: an all-in-one process running the 
 
 ## Internal Packages
 
+Five of the packages below live under `pkg/` rather than `internal/`: a module outside this repository imports them at a release tag to validate a settings directory with the server's own rules ([#834](https://github.com/Wave-RF/WaveHouse/issues/834)), so they carry nothing under `internal/` and none of the server's runtime dependencies (a depguard rule enforces both).
+
 ```text
 internal/
 ├── api/         HTTP layer (Chi router, handlers, middleware, the cached read paths' singleflight)
@@ -56,7 +58,6 @@ internal/
 ├── auth/        JWT/JWKS authentication middleware (HMAC or JWKS, role extraction)
 ├── cache/       Query cache: Ristretto L1 + the tenant-led version index; the Redis-compatible shared backend
 ├── chconn/      One ClickHouse pool per connection tuple among the served tenants, reconciled on reload under the ceiling
-├── chsql/       Shared ClickHouse SQL helpers (identifier quoting, bind-safety)
 ├── config/      YAML + env var configuration loading
 ├── coord/       Leases for work that must run in one process at a time (the sweeper, the ingest processes' shard claim membership), with fencing tokens (the NATS KV implementation is internal/mq/lease.go)
 ├── dedupe/      Optional deduplication (Reserve/Commit/Release; Pebble, DynamoDB)
@@ -65,11 +66,14 @@ internal/
 ├── keyenc/      The one escaping composite keys are built from (NATS subject tokens, cache keys, dedupe keys)
 ├── mq/          MQ boundary: the only NATS/JetStream importer (owned message/consumer/stream types + embedded server)
 ├── observability/ OpenTelemetry pipeline (traces/metrics/logs + Prometheus exposition)
+├── query/       Structured query AST, SQL builder, and timestamp bucketing
+├── settings/    Settings directory runtime: hold each tenant's adopted snapshot, reload on watch / SIGHUP / API
+└── stream/      SSE fan-out: event Hub (project once per role), Subscriber queue, Bucket fan-out, keepalive Heartbeater wheel
+pkg/
+├── chsql/       Shared ClickHouse SQL helpers (identifier quoting, bind-safety)
 ├── pipes/       Named query pipes (NamedQuery type, parameter binding, Source)
 ├── policy/      Hasura-style access control (policy types, evaluation, Source)
-├── query/       Structured query AST, SQL builder, and timestamp bucketing
-├── settings/    Settings directory: validate the JSON files, hold each tenant's adopted snapshot, reload on watch / SIGHUP / API
-├── stream/      SSE fan-out: event Hub (project once per role), Subscriber queue, Bucket fan-out, keepalive Heartbeater wheel
+├── settings/    Settings model: the document types, Finding, the validator (on disk and over bytes), the embedded seed
 └── tenant/      Tenant id: the type, its grammar, the reserved default, the request header name
 ```
 
@@ -210,19 +214,21 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 ### `query/` — Structured Query Engine
 
 - **ast.go** — `StructuredQuery` AST types: columns, aggregations, filters, group by, order by, limit, time range.
-- **builder.go** — `Build()` converts AST to parameterized SQL. It is the single chokepoint that validates every referenced identifier against the schema **and** authorizes every column reference — projection, aggregation args, filters, group_by, order_by, time_range — against the role's column allowlist (the [#223](https://github.com/Wave-RF/WaveHouse/issues/223) hard cap). A full-row read is requested with `select_all`, which expands to the role's allowed columns rather than emitting a raw `SELECT *`; an omitted projection selects nothing, and `*` in `columns` is a literal column name. Every identifier is backtick-quoted via `internal/chsql` (`QuoteIdent`) so any ClickHouse-legal name is accepted — a name containing `?` is refused fail-closed ([#279](https://github.com/Wave-RF/WaveHouse/issues/279)). The role's row-level-security predicate and `max_rows` cap are emitted by `Build()` itself, as part of the WHERE and LIMIT assembly — policy SQL is never spliced into rendered text ([#322](https://github.com/Wave-RF/WaveHouse/issues/322)). Timestamp bucketing for cache optimization.
+- **builder.go** — `Build()` converts AST to parameterized SQL. It is the single chokepoint that validates every referenced identifier against the schema **and** authorizes every column reference — projection, aggregation args, filters, group_by, order_by, time_range — against the role's column allowlist (the [#223](https://github.com/Wave-RF/WaveHouse/issues/223) hard cap). A full-row read is requested with `select_all`, which expands to the role's allowed columns rather than emitting a raw `SELECT *`; an omitted projection selects nothing, and `*` in `columns` is a literal column name. Every identifier is backtick-quoted via `pkg/chsql` (`QuoteIdent`) so any ClickHouse-legal name is accepted — a name containing `?` is refused fail-closed ([#279](https://github.com/Wave-RF/WaveHouse/issues/279)). The role's row-level-security predicate and `max_rows` cap are emitted by `Build()` itself, as part of the WHERE and LIMIT assembly — policy SQL is never spliced into rendered text ([#322](https://github.com/Wave-RF/WaveHouse/issues/322)). Timestamp bucketing for cache optimization.
 
 ### `settings/` — Settings Directory
 
+Two packages ([#834](https://github.com/Wave-RF/WaveHouse/issues/834)): `pkg/settings` holds the model — the document types, `Finding`, the validator and the embedded seed — and is what a program that writes settings directories (a control plane, a provisioning tool) imports to check one with the server's rules at the server's version, see [Validating from Go](/settings-directory#validating-from-go); `internal/settings` holds the runtime half, `Store`, `Registry`, `Watch` and `WriteSeed`.
+
 The hot-reloadable half of configuration: a directory of four JSON files (`config.json`, `roles.json`, `policies.json`, `pipes.json`) — or, [nested](/deployment#the-nested-settings-directory), one folder of those four per tenant — that the server validates at boot and re-adopts while running. `Validate` is the single gate (strict decode, per-file shape rules, and the cross-file check that every role a policy grant or pipe allowlist names is declared in `roles.json`), a `Store` holds one tenant's adopted `Document` as one atomic snapshot, and the `Registry` maps tenant ids to stores and owns every reload. `Store` is also the runtime authority for access control and pipes: it implements `policy.Source` (`Store.Policy`, nil when `policies.json` is `{}` — fail closed) and `pipes.Source`, and there is no other copy — the files are the only write path. See [Settings Directory](/settings-directory).
 
-- **validate.go** — `ValidateDir(dir)` reads, decodes, and checks one directory of the four files — a flat root, or one tenant's folder — in one pass (strict JSON — unknown fields and duplicate keys are errors; per-file shape rules; cross-file role references) and returns every `Finding` at once. Shared, by way of `Validate`, by `wavehouse validate`, boot, and every reload.
+- **validate.go** — `ValidateDir(dir)` reads, decodes, and checks one directory of the four files — a flat root, or one tenant's folder — in one pass (strict JSON — unknown fields and duplicate keys are errors; per-file shape rules; cross-file role references) and returns every `Finding` at once. Shared, by way of `Validate`, by `wavehouse validate`, boot, and every reload. It is `ValidateFiles(files)` — the same pass over the files' bytes by name, for a writer checking a directory before it exists — after the checks only a directory can fail: that it exists, that each file is a regular file (not a subdirectory or a FIFO), and `config.json`'s permission bits; names are read as directory entries are, so a stray file is unexpected in memory too. Every directory-content fixture in `validate_test.go` runs through both (`validateBoth`), so the two cannot drift.
 - **finding.go** — `Finding` / `Severity`: errors make the directory invalid, warnings don't block adoption. The JSON shape is part of the ops API (`POST /v1/ops/settings/reload` returns them).
 - **tree.go** — `Validate(root)` reads the directory's shape off its entries and checks either one: a root holding any of the four file names is flat and goes through `ValidateDir` untouched; otherwise a root holding a folder is nested, each folder name going through `tenant.Parse` and each folder through `ValidateDir`, with the folder leading every finding's `File` (`acme/policies.json`). The `Tree` it returns is nil when the finding is about the root itself — it cannot be listed, or a nested root holds a loose file or an entry that cannot be stat'ed.
 - **store.go** — `Store` is a passive holder: one tenant's adopted document behind an atomic pointer, swapped by the registry, which stamps it with the id of the tenant it created the store for (`Tenant()`, how a handler names its tenant to a per-tenant resource). Consumers read typed accessors per call (`ClickHouse()`, `Auth()`, `DedupeFor(table)`, `DLQFor(table)`, `Keepalive()`, …) rather than holding values.
 - **registry.go** — `Registry` maps a tenant id to its `Store` and owns everything that changes one. `Open` validates and adopts at boot; `Reload` re-validates the whole directory and `ReloadTenant` one tenant's folder, serialized with each other; `AfterAdopt` hooks run after every reload the registry applied, with the tenants it adopted — none when it only rejected or removed one, which a consumer holding a resource per tenant needs to hear of too; `For(id)` and `All()` see only the tenants being served, `Known()` every tenant held, rejected ones included, and `Resolve(id)` tells a rejected tenant from an unknown one. The shape is fixed at `Open`. Flat: an invalid directory refuses boot, and a rejected reload keeps the previous snapshot. Nested: fail closed per tenant — a folder with an error finding stops being served (the store keeps its document for requests already admitted, and gets the next good one) while the rest carry on; a whole-directory reload mirrors the folders, down to none (an emptied directory is not a change of shape); and a finding about the directory itself refuses boot or rejects the reload whole, leaving every tenant as it was; at `Open`, a nested directory that would serve no tenant (every folder rejected, or none named by a tenant id) refuses boot too, while a reload to the same tree drops every tenant and keeps running. The tenant map is replaced whole by a reload, so a lookup is one lock-free load.
 - **watch.go** — `Registry.Watch`, which `internal/app` starts for a flat directory only: fsnotify on the *directory* (not the files, so atomic-writer replaces and Kubernetes ConfigMap symlink swaps aren't lost), debounced into one reload; reloads once as soon as the watch exists so an edit between the boot read and the watch is never missed. `SIGHUP` and the reload endpoint funnel through the same serialized `Reload`.
-- **seed.go** / **seed/** — The embedded (`go:embed`) starter directory with every key at its default. The binary carries no compiled defaults except that a missing `dedupe.retention` means `"0"`: `wavehouse bootstrap [dir]` writes this seed, and the compose stack and e2e fixture ship copies of it.
+- **seed.go** / **seed/** — The embedded (`go:embed`) starter directory with every key at its default, `Seed()` as bytes by name. The binary carries no compiled defaults except that a missing `dedupe.retention` means `"0"`: `wavehouse bootstrap [dir]` writes this seed (`WriteSeed`, in `internal/settings`), and the compose stack and e2e fixture ship copies of it.
 
 ### `tenant/` — Tenant Identifier
 

@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/config"
-	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/settings"
 )
 
 // runValidate implements `wavehouse validate [dir]`: validate a settings

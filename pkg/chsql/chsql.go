@@ -1,6 +1,6 @@
 // Package chsql holds ClickHouse SQL helpers shared across packages that build
 // SQL — primarily safe identifier quoting. It is dependency-free so both
-// internal/query and internal/policy can use it without an import cycle.
+// internal/query and pkg/policy can use it without an import cycle.
 package chsql
 
 import "strings"

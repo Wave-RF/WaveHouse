@@ -277,7 +277,7 @@ $(CONFIG_FILES): .%.local.yaml: %.yaml
 	fi
 
 # Dev settings directory: the hot-reloadable config, policy, and pipes. Seeded
-# once from the embedded seed (never edit internal/settings/seed in place),
+# once from the embedded seed (never edit pkg/settings/seed in place),
 # then given the compose stack's permissive "public" trial policy so a fresh
 # `make dev` isn't fail-closed (the seed ships no policy). Gitignored.
 settings/config.json:
@@ -899,7 +899,7 @@ test-unit: go-mod-download ## Run Go unit tests + render coverage + gate thresho
 	@printf "$(CYAN)==> Running Unit Tests...$(RESET)\n"
 	@rm -rf $(COV_UNIT)/data && mkdir -p $(COV_UNIT)/data
 	@GOCOVERDIR="$(CURDIR)/$(COV_UNIT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
-		-tags="$(TAGS)" -cover -race -timeout $(UNIT_TIMEOUT) ./internal/... ./cmd/... $(ARGS) \
+		-tags="$(TAGS)" -cover -race -timeout $(UNIT_TIMEOUT) ./internal/... ./pkg/... ./cmd/... $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_UNIT)/data"
 	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render unit; fi
 

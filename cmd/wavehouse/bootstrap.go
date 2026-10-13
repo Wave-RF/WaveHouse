@@ -9,6 +9,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	model "github.com/Wave-RF/WaveHouse/pkg/settings"
 )
 
 // runBootstrap implements `wavehouse bootstrap [dir]`: write the
@@ -33,7 +34,7 @@ comes from %s — the same resolution as 'wavehouse validate'. Refuses a
 non-empty directory.
 
 Exit codes: 0 written, 1 failed, 2 usage.
-`, strings.Join(settings.Files(), ", "), config.EnvSettingsDir)
+`, strings.Join(model.Files(), ", "), config.EnvSettingsDir)
 	}
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -59,6 +60,6 @@ Exit codes: 0 written, 1 failed, 2 usage.
 		fmt.Fprintf(os.Stderr, "wavehouse bootstrap: %v\n", err)
 		return 1
 	}
-	fmt.Printf("wrote %s to %s\n", strings.Join(settings.Files(), ", "), dir)
+	fmt.Printf("wrote %s to %s\n", strings.Join(model.Files(), ", "), dir)
 	return 0
 }

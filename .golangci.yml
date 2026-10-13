@@ -73,6 +73,31 @@ linters:
           deny:
             - pkg: github.com/nats-io
               desc: only internal/mq may import NATS/JetStream; go through an mq-owned type
+        # The public packages (#834): a module outside this repository imports
+        # pkg/ at a release tag to validate a settings directory with the
+        # server's own rules, so nothing under internal/ and none of the
+        # server's runtime dependencies may come with them. An allow list, so
+        # a dependency added later is refused until it is listed here.
+        public-packages:
+          list-mode: strict
+          files:
+            - "**/pkg/**"
+            - "!**/*_test.go"
+          allow:
+            - $gostd
+            - github.com/Wave-RF/WaveHouse/pkg
+            - github.com/dustin/go-humanize
+            - gopkg.in/yaml.v3
+        public-packages-tests:
+          list-mode: strict
+          files:
+            - "**/pkg/**/*_test.go"
+          allow:
+            - $gostd
+            - github.com/Wave-RF/WaveHouse/pkg
+            - github.com/dustin/go-humanize
+            - gopkg.in/yaml.v3
+            - github.com/stretchr/testify
     revive:
       # Opt in to specific rules only; skip the default set's noisy
       # doc-comment and unused-parameter rules for internal packages.
