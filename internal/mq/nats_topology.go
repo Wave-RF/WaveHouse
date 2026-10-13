@@ -253,7 +253,8 @@ func hasRequired(findings []Finding) bool {
 // info and discard_new_per_subject.
 var minNATSServer = [3]int{2, 14, 0}
 
-// recommendedNATSMinor is the server line the embedded broker runs.
+// recommendedNATSMinor is the server line the external-NATS tests run
+// against; the embedded broker runs 2.15 since #806 (#817).
 const recommendedNATSMinor = "2.14."
 
 // topologyVerifier accumulates the findings of one check.
