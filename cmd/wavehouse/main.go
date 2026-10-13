@@ -178,6 +178,10 @@ func run(ctx context.Context) int {
 		logger.Error("load config", "error", err)
 		return 1
 	}
+	// Every later line names the process; the OTLP-aware logger app.New may
+	// swap in carries it too (observability.Identity.LogAttrs).
+	logger = logger.With("instance_id", cfg.InstanceID)
+	slog.SetDefault(logger)
 
 	// data_dir, when a selected backend keeps state there, must be writable
 	// before anything dials out, so the refusal (and, for the typical cause —

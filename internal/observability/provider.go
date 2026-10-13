@@ -20,9 +20,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 )
 
 // runtimeStartOnce gates the `runtime.Start` call in InitProvider so that
@@ -60,10 +58,13 @@ type ProviderConfig struct {
 // propagator (cheap, harmless when traces are off — in-process span
 // extraction still works against a no-op tracer provider).
 //
+// Every signal carries id as its resource, and a meter provider exports
+// wavehouse_build_info (see Identity).
+//
 // Returns a shutdown function (always non-nil) and a Prometheus HTTP handler
 // (non-nil iff PrometheusEnabled). The handler reads from a private
 // prometheus.Registry — global registry pollution is avoided.
-func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (func(context.Context) error, http.Handler, error) {
+func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(context.Context) error, http.Handler, error) {
 	// Snapshot the OTel globals on entry. On a partial init failure we want to
 	// roll them back to whatever was installed before — otherwise the caller
 	// (which continues on init error per internal/app) keeps using shut-down
@@ -134,13 +135,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 		}
 	}
 
-	res, err := resource.New(ctx,
-		resource.WithAttributes(semconv.ServiceNameKey.String(serviceName)),
-	)
-	if err != nil {
-		handleErr(err)
-		return shutdown, nil, err
-	}
+	res := newResource(ctx, id)
 
 	otel.SetTextMapPropagator(
 		propagation.NewCompositeTextMapPropagator(
@@ -201,6 +196,10 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 		meterProvider := metric.NewMeterProvider(mpOpts...)
 		shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
 		otel.SetMeterProvider(meterProvider)
+		if err := registerBuildInfo(meterProvider, id); err != nil {
+			handleErr(err)
+			return shutdown, nil, err
+		}
 
 		// `runtime.Start` spawns goroutines that the upstream package exposes
 		// no way to stop. In production InitProvider is called exactly once,
