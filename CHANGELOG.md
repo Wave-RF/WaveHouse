@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## Unreleased
 
-## [0.2.0] - 2026-10-12
+## [0.2.0] - 2026-10-13
 
 Upgrading from 0.1.0 is a conversion, not a binary swap: every behavioural setting moves from `config.yaml` and `WH_*` variables into a settings directory, the policy and pipes move from NATS KV into files in it, the queue is deleted at first boot, and the streaming wire changes, so `@wavehouse/sdk` must move to 0.2.x with the server. [Upgrading](https://wavehouse.dev/upgrading) lists every step in order. In short:
 
