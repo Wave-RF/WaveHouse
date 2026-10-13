@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Removed
 
-- **Releases ship Linux binaries only: amd64 and arm64** (`.goreleaser.yaml`, `.github/workflows/{publish-dev,release}.yml`, `.github/workflows/README.md`, `docs/src/content/docs/{deployment,development}.md`): the GitHub Release no longer carries macOS, Windows or FreeBSD archives, and Windows' `.zip` archive is gone with them. The container images were already linux/amd64 and linux/arm64 and are unchanged. Other systems run the container image or build from source with `go install`. The dev image build, which compiled all eight targets on every push to `main` though the image uses two, now compiles two, which also shrinks its build cache (#535).
+- **Releases ship Linux binaries only: amd64 and arm64** (`.goreleaser.yaml`, `.github/workflows/{publish-dev,release}.yml`, `.github/workflows/README.md`, `docs/src/content/docs/{deployment,development}.md`): the GitHub Release no longer carries macOS, Windows or FreeBSD archives, and Windows' `.zip` archive is gone with them. The container images were already linux/amd64 and linux/arm64 and are unchanged. Other systems run the container image or build from source with `go install`. The dev image build, which compiled all eight targets on every push to `main` though the image uses two, now compiles two, which should also shrink its build cache (#535; not yet measured at two targets).
 
 ### Fixed
 
