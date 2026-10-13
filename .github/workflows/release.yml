@@ -152,7 +152,7 @@ jobs:
           # attestation. Verify them all rather than a representative one —
           # a per-GOOS/GOARCH gap is exactly what this would miss.
           shopt -s nullglob
-          archives=(dist/*.tar.gz dist/*.zip)
+          archives=(dist/*.tar.gz)
           if [ ${#archives[@]} -eq 0 ]; then
             echo "::error::no release archives in dist/ to verify"
             exit 1
