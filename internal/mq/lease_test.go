@@ -234,7 +234,7 @@ func (f *failingKV) Update(ctx context.Context, key string, value []byte, revisi
 // Renewals that fail are counted per lease and logged, the first of a streak
 // at WARN and the rest below it, and the recovery at INFO; the term carries
 // on while the renew deadline allows, and a renewal that then succeeds keeps
-// it. A resign in flight is never counted as a failure.
+// it.
 func TestLeases_RenewalFailuresAreLoggedAndCounted(t *testing.T) { //nolint:paralleltest // captures the default logger and substitutes the lease meter
 	logs := logtest.Capture(t, slog.LevelInfo)
 	reader := sdkmetric.NewManualReader()
@@ -270,6 +270,32 @@ func TestLeases_RenewalFailuresAreLoggedAndCounted(t *testing.T) { //nolint:para
 	_, held = leaseMetrics(t, reader)
 	assert.Empty(t, held, "resigned")
 	assert.Equal(t, 1, strings.Count(logs.String(), `"msg":"coord: lease renewal failed`), "a resign is not a failure:\n%s", logs.String())
+}
+
+// A resign that cuts a renewal short is not a renewal failure: nothing is
+// counted or logged for it.
+func TestLeases_ResignMidRenewalIsNotAFailure(t *testing.T) { //nolint:paralleltest // captures the default logger and substitutes the lease meter
+	logs := logtest.Capture(t, slog.LevelDebug)
+	reader := sdkmetric.NewManualReader()
+	prev := leaseMeter
+	leaseMeter = func() metric.Meter { return sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test") }
+	t.Cleanup(func() { leaseMeter = prev })
+
+	f := leaseFixture(t)
+	kv := &stallableKV{KeyValue: f.bucketAs(t)}
+	a := newNATSLeases(kv, "a", WithLeaseTimings(2*time.Hour, time.Hour, testRenewEvery))
+	t.Cleanup(func() { _ = a.Close(context.Background()) })
+	term, err := a.TryAcquire(t.Context(), "sweeper")
+	require.NoError(t, err)
+	kv.stall()
+	time.Sleep(3 * testRenewEvery) // a renewal is now waiting on the stall
+	require.NoError(t, term.Resign(t.Context()))
+	assertTermEnded(t, term)
+
+	failures, held := leaseMetrics(t, reader)
+	assert.Zero(t, failures["sweeper"], "the renewal the resign cut short is not a failure")
+	assert.Empty(t, held, "resigned")
+	assert.NotContains(t, logs.String(), "coord: lease renewal failed", "nothing logged for it:\n%s", logs.String())
 }
 
 // leaseMetrics reads the renewal-failure counter and the held gauge, each
