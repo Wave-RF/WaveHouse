@@ -290,7 +290,8 @@ dev: deps-up $(AIR) $(CONFIG_FILES) settings/config.json ## Hot-reload dev serve
 	@echo "$(CYAN)==> Starting WaveHouse with air hot-reload (Ctrl+C to stop)$(RESET)"
 	@echo "    WaveHouse:  $(GREEN)http://localhost:8080$(RESET)  (CORS=*, trial public policy — no token needed)"
 	@echo "    ClickHouse: $(GREEN)http://localhost:8123$(RESET)  (HTTP), $(GREEN)localhost:9000$(RESET) (native)"
-	WH_CONFIG=.config.local.yaml $(AIR) -c .air.toml
+	@echo "    pprof:      $(GREEN)http://localhost:6060/debug/pprof/$(RESET)  (WH_PROFILING_ENABLED=false to turn off)"
+	WH_CONFIG=.config.local.yaml WH_PROFILING_ENABLED=$${WH_PROFILING_ENABLED:-true} $(AIR) -c .air.toml
 
 .PHONY: dev-ts
 dev-ts: pnpm-install ## Watch-build SDK (tsup --watch)

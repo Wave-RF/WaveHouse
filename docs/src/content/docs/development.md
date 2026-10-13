@@ -144,6 +144,7 @@ dev: deps-up $(AIR)
 - WaveHouse on `http://localhost:8080` with the default allow-all CORS posture, so a browser-based app on any localhost port can hit the API directly.
 - The trial `public` policy ships in `./settings` (see [Test the API](#test-the-api)); its `auth.jwt_secret` is empty, so no token validates until you set one there (see [Validating tokens](#validating-tokens)).
 - ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
+- Go's pprof endpoints on `http://localhost:6060/debug/pprof/` (`go tool pprof http://localhost:6060/debug/pprof/heap`): `make dev` sets `WH_PROFILING_ENABLED=true` unless it is already set in your environment, so `WH_PROFILING_ENABLED=false make dev` turns them off. The listener's address is `profiling.addr` in `.config.local.yaml` (see [Configuration → Profiling](/configuration#profiling)).
 - Hot reload: editing any `.go` file under `cmd/` or `internal/` triggers a debounced rebuild + restart. Boot config isn't hot-reloaded (settings-directory files are) — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
 
 ### Dev convenience targets

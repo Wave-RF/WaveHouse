@@ -310,6 +310,15 @@ Prometheus exposition is its own top-level config block, independent of `otel.*`
 | `prometheus.path` | `WH_PROMETHEUS_PATH` | `/metrics` | URL path. Must start with `/`, and may not collide with a reserved probe path (`/livez`, `/readyz`, `/healthz`, `/health`, `/ready`). When `port` is `0` (mounted on the main server) it also may not be `/v1` or sit under `/v1/`, which would shadow the authenticated API. An invalid path fails validation at startup. |
 | `prometheus.port` | `WH_PROMETHEUS_PORT` | `0` | Listener port. `0` mounts the endpoint on the main API server (`server.port`) — simplest, no extra port to expose. Non-zero spins up a dedicated HTTP listener, which lets you firewall metrics off the public API surface (common production posture). Must not equal `server.port` when non-zero. |
 
+### Profiling
+
+Go's [`net/http/pprof`](https://pkg.go.dev/net/http/pprof) endpoints (heap, CPU, goroutine, allocation, thread-creation, block and mutex profiles, the execution trace, the command line and symbol lookup) are served under `/debug/pprof/` on a listener of their own, never on `server.port`: a profile exposes the process's internals and the endpoints take no credential. Off by default. With it on, every process serves it, whatever its [`roles`](#process-roles). The default address is the loopback interface, so turning it on exposes nothing beyond the host; `kubectl port-forward` still reaches a loopback listener in a pod. An address that is not loopback is logged at `WARN` at boot. Block and mutex profiles stay empty, since WaveHouse sets no block or mutex sampling rate. `make dev` turns profiling on unless `WH_PROFILING_ENABLED` is set in its environment. See [Deployment → Profiling](/deployment#profiling) for the commands.
+
+| YAML Key | Env Var | Default | Description |
+| --- | --- | ------- | ----------- |
+| `profiling.enabled` | `WH_PROFILING_ENABLED` | `false` | Serve `/debug/pprof/` on `profiling.addr`. A failure to bind is logged at `ERROR` and the process serves on without it. |
+| `profiling.addr` | `WH_PROFILING_ADDR` | `127.0.0.1:6060` | `host:port` to listen on. The port must be 1–65535 and must not be `server.port` or, with `prometheus.enabled`, `prometheus.port`. An empty host (`:6060`) listens on every interface. Read only when `profiling.enabled` is `true`, and an invalid value fails validation at startup. |
+
 ### Logging
 
 | Env Var | Default | Description |
@@ -421,6 +430,10 @@ prometheus:
   enabled: false         # independent of otel — works standalone for scrape
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
+
+profiling:
+  enabled: false         # net/http/pprof under /debug/pprof/, never on server.port
+  addr: 127.0.0.1:6060   # loopback by default; the endpoints are unauthenticated
 ```
 
 </TabItem>
@@ -500,6 +513,9 @@ WH_OTEL_LOGS_SAMPLE_RATE=1.0
 WH_PROMETHEUS_ENABLED=false
 WH_PROMETHEUS_PATH=/metrics
 WH_PROMETHEUS_PORT=0
+
+WH_PROFILING_ENABLED=false
+WH_PROFILING_ADDR=127.0.0.1:6060
 ```
 
 </TabItem>

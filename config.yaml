@@ -45,6 +45,12 @@ prometheus:
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
 
+# Go's net/http/pprof under /debug/pprof/, on a listener of its own (never
+# server.port). Unauthenticated, so the address defaults to loopback.
+profiling:
+  enabled: false
+  addr: 127.0.0.1:6060
+
 # Only the connection ceiling is boot config; addr, http_port, http_scheme,
 # database, username, password, query_timeout, tls, headers and the pool
 # sizes are the settings directory's clickhouse block.
