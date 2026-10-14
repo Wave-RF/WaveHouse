@@ -143,6 +143,9 @@ type stallableKV struct {
 	stalled bool
 	// loseReplies stores each write, then withholds its answer.
 	loseReplies bool
+	// blocked counts the writes held up so far, so a test can wait for one
+	// to be in flight.
+	blocked atomic.Int32
 }
 
 func (s *stallableKV) stall() {
@@ -161,10 +164,17 @@ func (s *stallableKV) Update(ctx context.Context, key string, value []byte, revi
 		}
 	}
 	if stalled || lose {
+		s.blocked.Add(1)
 		<-ctx.Done()
 		return 0, ctx.Err()
 	}
 	return s.KeyValue.Update(ctx, key, value, revision)
+}
+
+// awaitBlocked waits until at least n writes are held up.
+func (s *stallableKV) awaitBlocked(t *testing.T, n int32) {
+	t.Helper()
+	require.Eventually(t, func() bool { return s.blocked.Load() >= n }, 5*time.Second, testRenewEvery/5, "a renewal waiting on the stall")
 }
 
 // A live holder is never replaced; a stalled one steps down at its renew
@@ -222,13 +232,28 @@ func TestLeases_StalledHolderIsReplacedAfterTheWindow(t *testing.T) {
 type failingKV struct {
 	jetstream.KeyValue
 	failing atomic.Bool
+	// failed and stored count the writes refused and the writes that went
+	// through, so a test can wait for the renewal loop to reach a state
+	// rather than assume it from the clock.
+	failed, stored atomic.Int32
 }
 
 func (f *failingKV) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
 	if f.failing.Load() {
+		f.failed.Add(1)
 		return 0, errors.New("kv unreachable")
 	}
-	return f.KeyValue.Update(ctx, key, value, revision)
+	rev, err := f.KeyValue.Update(ctx, key, value, revision)
+	if err == nil {
+		f.stored.Add(1)
+	}
+	return rev, err
+}
+
+// await waits until counter reaches at least n.
+func (f *failingKV) await(t *testing.T, counter *atomic.Int32, n int32, what string) {
+	t.Helper()
+	require.Eventually(t, func() bool { return counter.Load() >= n }, 5*time.Second, testRenewEvery/5, what)
 }
 
 // Renewals that fail are counted per lease and logged, the first of a streak
@@ -250,9 +275,16 @@ func TestLeases_RenewalFailuresAreLoggedAndCounted(t *testing.T) { //nolint:para
 	require.NoError(t, err)
 
 	kv.failing.Store(true)
-	time.Sleep(4 * testRenewEvery)
+	kv.await(t, &kv.failed, 2, "a streak of failed renewals")
+	// The renew loop is sequential, so once two failures have returned no
+	// earlier write is still in flight and the count of stored writes is
+	// settled.
+	stored := kv.stored.Load()
 	kv.failing.Store(false)
-	time.Sleep(3 * testRenewEvery)
+	kv.await(t, &kv.stored, stored+1, "a renewal stored again")
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), `"msg":"coord: lease renewed again"`)
+	}, 5*time.Second, testRenewEvery/5, "the recovery is logged once the stored renewal returns")
 	require.NoError(t, term.Err(), "the deadline was never reached")
 
 	warns := strings.Count(logs.String(), `"level":"WARN","msg":"coord: lease renewal failed`)
@@ -288,7 +320,7 @@ func TestLeases_ResignMidRenewalIsNotAFailure(t *testing.T) { //nolint:parallelt
 	term, err := a.TryAcquire(t.Context(), "sweeper")
 	require.NoError(t, err)
 	kv.stall()
-	time.Sleep(3 * testRenewEvery) // a renewal is now waiting on the stall
+	kv.awaitBlocked(t, 1) // a renewal is now waiting on the stall
 	require.NoError(t, term.Resign(t.Context()))
 	assertTermEnded(t, term)
 
