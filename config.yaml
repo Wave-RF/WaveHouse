@@ -44,6 +44,7 @@ prometheus:
   enabled: false
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
+  per_table_metrics: true # false = no table label, one series over all tables (OTLP too)
 
 # Only the connection ceiling is boot config; addr, http_port, http_scheme,
 # database, username, password, query_timeout, tls, headers and the pool

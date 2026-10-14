@@ -51,6 +51,9 @@ type ProviderConfig struct {
 	MetricsEnabled    bool
 	PrometheusEnabled bool
 	LogsEnabled       bool
+	// AggregateTables drops the table attribute from every metric, reporting
+	// one series summed over all tables (prometheus.per_table_metrics: false).
+	AggregateTables bool
 }
 
 // InitProvider sets up the OpenTelemetry pipeline, registering only the
@@ -189,7 +192,7 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 			promHandler = promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 		}
 
-		mpOpts := []metric.Option{metric.WithResource(res)}
+		mpOpts := []metric.Option{metric.WithResource(res), metric.WithView(tableView(cfg.AggregateTables, TableWarnThreshold))}
 		for _, r := range readers {
 			mpOpts = append(mpOpts, metric.WithReader(r))
 		}
