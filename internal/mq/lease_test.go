@@ -6,7 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,10 +17,15 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/coord/coordtest"
 	"github.com/Wave-RF/WaveHouse/internal/mq/natstest"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 )
 
 // Shortened lease timings, in the production ratios' order: a holder steps
@@ -207,6 +215,113 @@ func TestLeases_StalledHolderIsReplacedAfterTheWindow(t *testing.T) {
 	// The holder's last write landed at most one renewal before the stall,
 	// and the window runs from b's first sighting of it.
 	assert.GreaterOrEqual(t, tookOver.Sub(stalledAt), testLeaseDuration-testRenewEvery)
+}
+
+// failingKV is a bucket whose writes can be made to fail, as a server that
+// refuses or does not answer them would.
+type failingKV struct {
+	jetstream.KeyValue
+	failing atomic.Bool
+}
+
+func (f *failingKV) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
+	if f.failing.Load() {
+		return 0, errors.New("kv unreachable")
+	}
+	return f.KeyValue.Update(ctx, key, value, revision)
+}
+
+// Renewals that fail are counted per lease and logged, the first of a streak
+// at WARN and the rest below it, and the recovery at INFO; the term carries
+// on while the renew deadline allows, and a renewal that then succeeds keeps
+// it.
+func TestLeases_RenewalFailuresAreLoggedAndCounted(t *testing.T) { //nolint:paralleltest // captures the default logger and substitutes the lease meter
+	logs := logtest.Capture(t, slog.LevelInfo)
+	reader := sdkmetric.NewManualReader()
+	prev := leaseMeter
+	leaseMeter = func() metric.Meter { return sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test") }
+	t.Cleanup(func() { leaseMeter = prev })
+
+	f := leaseFixture(t)
+	kv := &failingKV{KeyValue: f.bucketAs(t)}
+	a := newNATSLeases(kv, "a", WithLeaseTimings(2*time.Hour, time.Hour, testRenewEvery))
+	t.Cleanup(func() { _ = a.Close(context.Background()) })
+	term, err := a.TryAcquire(t.Context(), "sweeper")
+	require.NoError(t, err)
+
+	kv.failing.Store(true)
+	time.Sleep(4 * testRenewEvery)
+	kv.failing.Store(false)
+	time.Sleep(3 * testRenewEvery)
+	require.NoError(t, term.Err(), "the deadline was never reached")
+
+	warns := strings.Count(logs.String(), `"level":"WARN","msg":"coord: lease renewal failed`)
+	assert.Equal(t, 1, warns, "one WARN per streak:\n%s", logs.String())
+	assert.Contains(t, logs.String(), `"lease":"sweeper"`)
+	assert.Contains(t, logs.String(), `"msg":"coord: lease renewed again"`)
+	assert.Equal(t, 1, strings.Count(logs.String(), `"msg":"coord: lease renewed again"`))
+	assert.Contains(t, logs.String(), "kv unreachable")
+
+	failures, held := leaseMetrics(t, reader)
+	assert.GreaterOrEqual(t, failures["sweeper"], int64(2), "every failed renewal of the streak counted")
+	assert.Equal(t, map[string]int64{"sweeper": 1}, held, "the lease this process holds")
+
+	require.NoError(t, term.Resign(t.Context()))
+	_, held = leaseMetrics(t, reader)
+	assert.Empty(t, held, "resigned")
+	assert.Equal(t, 1, strings.Count(logs.String(), `"msg":"coord: lease renewal failed`), "a resign is not a failure:\n%s", logs.String())
+}
+
+// A resign that cuts a renewal short is not a renewal failure: nothing is
+// counted or logged for it.
+func TestLeases_ResignMidRenewalIsNotAFailure(t *testing.T) { //nolint:paralleltest // captures the default logger and substitutes the lease meter
+	logs := logtest.Capture(t, slog.LevelDebug)
+	reader := sdkmetric.NewManualReader()
+	prev := leaseMeter
+	leaseMeter = func() metric.Meter { return sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test") }
+	t.Cleanup(func() { leaseMeter = prev })
+
+	f := leaseFixture(t)
+	kv := &stallableKV{KeyValue: f.bucketAs(t)}
+	a := newNATSLeases(kv, "a", WithLeaseTimings(2*time.Hour, time.Hour, testRenewEvery))
+	t.Cleanup(func() { _ = a.Close(context.Background()) })
+	term, err := a.TryAcquire(t.Context(), "sweeper")
+	require.NoError(t, err)
+	kv.stall()
+	time.Sleep(3 * testRenewEvery) // a renewal is now waiting on the stall
+	require.NoError(t, term.Resign(t.Context()))
+	assertTermEnded(t, term)
+
+	failures, held := leaseMetrics(t, reader)
+	assert.Zero(t, failures["sweeper"], "the renewal the resign cut short is not a failure")
+	assert.Empty(t, held, "resigned")
+	assert.NotContains(t, logs.String(), "coord: lease renewal failed", "nothing logged for it:\n%s", logs.String())
+}
+
+// leaseMetrics reads the renewal-failure counter and the held gauge, each
+// per lease.
+func leaseMetrics(t *testing.T, reader *sdkmetric.ManualReader) (failures, held map[string]int64) {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(t.Context(), &rm))
+	failures, held = map[string]int64{}, map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			switch d := m.Data.(type) {
+			case metricdata.Sum[int64]:
+				for _, dp := range d.DataPoints {
+					lease, _ := dp.Attributes.Value(attribute.Key("lease"))
+					failures[lease.AsString()] += dp.Value
+				}
+			case metricdata.Gauge[int64]:
+				for _, dp := range d.DataPoints {
+					lease, _ := dp.Attributes.Value(attribute.Key("lease"))
+					held[lease.AsString()] = dp.Value
+				}
+			}
+		}
+	}
+	return failures, held
 }
 
 // A renewal stuck on an unanswering server never holds a resign up: Resign
