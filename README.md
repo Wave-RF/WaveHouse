@@ -1,7 +1,7 @@
 <h1 align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/public/branding/lockup-dark.svg">
-    <img src="docs/public/branding/lockup-light.svg" alt="" height="60">
+    <img src="docs/public/branding/lockup-light.svg" alt="WaveHouse" height="60">
   </picture>
 </h1>
 
