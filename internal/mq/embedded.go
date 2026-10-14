@@ -979,7 +979,7 @@ type workerConsumer struct {
 
 func (c *workerConsumer) Consume(handler func(msg *Message), prefetch int) (func(), <-chan error, error) {
 	stop, err := c.start(func(m jetstream.Msg) {
-		handler(wrapMsg(c.ctx, m))
+		handler(wrapMsg(observability.ExtractHeaders(c.ctx, m.Headers()), m))
 	}, prefetch, true)
 	if err != nil {
 		return nil, nil, fmt.Errorf("consume: %w", err)

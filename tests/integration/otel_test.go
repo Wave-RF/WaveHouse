@@ -21,16 +21,20 @@ package tests
 
 import (
 	"context"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/Wave-RF/WaveHouse/internal/observability"
@@ -413,4 +417,98 @@ func TestOTel_Headers_AppliedToAllSignals(t *testing.T) {
 				"%s exporter dropped the x-honeycomb-team header", sig.name)
 		})
 	}
+}
+
+// TestOTel_IngestTraceContinuity follows one ingest request's trace past the
+// queue through the wired app: the server span and the handler's span under
+// the caller's traceparent, then, in the ingest process, a flush span linked
+// to the handler's span and an INSERT span under the flush. The link is what
+// ties a slow or failed insert back to the request that produced its rows
+// once the api and ingest roles run in separate processes.
+func TestOTel_IngestTraceContinuity(t *testing.T) {
+	// No t.Parallel: initAndShutdown mutates OTel globals, which the running
+	// app's handlers and worker read per request and per flush.
+	guardOTelGlobals(t)
+	e := env(t)
+	r := testutil.NewFakeOTLP(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+r.Addr())
+	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
+		TracesEnabled:    true,
+		TracesSampleRate: 1.0,
+	})
+	t.Cleanup(func() {
+		drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdown(drainCtx)
+	})
+
+	table := createTable(t, "user_id String, value Float64", "ORDER BY user_id")
+
+	// The caller's own trace, so the request's spans are found by its id.
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	ctx := context.Background()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		e.baseURL+"/v1/ingest?table="+url.QueryEscape(table),
+		strings.NewReader(`{"user_id":"traced","value":1}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("traceparent", "00-"+traceID+"-00f067aa0ba902b7-01")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// The worker's flush window is 5s and the exporter batches for 5s more.
+	spansNamed := func(name string) []*tracepb.Span {
+		var out []*tracepb.Span
+		for _, s := range r.Spans() {
+			if s.GetName() == name {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	stringAttr := func(s *tracepb.Span, key string) string {
+		for _, kv := range s.GetAttributes() {
+			if kv.GetKey() == key {
+				return kv.GetValue().GetStringValue()
+			}
+		}
+		return ""
+	}
+	var insert *tracepb.Span
+	require.Eventually(t, func() bool {
+		for _, s := range spansNamed("clickhouse.insert") {
+			if stringAttr(s, "db.sql.table") == table {
+				insert = s
+				return true
+			}
+		}
+		return false
+	}, 30*time.Second, 250*time.Millisecond, "the INSERT span of the row never arrived")
+
+	var handler *tracepb.Span
+	for _, s := range spansNamed("IngestHandler.Handle") {
+		if hex.EncodeToString(s.GetTraceId()) == traceID {
+			handler = s
+		}
+	}
+	require.NotNil(t, handler, "the handler's span is in the caller's trace")
+
+	var flush *tracepb.Span
+	for _, s := range spansNamed("IngestWorker.Flush") {
+		if hex.EncodeToString(s.GetSpanId()) == hex.EncodeToString(insert.GetParentSpanId()) {
+			flush = s
+		}
+	}
+	require.NotNil(t, flush, "the INSERT span is a flush span's child")
+	assert.Empty(t, flush.GetParentSpanId(), "the flush is a root of its own: its rows came from many requests")
+	assert.Equal(t, table, stringAttr(flush, "table"))
+	linked := false
+	for _, l := range flush.GetLinks() {
+		linked = linked || (hex.EncodeToString(l.GetTraceId()) == traceID &&
+			hex.EncodeToString(l.GetSpanId()) == hex.EncodeToString(handler.GetSpanId()))
+	}
+	assert.True(t, linked, "the flush links to the handler's span")
 }

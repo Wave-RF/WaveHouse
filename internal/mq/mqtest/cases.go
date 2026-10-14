@@ -215,6 +215,29 @@ func subscribeCarriesTheTraceContext(t *testing.T, h Harness) {
 	}
 }
 
+// A message the worker's consumer delivers carries the trace context its
+// publisher's headers held, on CreateConsumer's ctx, so the worker's flush
+// can link back to the request that published each row.
+func consumeCarriesTheTraceContext(t *testing.T, h Harness) {
+	b := h.New(t)
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e, 0x47, 0x37},
+		SpanID:     trace.SpanID{0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb8},
+		TraceFlags: trace.FlagsSampled,
+	})
+	pubCtx := trace.ContextWithSpanContext(ctx(t), sc)
+	require.NoError(t, b.Publish(pubCtx, mq.Topic{Tenant: Acme, Table: "traced"}, []byte("x")))
+
+	c := context.WithValue(ctx(t), ctxKey{}, "worker")
+	got, _, _ := consume(c, t, b, mq.ConsumerConfig{MaxAckPending: 100}, ackEach(t))
+	d := next(t, got, 1)[0]
+	have := trace.SpanContextFromContext(d.msg.Ctx)
+	assert.Equal(t, sc.TraceID(), have.TraceID())
+	assert.Equal(t, sc.SpanID(), have.SpanID())
+	assert.True(t, have.IsRemote())
+	assert.Equal(t, "worker", d.msg.Ctx.Value(ctxKey{}), "the trace context rides CreateConsumer's ctx, not another")
+}
+
 // Every tenant's events reach one Subscribe, whichever tenant published them.
 func subscribeSeesEveryTenant(t *testing.T, h Harness) {
 	b := h.New(t)
