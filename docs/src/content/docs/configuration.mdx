@@ -124,6 +124,7 @@ Boot logs each of these at `WARN` rather than refusing. The first two are right 
 - **`mq.nats` set with `mq.backend=embedded`**, or **`coord.nats` set with `coord.backend=local`**: the block is ignored.
 - **`cache.redis.addrs` set with `cache.backend=local`**, in a process running `api`: the block is ignored.
 - **`cache.redis.tls.insecure_skip_verify` on**, in a process running `api`: the cache accepts any certificate (see [Cache](#cache)).
+- **`profiling.enabled` with a `profiling.addr` that is not loopback** (an empty host, `0.0.0.0`, a pod address), in every process: the unauthenticated pprof endpoints are reachable beyond the host (see [Profiling](#profiling)).
 - **`mq.backend=nats` and a tenant with dedupe on whose finite `dedupe.retention` is under the partitions' `duplicate_window`**, in a process running `api`, at boot and after every reload: see [Deployment → Create the topology](/deployment#create-the-topology).
 
 ### Process roles
