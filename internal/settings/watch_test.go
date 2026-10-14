@@ -11,7 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // TestRegistry_Watch_ReloadsOnChange pins the watcher end to end: an edit to a
@@ -33,7 +34,7 @@ func startWatch(ctx context.Context, t *testing.T, reg *Registry, maxRows int) <
 	// goroutine, where a bare require.NoError would FailNow the wrong
 	// goroutine and stall the poll until timeout instead of failing loudly.
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		require.NoError(c, os.WriteFile(filepath.Join(reg.Dir(), FileConfig), []byte(configJSON(fmt.Sprintf(`{"query": {"default_max_rows": %d}}`, maxRows))), 0o600))
+		require.NoError(c, os.WriteFile(filepath.Join(reg.Dir(), settings.FileConfig), []byte(configJSON(fmt.Sprintf(`{"query": {"default_max_rows": %d}}`, maxRows))), 0o600))
 		assert.Equal(c, maxRows, s.DefaultMaxRows())
 	}, 5*time.Second, 2*watchDebounce, "watcher should adopt the readiness write")
 	return done
@@ -42,7 +43,7 @@ func startWatch(ctx context.Context, t *testing.T, reg *Registry, maxRows int) <
 func TestRegistry_Watch_ReloadsOnChange(t *testing.T) {
 	t.Parallel()
 	reg := newLoadedRegistry(t, map[string]string{
-		FileConfig: configJSON(`{"query": {"default_max_rows": 100}}`),
+		settings.FileConfig: configJSON(`{"query": {"default_max_rows": 100}}`),
 	})
 	s, _ := reg.For(tenant.Default)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -50,7 +51,7 @@ func TestRegistry_Watch_ReloadsOnChange(t *testing.T) {
 	done := startWatch(ctx, t, reg, 900)
 
 	// An invalid edit is debounced, rejected, and the snapshot survives.
-	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), FileConfig), []byte(`not json`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), settings.FileConfig), []byte(`not json`), 0o600))
 	time.Sleep(4 * watchDebounce)
 	assert.Equal(t, 900, s.DefaultMaxRows(), "invalid edit must keep the previous snapshot")
 
@@ -64,11 +65,11 @@ func TestRegistry_Watch_ReloadsOnChange(t *testing.T) {
 func TestRegistry_Watch_CatchesUpOnStart(t *testing.T) {
 	t.Parallel()
 	reg := newLoadedRegistry(t, map[string]string{
-		FileConfig: configJSON(`{"query": {"default_max_rows": 100}}`),
+		settings.FileConfig: configJSON(`{"query": {"default_max_rows": 100}}`),
 	})
 	s, _ := reg.For(tenant.Default)
 	// The "in-between" edit: after Open, before Watch.
-	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 700}}`)), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), settings.FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 700}}`)), 0o600))
 	assert.Equal(t, 100, s.DefaultMaxRows(), "no watch yet, so nothing has adopted the edit")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -100,7 +101,7 @@ func TestRegistry_Watch_MissingDir(t *testing.T) {
 func TestRegistry_Watch_SurvivesDirectoryRecreate(t *testing.T) {
 	t.Parallel()
 	reg := newLoadedRegistry(t, map[string]string{
-		FileConfig: configJSON(`{"query": {"default_max_rows": 100}}`),
+		settings.FileConfig: configJSON(`{"query": {"default_max_rows": 100}}`),
 	})
 	s, _ := reg.For(tenant.Default)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -114,7 +115,7 @@ func TestRegistry_Watch_SurvivesDirectoryRecreate(t *testing.T) {
 
 	// Recreate it with new content: the watcher must pick it up again.
 	files := validFiles()
-	files[FileConfig] = configJSON(`{"query": {"default_max_rows": 300}}`)
+	files[settings.FileConfig] = configJSON(`{"query": {"default_max_rows": 300}}`)
 	require.NoError(t, os.Mkdir(reg.Dir(), 0o750))
 	for name, content := range files {
 		require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), name), []byte(content), 0o600))
@@ -123,7 +124,7 @@ func TestRegistry_Watch_SurvivesDirectoryRecreate(t *testing.T) {
 		5*time.Second, 50*time.Millisecond, "recreated directory should be adopted")
 
 	// And edits inside the recreated directory are watched again.
-	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 400}}`)), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), settings.FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 400}}`)), 0o600))
 	assert.Eventually(t, func() bool { return s.DefaultMaxRows() == 400 },
 		5*time.Second, 50*time.Millisecond, "edits after recreate should be watched")
 

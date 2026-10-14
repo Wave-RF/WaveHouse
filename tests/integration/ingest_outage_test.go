@@ -16,9 +16,9 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // TestIngest_ClickHouseOutage_RetriedNotDeadLettered stops a real ClickHouse

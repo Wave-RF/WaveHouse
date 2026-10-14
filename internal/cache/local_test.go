@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/cachetest"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 const localMaxCost = 1 << 20

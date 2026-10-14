@@ -1,3 +1,7 @@
+// Package policy defines the access-control policy document (policies.json)
+// and evaluates it: role-first grants per table, split into select and insert
+// permissions, with row filters and insert checks resolved against JWT
+// claims. Importable from outside the module; see pkg/settings.
 package policy
 
 import (
@@ -5,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Wave-RF/WaveHouse/internal/chsql"
+	"github.com/Wave-RF/WaveHouse/pkg/chsql"
 )
 
 // Policy is the top-level access control configuration.

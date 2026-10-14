@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/pkg/chsql"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

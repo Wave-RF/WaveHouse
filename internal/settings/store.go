@@ -5,9 +5,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Wave-RF/WaveHouse/internal/pipes"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/pipes"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
+	"github.com/Wave-RF/WaveHouse/pkg/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // Store holds the settings snapshot one tenant has adopted, and nothing
@@ -24,7 +25,7 @@ type Store struct {
 	// tenant is the id the Registry created the store for; the zero value
 	// only for a Store built outside a Registry (tests).
 	tenant tenant.ID
-	snap   atomic.Pointer[Document]
+	snap   atomic.Pointer[settings.Document]
 }
 
 // Tenant returns the id of the tenant this store holds the settings of: how
@@ -34,12 +35,12 @@ func (s *Store) Tenant() tenant.ID { return s.tenant }
 
 // adopt swaps in a validated document. The Registry calls it under its
 // reload lock.
-func (s *Store) adopt(doc *Document) { s.snap.Store(doc) }
+func (s *Store) adopt(doc *settings.Document) { s.snap.Store(doc) }
 
 // doc returns the current snapshot. Never nil for a Store a Registry from
 // Open hands out: adoption happened first, and a rejected reload leaves the
 // previous document in place.
-func (s *Store) doc() *Document {
+func (s *Store) doc() *settings.Document {
 	return s.snap.Load()
 }
 

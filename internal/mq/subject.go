@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/keyenc"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // The embedded broker's naming. Private to this package: everything else

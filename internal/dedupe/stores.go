@@ -7,7 +7,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // Factory builds one tenant's store, closed: Stores calls it the first time

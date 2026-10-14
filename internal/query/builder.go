@@ -8,9 +8,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/pkg/chsql"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
 )
 
 // DefaultMaxRows is the fallback result LIMIT applied when no explicit LIMIT is

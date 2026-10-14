@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	model "github.com/Wave-RF/WaveHouse/pkg/settings"
 )
 
 // SettingsHandler serves the ops surface for the hot-reloadable settings
@@ -25,8 +26,8 @@ func NewSettingsHandler(tenants *settings.Registry) *SettingsHandler {
 // Findings is never null — an empty array keeps clients off the
 // nil-vs-empty distinction.
 type reloadResponse struct {
-	Adopted  bool               `json:"adopted"`
-	Findings []settings.Finding `json:"findings"`
+	Adopted  bool            `json:"adopted"`
+	Findings []model.Finding `json:"findings"`
 }
 
 // Reload handles POST /v1/ops/settings/reload — the API trigger for the same
@@ -45,7 +46,7 @@ func (h *SettingsHandler) Reload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var findings []settings.Finding
+	var findings []model.Finding
 	var adopted bool
 	if named {
 		var known bool
@@ -57,7 +58,7 @@ func (h *SettingsHandler) Reload(w http.ResponseWriter, r *http.Request) {
 		findings, adopted = h.Tenants.Reload("api")
 	}
 	if findings == nil {
-		findings = []settings.Finding{}
+		findings = []model.Finding{}
 	}
 	status := http.StatusOK
 	if !adopted {

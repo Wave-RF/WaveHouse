@@ -18,8 +18,8 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/api"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
 )
 
 // TestStructuredQuery_ResourceCapsEnforcedServerSide is the executable proof

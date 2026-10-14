@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // switchedOn returns tenant id's store over e, switched on, and switches it

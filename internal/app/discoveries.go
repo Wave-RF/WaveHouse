@@ -11,7 +11,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // discoveries is one schema registry per served tenant (#583 story 6), each
