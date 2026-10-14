@@ -825,7 +825,7 @@ Every process reads the settings directory and reloads it on its own, so a reloa
 
 | Metric | Meaning |
 | --- | --- |
-| `wavehouse_settings_reloads_total{trigger, result}` | Reloads since boot, boot's own included. `trigger` is `boot`, `sighup`, `watch` or `api`. `result` is `adopted` (every tenant's folder adopted, and every component reconciled with it), `partial` (a tenant's folder was rejected, or a component failed to reconcile) or `rejected` (nothing adopted: a flat directory with an error, a finding about the directory itself, or the one folder a `?tenant=` reload read). |
+| `wavehouse_settings_reloads_total{trigger, result}` | Reloads since boot, boot's own included. `trigger` is `boot`, `sighup`, `watch` or `api`. `result` is `adopted` (every tenant's folder adopted, and every component reconciled with it), `partial` (a tenant's folder was rejected, or a component failed to reconcile) or `rejected` (the reload was refused, so nothing changed: a flat directory with an error, or a finding about the directory itself; or the one folder a `?tenant=` reload read, which then stops being served). A whole-directory reload that rejects every folder counts as `partial`. |
 | `wavehouse_settings_last_reload_successful` | `1` while the last reload's result was `adopted`, else `0`. |
 | `wavehouse_settings_last_reload_success_timestamp_seconds` | Unix time of the last reload whose result was `adopted`; `0` if none has been. |
 | `wavehouse_settings_tenants{state}` | Tenants this process holds, `served` or `rejected` (their folder failed its last validation, and their requests answer `503`). A flat directory is one served tenant. |

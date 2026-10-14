@@ -14,9 +14,10 @@ const (
 	// ResultPartial is a reload that applied, but with a tenant's folder
 	// rejected or a consumer that failed to reconcile with it.
 	ResultPartial = "partial"
-	// ResultRejected is a reload that adopted nothing: a flat directory with
-	// an error, a finding about the directory itself, or the one tenant
-	// ReloadTenant read rejected.
+	// ResultRejected is a reload refused whole: a flat directory with an
+	// error, a finding about the directory itself, or the one tenant
+	// ReloadTenant read rejected. A nested reload rejecting every folder
+	// is partial.
 	ResultRejected = "rejected"
 )
 
