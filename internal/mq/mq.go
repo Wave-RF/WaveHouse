@@ -17,7 +17,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/keyenc"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // Topic addresses the events of one tenant's table, optionally narrowed to a

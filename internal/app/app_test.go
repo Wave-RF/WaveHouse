@@ -39,10 +39,11 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
+	model "github.com/Wave-RF/WaveHouse/pkg/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // A test that touches process-wide state stays serial: the default logger
@@ -77,10 +78,10 @@ func closedPort(t *testing.T) int {
 // blocks (each value re-marshaled whole).
 func writeSettings(t *testing.T, patch map[string]any) string {
 	t.Helper()
-	files, err := settings.Seed()
+	files, err := model.Seed()
 	require.NoError(t, err)
 	var doc map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(files[settings.FileConfig], &doc))
+	require.NoError(t, json.Unmarshal(files[model.FileConfig], &doc))
 	var ch map[string]any
 	require.NoError(t, json.Unmarshal(doc["clickhouse"], &ch))
 	ch["addr"] = closedAddr(t)
@@ -96,7 +97,7 @@ func writeSettings(t *testing.T, patch map[string]any) string {
 		doc[key], err = json.Marshal(val)
 		require.NoError(t, err)
 	}
-	files[settings.FileConfig], err = json.Marshal(doc)
+	files[model.FileConfig], err = json.Marshal(doc)
 	require.NoError(t, err)
 
 	dir := t.TempDir()
@@ -251,9 +252,9 @@ func TestNew_DedupeFollowsSettings(t *testing.T) {
 func rewriteSettings(t *testing.T, dir string, patch map[string]any) {
 	t.Helper()
 	src := writeSettings(t, patch)
-	data, err := os.ReadFile(filepath.Join(src, settings.FileConfig)) //nolint:gosec // G304: path rooted in t.TempDir()
+	data, err := os.ReadFile(filepath.Join(src, model.FileConfig)) //nolint:gosec // G304: path rooted in t.TempDir()
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileConfig), data, 0o600)) //nolint:gosec // G703: dir is a t.TempDir() from writeSettings
+	require.NoError(t, os.WriteFile(filepath.Join(dir, model.FileConfig), data, 0o600)) //nolint:gosec // G703: dir is a t.TempDir() from writeSettings
 }
 
 func TestReload_DrivesTheRegisteredHooks(t *testing.T) {
@@ -1359,8 +1360,8 @@ func authPatch(jwksURL string) map[string]any {
 // one that did not (401, the fail-loud denial) without a ClickHouse.
 func analystPipe(t *testing.T, dir string) {
 	t.Helper()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileRoles), []byte(`{"roles": ["analyst"]}`), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FilePipes), []byte(`{"pipes": [{"name": "p", "sql": "SELECT 1", "allowed_roles": ["analyst"]}]}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, model.FileRoles), []byte(`{"roles": ["analyst"]}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, model.FilePipes), []byte(`{"pipes": [{"name": "p", "sql": "SELECT 1", "allowed_roles": ["analyst"]}]}`), 0o600))
 }
 
 // A boot that fails after stores are open releases them, so the same data_dir

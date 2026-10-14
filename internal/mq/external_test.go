@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"

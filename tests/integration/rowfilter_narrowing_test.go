@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
 )
 
 // TestRowFilterNumeric_DifferentialAgainstClickHouse pins the stream/query

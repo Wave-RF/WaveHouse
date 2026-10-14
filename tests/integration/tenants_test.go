@@ -19,8 +19,8 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/app"
 	"github.com/Wave-RF/WaveHouse/internal/config"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // TestNestedDirectory_PerTenantPoolsAndDiscovery boots the real wiring over

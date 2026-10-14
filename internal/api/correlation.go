@@ -7,7 +7,7 @@ import (
 	"net/url"
 
 	"github.com/Wave-RF/WaveHouse/internal/observability"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // requestIDHeader carries the request id both ways: an upstream proxy's id

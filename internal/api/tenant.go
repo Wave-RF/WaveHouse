@@ -8,9 +8,9 @@ import (
 	"net/url"
 
 	"github.com/Wave-RF/WaveHouse/internal/observability"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // PolicySource yields the access-control policy of the request's tenant,
@@ -23,7 +23,7 @@ type PolicySource func(*settings.Store) *policy.Policy
 type tenantStoreKey struct{}
 
 // WithStore returns ctx carrying the request's resolved tenant store. These
-// helpers live here rather than in internal/tenant because settings names
+// helpers live here rather than in pkg/tenant because settings names
 // tenant.ID, so tenant cannot name settings.Store back.
 func WithStore(ctx context.Context, store *settings.Store) context.Context {
 	return context.WithValue(ctx, tenantStoreKey{}, store)

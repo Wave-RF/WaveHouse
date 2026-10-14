@@ -78,8 +78,8 @@ jobs:
       # GOOS/GOARCH pairs and share nothing with ci.yml's native-only
       # flavors, so `-release` keeps both sides from restoring bytes the
       # other can't use. Same `gobuild-v3` family and key inputs as
-      # setup-env's (see .github/workflows/README.md); ~0.5 GB rather than
-      # the ~1 GB the bundled cache held.
+      # setup-env's (see .github/workflows/README.md); 241 MiB on main
+      # (measured 2026-10-14) rather than the ~1 GB the bundled cache held.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/go-build

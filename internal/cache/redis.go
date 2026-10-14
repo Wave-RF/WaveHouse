@@ -17,7 +17,7 @@ import (
 
 	"github.com/redis/rueidis"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // Redis deployment modes for RedisConfig.Mode.
