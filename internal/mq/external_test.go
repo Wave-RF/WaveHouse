@@ -1029,11 +1029,12 @@ func TestExternalNATS_UnitStates(t *testing.T) {
 	topic := Topic{Tenant: "acme", Table: "events"}
 	p, s := natsRoute(topic, 4, 8)
 	unit := shippedPartition(p) + "/" + natsShardDurable("wh-ingest", s)
-	read := func() (UnitState, int) {
-		t.Helper()
+	// read reports to rt, which is t for a one-off read and the poll's
+	// CollectT inside await, where a failed check must end only that tick.
+	read := func(rt require.TestingT) (UnitState, int) {
 		states, err := e.UnitStates(t.Context())
-		require.NoError(t, err)
-		require.Len(t, states, 4*8, "one state per configured unit")
+		require.NoError(rt, err)
+		require.Len(rt, states, 4*8, "one state per configured unit")
 		unowned, mine := 0, UnitState{}
 		for _, st := range states {
 			if st.Unowned() {
@@ -1043,24 +1044,34 @@ func TestExternalNATS_UnitStates(t *testing.T) {
 				mine = st
 			}
 		}
-		require.Equal(t, unit, mine.Unit, "no state for %s", unit)
+		require.Equal(rt, unit, mine.Unit, "no state for %s", unit)
 		return mine, unowned
 	}
-	state, unowned := read()
+	state, unowned := read(t)
 	require.Equal(t, UnitState{Unit: unit, MaxAckPending: 10000}, state, "the shipped durable, idle")
 	assert.Zero(t, unowned, "no rows, nothing to own")
 
+	// The consumer info can trail the stream by a moment, as
+	// TestExternalNATS_ShardUnits allows for, so each state is polled.
+	await := func(want UnitState, msg string) int {
+		t.Helper()
+		var unowned int
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			var state UnitState
+			state, unowned = read(c)
+			assert.Equal(c, want, state, msg)
+		}, 5*time.Second, 20*time.Millisecond)
+		return unowned
+	}
 	require.NoError(t, e.Publish(t.Context(), topic, []byte("x")))
-	state, unowned = read()
-	assert.Equal(t, UnitState{Unit: unit, Pending: 1, MaxAckPending: 10000}, state, "a row nobody pulls")
+	unowned = await(UnitState{Unit: unit, Pending: 1, MaxAckPending: 10000}, "a row nobody pulls")
 	assert.Equal(t, 1, unowned)
 
 	var hold atomic.Bool
 	hold.Store(true)
 	_, _, got := unitConsumer(t, e, unit, &hold)
 	require.Equal(t, "x", receive(t, got))
-	state, unowned = read()
-	assert.Equal(t, UnitState{Unit: unit, AckPending: 1, MaxAckPending: 10000, Held: true}, state, "received and not acked, by a consumer that holds the unit")
+	unowned = await(UnitState{Unit: unit, AckPending: 1, MaxAckPending: 10000, Held: true}, "received and not acked, by a consumer that holds the unit")
 	assert.Zero(t, unowned, "held by the consumer that received it")
 }
 
