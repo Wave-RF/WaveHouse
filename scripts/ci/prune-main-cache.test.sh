@@ -49,8 +49,17 @@ app="gobuild-v3-Linux-go-integration-app"
   # No trailing hash: never a generation.
   row 40 $main "smoke-node-v1-Linux-X64-22.0.0" 2026-10-01T00:00:00Z
   row 41 $main "smoke-node-v1-Linux-X64-22.1.0" 2026-10-02T00:00:00Z
-  row 42 $main "codeql-overlay-base-database-1-433570c23e836bda-go-2.27.2-68578046021af94ca3564369127e82158d672191-38567452949-1" 2026-10-14T12:56:00Z
-  row 43 $main "codeql-overlay-base-database-1-433570c23e836bda-go-2.27.2-4ad8d8b5838b72c34a302e19ee7924e476d760ff-38565329743-1" 2026-10-14T12:40:00Z
+  # Overlay databases: one family per language and CodeQL version, the
+  # commit sha, run id and attempt dropped. Only the newest of each stays.
+  ov="codeql-overlay-base-database-1-433570c23e836bda"
+  row 42 $main "$ov-go-2.27.2-68578046021af94ca3564369127e82158d672191-38567452949-1" 2026-10-14T12:56:00Z
+  row 43 $main "$ov-go-2.27.2-4ad8d8b5838b72c34a302e19ee7924e476d760ff-38565329743-1" 2026-10-14T12:40:00Z
+  row 44 $main "$ov-go-2.27.2-8b37a2a2c49c4a405a0a56f50f8d84ca0db2b6d8-38564481869-2" 2026-10-14T12:33:00Z
+  row 45 $main "$ov-javascript-2.27.2-4ad8d8b5838b72c34a302e19ee7924e476d760ff-38565329743-1" 2026-10-14T12:39:00Z
+  row 46 $main "$ov-go-2.27.3-4ad8d8b5838b72c34a302e19ee7924e476d760ff-38565329743-1" 2026-10-14T12:00:00Z
+  # A commit-sha tail outside the overlay family is not a generation.
+  row 47 $main "other-4ad8d8b5838b72c34a302e19ee7924e476d760ff-38565329743-1" 2026-10-01T00:00:00Z
+  row 48 $main "other-68578046021af94ca3564369127e82158d672191-38567452949-1" 2026-10-02T00:00:00Z
   # Not main's: PR and merge-queue scopes belong to the PR cleanup.
   row 50 refs/pull/1/merge "$app-$(h 1)" 2026-10-01T00:00:00Z
   row 51 refs/pull/1/merge "$app-$(h 2)" 2026-10-02T00:00:00Z
@@ -78,7 +87,7 @@ exit 0
 EOF
 chmod +x "$dir/bin/gh"
 
-want="1 2 10 12 14 20"
+want="1 2 10 12 14 20 43 44"
 
 # selects <name> <want ids, sorted>: a dry run's picks.
 selects() {

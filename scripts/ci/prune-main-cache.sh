@@ -3,17 +3,23 @@
 # hash (gomod-v1, gobuild-v3, pnpm, playwright, astro, golangci,
 # codeql-dependencies) gets a new hash on every dependency change, and the
 # old entry lingers until eviction: two go.sum bumps in a day put three Go
-# sets in the 10 GB budget. In refs/heads/main this deletes every entry but
-# the newest of its family (the key minus its hash):
+# sets in the 10 GB budget. CodeQL's overlay base databases add one entry
+# per language per main commit (`...-<commit sha>-<run id>-<attempt>`) and
+# are restored by the prefix before the sha, so only the newest is read.
+# In refs/heads/main this deletes every such entry but the newest of its
+# family (the key minus that tail):
 #   - each family has one writer whose main runs never overlap (ci.yml
 #     queues them; publish-dev cancels the older), so the newest is the
-#     generation main's HEAD uses. CodeQL is the exception: if an older
-#     analysis saves last, the next one rebuilds its dependency cache;
+#     generation main's HEAD uses;
 #   - an entry goes only once a newer one of its family exists, which is
 #     the one a restore-keys lookup would pick anyway.
-# A pull request still on an older go.sum then restores the newest by
-# prefix instead of its exact key. Keys without the hash (smoke-node,
-# CodeQL's per-commit overlay databases) are left alone.
+# Three cases break "newest is HEAD's" and each costs one main run a cold
+# or stale cache before the next prune repairs it: an older CodeQL
+# analysis saving last, a re-run of an older main run after a dependency
+# change (its old key was pruned, so it saves it again), and a revert
+# landing while its bump's prune runs. A pull request still on an older
+# go.sum restores the newest by prefix instead of its exact key. Other keys
+# (smoke-node) are left alone.
 #
 # Usage: scripts/ci/prune-main-cache.sh [--dry-run] [--from <file>]
 #   --dry-run    list what would be deleted; delete nothing
@@ -54,9 +60,14 @@ fi
 # can return an entry twice, and two copies of the newest would make `.[:-1]`
 # delete it.
 doomed="$(jq -rs '
-  map(select(.ref == "refs/heads/main" and (.key | test("-[0-9a-f]{64}$"))))
+  def family:
+    if test("-[0-9a-f]{64}$") then sub("-[0-9a-f]{64}$"; "")
+    elif test("^codeql-overlay-base-database-.*-[0-9a-f]{40}-[0-9]+-[0-9]+$")
+    then sub("-[0-9a-f]{40}-[0-9]+-[0-9]+$"; "")
+    else null end;
+  map(select(.ref == "refs/heads/main") | .family = (.key | family) | select(.family != null))
   | unique_by(.id)
-  | group_by(.key | sub("-[0-9a-f]{64}$"; ""))
+  | group_by(.family)
   | map(sort_by((.created_at | sub("\\.[0-9]+Z$"; "Z")), .id) | .[:-1][])[]
   | [.id, .key, .size_in_bytes] | @tsv
 ' "$list")"
