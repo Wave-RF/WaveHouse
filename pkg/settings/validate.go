@@ -737,9 +737,12 @@ func (v *validator) checkSecretsMode(c TenantConfig) {
 }
 
 // required reports a missing key. Every top-level tunable is required so the
-// adopted snapshot never depends on a value the files don't state.
+// adopted snapshot never depends on a value the files don't state. The
+// message says what is wrong and no more: findings reach a writer through
+// ValidateFiles and an operator through the reload response as well as the
+// CLI, and only the CLI can tell its reader what command to run.
 func (v *validator) required(path string) {
-	v.errorf(FileConfig, path, "required — run `wavehouse bootstrap` for a complete starter config.json")
+	v.errorf(FileConfig, path, "required — config.json has no defaults, every key is set explicitly")
 }
 
 func (v *validator) parseConfig(data []byte) TenantConfig {

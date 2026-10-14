@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path"
 	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/config"
@@ -52,13 +53,19 @@ Exit codes: 0 valid (warnings allowed), 1 invalid, 2 usage.
 
 	_, findings := settings.Validate(dir)
 	var errs, warns int
+	configErrs := false
 	for _, f := range findings {
 		fmt.Println(f)
 		if f.Severity == settings.SeverityError {
 			errs++
+			configErrs = configErrs || path.Base(f.File) == settings.FileConfig
 		} else {
 			warns++
 		}
+	}
+	// The findings say what is wrong; the fix is this binary's to suggest.
+	if configErrs {
+		fmt.Println("hint: `wavehouse bootstrap <dir>` writes a complete starter config.json to compare against")
 	}
 	if errs > 0 {
 		fmt.Printf("invalid: %d error(s), %d warning(s) in %s\n", errs, warns, dir)

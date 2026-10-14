@@ -49,6 +49,28 @@ func TestValidateFiles_NoPermissionBits(t *testing.T) {
 	assert.Empty(t, findings)
 }
 
+// roundTrip decodes files into the public types and marshals them back: what
+// a writer that edits the structs sends.
+func roundTrip(t *testing.T, files map[string][]byte) map[string][]byte {
+	t.Helper()
+	var roles RolesFile
+	require.NoError(t, json.Unmarshal(files[FileRoles], &roles))
+	var pol policy.Policy
+	require.NoError(t, json.Unmarshal(files[FilePolicies], &pol))
+	var pipesFile PipesFile
+	require.NoError(t, json.Unmarshal(files[FilePipes], &pipesFile))
+	var config TenantConfig
+	require.NoError(t, json.Unmarshal(files[FileConfig], &config))
+
+	out := map[string][]byte{}
+	for name, v := range map[string]any{FileRoles: roles, FilePolicies: pol, FilePipes: pipesFile, FileConfig: config} {
+		data, err := json.Marshal(v)
+		require.NoError(t, err)
+		out[name] = data
+	}
+	return out
+}
+
 // TestSeed_RoundTripsThroughTheTypes pins what a writer relies on: the seed
 // decodes into the public types, and what those types marshal back passes
 // ValidateFiles with the findings the seed itself gets — so a program that
@@ -59,25 +81,42 @@ func TestSeed_RoundTripsThroughTheTypes(t *testing.T) {
 	seed, err := Seed()
 	require.NoError(t, err)
 
-	var roles RolesFile
-	require.NoError(t, json.Unmarshal(seed[FileRoles], &roles))
-	var pol policy.Policy
-	require.NoError(t, json.Unmarshal(seed[FilePolicies], &pol))
-	var pipesFile PipesFile
-	require.NoError(t, json.Unmarshal(seed[FilePipes], &pipesFile))
-	var config TenantConfig
-	require.NoError(t, json.Unmarshal(seed[FileConfig], &config))
-
-	files := map[string][]byte{}
-	for name, v := range map[string]any{FileRoles: roles, FilePolicies: pol, FilePipes: pipesFile, FileConfig: config} {
-		files[name], err = json.Marshal(v)
-		require.NoError(t, err)
-	}
-
-	doc, findings := ValidateFiles(files)
+	doc, findings := ValidateFiles(roundTrip(t, seed))
 	require.NotNil(t, doc, "findings: %s", findingStrings(findings))
 	assert.False(t, HasErrors(findings))
 	_, want := ValidateFiles(seed)
 	assert.Equal(t, want, findings, "the marshaled seed reports what the seed does")
 	assert.Contains(t, findingStrings(findings), "no policy", "the seed's one finding: it ships no policy on purpose")
+}
+
+// TestDocuments_RoundTripThroughTheTypes is the same contract for what a
+// writer actually sends, which the seed's empty policy and pipes never
+// exercise: a policy with grants on both operations, a claim-template
+// filter and check, aggregation rules and the typed limits (Millis and
+// ByteSize decode a string and encode a number); a pipe with parameters,
+// a default and an allowlist; a config with per-table overrides, headers and
+// secrets. The marshaled form must validate to the same findings and the
+// same Document as the hand-written one, so a field added later with a
+// one-way encoding, or a MarshalJSON that drops something, fails here.
+func TestDocuments_RoundTripThroughTheTypes(t *testing.T) {
+	t.Parallel()
+	files := bytesOf(map[string]string{
+		FileRoles: `{"roles": ["public", "analyst", "admin"]}`,
+		FilePolicies: `{"default_role": "public", "tables": {"clicks": {
+			"analyst": {
+				"select": {"allow_columns": ["page", "tenant", "ts"], "filter": {"tenant": {"_eq": "{{ jwt.claim.tenant }}"}}, "allowed_aggregations": ["count", "sum"], "max_rows": 100, "max_execution_time": "5s", "max_rows_to_read": 1000000, "max_memory_usage": "1GiB"},
+				"insert": {"allow_columns": ["page", "tenant"], "check": {"tenant": {"_eq": "{{ jwt.claim.tenant }}"}}}
+			},
+			"public": {"select": {"deny_columns": ["tenant"], "denied_aggregations": ["uniq"]}}
+		}}}`,
+		FilePipes:  `{"pipes": [{"name": "top_pages", "sql": "SELECT page FROM clicks LIMIT {{limit}}", "description": "Top pages", "allowed_roles": ["analyst"], "parameters": [{"name": "limit", "type": "number", "required": true}, {"name": "region", "type": "string", "default": "eu"}]}]}`,
+		FileConfig: configJSON(`{"clickhouse": {"password": "s3cret", "headers": {"X-Trace": "1"}}, "auth": {"jwt_secret": "hmac"}, "dedupe": {"retention": "720h", "tables": {"clicks": {"id_field": "click_id", "retention": "24h"}}}, "dlq": {"tables": {"clicks": {"enabled": false}}}}`),
+	})
+	wantDoc, wantFindings := ValidateFiles(files)
+	require.NotNil(t, wantDoc, "the fixture must be valid as written: %s", findingStrings(wantFindings))
+	require.Empty(t, wantFindings)
+
+	doc, findings := ValidateFiles(roundTrip(t, files))
+	assert.Equal(t, wantFindings, findings)
+	assert.Equal(t, wantDoc, doc, "the marshaled documents must decode to what the hand-written ones do")
 }
