@@ -358,9 +358,9 @@ func logFindings(trigger string, findings []Finding) (errs, warns int) {
 // applied, serialized with the reload itself, with the tenants it adopted:
 // none for a reload that only rejected or removed a tenant, which a consumer
 // holding a resource per tenant needs to hear of as much as an adoption. A
-// reload rejected whole runs nothing, since nothing changed. Open's boot
-// adoption has already happened by the time a caller can register, so the
-// caller applies the boot state itself. A hook whose work can fail reports
+// whole-directory reload rejected whole runs nothing, since nothing changed.
+// Open's boot adoption has already happened by the time a caller can
+// register, so the caller applies the boot state itself. A hook whose work can fail reports
 // how it went through Reconciled.
 func (r *Registry) AfterAdopt(fn func(adopted []tenant.ID)) {
 	r.mu.Lock()
