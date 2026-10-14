@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	"github.com/stretchr/testify/require"
 )
 

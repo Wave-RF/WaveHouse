@@ -1,36 +1,12 @@
 package settings
 
 import (
-	"embed"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/Wave-RF/WaveHouse/pkg/settings"
 )
-
-// seedFS holds the starter settings directory: every file present, every
-// key set to its default. The checked-in seed/ directory is the ONE place
-// defaults live — the binary's one compiled fallback is dedupe.retention
-// (missing means "0", forever). Its one consumer is
-// this embed, so `wavehouse bootstrap` can write the directory anywhere
-// without a source tree; the container images ship no settings (the operator
-// mounts or seeds /app/settings), same as they ship no policy file.
-//
-//go:embed seed/*.json
-var seedFS embed.FS
-
-// Seed returns the starter settings directory's files by name.
-func Seed() (map[string][]byte, error) {
-	out := make(map[string][]byte, len(Files()))
-	for _, name := range Files() {
-		data, err := fs.ReadFile(seedFS, "seed/"+name)
-		if err != nil {
-			return nil, fmt.Errorf("embedded seed %s: %w", name, err)
-		}
-		out[name] = data
-	}
-	return out, nil
-}
 
 // WriteSeed materializes the starter directory at dir, creating it if
 // needed. It refuses a non-empty directory (the `initdb` contract): an
@@ -50,11 +26,11 @@ func WriteSeed(dir string) error {
 	if len(entries) > 0 {
 		return fmt.Errorf("%s is not empty — refusing to overwrite an existing settings directory", dir)
 	}
-	files, err := Seed()
+	files, err := settings.Seed()
 	if err != nil {
 		return err
 	}
-	for _, name := range Files() {
+	for _, name := range settings.Files() {
 		if err := os.WriteFile(filepath.Join(dir, name), files[name], 0o644); err != nil { //nolint:gosec // G306: the seed's secret keys are empty, and the server runs as another user in the container; the operator tightens the mode when filling them in (deployment docs)
 			return err
 		}

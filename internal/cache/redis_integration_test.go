@@ -32,8 +32,8 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/cachetest"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // Pinned: the servers the shared cache is documented to run on.

@@ -10,7 +10,7 @@ import (
 )
 
 // writeSettingsDir materializes a minimal settings directory. Content-rule
-// coverage lives in internal/settings; these tests pin the CLI contract only:
+// coverage lives in pkg/settings; these tests pin the CLI contract only:
 // argument/env resolution and exit codes.
 func writeSettingsDir(t *testing.T, policies string) string {
 	t.Helper()

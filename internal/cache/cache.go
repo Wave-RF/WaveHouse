@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // Entry is what a Lookup found. A nil Value is a miss.

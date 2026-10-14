@@ -124,6 +124,6 @@ auth:
 # directory with every key at its default; `wavehouse validate [dir]` checks
 # one (both resolve dir the same way: the argument, else WH_SETTINGS_DIR).
 # `make dev` seeds ./settings (gitignored) from the embedded seed on first
-# run, so local edits never touch the checked-in internal/settings/seed.
+# run, so local edits never touch the checked-in pkg/settings/seed.
 settings:
   dir: settings
