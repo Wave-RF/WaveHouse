@@ -32,7 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Security
 
-- **Seven transitive npm packages move to patched releases** (`pnpm-lock.yaml`): brace-expansion 5.0.12, dompurify 3.4.16, fast-uri 3.1.8, js-yaml 3.15.2, mermaid 11.17.2, nanoid 3.3.20 and source-map-js 1.2.2, each within the range its dependent already allows, so no `package.json` changes. They are dependencies of the docs site and the dev tooling; the server binary and the published SDK don't use them. Mermaid 11.17 lays out one state diagram on the ingest-pipeline page 36 px shorter, and the diagram audit is otherwise unchanged.
+- **Seven transitive npm packages move to patched releases** (`pnpm-lock.yaml`): brace-expansion 5.0.12, dompurify 3.4.16, fast-uri 3.1.8, js-yaml 3.15.2, mermaid 11.17.2, nanoid 3.3.20 and source-map-js 1.2.2, each within the range its dependent already allows, so no `package.json` changes. Mermaid 11.17.2 also brings `@mermaid-js/parser` 1.2.1 and two new dependencies, `fastdom` 1.0.12 and `strictdom` 1.0.1. They are dependencies of the docs site and the dev tooling; the server binary and the published SDK don't use them. Mermaid 11.17 lays out one state diagram on the ingest-pipeline page 36 px shorter, and the diagram audit is otherwise unchanged.
 
 ## [0.2.0] - 2026-10-13
 
