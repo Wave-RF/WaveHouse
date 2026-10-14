@@ -17,7 +17,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/api"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // TestBootResilience_StickyHealthVsConditionalReady exercises the full

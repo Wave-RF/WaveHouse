@@ -1,7 +1,7 @@
 # File-path-to-label map for actions/labeler. Keeps area/* labels on
 # PRs in sync with what files they touch — no manual label picking.
-# Rule of thumb: match the `internal/<pkg>/` → `area/<pkg>` convention
-# established in AGENTS.md.
+# Rule of thumb: match the `internal/<pkg>/` (or `pkg/<pkg>/`) → `area/<pkg>`
+# convention established in AGENTS.md.
 
 "area/app":
   - changed-files:
@@ -16,7 +16,7 @@
 "area/tenant":
   - changed-files:
     - any-glob-to-any-file:
-      - "internal/tenant/**"
+      - "pkg/tenant/**"
 
 "area/ingest":
   - changed-files:
@@ -47,12 +47,12 @@
 "area/policy":
   - changed-files:
     - any-glob-to-any-file:
-      - "internal/policy/**"
+      - "pkg/policy/**"
 
 "area/pipes":
   - changed-files:
     - any-glob-to-any-file:
-      - "internal/pipes/**"
+      - "pkg/pipes/**"
 
 "area/sdk":
   - changed-files:

@@ -421,7 +421,7 @@ WaveHouse's replies arrive under `_INBOX_<prefix>.>`, which is why the subscribe
 ### Limits that differ from the embedded queue
 
 - **Per-tenant budgets are not enforced.** A tenant's [`mq.max_bytes_gb`](/settings-directory#message-queue) is not applied; a partition's byte limit is shared by the tenants in it. `maxMsgsPerSubject` with `discardPerSubject: true`, which the generated manifests set, refuses one tenant's table once it holds that many unwritten rows, before it fills the partition.
-- **A shard's delivery can stall on one tenant.** If one tenant's ClickHouse hangs, its unwritten rows can fill its shard's share of the rows the ingest process may hold (see [Scaling ingest processes](#scaling-ingest-processes)), and then delivery pauses for every table in that shard, about 1/(N×V) of the tables. The other shards of the same process keep their own shares and keep flowing. More shards shrink that share. (A ClickHouse that refuses inserts outright does not stall a shard: its rows are handed back to the partition for a delayed retry.)
+- **A shard's delivery can stall on one tenant.** If one tenant's ClickHouse hangs, its unwritten rows can fill its shard's share of the rows the ingest process may hold (see [Scaling ingest processes](#scaling-ingest-processes)), and then delivery pauses for every table in that shard, about 1/(N×V) of the tables. The other shards of the same process keep their own shares and keep flowing. More shards shrink that share. (A ClickHouse that refuses inserts outright does not take up the process's share: its rows are handed back to the partition for a delayed retry. They still count toward the shard durable's `max_ack_pending`, so a refusal that lasts stalls the shard there instead; `wavehouse_ingest_shard_ack_pending` in [Monitoring](#monitoring) shows it filling.)
 - **Dead-lettered rows share one stream.** Its `discard: old` evicts the oldest rows when it is full; with `maxMsgsPerSubject` set, it evicts per table, so one tenant's flood evicts only its own rows. `GET /v1/ops/dlq/stats?tenant=` answers `200` with zeros for a tenant that has never parked a row, where the embedded queue answers `404`.
 - **SSE replay and live events are best effort.** A row republished while the history stream is unavailable, for example full with `discard: new`, deleted, or electing a leader, is written to ClickHouse but never reaches SSE. `wavehouse_mq_history_behind_seconds` shows a history that stops taking rows, and a deleted one fails the topology check (`wavehouse_mq_topology_ok`).
 
@@ -474,11 +474,23 @@ The ingest processes export these for their shards:
 | `wavehouse_ingest_shards_owned` | Shards this process holds and consumes. The sum over processes is partitions × shards, plus any extras still draining, once membership has settled. |
 | `wavehouse_ingest_shard_members` | Ingest processes this process last counted. |
 | `wavehouse_ingest_shards_unowned` | Shards with rows waiting that no process holds, and that have delivered nothing and had no ack for the pinned TTL, read every 15 seconds by the lowest-ranked member only (the others report nothing, so take the `max` across processes). Alert when it stays above `0` for a minute or more: rows nobody is writing. A shard whose process is stuck on a hung insert keeps its pin, so it does not count. |
+| `wavehouse_ingest_shard_owned{shard}` | `1` for each shard this process holds and consumes, labeled by the shard's name (`<partition stream>/<durable>`, such as `WH_INGEST_0/wh-ingest-3`), so `max by (shard, instance)` says which process owns which shard, and a shard with no series has no owner. |
+| `wavehouse_ingest_shard_pending{shard}` | Rows stored on the shard and not yet delivered to any process, read every 15 seconds by the lowest-ranked member only, like `wavehouse_ingest_shards_unowned`. A backlog that grows on a shard someone owns is that shard's owner falling behind. |
+| `wavehouse_ingest_shard_ack_pending{shard}` | Rows delivered from the shard and awaiting an ack or a nak, read the same way. Alert when it sits at `wavehouse_ingest_shard_max_ack_pending{shard}`: the server delivers nothing more from the shard until a row settles, so every table in it stops while the rows that fill it (a tenant whose ClickHouse refuses inserts, or one table that keeps failing, whose rows are handed back with a delay and keep their slot) are retried. |
+| `wavehouse_ingest_shard_max_ack_pending{shard}` | The shard durable's `max_ack_pending` (10,000 in the generated manifests), read the same way. |
+| `wavehouse_ingest_shard_redelivered{shard}` | Rows delivered from the shard more than once that still await an ack or a nak, read the same way: rows being retried, or taken over from a process that died. |
 | `wavehouse_ingest_rows_held` | Rows delivered to this process that it has not yet acked or nacked (confirmed or not), and that are younger than `ack_wait`, across its shards; each shard holds about its share at most (see [Scaling ingest processes](#scaling-ingest-processes)). |
 | `wavehouse_ingest_shard_events_total{event}` | `taken`, `released`, `reset` (a dead owner's rows redelivered at takeover), `handover_timeout` (a shard released before its rows were acked or handed back), `lost` (the membership lease ended under the process), `bind_failed` (a shard could not be bound; tried again next tick, and logged as an error once it has failed for a minute). A configured shard durable (one of the N×V) that is gone, with its stream or alone, or that no longer fits the worker (its `ack_wait` shorter than a minute, or no `max_ack_pending`), ends the worker instead, as a durable deleted while it is pulled does; a leftover durable past a lower N or V is only logged. |
 | `wavehouse_ingest_shard_handover_seconds` | From giving a shard up to releasing it. |
 
 `wavehouse_nats_connections` and `wavehouse_nats_in_msgs_total` describe this process's client connection under `nats` (`1` or `0`, and the messages it has received), where under `embedded` they describe the embedded server.
+
+Under `coord.backend: nats` every ingest process exports its lease, labeled by name (`ingest.m<j>`, its membership slot; there is no sweeper lease under this backend):
+
+| Metric | Meaning |
+| --- | --- |
+| `wavehouse_coord_lease_held{lease}` | `1` for each lease this process holds, so `max by (lease, instance)` says which process holds each membership slot. |
+| `wavehouse_coord_lease_renewal_failures_total{lease}` | Renewals of the lease this process could not store: the write failed or got no answer. A holder renews every 2 seconds and steps down once 10 seconds pass without a stored renewal, so a streak that keeps growing ends in the term's loss (`wavehouse_ingest_shard_events_total{event="lost"}` for a membership slot) and a candidate's takeover once it has seen the lease unrenewed for 15 seconds. Each streak is logged as well: `coord: lease renewal failed; trying again until the renew deadline` at `WARN` on its first failure, with the time left to the deadline, and `coord: lease renewed again` at `INFO` when a renewal is stored again. |
 
 ## One Deployment per role
 
@@ -753,6 +765,8 @@ WaveHouse **pushes** to an OTel collector; scraping-style pipelines (Promtail/Gr
 
 Every log record written through a request's context (as the request path logs) carries `request_id`, and `tenant` once the request's tenant is known: the `X-Tenant-ID` a `/v1` route resolves, or the `?tenant=` an ops route names, from authentication on (tenant `0` for any other ops route that names none, reads, raw SQL and the schema refresh alike; a settings reload that names none acts on every tenant and carries none). The request's server span carries the same two attributes under the same names, so one query finds both (SSE streams on `/v1/stream`, the probes, `/v1/health` and the metrics path open no server span, so their correlation is on log lines only: `/v1/stream` and `/v1/health` carry `request_id` and `tenant`, while the bare probes and the metrics path resolve no tenant and carry `request_id` alone). A record that already names a tenant keeps its own. The request id is the `X-Request-Id` the request arrived with, when it was sent once and is 1 to 128 printable ASCII characters with no spaces, and otherwise a fresh random 32-hex-character id; either way the response carries it back in `X-Request-Id`, so a log line can be joined to a proxy's access log or to a client's report. Have the proxy set the header (see [Reverse proxy](/reverse-proxy#header-and-auth-forwarding)). Neither is a label on the HTTP request metrics: with many tenants per process that would be a series per tenant per route. The ingest worker's lines are not request-scoped and carry the tenant only where they name it.
 
+An ingest request's trace continues past the queue. The handler's span (`IngestHandler.Handle`) rides in the queue headers of every row the request published, and the worker's flush of a batch opens a span of its own, `IngestWorker.Flush`, linked to the span of each request whose rows it holds (a batch holds rows from many requests, so the link, not a parent, is what ties them; a request's trace shows no worker span inline, and the flush's `producers` attribute counts every request whose rows it holds, of which at most the first 128 are linked), with `tenant`, `table` and `rows`. Under it, `clickhouse.insert` wraps each `INSERT` with the standard database attributes (`db.system`, `db.name`, `db.operation`, `db.sql.table`, `server.address`, `server.port`) and `rows`, and records the error when the `INSERT` fails, refused by ClickHouse or ClickHouse unreachable or timed out. Each flush is a trace of its own, sampled at `otel.traces.sample_rate` independently of the requests it links to, so below `1.0` either end of a link may be missing; to keep them together, sample at 100% at the source and downsample at the collector. With the `api` and `ingest` roles in separate processes the link crosses them, so a slow or failed insert reads back to every request that produced its rows.
+
 ### Pattern: Local collector (SigNoz, OTel Collector, Alloy)
 
 A local collector almost always speaks **plaintext** gRPC, but the SDK's unset default endpoint is **TLS** at `localhost:4317` — so enabling OTel alone is not enough. Point it at the collector with an explicit `http://` scheme: `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` (or leave the endpoint unset and set `OTEL_EXPORTER_OTLP_INSECURE=true`). All three signals (traces, metrics, logs) push to the same endpoint, each over its own connection. This is the simplest setup.
@@ -846,6 +860,28 @@ max by (instance) (wavehouse_settings_tenants{state="rejected"}) > 0
 By default, `prometheus.port` is `0`, which mounts `/metrics` on the main API server port (typically `8080`). This is the friendliest setup for compose / quick-start use.
 
 For production posture where metrics should not be exposed on the public API listener, set `port` to a separate non-zero value (e.g. `9091`). WaveHouse spins up a dedicated HTTP listener bound to that port serving only `/metrics`. Firewall the port to internal networks only; the main API listener stays where it was. Both listeners participate in graceful shutdown.
+
+### Many tables
+
+Seven metrics carry a `table` label, so each grows by one series per table that sees traffic, multiplied by its other labels. At a few dozen tables that is noise; with table-per-tenant schemas or thousands of tables it shows up in your time-series database's memory and bill. Set `prometheus.per_table_metrics: false` (`WH_METRICS_PER_TABLE=false`) to drop the label and report each metric summed over every table, on the Prometheus endpoint and OTLP push alike. WaveHouse logs one `WARN` naming the setting once its metrics have carried more than 500 distinct tables. See [Configuration → Metric labels](/configuration#metric-labels).
+
+### Profiling
+
+For a memory leak, a goroutine leak or a CPU hotspot in a running process, set `profiling.enabled: true` (`WH_PROFILING_ENABLED=true`). WaveHouse then serves Go's `net/http/pprof` endpoints under `/debug/pprof/` on `profiling.addr`, a listener of its own that is never the API port (see [Configuration → Profiling](/configuration#profiling)). It is off by default. The endpoints take no credential and a heap or goroutine dump shows the process's internals, so the default address is `127.0.0.1:6060`: nothing beyond the host reaches it. On Kubernetes, forward to it rather than exposing it:
+
+```bash
+# Leave this running; run the commands below in another terminal.
+kubectl port-forward pod/<wavehouse-pod> 6060:6060
+```
+
+```bash
+go tool pprof http://localhost:6060/debug/pprof/heap
+go tool pprof 'http://localhost:6060/debug/pprof/profile?seconds=30'
+curl -s 'http://localhost:6060/debug/pprof/goroutine?debug=2' > goroutines.txt
+curl -s -o trace.out 'http://localhost:6060/debug/pprof/trace?seconds=5'
+```
+
+In Docker Compose, a loopback address inside the container is not reachable through a published port, so set `WH_PROFILING_ADDR=:6060` and publish it to the host's loopback only (`127.0.0.1:6060:6060`); boot logs a `WARN` for any address that is not loopback. The index at `/debug/pprof/` lists every profile. Block and mutex profiles stay empty, since WaveHouse sets no block or mutex sampling rate. A CPU profile or trace in flight ends when the process begins its graceful stop, rather than holding the stop to `server.shutdown_timeout`.
 
 ### Local Observability Stack
 

@@ -10,13 +10,21 @@
 // function can gate the `wavehouse validate` CLI, boot, and a live reload.
 // Table/column existence is out of scope by design: WaveHouse is
 // Bring-Your-Own-Schema, and schema discovery owns what exists in ClickHouse.
+//
+// The package is importable from outside the module (#834): a program that
+// writes settings directories checks them with ValidateFiles, over bytes,
+// using the package from the same release tag as the server, and so with
+// exactly the rules that server applies. It imports nothing under internal/
+// and none of the server's runtime dependencies; the runtime half — the
+// adopted snapshot, the reload triggers, the directory watcher — is
+// internal/settings.
 package settings
 
 import (
 	"time"
 
-	"github.com/Wave-RF/WaveHouse/internal/pipes"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/pkg/pipes"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
 )
 
 // The four settings files. Any other entry in the directory is rejected — a

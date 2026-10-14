@@ -10,8 +10,9 @@ import (
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/settings"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	model "github.com/Wave-RF/WaveHouse/pkg/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,10 +29,10 @@ func writeSettingsFixture(t *testing.T, configJSON string) string {
 	t.Helper()
 	dir := t.TempDir()
 	for name, content := range map[string]string{
-		settings.FileRoles:    `{"roles": ["public"]}`,
-		settings.FilePolicies: `{"default_role": "public"}`,
-		settings.FilePipes:    `{}`,
-		settings.FileConfig:   configJSON,
+		model.FileRoles:    `{"roles": ["public"]}`,
+		model.FilePolicies: `{"default_role": "public"}`,
+		model.FilePipes:    `{}`,
+		model.FileConfig:   configJSON,
 	} {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600))
 	}
@@ -56,7 +57,7 @@ func TestSettingsReload(t *testing.T) {
 	}
 
 	t.Run("valid directory adopts with 200", func(t *testing.T) {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileConfig), []byte(fullConfig(200)), 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, model.FileConfig), []byte(fullConfig(200)), 0o600))
 		rec, body := post()
 		assert.Equal(t, http.StatusOK, rec.Code)
 		assert.True(t, body.Adopted)
@@ -65,7 +66,7 @@ func TestSettingsReload(t *testing.T) {
 	})
 
 	t.Run("invalid directory keeps previous settings with 422", func(t *testing.T) {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileConfig), []byte(`{"unknown_key": true}`), 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, model.FileConfig), []byte(`{"unknown_key": true}`), 0o600))
 		rec, body := post()
 		assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 		assert.False(t, body.Adopted)
@@ -85,7 +86,7 @@ func TestSettingsReload_TenantParam(t *testing.T) {
 	globex, _ := tenants.For("globex")
 	h := NewSettingsHandler(tenants)
 	rewrite := func(folder, config string) {
-		require.NoError(t, os.WriteFile(filepath.Join(tenants.Dir(), folder, settings.FileConfig), []byte(config), 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(tenants.Dir(), folder, model.FileConfig), []byte(config), 0o600))
 	}
 	post := func(query string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
@@ -174,7 +175,7 @@ func TestSettingsReload_TenantParam_FlatDirectory(t *testing.T) {
 		return rec
 	}
 
-	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileConfig), []byte(fullConfig(200)), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, model.FileConfig), []byte(fullConfig(200)), 0o600))
 	assert.Equal(t, http.StatusOK, post("tenant=0").Code)
 	assert.Equal(t, 200, store.DefaultMaxRows())
 	assert.Equal(t, http.StatusNotFound, post("tenant=acme").Code)

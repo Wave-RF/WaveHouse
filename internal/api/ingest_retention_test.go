@@ -17,8 +17,9 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	model "github.com/Wave-RF/WaveHouse/pkg/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // A finite retention must outlast the queue's duplicate window, or an id
@@ -26,7 +27,7 @@ import (
 // a copy of the first publish.
 func TestIngest_MinDedupeRetentionCoversTheDuplicateWindow(t *testing.T) {
 	t.Parallel()
-	assert.GreaterOrEqual(t, settings.MinDedupeRetention, mq.EmbeddedDuplicateWindow)
+	assert.GreaterOrEqual(t, model.MinDedupeRetention, mq.EmbeddedDuplicateWindow)
 }
 
 // dedupeConfig is fullConfig with dedupe switched on and the given dedupe
@@ -68,7 +69,7 @@ func TestIngest_Dedup_CommitsWithTheAdoptedRetention(t *testing.T) {
 	assert.Equal(t, 720*time.Hour, dedup.Retention(dedupe.Key{Table: "clicks", ID: "e1"}))
 	assert.Equal(t, time.Duration(0), dedup.Retention(dedupe.Key{Table: "users", ID: "e1"}), "the table keeps ids forever")
 
-	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileConfig), []byte(dedupeConfig("24h", `{}`)), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, model.FileConfig), []byte(dedupeConfig("24h", `{}`)), 0o600))
 	_, adopted := tenants.Reload("test")
 	require.True(t, adopted)
 	ingest("clicks", "e2")

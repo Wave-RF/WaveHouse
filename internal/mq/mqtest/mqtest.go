@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 )
@@ -86,6 +86,7 @@ func Run(t *testing.T, h Harness) {
 		{"IdempotencyKeyDropsARepeat", true, idempotencyKeyDropsARepeat},
 		{"RefusesATopicWithoutATenant", true, refusesATopicWithoutATenant},
 		{"SubscribeCarriesTheTraceContext", true, subscribeCarriesTheTraceContext},
+		{"ConsumeCarriesTheTraceContext", true, consumeCarriesTheTraceContext},
 		{"SubscribeSeesEveryTenant", true, subscribeSeesEveryTenant},
 		{"EachTenantInOrder", true, eachTenantInOrder},
 		{"NakRedelivers", true, nakRedelivers},

@@ -9,7 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 var errReconcile = errors.New("reconcile failed")
@@ -25,7 +26,7 @@ func TestStats_FlatReloads(t *testing.T) {
 	boot := st.LastSuccess
 	require.False(t, boot.IsZero())
 
-	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": -1}}`)), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), settings.FileConfig), []byte(configJSON(`{"query": {"default_max_rows": -1}}`)), 0o600))
 	reg.Reload("sighup")
 	st = reg.Stats()
 	assert.Equal(t, int64(1), st.Reloads[ReloadKey{"sighup", ResultRejected}])
@@ -33,7 +34,7 @@ func TestStats_FlatReloads(t *testing.T) {
 	assert.Equal(t, boot, st.LastSuccess, "a rejected reload is not a success")
 	assert.Equal(t, 1, st.Served, "a flat directory keeps serving its previous settings")
 
-	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), FileConfig), []byte(configJSON(`{}`)), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), settings.FileConfig), []byte(configJSON(`{}`)), 0o600))
 	reg.Reload("api")
 	st = reg.Stats()
 	assert.Equal(t, int64(1), st.Reloads[ReloadKey{"api", ResultAdopted}])

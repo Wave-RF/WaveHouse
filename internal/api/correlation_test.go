@@ -16,11 +16,11 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/Wave-RF/WaveHouse/internal/observability"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 func TestRequestID(t *testing.T) {

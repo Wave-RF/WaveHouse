@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -558,7 +559,7 @@ func (c *externalConsumer) deliver(part *consumerPart, handler func(*Message)) {
 		if !ok {
 			return
 		}
-		msg := c.e.wrapMsg(c.ctx, m, true)
+		msg := c.e.wrapMsg(observability.ExtractHeaders(c.ctx, m.Headers()), m, true)
 		letGo := sync.OnceFunc(part.settle)
 		expire := time.AfterFunc(part.ackWait, letGo)
 		msg.OnSettled(func() { expire.Stop(); letGo() })

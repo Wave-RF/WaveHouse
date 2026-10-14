@@ -31,11 +31,11 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
-	"github.com/Wave-RF/WaveHouse/internal/pipes"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/pipes"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 const (
@@ -51,7 +51,7 @@ func withoutContext(release func() error) func(context.Context) error {
 
 // wireSettings adopts the settings directory — the hot-reloadable half of
 // configuration (dedupe, dlq, query, schema, stream, cors — see
-// settings.TenantConfig). Required: config.Validate already rejected an
+// pkg/settings's TenantConfig). Required: config.Validate already rejected an
 // empty settings.dir, and an invalid directory refuses boot. The binary
 // carries no compiled defaults but a missing dedupe.retention ("0");
 // `wavehouse bootstrap` writes the seed. A
@@ -221,6 +221,7 @@ func (a *App) wireObservability(ctx context.Context) {
 		MetricsEnabled:    cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
 		PrometheusEnabled: cfg.Prometheus.Enabled,
 		LogsEnabled:       cfg.OTel.Enabled && cfg.OTel.Logs.Enabled,
+		AggregateTables:   !cfg.Prometheus.PerTableMetrics,
 	})
 	if err != nil {
 		slog.Error("failed to initialize observability, falling back to stdout", "error", err)

@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/Wave-RF/WaveHouse/internal/coord"
 )
@@ -76,20 +80,63 @@ func newNATSLeases(kv jetstream.KeyValue, holder string, opts ...LeaseOption) *n
 	for _, opt := range opts {
 		opt(&t)
 	}
-	return &natsLeases{
+	l := &natsLeases{
 		kv: kv, timings: t,
 		value:     leaseValue{Holder: holder, DurationMS: t.duration.Milliseconds(), Session: nuid.Next()},
 		held:      map[string]*natsTerm{},
 		acquiring: map[string]struct{}{},
 		seen:      map[string]leaseSighting{},
 	}
+	var err error
+	if l.renewalFailures, l.gauges, err = registerLeaseMetrics(l); err != nil {
+		slog.Warn("coord: lease metrics not registered", "error", err)
+	}
+	return l
 }
+
+// leaseMeter is the meter the lease metrics register on (tests substitute
+// their own rather than the global provider, which binds only once).
+var leaseMeter = func() metric.Meter { return otel.Meter("wavehouse-mq") }
+
+// registerLeaseMetrics makes the renewal-failure counter and registers the
+// held gauge on the meter provider in place now, since the coordinator is
+// opened after the provider is set.
+func registerLeaseMetrics(l *natsLeases) (metric.Int64Counter, metric.Registration, error) {
+	meter := leaseMeter()
+	failures, err := meter.Int64Counter("wavehouse_coord_lease_renewal_failures_total",
+		metric.WithDescription("Lease renewals this process could not store (the write failed or got no answer); the term ends at its renew deadline if they keep failing"))
+	if err != nil {
+		return nil, nil, err
+	}
+	held, err := meter.Int64ObservableGauge("wavehouse_coord_lease_held",
+		metric.WithDescription("1 for each lease this process holds in the NATS KV bucket: its shard claim membership slot"))
+	if err != nil {
+		return nil, nil, err
+	}
+	reg, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		for name := range l.held {
+			o.ObserveInt64(held, 1, metric.WithAttributes(leaseAttr(name)))
+		}
+		return nil
+	}, held)
+	if err != nil {
+		return nil, nil, err
+	}
+	return failures, reg, nil
+}
+
+func leaseAttr(name string) attribute.KeyValue { return attribute.String("lease", name) }
 
 // natsLeases is the coord.Coordinator over a KV bucket.
 type natsLeases struct {
 	kv      jetstream.KeyValue
 	timings leaseTimings
 	value   leaseValue
+
+	renewalFailures metric.Int64Counter
+	gauges          metric.Registration
 
 	// mu guards the fields below and is never held across a request, so a
 	// slow campaign cannot hold up another term ending.
@@ -260,6 +307,9 @@ func (l *natsLeases) Close(ctx context.Context) error {
 	for _, t := range terms {
 		errs = append(errs, t.Resign(ctx))
 	}
+	if l.gauges != nil {
+		_ = l.gauges.Unregister()
+	}
 	return errors.Join(errs...)
 }
 
@@ -314,7 +364,9 @@ func (t *natsTerm) Err() error {
 // also ends the moment the renew deadline passes without a stored renewal,
 // timed from when that renewal was sent (last): a candidate may start its
 // lease-duration clock as soon as the write is stored, so the holder steps
-// down no later than renewDeadline after it, before any takeover.
+// down no later than renewDeadline after it, before any takeover. A renewal
+// that fails is counted and logged, the first of a streak at WARN, so an
+// operator sees the term heading for its deadline before it ends.
 func (t *natsTerm) renew(last time.Time) {
 	defer close(t.stopped)
 	tm := t.owner.timings
@@ -323,6 +375,7 @@ func (t *natsTerm) renew(last time.Time) {
 	tick := time.NewTicker(tm.renewEvery)
 	defer tick.Stop()
 	var lastErr error
+	failures := 0
 	for {
 		select {
 		case <-t.ctx.Done():
@@ -347,12 +400,28 @@ func (t *natsTerm) renew(last time.Time) {
 		case err == nil:
 			t.rev, last = rev, sent
 			deadline.Reset(time.Until(last.Add(tm.renewDeadline)))
+			if failures > 0 {
+				slog.InfoContext(t.ctx, "coord: lease renewed again", "lease", t.name, "failures", failures)
+				failures = 0
+			}
 		case errors.Is(err, coord.ErrLost):
 			t.end(err)
 			return
+		case t.ctx.Err() != nil:
+			return // resigned mid-renewal: not a failure
 		default:
 			// Retried next tick; the deadline timer ends the term on time.
 			lastErr = err
+			failures++
+			if t.owner.renewalFailures != nil {
+				t.owner.renewalFailures.Add(t.ctx, 1, metric.WithAttributes(leaseAttr(t.name)))
+			}
+			level := slog.LevelDebug
+			if failures == 1 {
+				level = slog.LevelWarn
+			}
+			slog.Log(t.ctx, level, "coord: lease renewal failed; trying again until the renew deadline",
+				"lease", t.name, "failures", failures, "deadline_in", time.Until(last.Add(tm.renewDeadline)).Round(time.Millisecond), "error", err)
 		}
 	}
 }

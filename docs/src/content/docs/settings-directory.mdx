@@ -37,6 +37,45 @@ Every adoption — boot and every reload — goes through the same `Validate`, s
 
 Every file is decoded strictly: an unknown key, a duplicate key, a UTF-8 byte order mark, an all-whitespace file, or a top-level `null` is an error, so a misspelled rule can never load as "no rule".
 
+## Validating from Go
+
+A program that writes settings directories — a control plane, a provisioning tool, a GitOps generator — can check a directory with the server's own rules before it hands it over: no running server, nothing on disk. The settings model and its validator are public packages of the server module, versioned by its release tags, so **validate with the package from the same tag as the server**: `go get github.com/Wave-RF/WaveHouse@vX.Y.Z` checks with exactly the rules a `vX.Y.Z` server applies, and a writer that re-implemented them would drift the first time they changed.
+
+```go
+import (
+    "encoding/json"
+    "errors"
+    "fmt"
+
+    "github.com/Wave-RF/WaveHouse/pkg/settings"
+)
+
+files, err := settings.Seed() // the starter directory: every file, every key at its default
+if err != nil {
+    return err
+}
+var config settings.TenantConfig
+if err := json.Unmarshal(files[settings.FileConfig], &config); err != nil {
+    return err
+}
+*config.ClickHouse.Addr = "clickhouse:9000"
+if files[settings.FileConfig], err = json.Marshal(config); err != nil {
+    return err
+}
+
+doc, findings := settings.ValidateFiles(files)
+for _, f := range findings {
+    // The seed prints one finding, "warning: policies.json: empty document — no policy; ...";
+    // an addr without a port would add "error: config.json: clickhouse.addr: must be host:port, got ...".
+    fmt.Println(f)
+}
+if doc == nil {
+    return errors.New("the server would refuse this directory") // an error finding; warnings alone leave doc set
+}
+```
+
+`settings.ValidateFiles` takes the four files by name (`settings.Files()`) as bytes and runs the pass `wavehouse validate`, boot and a reload run — there is one validator, and every path goes through it — returning every finding at once, the same `{"severity", "file", "path", "message"}` objects `POST /v1/ops/settings/reload` returns. It skips only what needs a directory: that it exists, that each file is a regular file (not a subdirectory or a FIFO), and `config.json`'s permission bits; `settings.ValidateDir` runs those too, over a directory on disk, and `settings.Validate` over a root of either shape. Names are read as directory entries are: a dot-prefixed name is skipped, any other name outside the four is an unexpected file, and an absent or nil file is missing. For a [nested directory](/deployment#the-nested-settings-directory), check a folder name with `tenant.Parse` (`github.com/Wave-RF/WaveHouse/pkg/tenant`) before creating the folder. The document types — `settings.TenantConfig`, `settings.RolesFile`, `settings.PipesFile`, and `policy.Policy` from `github.com/Wave-RF/WaveHouse/pkg/policy` — are what the validator decodes into, and the seed round-trips through them to a document the validator reads identically, so a writer that starts from `settings.Seed()` and edits the structs emits documents in the shape the server reads. Some checks need the table schema (a policy `check` naming a column the table lacks, say) and run only against ClickHouse; they are not part of this package.
+
 ## `roles.json`
 
 The role registry — every role a policy grant or a pipe allowlist may name:

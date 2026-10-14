@@ -14,7 +14,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/Wave-RF/WaveHouse/internal/keyenc"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // tokenLen is the size of a version token: random, so a token key that is

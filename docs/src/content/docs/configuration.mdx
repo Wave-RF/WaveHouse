@@ -124,6 +124,7 @@ Boot logs each of these at `WARN` rather than refusing. The first two are right 
 - **`mq.nats` set with `mq.backend=embedded`**, or **`coord.nats` set with `coord.backend=local`**: the block is ignored.
 - **`cache.redis.addrs` set with `cache.backend=local`**, in a process running `api`: the block is ignored.
 - **`cache.redis.tls.insecure_skip_verify` on**, in a process running `api`: the cache accepts any certificate (see [Cache](#cache)).
+- **`profiling.enabled` with a `profiling.addr` that is not loopback** (an empty host, `0.0.0.0`, a pod address), in every process: the unauthenticated pprof endpoints are reachable beyond the host (see [Profiling](#profiling)).
 - **`mq.backend=nats` and a tenant with dedupe on whose finite `dedupe.retention` is under the partitions' `duplicate_window`**, in a process running `api`, at boot and after every reload: see [Deployment → Create the topology](/deployment#create-the-topology).
 
 ### Process roles
@@ -296,25 +297,51 @@ The master switch is `otel.enabled`. When `true`, each signal (traces/metrics/lo
 | `otel.enabled` | `WH_OTEL_ENABLED` | `false` | Master switch. When `false`, no signals are initialized regardless of the sub-toggles below. The OTLP endpoint, TLS, custom CA, mutual TLS, and auth headers are configured via the standard `OTEL_EXPORTER_OTLP_*` env vars (see the note above), not a WaveHouse key. |
 | `otel.traces.enabled` | `WH_OTEL_TRACES_ENABLED` | `true` | Export traces via OTLP gRPC. |
 | `otel.traces.sample_rate` | `WH_OTEL_TRACES_SAMPLE_RATE` | `1.0` | Head-based trace sampling rate in `[0.0, 1.0]`. `1.0` exports every trace; `0.0` exports none. Defaults to 100% (matches the OpenTelemetry SDK default); lower it for high-QPS production services where collector or backend cost is a concern. Best practice is "100% at the source, downsample at the collector" via tail-based sampling. Validated at config load. |
-| `otel.metrics.enabled` | `WH_OTEL_METRICS_ENABLED` | `true` | Export metrics + Go runtime metrics via OTLP gRPC. Periodic reader interval is fixed at 15s. Metrics are pre-aggregated so there is no sampling knob. |
+| `otel.metrics.enabled` | `WH_OTEL_METRICS_ENABLED` | `true` | Export metrics + Go runtime metrics via OTLP gRPC. Periodic reader interval is fixed at 15s. Metrics are pre-aggregated so there is no sampling knob. Whether they carry a `table` label is [`prometheus.per_table_metrics`](#metric-labels), which applies here too. |
 | `otel.logs.enabled` | `WH_OTEL_LOGS_ENABLED` | `true` | Export logs via OTLP gRPC. Disabling it leaves stdout with 100% of records, but from the boot logger: lines keep `trace_id`/`span_id`, `request_id`, `tenant` and `instance_id`, and lose `component`, `source` and the build fields. |
-| `otel.logs.sample_rate` | `WH_OTEL_LOGS_SAMPLE_RATE` | `1.0` | OTLP export rate for `DEBUG`/`INFO` records, in `[0.0, 1.0]`. Validated at config load. `WARN` and `ERROR` records always export at 100% — dropping them silently during incidents is too dangerous to expose as a knob. **Stdout always receives 100% of records regardless of this rate** (see the scraper note above). |
+| `otel.logs.sample_rate` | `WH_OTEL_LOGS_SAMPLE_RATE` | `1.0` | OTLP export rate for the `DEBUG`/`INFO` records `WH_LOG_LEVEL` admits, in `[0.0, 1.0]`. Validated at config load. `WARN` and `ERROR` records always export at 100% — dropping them silently during incidents is too dangerous to expose as a knob. **Stdout always receives 100% of records regardless of this rate** (see the scraper note above). |
 
 ### Prometheus
 
-Prometheus exposition is its own top-level config block, independent of `otel.*`. Operators using a scrape-based pipeline (Grafana Alloy, Mimir, the standalone Prometheus server) can leave the entire `[otel]` block at its `enabled: false` default and turn on only `prometheus.enabled` — no OTLP collector required. Conversely, OTLP push and Prometheus can both be on at once (the underlying OTel MeterProvider drives both readers, same `Meter()` API). Disabled by default since enabling adds an unauthenticated endpoint, so opt-in is explicit.
+Prometheus exposition is its own top-level config block, independent of `otel.*`, except for `prometheus.per_table_metrics`, which shapes every metrics output, OTLP push included. Operators using a scrape-based pipeline (Grafana Alloy, Mimir, the standalone Prometheus server) can leave the entire `[otel]` block at its `enabled: false` default and turn on only `prometheus.enabled` — no OTLP collector required. Conversely, OTLP push and Prometheus can both be on at once (the underlying OTel MeterProvider drives both readers, same `Meter()` API). Disabled by default since enabling adds an unauthenticated endpoint, so opt-in is explicit.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `prometheus.enabled` | `WH_PROMETHEUS_ENABLED` | `false` | Expose a Prometheus-format `/metrics` endpoint. Works standalone (no OTel push) or alongside `otel.metrics.enabled`. |
 | `prometheus.path` | `WH_PROMETHEUS_PATH` | `/metrics` | URL path. Must start with `/`, and may not collide with a reserved probe path (`/livez`, `/readyz`, `/healthz`, `/health`, `/ready`). When `port` is `0` (mounted on the main server) it also may not be `/v1` or sit under `/v1/`, which would shadow the authenticated API. An invalid path fails validation at startup. |
 | `prometheus.port` | `WH_PROMETHEUS_PORT` | `0` | Listener port. `0` mounts the endpoint on the main API server (`server.port`) — simplest, no extra port to expose. Non-zero spins up a dedicated HTTP listener, which lets you firewall metrics off the public API surface (common production posture). Must not equal `server.port` when non-zero. |
+| `prometheus.per_table_metrics` | `WH_METRICS_PER_TABLE` | `true` | Keep the `table` label on the metrics that carry one. `false` drops it, so each such metric reports one series summed over every table. Applies to every metric output, OTLP push included, since both share one meter provider. See [Metric labels](#metric-labels). |
+
+#### Metric labels
+
+Every series is a cost in the time-series database that stores it, and the labels a metric carries multiply its series. WaveHouse discovers whatever tables you have and sets no limit on how many, so a label holding a table name grows with your schema: `wavehouse_sse_rows_withheld_total{table, role}` at 2,000 tables and 10 roles is up to 20,000 series. The metrics labeled by `table` are `wavehouse_sse_rows_withheld_total`, `wavehouse_ingest_retries_total`, `wavehouse_ingest_poison_total`, `wavehouse_ingest_dedupe_missing_id_total`, `wavehouse_ingest_dedupe_commit_failed_total`, `wavehouse_ingest_dedupe_disabled_total` and `wavehouse_dedupe_hashed_id_total`.
+
+`prometheus.per_table_metrics: false` drops the `table` label from all of them at once, and each keeps its other labels, summed over every table. It stays `true` by default, because per-table detail is what you want while one table misbehaves. Once the metrics have carried more than 500 distinct table names, the process logs one `WARN` that names this setting; the label stays on until you change it. Turning it off needs a restart.
+
+New metrics follow one rule for their labels:
+
+| Label | Use |
+| ----- | --- |
+| A closed set: `kind`, `role`, `reason`, a status or an error class | Always fine. |
+| `table` | Fine on a counter, an up-down counter (observable included) or a histogram; `prometheus.per_table_metrics` drops it with the rest, and the series sum. Not on a gauge: with the label dropped, a gauge reports one table's value, not the total. |
+| `column` | Avoid: it multiplies against `table`. |
+| `tenant` | Not on a new metric: put it in log fields and span attributes. `wavehouse_schema_refresh_failures_total` predates the rule and still carries it. |
+| A value from a row or a request payload | Never. |
+
+### Profiling
+
+Go's [`net/http/pprof`](https://pkg.go.dev/net/http/pprof) endpoints (heap, CPU, goroutine, allocation, thread-creation, block and mutex profiles, the execution trace, the command line and symbol lookup) are served under `/debug/pprof/` on a listener of their own, never on `server.port`: a profile exposes the process's internals and the endpoints take no credential. Off by default. With it on, every process serves it, whatever its [`roles`](#process-roles). The default address is the loopback interface, so turning it on exposes nothing beyond the host; `kubectl port-forward` still reaches a loopback listener in a pod. An address that is not loopback is logged at `WARN` at boot. Block and mutex profiles stay empty, since WaveHouse sets no block or mutex sampling rate. `make dev` turns profiling on unless `WH_PROFILING_ENABLED` is set in its environment. See [Deployment → Profiling](/deployment#profiling) for the commands.
+
+| YAML Key | Env Var | Default | Description |
+| --- | --- | ------- | ----------- |
+| `profiling.enabled` | `WH_PROFILING_ENABLED` | `false` | Serve `/debug/pprof/` on `profiling.addr`. A failure to bind is logged at `ERROR` and the process serves on without it. |
+| `profiling.addr` | `WH_PROFILING_ADDR` | `127.0.0.1:6060` | `host:port` to listen on. The port must be 1–65535 and must not be `server.port` or, with `prometheus.enabled`, `prometheus.port`. An empty host (`:6060`) listens on every interface. Read only when `profiling.enabled` is `true`, and an invalid value fails validation at startup. |
 
 ### Logging
 
 | Env Var | Default | Description |
 | ------- | ------- | ----------- |
-| `WH_LOG_LEVEL` | `INFO` | Minimum log level. One of `DEBUG`, `INFO`, `WARN`, `ERROR` (case-insensitive). Applies to both stdout and (when OTel is enabled) the OTLP log exporter. See `otel.logs.sample_rate` above for the OTLP export rate. |
+| `WH_LOG_LEVEL` | `INFO` | Minimum log level. One of `DEBUG`, `INFO`, `WARN`, `ERROR` (case-insensitive). Applies to both stdout and (when OTel is enabled) the OTLP log exporter: a record below it is neither written nor exported, `WARN` included when the level is `ERROR`. See `otel.logs.sample_rate` above for the OTLP export rate. |
 
 ## Example Config File
 
@@ -421,6 +448,11 @@ prometheus:
   enabled: false         # independent of otel — works standalone for scrape
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
+  per_table_metrics: true # false = no table label, one series over all tables (OTLP too)
+
+profiling:
+  enabled: false         # net/http/pprof under /debug/pprof/, never on server.port
+  addr: 127.0.0.1:6060   # loopback by default; the endpoints are unauthenticated
 ```
 
 </TabItem>
@@ -500,6 +532,10 @@ WH_OTEL_LOGS_SAMPLE_RATE=1.0
 WH_PROMETHEUS_ENABLED=false
 WH_PROMETHEUS_PATH=/metrics
 WH_PROMETHEUS_PORT=0
+WH_METRICS_PER_TABLE=true
+
+WH_PROFILING_ENABLED=false
+WH_PROFILING_ADDR=127.0.0.1:6060
 ```
 
 </TabItem>

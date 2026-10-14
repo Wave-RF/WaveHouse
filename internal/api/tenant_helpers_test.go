@@ -12,10 +12,10 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
-	"github.com/Wave-RF/WaveHouse/internal/pipes"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
+	"github.com/Wave-RF/WaveHouse/pkg/pipes"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
 )
 
 // testStore stands in for the store TenantMW resolves. It holds no document:

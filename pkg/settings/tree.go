@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // Tree is a validated settings root (#583). A flat root — the four files in
@@ -21,8 +21,8 @@ type Tree struct {
 	Tenants map[tenant.ID]TenantResult
 }
 
-// serves reports whether the tree holds a tenant with a document to serve.
-func (t *Tree) serves() bool {
+// Serves reports whether the tree holds a tenant with a document to serve.
+func (t *Tree) Serves() bool {
 	for _, res := range t.Tenants {
 		if res.Doc != nil {
 			return true
@@ -80,7 +80,7 @@ func Validate(root string) (*Tree, []Finding) {
 			findings = append(findings, Finding{Severity: SeverityError, File: name, Message: fmt.Sprintf("folder name is not a tenant id: %v", err)})
 			continue
 		}
-		doc, fs := validateFolder(root, name)
+		doc, fs := ValidateFolder(root, name)
 		tree.Tenants[id] = TenantResult{Doc: doc, Findings: fs}
 		findings = append(findings, fs...)
 	}
@@ -90,8 +90,9 @@ func Validate(root string) (*Tree, []Finding) {
 	return tree, findings
 }
 
-// validateFolder is ValidateDir for one tenant folder of a nested root, with
-// the folder leading each finding's File.
+// ValidateFolder is ValidateDir for one tenant folder of a nested root, with
+// the folder leading each finding's File — what checks one tenant's folder
+// on its own, as the Registry does for a reload of that tenant alone.
 //
 // This is the one place a tenant id becomes a filesystem path: the dedupe
 // store keys by tenant, not by directory (internal/dedupe's Embedded).
@@ -102,7 +103,7 @@ func Validate(root string) (*Tree, []Finding) {
 // on it, rather than in two callers — and it is the check CodeQL's
 // path-injection query recognizes as a sanitizer, which the grammar in
 // tenant.Parse is not.
-func validateFolder(root, folder string) (*Document, []Finding) {
+func ValidateFolder(root, folder string) (*Document, []Finding) {
 	if folder == "" || folder == "." || strings.Contains(folder, "/") || strings.Contains(folder, `\`) || strings.Contains(folder, "..") {
 		return nil, []Finding{{Severity: SeverityError, File: folder, Message: "folder name is not a tenant id: it must name one folder — not empty, not \".\", no path separator, no \"..\""}}
 	}
@@ -112,21 +113,6 @@ func validateFolder(root, folder string) (*Document, []Finding) {
 		findings[i].File = path.Join(folder, findings[i].File)
 	}
 	return doc, findings
-}
-
-// emptyRoot reports whether root can be listed and holds nothing but
-// dot-prefixed entries, which both shapes skip.
-func emptyRoot(root string) bool {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), ".") {
-			return false
-		}
-	}
-	return true
 }
 
 // looseEntry is a root entry that is not a tenant folder: a file, or

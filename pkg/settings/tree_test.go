@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // writeTree materializes a nested root: tenant folder → file name → content.
@@ -177,19 +177,19 @@ func TestValidate_NestedLooseFile(t *testing.T) {
 	assert.Contains(t, out, "error: globex/roles.json: missing")
 }
 
-// validateFolder is where a tenant id becomes a path, and it refuses a name
+// ValidateFolder is where a tenant id becomes a path, and it refuses a name
 // that could leave the root itself rather than trusting its callers to have
 // parsed it: a finding against that name, nothing read.
 func TestValidateFolder_RefusesAPathLikeName(t *testing.T) {
 	t.Parallel()
 	root := writeTree(t, map[string]map[string]string{"acme": validFiles()})
 	for _, name := range []string{"../acme", "acme/..", `..\acme`, "a/b", "..", ".", ""} {
-		doc, findings := validateFolder(root, name)
+		doc, findings := ValidateFolder(root, name)
 		assert.Nil(t, doc, name)
 		require.Len(t, findings, 1, name)
 		assert.Equal(t, name, findings[0].File)
 		assert.Contains(t, findings[0].Message, "not a tenant id")
 	}
-	doc, findings := validateFolder(root, "acme")
+	doc, findings := ValidateFolder(root, "acme")
 	assert.NotNil(t, doc, "a plain name is checked as before: %s", findingStrings(findings))
 }

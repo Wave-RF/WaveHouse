@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // sourceOf wraps a fake connection in the Source NewSchemaRegistry takes,

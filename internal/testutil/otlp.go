@@ -200,6 +200,20 @@ func (r *FakeOTLP) SpanCount() int {
 	return n
 }
 
+// Spans returns every span received, flattened across resource and scope
+// groupings, in arrival order.
+func (r *FakeOTLP) Spans() []*tracepb.Span {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []*tracepb.Span
+	for _, rs := range r.traces {
+		for _, ss := range rs.GetScopeSpans() {
+			out = append(out, ss.GetSpans()...)
+		}
+	}
+	return out
+}
+
 // MetricCount returns the total number of metric records received, flattened
 // across resource and scope groupings.
 func (r *FakeOTLP) MetricCount() int {
