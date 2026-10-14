@@ -37,6 +37,7 @@ type Config struct {
 	Auth       Auth       `yaml:"auth"`
 	OTel       OTel       `yaml:"otel"`
 	Prometheus Prometheus `yaml:"prometheus"`
+	Profiling  Profiling  `yaml:"profiling"`
 	Settings   Settings   `yaml:"settings"`
 }
 
@@ -282,6 +283,7 @@ func defaults() Config {
 			Logs:    OTelLogs{Enabled: true, SampleRate: 1.0},
 		},
 		Prometheus: Prometheus{Path: "/metrics", PerTableMetrics: true},
+		Profiling:  Profiling{Addr: "127.0.0.1:6060"},
 	}
 }
 
@@ -350,6 +352,9 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := c.validateProfiling(); err != nil {
+		return err
+	}
 	if err := c.validateRoles(); err != nil {
 		return err
 	}

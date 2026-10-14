@@ -124,6 +124,7 @@ Boot logs each of these at `WARN` rather than refusing. The first two are right 
 - **`mq.nats` set with `mq.backend=embedded`**, or **`coord.nats` set with `coord.backend=local`**: the block is ignored.
 - **`cache.redis.addrs` set with `cache.backend=local`**, in a process running `api`: the block is ignored.
 - **`cache.redis.tls.insecure_skip_verify` on**, in a process running `api`: the cache accepts any certificate (see [Cache](#cache)).
+- **`profiling.enabled` with a `profiling.addr` that is not loopback** (an empty host, `0.0.0.0`, a pod address), in every process: the unauthenticated pprof endpoints are reachable beyond the host (see [Profiling](#profiling)).
 - **`mq.backend=nats` and a tenant with dedupe on whose finite `dedupe.retention` is under the partitions' `duplicate_window`**, in a process running `api`, at boot and after every reload: see [Deployment → Create the topology](/deployment#create-the-topology).
 
 ### Process roles
@@ -327,6 +328,15 @@ New metrics follow one rule for their labels:
 | `tenant` | Not on a new metric: put it in log fields and span attributes. `wavehouse_schema_refresh_failures_total` predates the rule and still carries it. |
 | A value from a row or a request payload | Never. |
 
+### Profiling
+
+Go's [`net/http/pprof`](https://pkg.go.dev/net/http/pprof) endpoints (heap, CPU, goroutine, allocation, thread-creation, block and mutex profiles, the execution trace, the command line and symbol lookup) are served under `/debug/pprof/` on a listener of their own, never on `server.port`: a profile exposes the process's internals and the endpoints take no credential. Off by default. With it on, every process serves it, whatever its [`roles`](#process-roles). The default address is the loopback interface, so turning it on exposes nothing beyond the host; `kubectl port-forward` still reaches a loopback listener in a pod. An address that is not loopback is logged at `WARN` at boot. Block and mutex profiles stay empty, since WaveHouse sets no block or mutex sampling rate. `make dev` turns profiling on unless `WH_PROFILING_ENABLED` is set in its environment. See [Deployment → Profiling](/deployment#profiling) for the commands.
+
+| YAML Key | Env Var | Default | Description |
+| --- | --- | ------- | ----------- |
+| `profiling.enabled` | `WH_PROFILING_ENABLED` | `false` | Serve `/debug/pprof/` on `profiling.addr`. A failure to bind is logged at `ERROR` and the process serves on without it. |
+| `profiling.addr` | `WH_PROFILING_ADDR` | `127.0.0.1:6060` | `host:port` to listen on. The port must be 1–65535 and must not be `server.port` or, with `prometheus.enabled`, `prometheus.port`. An empty host (`:6060`) listens on every interface. Read only when `profiling.enabled` is `true`, and an invalid value fails validation at startup. |
+
 ### Logging
 
 | Env Var | Default | Description |
@@ -439,6 +449,10 @@ prometheus:
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
   per_table_metrics: true # false = no table label, one series over all tables (OTLP too)
+
+profiling:
+  enabled: false         # net/http/pprof under /debug/pprof/, never on server.port
+  addr: 127.0.0.1:6060   # loopback by default; the endpoints are unauthenticated
 ```
 
 </TabItem>
@@ -519,6 +533,9 @@ WH_PROMETHEUS_ENABLED=false
 WH_PROMETHEUS_PATH=/metrics
 WH_PROMETHEUS_PORT=0
 WH_METRICS_PER_TABLE=true
+
+WH_PROFILING_ENABLED=false
+WH_PROFILING_ADDR=127.0.0.1:6060
 ```
 
 </TabItem>

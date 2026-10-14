@@ -841,6 +841,24 @@ For production posture where metrics should not be exposed on the public API lis
 
 Seven metrics carry a `table` label, so each grows by one series per table that sees traffic, multiplied by its other labels. At a few dozen tables that is noise; with table-per-tenant schemas or thousands of tables it shows up in your time-series database's memory and bill. Set `prometheus.per_table_metrics: false` (`WH_METRICS_PER_TABLE=false`) to drop the label and report each metric summed over every table, on the Prometheus endpoint and OTLP push alike. WaveHouse logs one `WARN` naming the setting once its metrics have carried more than 500 distinct tables. See [Configuration → Metric labels](/configuration#metric-labels).
 
+### Profiling
+
+For a memory leak, a goroutine leak or a CPU hotspot in a running process, set `profiling.enabled: true` (`WH_PROFILING_ENABLED=true`). WaveHouse then serves Go's `net/http/pprof` endpoints under `/debug/pprof/` on `profiling.addr`, a listener of its own that is never the API port (see [Configuration → Profiling](/configuration#profiling)). It is off by default. The endpoints take no credential and a heap or goroutine dump shows the process's internals, so the default address is `127.0.0.1:6060`: nothing beyond the host reaches it. On Kubernetes, forward to it rather than exposing it:
+
+```bash
+# Leave this running; run the commands below in another terminal.
+kubectl port-forward pod/<wavehouse-pod> 6060:6060
+```
+
+```bash
+go tool pprof http://localhost:6060/debug/pprof/heap
+go tool pprof 'http://localhost:6060/debug/pprof/profile?seconds=30'
+curl -s 'http://localhost:6060/debug/pprof/goroutine?debug=2' > goroutines.txt
+curl -s -o trace.out 'http://localhost:6060/debug/pprof/trace?seconds=5'
+```
+
+In Docker Compose, a loopback address inside the container is not reachable through a published port, so set `WH_PROFILING_ADDR=:6060` and publish it to the host's loopback only (`127.0.0.1:6060:6060`); boot logs a `WARN` for any address that is not loopback. The index at `/debug/pprof/` lists every profile. Block and mutex profiles stay empty, since WaveHouse sets no block or mutex sampling rate. A CPU profile or trace in flight ends when the process begins its graceful stop, rather than holding the stop to `server.shutdown_timeout`.
+
 ### Local Observability Stack
 
 We intentionally do not maintain a heavy, multi-node observability cluster (like SigNoz or an ELK stack) for local development. Instead, we use lightweight, ephemeral, single-container tools that boot instantly and clean themselves up.

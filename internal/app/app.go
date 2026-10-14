@@ -228,6 +228,7 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 		a.wireReloadTriggers()
 		a.wireOpsHTTP(authMW)
 	}
+	a.wireProfiling()
 	return a, nil
 }
 
