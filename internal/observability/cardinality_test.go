@@ -47,6 +47,13 @@ func collectSums(t *testing.T, view sdkmetric.View, name string, sets ...[]attri
 	return got
 }
 
+// TestTableAttr_MatchesTheRecorders pins the key: the seven recorders spell
+// "table" as a literal, so a rename here would silently leave them unbounded.
+func TestTableAttr_MatchesTheRecorders(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, attribute.Key("table"), TableAttr)
+}
+
 func TestTableView(t *testing.T) {
 	t.Parallel()
 	sets := [][]attribute.KeyValue{
