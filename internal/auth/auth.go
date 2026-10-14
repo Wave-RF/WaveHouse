@@ -17,8 +17,8 @@ import (
 
 	"github.com/MicahParks/jwkset"
 	"github.com/MicahParks/keyfunc/v3"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	"github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"

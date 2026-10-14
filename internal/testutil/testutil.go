@@ -15,8 +15,8 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // NewTestSchemaRegistry creates a SchemaRegistry pre-loaded with the given

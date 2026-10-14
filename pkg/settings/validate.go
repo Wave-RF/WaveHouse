@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Wave-RF/WaveHouse/internal/pipes"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/pkg/pipes"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
 )
 
 // ValidateDir reads, decodes, and checks one directory of the four settings
@@ -30,12 +30,55 @@ import (
 // boot, a live reload) goes through it, by way of Validate. Callers translate
 // the result per their own contract: the CLI exits non-zero, boot refuses to
 // start, and a live reload keeps serving the previous good document.
+//
+// It is ValidateFiles over the directory's bytes, after the checks only a
+// directory can fail: that it exists, that each file is a regular file, and
+// config.json's permission bits.
 func ValidateDir(dir string) (*Document, []Finding) {
 	v := &validator{}
-
 	files, ok := v.checkDir(dir)
 	if !ok {
 		return nil, v.findings
+	}
+	return v.validateFiles(files)
+}
+
+// ValidateFiles is ValidateDir for a directory that exists only in memory:
+// the settings files by name (see Files), as a program that writes a
+// settings directory holds them before it does. It checks them with the
+// rules ValidateDir applies, at the version it applies them, so a writer
+// built against this package at the server's release tag can refuse a
+// directory the server would refuse before anything reaches disk. The
+// findings are ValidateDir's but for the checks that need a directory
+// (listed there). Names are read as directory entries are: a dot-prefixed
+// name is skipped, any other name not among Files is an unexpected file,
+// and a file that is absent or nil is missing.
+func ValidateFiles(files map[string][]byte) (*Document, []Finding) {
+	v := &validator{}
+	present := make(map[string][]byte, len(files))
+	// Sorted, as os.ReadDir lists a directory, so the findings come in one
+	// order every run.
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		switch {
+		case strings.HasPrefix(name, "."):
+		case !slices.Contains(Files(), name):
+			v.unexpected(name, "file")
+		case files[name] != nil:
+			present[name] = files[name]
+		}
+	}
+	return v.validateFiles(present)
+}
+
+// validateFiles is the half of the pass that reads only bytes: every file
+// decoded and checked, then the cross-file references. A name absent from
+// files is a missing file; one present with nil bytes has been reported by
+// checkDir already and is skipped without a second finding.
+func (v *validator) validateFiles(files map[string][]byte) (*Document, []Finding) {
+	for _, name := range Files() {
+		if _, present := files[name]; !present {
+			v.errorf(name, "", "missing — every settings file must exist (an empty document is {})")
+		}
 	}
 
 	doc := &Document{}
@@ -73,13 +116,14 @@ func (v *validator) warnf(file, path, format string, args ...any) {
 	v.findings = append(v.findings, Finding{Severity: SeverityWarning, File: file, Path: path, Message: fmt.Sprintf(format, args...)})
 }
 
-// checkDir verifies the directory itself and reads each expected file's bytes.
-// A missing file is an error — an empty deployment writes {} in all four
-// files, so absence always means deletion or a wrong path, never "defaults".
-// Any other entry — file or subdirectory, JSON or not — is an error: a typoed
-// polices.json silently ignored would revert the author's intent, the exact
-// trap strict decoding closes for keys. The one exception is dot-prefixed
-// entries (see the loop body).
+// checkDir verifies the directory itself and reads each expected file's bytes;
+// a file it does not return is missing, which validateFiles reports — an
+// empty deployment writes {} in all four files, so absence always means
+// deletion or a wrong path, never "defaults". Any other entry — file or
+// subdirectory, JSON or not — is an error: a typoed polices.json silently
+// ignored would revert the author's intent, the exact trap strict decoding
+// closes for keys. The one exception is dot-prefixed entries (see the loop
+// body).
 func (v *validator) checkDir(dir string) (map[string][]byte, bool) {
 	info, err := os.Stat(dir)
 	switch {
@@ -118,7 +162,7 @@ func (v *validator) checkDir(dir string) (map[string][]byte, bool) {
 			if e.IsDir() {
 				kind = "directory"
 			}
-			v.errorf(name, "", "unexpected %s — the settings directory holds only %s", kind, strings.Join(expected, ", "))
+			v.unexpected(name, kind)
 			continue
 		}
 		if e.IsDir() {
@@ -159,12 +203,13 @@ func (v *validator) checkDir(dir string) (map[string][]byte, bool) {
 		}
 		files[name] = data
 	}
-	for _, name := range expected {
-		if _, present := files[name]; !present {
-			v.errorf(name, "", "missing — every settings file must exist (an empty document is {})")
-		}
-	}
 	return files, true
+}
+
+// unexpected reports a directory entry (or an in-memory file name) that is
+// not one of the four settings files.
+func (v *validator) unexpected(name, kind string) {
+	v.errorf(name, "", "unexpected %s — the settings directory holds only %s", kind, strings.Join(Files(), ", "))
 }
 
 // parseFile runs the shared syntax gate — non-empty, duplicate-key scan,
@@ -511,7 +556,11 @@ func (v *validator) checkClickHouse(ch *ClickHouseConfig) {
 	} else if *ch.HTTPScheme != "http" && *ch.HTTPScheme != "https" {
 		v.errorf(FileConfig, "clickhouse.http_scheme", "must be \"http\" or \"https\", got %q", *ch.HTTPScheme)
 	}
-	for path, val := range map[string]*string{"clickhouse.database": ch.Database, "clickhouse.username": ch.Username} {
+	for _, f := range []struct {
+		path string
+		val  *string
+	}{{"clickhouse.database", ch.Database}, {"clickhouse.username", ch.Username}} {
+		path, val := f.path, f.val
 		if val == nil {
 			v.required(path)
 		} else if strings.TrimSpace(*val) == "" {
@@ -556,14 +605,21 @@ func (v *validator) checkClickHouse(ch *ClickHouseConfig) {
 // Validate is pure and also runs on the control plane, where the files need
 // not exist; an unreadable file fails where the connection is built.
 func (v *validator) checkClickHouseTLS(t *ClickHouseTLS) {
-	for path, val := range map[string]*bool{"clickhouse.tls.enabled": t.Enabled, "clickhouse.tls.insecure_skip_verify": t.InsecureSkipVerify} {
-		if val == nil {
-			v.required(path)
+	// Slices, not maps: the findings come out in document order every run.
+	for _, f := range []struct {
+		path string
+		val  *bool
+	}{{"clickhouse.tls.enabled", t.Enabled}, {"clickhouse.tls.insecure_skip_verify", t.InsecureSkipVerify}} {
+		if f.val == nil {
+			v.required(f.path)
 		}
 	}
-	for path, val := range map[string]*string{"clickhouse.tls.ca_file": t.CAFile, "clickhouse.tls.cert_file": t.CertFile, "clickhouse.tls.key_file": t.KeyFile, "clickhouse.tls.server_name": t.ServerName} {
-		if val == nil {
-			v.required(path)
+	for _, f := range []struct {
+		path string
+		val  *string
+	}{{"clickhouse.tls.ca_file", t.CAFile}, {"clickhouse.tls.cert_file", t.CertFile}, {"clickhouse.tls.key_file", t.KeyFile}, {"clickhouse.tls.server_name", t.ServerName}} {
+		if f.val == nil {
+			v.required(f.path)
 		}
 	}
 	if t.CertFile != nil && t.KeyFile != nil && (*t.CertFile == "") != (*t.KeyFile == "") {
@@ -638,7 +694,11 @@ func validHeaderValue(value string) bool {
 // checkClickHousePool checks the native pool's sizes: each >= 1, so the
 // driver never substitutes its own defaults for a zero, and open >= idle.
 func (v *validator) checkClickHousePool(ch *ClickHouseConfig) {
-	for path, val := range map[string]*int{"clickhouse.max_open_conns": ch.MaxOpenConns, "clickhouse.max_idle_conns": ch.MaxIdleConns} {
+	for _, f := range []struct {
+		path string
+		val  *int
+	}{{"clickhouse.max_open_conns", ch.MaxOpenConns}, {"clickhouse.max_idle_conns", ch.MaxIdleConns}} {
+		path, val := f.path, f.val
 		if val == nil {
 			v.required(path)
 		} else if *val < 1 {
@@ -677,9 +737,12 @@ func (v *validator) checkSecretsMode(c TenantConfig) {
 }
 
 // required reports a missing key. Every top-level tunable is required so the
-// adopted snapshot never depends on a value the files don't state.
+// adopted snapshot never depends on a value the files don't state. The
+// message says what is wrong and no more: findings reach a writer through
+// ValidateFiles and an operator through the reload response as well as the
+// CLI, and only the CLI can tell its reader what command to run.
 func (v *validator) required(path string) {
-	v.errorf(FileConfig, path, "required — run `wavehouse bootstrap` for a complete starter config.json")
+	v.errorf(FileConfig, path, "required — config.json has no defaults, every key is set explicitly")
 }
 
 func (v *validator) parseConfig(data []byte) TenantConfig {

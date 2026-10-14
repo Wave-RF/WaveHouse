@@ -59,7 +59,7 @@ const (
 
 // Settings locates the hot-reloadable settings directory — the four JSON
 // documents (roles.json, policies.json, pipes.json, config.json) validated by
-// internal/settings. Boot-tier by necessity: it's the pointer the reload
+// pkg/settings. Boot-tier by necessity: it's the pointer the reload
 // machinery follows, so it can't live behind itself. REQUIRED, with no
 // default: a baked-in path would turn a
 // missing mount into silent misconfiguration instead of an explicit operator

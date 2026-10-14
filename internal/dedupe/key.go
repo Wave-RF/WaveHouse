@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 
 	"github.com/Wave-RF/WaveHouse/internal/keyenc"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // The key every backend stores is text:

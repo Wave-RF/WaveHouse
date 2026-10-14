@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/Wave-RF/WaveHouse/internal/keyenc"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // VersionManager is the invalidation index: one version per tenant, per

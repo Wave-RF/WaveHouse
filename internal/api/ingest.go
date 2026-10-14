@@ -19,8 +19,8 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"

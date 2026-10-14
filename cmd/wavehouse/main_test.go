@@ -19,8 +19,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/config"
-	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
+	"github.com/Wave-RF/WaveHouse/pkg/settings"
 )
 
 // run reads the whole boot config from the environment here (no config

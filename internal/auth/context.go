@@ -1,7 +1,7 @@
 // Package auth handles authentication: it validates JWT Bearer tokens and
 // records the caller's role, claims, and any token-validation error in the
 // request context. It makes no authorization decisions and writes no HTTP
-// responses — authorization lives in internal/policy (role checks) and the
+// responses — authorization lives in pkg/policy (role checks) and the
 // gates in internal/api (which translate decisions into HTTP responses).
 package auth
 
