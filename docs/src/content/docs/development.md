@@ -135,7 +135,7 @@ dev: deps-up $(AIR)
     air -c .air.toml
 ```
 
-`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` (the `.go` and `.yaml` files within them), rebuilds `tmp/wavehouse` on change, and restarts the binary. Boot config is **not** hot-reloaded (the settings directory it points at is — see [Enable Dedup](#enable-dedup-optional)): `make dev` runs the binary with `WH_CONFIG=.config.local.yaml` — a gitignored personal copy seeded **once** from `config.yaml` on first run (it won't re-copy if it already exists). So to change dev config, edit `.config.local.yaml` (not `config.yaml`) and restart `make dev`; air watches neither root file. The flip side: when `config.yaml` gains a key your copy lacks, your copy is stale — `make dev` warns when `config.yaml` is newer than `.config.local.yaml`, and the fix is to port the change over or delete `.config.local.yaml` to re-seed it. `settings.dir` is the one key that will stop the server outright if it's missing (it's required with no default), so a checkout whose local copy predates it fails at config validation until re-seeded.
+`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/`, `internal/` and `pkg/` (the `.go` and `.yaml` files within them), rebuilds `tmp/wavehouse` on change, and restarts the binary. Boot config is **not** hot-reloaded (the settings directory it points at is — see [Enable Dedup](#enable-dedup-optional)): `make dev` runs the binary with `WH_CONFIG=.config.local.yaml` — a gitignored personal copy seeded **once** from `config.yaml` on first run (it won't re-copy if it already exists). So to change dev config, edit `.config.local.yaml` (not `config.yaml`) and restart `make dev`; air watches neither root file. The flip side: when `config.yaml` gains a key your copy lacks, your copy is stale — `make dev` warns when `config.yaml` is newer than `.config.local.yaml`, and the fix is to port the change over or delete `.config.local.yaml` to re-seed it. `settings.dir` is the one key that will stop the server outright if it's missing (it's required with no default), so a checkout whose local copy predates it fails at config validation until re-seeded.
 
 `air` is pinned to a specific version and installed via `go install` rather than a `go.mod` tool directive — its transitive deps (Hugo, godartsass, Sass libs) would bloat `go.sum` for everyone. Same exclusion principle as `golangci-lint`.
 
@@ -144,7 +144,8 @@ dev: deps-up $(AIR)
 - WaveHouse on `http://localhost:8080` with the default allow-all CORS posture, so a browser-based app on any localhost port can hit the API directly.
 - The trial `public` policy ships in `./settings` (see [Test the API](#test-the-api)); its `auth.jwt_secret` is empty, so no token validates until you set one there (see [Validating tokens](#validating-tokens)).
 - ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
-- Hot reload: editing any `.go` file under `cmd/` or `internal/` triggers a debounced rebuild + restart. Boot config isn't hot-reloaded (settings-directory files are) — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
+- Go's pprof endpoints on `http://localhost:6060/debug/pprof/` (`go tool pprof http://localhost:6060/debug/pprof/heap`): `make dev` sets `WH_PROFILING_ENABLED=true` unless it is already set in your environment, so `WH_PROFILING_ENABLED=false make dev` turns them off. The listener's address is `profiling.addr` in `.config.local.yaml` (see [Configuration → Profiling](/configuration#profiling)).
+- Hot reload: editing any `.go` file under `cmd/`, `internal/` or `pkg/` triggers a debounced rebuild + restart. Boot config isn't hot-reloaded (settings-directory files are) — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
 
 ### Dev convenience targets
 
@@ -229,7 +230,7 @@ curl -s -X POST http://localhost:8080/v1/ops/query \
 
 ### Enable Dedup (Optional)
 
-`make dev` seeds `./settings` (gitignored) from the embedded seed on first run and points `settings.dir` at it; the seed ships with `dedupe.enabled: false`. Flip it there — never in the checked-in `internal/settings/seed`, which is what `wavehouse bootstrap` writes for everyone:
+`make dev` seeds `./settings` (gitignored) from the embedded seed on first run and points `settings.dir` at it; the seed ships with `dedupe.enabled: false`. Flip it there — never in the checked-in `pkg/settings/seed`, which is what `wavehouse bootstrap` writes for everyone:
 
 ```bash
 # ./settings already exists after the first `make dev` (or: make settings/config.json)
@@ -360,7 +361,7 @@ The host needs what a local `make ci` needs: bash, git, curl, jq, GNU Make 4+, G
 
 | Category | Location | Docker? | Command |
 | -------- | -------- | ------- | ------- |
-| Unit tests | `internal/*/_test.go` | No | `make test` |
+| Unit tests | `internal/**/*_test.go`, `pkg/**/*_test.go` | No | `make test` |
 | SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-ts` (always includes coverage + gate) |
 | Integration tests (Go) | `tests/integration/*_test.go`, `internal/cache/*_integration_test.go`, plus `internal/mq/natsspike` and `internal/mq`'s integration-tagged tests | Yes | `make test-integration` |
 | E2E tests (SDK) | `tests/e2e/sdk/*.test.ts` | Yes | `make test-e2e` |
@@ -452,7 +453,7 @@ The configuration is in `.golangci.yml` (v2 format with `default: none` for expl
 - **noctx** — HTTP requests without context
 - **errorlint** — Proper error wrapping checks (`%w`, `errors.Is/As`)
 - **tparallel** — Missing `t.Parallel()` in test subtests
-- **depguard** — Import boundaries: only `internal/mq` may import NATS/JetStream (`github.com/nats-io/…`); everything else goes through an mq-owned type
+- **depguard** — Import boundaries: only `internal/mq` may import NATS/JetStream (`github.com/nats-io/…`); everything else goes through an mq-owned type. And the `pkg/` packages import only the standard library, each other, `go-humanize` and `yaml.v3` (plus `testify` in tests): an allow list, so a new dependency there fails lint until it is listed
 
 Formatting (**gofumpt** — strict superset of gofmt — and **goimports** import grouping) is enforced through the v2 `formatters:` section rather than as linters.
 
@@ -481,7 +482,6 @@ WaveHouse/
 │   ├── auth/               # JWT/JWKS authentication middleware
 │   ├── cache/              # Query cache: Ristretto L1 + the tenant-led version index; the Redis-compatible shared backend
 │   ├── chconn/             # ClickHouse pools, one per connection tuple (reconciled on settings reload)
-│   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── config/             # YAML + env var configuration
 │   ├── coord/              # Leases with fencing tokens (in-process Local, RunElected, coordtest suite)
 │   ├── dedupe/             # Optional deduplication (Reserve/Commit/Release; Pebble or DynamoDB)
@@ -490,13 +490,16 @@ WaveHouse/
 │   ├── keyenc/             # One escaping for composite keys (NATS subject tokens, cache keys, dedupe keys)
 │   ├── mq/                 # MQ boundary: the only NATS/JetStream importer
 │   ├── observability/      # OpenTelemetry pipeline (traces/metrics/logs + Prometheus)
+│   ├── query/              # Structured query AST + SQL builder
+│   ├── settings/           # Settings directory runtime: adopted snapshot, reload, watcher, WriteSeed
+│   ├── stream/             # SSE fan-out: Hub, Subscriber queue, Bucket, keepalive wheel
+│   └── testutil/           # Shared test helpers and mocks (cachetest suite)
+├── pkg/                    # Public packages: importable at a release tag, no internal/ or runtime dependency
+│   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── pipes/              # Named query pipes (types + parameter binding)
 │   ├── policy/             # Access control policies (types + evaluation)
-│   ├── query/              # Structured query AST + SQL builder
-│   ├── settings/           # Settings directory: validate, adopted snapshot, reload
-│   ├── stream/             # SSE fan-out: Hub, Subscriber queue, Bucket, keepalive wheel
-│   ├── tenant/             # Tenant id: type, grammar, reserved default, request header name
-│   └── testutil/           # Shared test helpers and mocks (cachetest suite)
+│   ├── settings/           # Settings model: document types, Finding, the validator (on disk and over bytes), embedded seed
+│   └── tenant/             # Tenant id: type, grammar, reserved default, request header name
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)
 │   └── e2e/                # E2E suite (SDK specs; `scripts/orchestrator` starts ClickHouse and Redis testcontainers)
@@ -522,7 +525,7 @@ WaveHouse/
 
 - **Strict Go formatting**: Use `gofumpt` (a stricter superset of `gofmt`, enforced by CI). `make fmt` checks it, as does `make verify` (what CI and the pre-commit hook run); `make fix` applies it.
 - **Interface-first design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) are defined as interfaces so implementations can be swapped behind a stable contract.
-- **Package boundaries**: The `internal/` directory ensures packages are private to this module.
+- **Package boundaries**: The `internal/` directory ensures packages are private to this module; `pkg/` is the importable surface — what a settings writer outside this repository validates with — so a package there imports nothing under `internal/` and none of the server's runtime dependencies (the `public-packages` depguard rule).
 - **Error handling**: Return errors to callers. Use `slog` for structured logging, through the default logger (`slog.InfoContext(ctx, …)` and its siblings) — constructors don't take a `*slog.Logger`; tests silence or capture it with `internal/testutil/logtest`.
 - **Schema-driven**: ClickHouse is the schema source of truth. WaveHouse discovers and validates against real table schemas.
 
@@ -595,11 +598,8 @@ For Go modules:
 
 ```bash
 go get -u ./...                         # Update the main module's non-test deps (direct and indirect); add -t for test-only deps, and run go get -u tool for the tool block
-go get google.golang.org/grpc@v1.83     # Re-apply the gRPC hold (newest 1.83.x) until #643 closes (see below)
 go mod tidy                             # Remove unused, add missing
 ```
-
-`go get -u` ignores Dependabot's holds: until [#643](https://github.com/Wave-RF/WaveHouse/issues/643) closes it pulls `google.golang.org/grpc` 1.84.x, and `make vulncheck` fails on GO-2026-6443. The second line re-applies the hold (`@v1.83` selects the newest 1.83.x patch, 1.83.2, which carries the GO-2026-6443 fix; 1.83.0 and 1.83.1 are affected), and Go steps `proto/otlp` and `grpc-gateway/v2` back down with it ([Dependabot](#dependabot) lists the same holds). Run it before `go mod tidy`, or `make tidy` finds stale `go.sum` lines.
 
 ### Vulnerability Scanning
 
@@ -616,7 +616,7 @@ For a combined security scan, run `make verify` — it runs `vulncheck` alongsid
 
 Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for three update configs:
 
-- **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`. `google.golang.org/grpc` 1.84.x is held back (GO-2026-6443, no 1.84.x fix), along with the releases that require it, `go.opentelemetry.io/proto/otlp` 1.11.1 and later and `grpc-gateway/v2` 2.31.0 and later; drop the three holds, and the `go get google.golang.org/grpc@v1.83` line under [Updating Dependencies](#updating-dependencies), together when gRPC 1.85.0 ships ([#643](https://github.com/Wave-RF/WaveHouse/issues/643))
+- **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`.
 - **GitHub Actions** (root **and** `/.github/actions/setup-env`) — outdated action versions tracked against the SHA pins across `.github/workflows/*` and the `setup-env` composite action, commit prefix `ci:`
 - **npm — pnpm workspace** (root) — covers all three TypeScript packages (the docs site, the SDK, and the E2E tests) in one grouped PR, commit prefix `deps:`
 

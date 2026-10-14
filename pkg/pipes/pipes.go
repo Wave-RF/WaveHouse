@@ -1,3 +1,6 @@
+// Package pipes defines named query pipes (pipes.json): the NamedQuery
+// type, its parameter definitions, and the binding of supplied values into
+// the SQL template. Importable from outside the module; see pkg/settings.
 package pipes
 
 import (

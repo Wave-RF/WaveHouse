@@ -197,3 +197,83 @@ func TestTraceHandler_InvalidSpan(t *testing.T) {
 	log.InfoContext(ctx, "hello")
 	assert.NotContains(t, buf.String(), "trace_id=")
 }
+
+// Regression for #397: WH_LOG_LEVEL used to filter stdout only, so the OTLP
+// leg exported DEBUG/INFO records under WARN.
+func TestOTLPLeg_HonoursLevel(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		level slog.Level
+		rate  float64
+		want  []string
+	}{
+		{"warn drops debug and info", slog.LevelWarn, 1.0, []string{"WARN", "ERROR"}},
+		{"error drops warn", slog.LevelError, 1.0, []string{"ERROR"}},
+		{"debug admits all", slog.LevelDebug, 1.0, []string{"DEBUG", "INFO", "WARN", "ERROR"}},
+		{"warn floor survives rate 0", slog.LevelDebug, 0.0, []string{"WARN", "ERROR"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			exporter := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+			lvl := &slog.LevelVar{}
+			lvl.Set(tc.level)
+
+			log := slog.New(otlpLeg(exporter, lvl, tc.rate))
+			log.Debug("m")
+			log.Info("m")
+			log.Warn("m")
+			log.Error("m")
+
+			assert.Equal(t, tc.want, exportedLevels(buf.String()))
+		})
+	}
+}
+
+func TestOTLPLeg_FollowsLevelChanges(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	exporter := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	lvl := &slog.LevelVar{}
+	lvl.Set(slog.LevelWarn)
+	leg := otlpLeg(exporter, lvl, 1.0)
+
+	assert.False(t, leg.Enabled(context.Background(), slog.LevelInfo))
+	lvl.Set(slog.LevelDebug)
+	assert.True(t, leg.Enabled(context.Background(), slog.LevelDebug))
+	slog.New(leg).Debug("m")
+	assert.Equal(t, []string{"DEBUG"}, exportedLevels(buf.String()))
+}
+
+func TestOTLPLeg_WithAttrsAndGroupKeepGate(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	exporter := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	lvl := &slog.LevelVar{}
+	lvl.Set(slog.LevelWarn)
+
+	log := slog.New(otlpLeg(exporter, lvl, 1.0)).With("component", "api").WithGroup("g")
+	log.Info("m")
+	log.Warn("m")
+
+	assert.Equal(t, []string{"WARN"}, exportedLevels(buf.String()))
+	assert.Contains(t, buf.String(), "component=api")
+}
+
+// exportedLevels returns the level of each text-handler line in out.
+func exportedLevels(out string) []string {
+	var levels []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		for _, field := range strings.Fields(line) {
+			if l, ok := strings.CutPrefix(field, "level="); ok {
+				levels = append(levels, l)
+			}
+		}
+	}
+	return levels
+}

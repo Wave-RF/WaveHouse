@@ -64,6 +64,23 @@ func configJSON(patch string) string {
 	return string(out)
 }
 
+// validateBoth is ValidateDir over files written to a directory, checked
+// against ValidateFiles over the same bytes: every fixture in this file pins
+// the two to the same findings and the same document, which is what lets a
+// writer trust the in-memory pass. It returns ValidateDir's result.
+func validateBoth(t *testing.T, files map[string]string) (*Document, []Finding) {
+	t.Helper()
+	doc, findings := ValidateDir(writeDir(t, files))
+	bytesByName := make(map[string][]byte, len(files))
+	for name, content := range files {
+		bytesByName[name] = []byte(content)
+	}
+	memDoc, memFindings := ValidateFiles(bytesByName)
+	assert.Equal(t, findings, memFindings, "ValidateFiles must report what ValidateDir does")
+	assert.Equal(t, doc, memDoc, "ValidateFiles must return the document ValidateDir does")
+	return doc, findings
+}
+
 func findingStrings(findings []Finding) string {
 	parts := make([]string, len(findings))
 	for i, f := range findings {
@@ -74,7 +91,7 @@ func findingStrings(findings []Finding) string {
 
 func TestValidate_ValidDirectory(t *testing.T) {
 	t.Parallel()
-	doc, findings := ValidateDir(writeDir(t, validFiles()))
+	doc, findings := validateBoth(t, validFiles())
 
 	require.Empty(t, findings, "a fully valid directory must produce no findings")
 	require.NotNil(t, doc)
@@ -94,9 +111,9 @@ func TestValidate_ValidDirectory(t *testing.T) {
 
 func TestValidate_EmptyDocuments(t *testing.T) {
 	t.Parallel()
-	doc, findings := ValidateDir(writeDir(t, map[string]string{
+	doc, findings := validateBoth(t, map[string]string{
 		FileRoles: `{}`, FilePolicies: `{}`, FilePipes: `{}`, FileConfig: configJSON(`{}`),
-	}))
+	})
 
 	// Valid — but not silent: the one finding is the no-policy lockout warning,
 	// so the total deny announces itself at validation time, not per-403.
@@ -133,7 +150,7 @@ func TestValidate_DirectoryProblems(t *testing.T) {
 		t.Parallel()
 		files := validFiles()
 		delete(files, FileConfig)
-		doc, findings := ValidateDir(writeDir(t, files))
+		doc, findings := validateBoth(t, files)
 		assert.Nil(t, doc)
 		assert.Contains(t, findingStrings(findings), "config.json: missing")
 	})
@@ -143,7 +160,7 @@ func TestValidate_DirectoryProblems(t *testing.T) {
 		files := validFiles()
 		files["polices.json"] = `{}` // the canonical typo
 		files["notes.txt"] = "scratch"
-		doc, findings := ValidateDir(writeDir(t, files))
+		doc, findings := validateBoth(t, files)
 		assert.Nil(t, doc)
 		out := findingStrings(findings)
 		assert.Contains(t, out, "polices.json: unexpected file")
@@ -227,7 +244,7 @@ func TestValidate_FileSyntax(t *testing.T) {
 			t.Parallel()
 			files := validFiles()
 			files[tt.file] = tt.body
-			doc, findings := ValidateDir(writeDir(t, files))
+			doc, findings := validateBoth(t, files)
 			assert.Nil(t, doc)
 			require.True(t, HasErrors(findings), "findings: %s", findingStrings(findings))
 			assert.Contains(t, findingStrings(findings), tt.want)
@@ -346,7 +363,7 @@ func TestValidate_ContentRules(t *testing.T) {
 			t.Parallel()
 			files := validFiles()
 			files[tt.file] = tt.body
-			doc, findings := ValidateDir(writeDir(t, files))
+			doc, findings := validateBoth(t, files)
 			assert.Nil(t, doc)
 			require.True(t, HasErrors(findings), "findings: %s", findingStrings(findings))
 			assert.Contains(t, findingStrings(findings), tt.want)
@@ -369,7 +386,7 @@ func TestValidate_DedupeRetentionAccepted(t *testing.T) {
 			t.Parallel()
 			files := validFiles()
 			files[FileConfig] = configJSON(patch)
-			doc, findings := ValidateDir(writeDir(t, files))
+			doc, findings := validateBoth(t, files)
 			require.NotNil(t, doc, "findings: %s", findingStrings(findings))
 			assert.False(t, HasErrors(findings))
 		})
@@ -394,7 +411,7 @@ func TestValidate_DedupeRetentionOptional(t *testing.T) {
 	files := validFiles()
 	files[FileConfig] = configJSONWithout(t)
 	require.NotContains(t, files[FileConfig], "retention")
-	doc, findings := ValidateDir(writeDir(t, files))
+	doc, findings := validateBoth(t, files)
 	require.NotNil(t, doc, "findings: %s", findingStrings(findings))
 	assert.False(t, HasErrors(findings), "findings: %s", findingStrings(findings))
 	assert.Nil(t, doc.Config.Dedupe.Retention)
@@ -407,7 +424,7 @@ func TestValidate_OverrideTableNamesAnyBytes(t *testing.T) {
 	t.Parallel()
 	files := validFiles()
 	files[FileConfig] = configJSON(`{"dedupe": {"tables": {"cli\u0000cks": {"require_id": true}, "a\u0001b\tc": {"id_field": "x"}}}, "dlq": {"tables": {"cli\u0000cks": {"enabled": false}}}}`)
-	doc, findings := ValidateDir(writeDir(t, files))
+	doc, findings := validateBoth(t, files)
 	require.Empty(t, findings, "findings: %s", findingStrings(findings))
 	require.NotNil(t, doc)
 	assert.Contains(t, doc.Config.Dedupe.Tables, "cli\x00cks")
@@ -423,7 +440,7 @@ func TestValidate_ClickHouseTLSPathsAreNotOpened(t *testing.T) {
 	t.Parallel()
 	files := validFiles()
 	files[FileConfig] = configJSON(`{"clickhouse": {"http_scheme": "https", "tls": {"enabled": true, "ca_file": "/nowhere/ca.pem", "cert_file": "/nowhere/client.pem", "key_file": "/nowhere/client.key", "insecure_skip_verify": false, "server_name": "ch.internal"}, "headers": {"X-Proxy-Token": "abc"}, "max_open_conns": 20, "max_idle_conns": 20}}`)
-	doc, findings := ValidateDir(writeDir(t, files))
+	doc, findings := validateBoth(t, files)
 	require.NotNil(t, doc, "findings: %s", findingStrings(findings))
 	assert.Empty(t, findings)
 	ch := doc.Config.ClickHouse
@@ -443,7 +460,7 @@ func TestValidate_RoleReferences(t *testing.T) {
 		files := validFiles()
 		files[FilePolicies] = `{"default_role": "ghost", "tables": {"clicks": {"phantom": {"select": {}}}}}`
 		files[FilePipes] = `{"pipes": [{"name": "a", "sql": "SELECT 1", "allowed_roles": ["specter"]}]}`
-		doc, findings := ValidateDir(writeDir(t, files))
+		doc, findings := validateBoth(t, files)
 		assert.Nil(t, doc)
 		out := findingStrings(findings)
 		assert.Contains(t, out, `default_role: role "ghost" is not declared`)
@@ -455,7 +472,7 @@ func TestValidate_RoleReferences(t *testing.T) {
 		t.Parallel()
 		files := validFiles()
 		files[FilePolicies] = `{"admin_role": "root", "tables": {}}`
-		doc, findings := ValidateDir(writeDir(t, files))
+		doc, findings := validateBoth(t, files)
 		assert.Nil(t, doc)
 		assert.Contains(t, findingStrings(findings), `admin_role: role "root" is not declared`)
 	})
@@ -464,7 +481,7 @@ func TestValidate_RoleReferences(t *testing.T) {
 		t.Parallel()
 		files := validFiles()
 		files[FileRoles] = `{"roles": [`
-		_, findings := ValidateDir(writeDir(t, files))
+		_, findings := validateBoth(t, files)
 		out := findingStrings(findings)
 		assert.NotContains(t, out, "is not declared", "reference checks against a broken registry are noise")
 	})
@@ -540,7 +557,7 @@ func TestValidate_Warnings(t *testing.T) {
 			t.Parallel()
 			files := validFiles()
 			files[tt.file] = tt.body
-			doc, findings := ValidateDir(writeDir(t, files))
+			doc, findings := validateBoth(t, files)
 			require.NotNil(t, doc, "warnings alone must leave the directory valid: %s", findingStrings(findings))
 			assert.False(t, HasErrors(findings))
 			assert.Contains(t, findingStrings(findings), tt.want)
@@ -575,7 +592,7 @@ func TestValidate_LegacyPolicyLayout(t *testing.T) {
 			t.Parallel()
 			files := validFiles()
 			files[FilePolicies] = tt.body
-			doc, findings := ValidateDir(writeDir(t, files))
+			doc, findings := validateBoth(t, files)
 			assert.Nil(t, doc)
 			require.True(t, HasErrors(findings), "findings: %s", findingStrings(findings))
 			out := findingStrings(findings)
@@ -595,7 +612,7 @@ func TestValidate_V2LayoutNotFlaggedAsLegacy(t *testing.T) {
 		`"select": {"allow_columns": ["page"], "filter": {"region": {"_eq": "eu"}}},` +
 		`"insert": {"check": {"region": {"_eq": "eu"}}}}}}}`
 	files[FileRoles] = `{"roles": ["public", "analyst"]}`
-	doc, findings := ValidateDir(writeDir(t, files))
+	doc, findings := validateBoth(t, files)
 	require.NotNil(t, doc, "findings: %s", findingStrings(findings))
 	assert.NotContains(t, findingStrings(findings), "pre-v2")
 	require.NotNil(t, doc.Policy.Tables["clicks"]["analyst"].Select)
@@ -609,12 +626,12 @@ func TestValidate_V2LayoutNotFlaggedAsLegacy(t *testing.T) {
 // exactly once, so the operator gets the whole list without noise.
 func TestValidate_MultipleFaults(t *testing.T) {
 	t.Parallel()
-	doc, findings := ValidateDir(writeDir(t, map[string]string{
+	doc, findings := validateBoth(t, map[string]string{
 		FileRoles:    `{"roles": ["analyst", "analyst"]}`,               // duplicate role
 		FilePolicies: `{"default_role": "ghost", "tables": {}}`,         // undeclared role
 		FilePipes:    `{"pipes": [`,                                     // truncated JSON
 		FileConfig:   configJSON(`{"query": {"default_max_rows": -1}}`), // bounds violation
-	}))
+	})
 	assert.Nil(t, doc)
 	out := findingStrings(findings)
 	assert.Contains(t, out, "duplicate role")
@@ -638,7 +655,7 @@ func TestValidate_RoleNamedAfterAnOperation_DecodesAsWritten(t *testing.T) {
 	files[FileRoles] = `{"roles": ["select"]}`
 	files[FilePolicies] = `{"tables":{"clicks":{"select":{"select":{"allow_columns":["page"]}}}}}`
 	files[FilePipes] = `{}`
-	doc, findings := ValidateDir(writeDir(t, files))
+	doc, findings := validateBoth(t, files)
 
 	require.False(t, HasErrors(findings), "the readings agree, so this must adopt: %v", findingStrings(findings))
 	require.NotNil(t, doc)
@@ -667,7 +684,7 @@ func TestValidate_EmptyLegacyOperationBlock(t *testing.T) {
 		files[FileRoles] = `{"roles": ["viewer"]}`
 		files[FilePolicies] = legacy
 		files[FilePipes] = `{}`
-		doc, findings := ValidateDir(writeDir(t, files))
+		doc, findings := validateBoth(t, files)
 		require.True(t, HasErrors(findings))
 		assert.Nil(t, doc)
 		joined := findingStrings(findings)
@@ -684,7 +701,7 @@ func TestValidate_EmptyLegacyOperationBlock(t *testing.T) {
 		files[FileRoles] = `{"roles": ["select"]}`
 		files[FilePolicies] = legacy
 		files[FilePipes] = `{}`
-		doc, findings := ValidateDir(writeDir(t, files))
+		doc, findings := validateBoth(t, files)
 		require.False(t, HasErrors(findings), "%v", findingStrings(findings))
 		require.NotNil(t, doc, "the document adopts")
 		assert.Contains(t, findingStrings(findings), "grant sets neither select nor insert")
@@ -698,7 +715,7 @@ func TestValidate_ErrorAndWarningMix(t *testing.T) {
 	files := validFiles()
 	files[FilePolicies] = `{"default_role": "public", "tables": {"clicks": {"admin": {"select": {}}}}}` // warning: admin grant is dead config
 	files[FileConfig] = configJSON(`{"schema": {"refresh_interval": 0}}`)                               // error: bounds violation
-	doc, findings := ValidateDir(writeDir(t, files))
+	doc, findings := validateBoth(t, files)
 	assert.Nil(t, doc, "one error rejects the directory even when the rest only warns")
 	require.True(t, HasErrors(findings))
 	out := findingStrings(findings)
@@ -729,7 +746,7 @@ func FuzzSyntaxGate(f *testing.F) {
 // when no finding is an error.
 func TestValidate_DocumentGating(t *testing.T) {
 	t.Parallel()
-	doc, findings := ValidateDir(writeDir(t, validFiles()))
+	doc, findings := validateBoth(t, validFiles())
 	assert.NotNil(t, doc)
 	assert.Empty(t, findings)
 	doc, findings = ValidateDir(filepath.Join(t.TempDir(), "nope"))

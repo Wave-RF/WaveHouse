@@ -15,7 +15,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // Embedded is the embedded implementation: every tenant's seen ids in one

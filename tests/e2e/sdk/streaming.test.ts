@@ -43,7 +43,7 @@ describe("Streaming", () => {
     // `anon` deliberately cannot see `payload` here, which is what makes the
     // Authorization-header test below discriminating: `viewer` keeps the
     // baseline `["*"]`, so the two roles observe different frames. Role
-    // matching is exact (internal/policy: no "*" any-role wildcard), so this
+    // matching is exact (pkg/policy: no "*" any-role wildcard), so this
     // entry is the only thing `anon` gets on this table.
     Object.assign(publicPolicy.tables[T.events], {
       anon: {

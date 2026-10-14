@@ -10,7 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // newLoadedStore materializes a valid directory (with overrides applied) and
@@ -47,7 +48,7 @@ func TestStore_Tenant(t *testing.T) {
 func TestStore_DedupeFor_Cascade(t *testing.T) {
 	t.Parallel()
 	s := newLoadedStore(t, map[string]string{
-		FileConfig: configJSON(`{"dedupe": {"require_id": true, "retention": "720h", "tables": {"clicks": {"id_field": "click_id"}, "views": {"require_id": false, "retention": "24h"}, "audit": {"retention": "0"}}}}`),
+		settings.FileConfig: configJSON(`{"dedupe": {"require_id": true, "retention": "720h", "tables": {"clicks": {"id_field": "click_id"}, "views": {"require_id": false, "retention": "24h"}, "audit": {"retention": "0"}}}}`),
 	})
 
 	tests := []struct {
@@ -78,7 +79,7 @@ func TestStore_DedupeFor_RetentionMissing(t *testing.T) {
 	delete(doc["dedupe"], "retention")
 	body, err := json.Marshal(doc)
 	require.NoError(t, err)
-	s := newLoadedStore(t, map[string]string{FileConfig: string(body)})
+	s := newLoadedStore(t, map[string]string{settings.FileConfig: string(body)})
 
 	assert.Equal(t, Dedupe{IDField: "event_id"}, s.DedupeFor("other"), "forever")
 	assert.Equal(t, Dedupe{IDField: "click_id"}, s.DedupeFor("clicks"), "inherits forever")
@@ -95,7 +96,7 @@ func TestStore_SeedIsValid(t *testing.T) {
 	require.NoError(t, WriteSeed(dir))
 	reg, findings := Open(dir)
 	require.NotNil(t, reg, "findings: %s", findingStrings(findings))
-	assert.False(t, HasErrors(findings))
+	assert.False(t, settings.HasErrors(findings))
 	s, _ := reg.For(tenant.Default)
 	// The one expected finding: an empty policies.json is fail-closed and
 	// says so. The seed ships no policy on purpose — a policy is a tenant's
@@ -117,18 +118,18 @@ func TestStore_SeedIsValid(t *testing.T) {
 	assert.Equal(t, []string{"*"}, s.CORSOrigins())
 
 	// Non-empty directory: refused, contents untouched.
-	require.NoError(t, os.WriteFile(filepath.Join(dir, FileConfig), []byte(`{}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileConfig), []byte(`{}`), 0o600))
 	err := WriteSeed(dir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not empty")
-	data, _ := os.ReadFile(filepath.Join(dir, FileConfig)) //nolint:gosec // G304: path is rooted in t.TempDir()
+	data, _ := os.ReadFile(filepath.Join(dir, settings.FileConfig)) //nolint:gosec // G304: path is rooted in t.TempDir()
 	assert.Equal(t, `{}`, string(data))
 }
 
 func TestStore_TypedAccessors(t *testing.T) {
 	t.Parallel()
 	s := newLoadedStore(t, map[string]string{
-		FileConfig: configJSON(`{"query": {"default_max_rows": 250, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 5}, "stream": {"keepalive_interval": 10, "keepalive_buckets": 2, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 2}, "cors": {"allowed_origins": ["https://app.example.com"]}}`),
+		settings.FileConfig: configJSON(`{"query": {"default_max_rows": 250, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 5}, "stream": {"keepalive_interval": 10, "keepalive_buckets": 2, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 2}, "cors": {"allowed_origins": ["https://app.example.com"]}}`),
 	})
 	assert.Equal(t, 250, s.DefaultMaxRows())
 	assert.Equal(t, 0, s.TimestampBucketSeconds())
@@ -144,7 +145,7 @@ func TestStore_TypedAccessors(t *testing.T) {
 func TestStore_ClickHouseAndAuthAccessors(t *testing.T) {
 	t.Parallel()
 	s := newLoadedStore(t, map[string]string{
-		FileConfig: configJSON(`{"clickhouse": {"addr": "ch.internal:9440", "http_port": 8443, "http_scheme": "https", "database": "analytics", "username": "wh", "password": "s3cret", "query_timeout": 5}, "auth": {"jwks_url": "https://idp.example/.well-known/jwks.json", "jwt_secret": "hmac-secret", "role_claim": "app_metadata.role"}}`),
+		settings.FileConfig: configJSON(`{"clickhouse": {"addr": "ch.internal:9440", "http_port": 8443, "http_scheme": "https", "database": "analytics", "username": "wh", "password": "s3cret", "query_timeout": 5}, "auth": {"jwks_url": "https://idp.example/.well-known/jwks.json", "jwt_secret": "hmac-secret", "role_claim": "app_metadata.role"}}`),
 	})
 	assert.Equal(t, ClickHouse{Addr: "ch.internal:9440", HTTPPort: 8443, HTTPScheme: "https", Database: "analytics", Username: "wh", Password: "s3cret", QueryTimeout: 5 * time.Second, Headers: map[string]string{}, MaxOpenConns: 10, MaxIdleConns: 5}, s.ClickHouse())
 	assert.Equal(t, Auth{JWKSURL: "https://idp.example/.well-known/jwks.json", JWTSecret: "hmac-secret", RoleClaim: "app_metadata.role"}, s.Auth())
@@ -153,7 +154,7 @@ func TestStore_ClickHouseAndAuthAccessors(t *testing.T) {
 func TestStore_DLQFor_Cascade(t *testing.T) {
 	t.Parallel()
 	s := newLoadedStore(t, map[string]string{
-		FileConfig: configJSON(`{"dlq": {"enabled": true, "tables": {"clicks": {"enabled": false}, "views": {}}}}`),
+		settings.FileConfig: configJSON(`{"dlq": {"enabled": true, "tables": {"clicks": {"enabled": false}, "views": {}}}}`),
 	})
 	assert.False(t, s.DLQFor("clicks"), "table override wins")
 	assert.True(t, s.DLQFor("views"), "an override that sets nothing inherits the global switch")
@@ -176,7 +177,7 @@ func TestStore_PolicyAndPipesAccessors(t *testing.T) {
 	assert.Same(t, q, s.Pipes()[0])
 
 	// Empty documents: nil policy (lockout) and no pipes — never a panic.
-	empty := newLoadedStore(t, map[string]string{FilePolicies: `{}`, FilePipes: `{}`})
+	empty := newLoadedStore(t, map[string]string{settings.FilePolicies: `{}`, settings.FilePipes: `{}`})
 	assert.Nil(t, empty.Policy())
 	assert.Nil(t, empty.Pipe("top_clicks"))
 	assert.Empty(t, empty.Pipes())

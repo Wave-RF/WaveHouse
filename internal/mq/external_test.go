@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -1018,29 +1018,61 @@ func TestExternalNATS_ReleaseChecksThePinIsStillItsOwn(t *testing.T) {
 	assert.Equal(t, pin, unitPin(t, f, topic), "A's release leaves B's pin")
 }
 
-// Unowned counts the units with rows waiting that no consumer holds.
-func TestExternalNATS_Unowned(t *testing.T) {
+// UnitStates reads every shard durable's backlog: a published row is pending
+// on its unit, which nobody holds, so the unit is unowned; once a consumer
+// has received it and not acked, it awaits an ack on a held unit, under the
+// durable's max_ack_pending.
+func TestExternalNATS_UnitStates(t *testing.T) {
 	t.Parallel()
 	f := shippedFixture(t)
 	e := f.broker(t, nil)
-	n, err := e.Unowned(t.Context())
-	require.NoError(t, err)
-	assert.Zero(t, n, "no rows, nothing to own")
-
 	topic := Topic{Tenant: "acme", Table: "events"}
+	p, s := natsRoute(topic, 4, 8)
+	unit := shippedPartition(p) + "/" + natsShardDurable("wh-ingest", s)
+	// read reports to rt, which is t for a one-off read and the poll's
+	// CollectT inside await, where a failed check must end only that tick.
+	read := func(rt require.TestingT) (UnitState, int) {
+		states, err := e.UnitStates(t.Context())
+		require.NoError(rt, err)
+		require.Len(rt, states, 4*8, "one state per configured unit")
+		unowned, mine := 0, UnitState{}
+		for _, st := range states {
+			if st.Unowned() {
+				unowned++
+			}
+			if st.Unit == unit {
+				mine = st
+			}
+		}
+		require.Equal(rt, unit, mine.Unit, "no state for %s", unit)
+		return mine, unowned
+	}
+	state, unowned := read(t)
+	require.Equal(t, UnitState{Unit: unit, MaxAckPending: 10000}, state, "the shipped durable, idle")
+	assert.Zero(t, unowned, "no rows, nothing to own")
+
+	// The consumer info can trail the stream by a moment, as
+	// TestExternalNATS_ShardUnits allows for, so each state is polled.
+	await := func(want UnitState, msg string) int {
+		t.Helper()
+		var unowned int
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			var state UnitState
+			state, unowned = read(c)
+			assert.Equal(c, want, state, msg)
+		}, 5*time.Second, 20*time.Millisecond)
+		return unowned
+	}
 	require.NoError(t, e.Publish(t.Context(), topic, []byte("x")))
-	n, err = e.Unowned(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, 1, n, "a row nobody pulls")
+	unowned = await(UnitState{Unit: unit, Pending: 1, MaxAckPending: 10000}, "a row nobody pulls")
+	assert.Equal(t, 1, unowned)
 
 	var hold atomic.Bool
 	hold.Store(true)
-	p, s := natsRoute(topic, 4, 8)
-	_, _, got := unitConsumer(t, e, shippedPartition(p)+"/"+natsShardDurable("wh-ingest", s), &hold)
+	_, _, got := unitConsumer(t, e, unit, &hold)
 	require.Equal(t, "x", receive(t, got))
-	n, err = e.Unowned(t.Context())
-	require.NoError(t, err)
-	assert.Zero(t, n, "held by the consumer that received it")
+	unowned = await(UnitState{Unit: unit, AckPending: 1, MaxAckPending: 10000, Held: true}, "received and not acked, by a consumer that holds the unit")
+	assert.Zero(t, unowned, "held by the consumer that received it")
 }
 
 // One unit's consume throughput: a backlog of rows on one shard, drained by

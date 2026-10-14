@@ -111,8 +111,8 @@ type ClaimConfig struct {
 	// shared out per unit (see Memory above); default the worker's
 	// maxAckPending.
 	MaxHeld int
-	// UnownedEvery is how often the lowest live member reads how many units
-	// have rows and no owner; default 15s.
+	// UnownedEvery is how often the lowest live member reads every unit's
+	// backlog, and which have rows and no owner; default 15s.
 	UnownedEvery time.Duration
 	// SlotExpiry frees a delivered row's MaxHeld slot if the worker never
 	// settles it: by then the broker redelivers the row anyway. Default the
@@ -263,8 +263,12 @@ type claimLoop struct {
 	share, held atomic.Int64
 
 	ownedGauge, membersGauge, unownedGauge atomic.Int64
-	rankZero                               atomic.Bool
-	gauges                                 metric.Registration
+	// ownedUnits is the units held as of the last tick, and unitStates every
+	// unit's backlog as the lowest live member last read it (nil elsewhere).
+	ownedUnits atomic.Pointer[[]string]
+	unitStates atomic.Pointer[[]mq.UnitState]
+	rankZero   atomic.Bool
+	gauges     metric.Registration
 
 	failed            chan error
 	reported, stopped atomic.Bool
@@ -319,7 +323,7 @@ func (l *claimLoop) run() {
 func (l *claimLoop) tick() {
 	ctx, cancel := context.WithTimeout(l.ctx, tickTimeout)
 	defer cancel()
-	defer func() { l.ownedGauge.Store(int64(len(l.owned))) }()
+	defer l.snapshotOwned()
 	defer func() { m := l.member; l.memberSnap.Store(&m) }()
 	l.reap()
 	if l.member == nil {
@@ -353,6 +357,13 @@ func (l *claimLoop) tick() {
 	l.prev = assignment
 	l.rankZero.Store(mine && len(live) > 0 && live[0] == l.slot)
 	l.readUnowned()
+}
+
+// snapshotOwned publishes what the process holds for the gauges.
+func (l *claimLoop) snapshotOwned() {
+	units := slices.Sorted(maps.Keys(l.owned))
+	l.ownedUnits.Store(&units)
+	l.ownedGauge.Store(int64(len(units)))
 }
 
 // memberTerm is the membership term as of the last tick, nil for none.
@@ -620,8 +631,9 @@ func (l *claimLoop) release(cl *claim) {
 	}
 }
 
-// readUnowned has the lowest live member count the units with rows and no
-// owner, every UnownedEvery; the others report nothing.
+// readUnowned has the lowest live member read every unit's backlog, and
+// count the units with rows and no owner, every UnownedEvery; the others
+// report nothing.
 func (l *claimLoop) readUnowned() {
 	if !l.rankZero.Load() || time.Since(l.lastUnowned) < l.q.cfg.UnownedEvery {
 		return
@@ -629,13 +641,20 @@ func (l *claimLoop) readUnowned() {
 	// A context of its own, not what the tick's reads left.
 	ctx, cancel := context.WithTimeout(l.ctx, tickTimeout)
 	defer cancel()
-	n, err := l.q.sq.Unowned(ctx)
+	states, err := l.q.sq.UnitStates(ctx)
 	if err != nil {
-		l.warn("ingest: could not count the shards without an owner", err)
+		l.warn("ingest: could not read the shards' backlogs", err)
 		return
 	}
 	l.lastUnowned = time.Now()
+	n := 0
+	for _, s := range states {
+		if s.Unowned() {
+			n++
+		}
+	}
 	l.unownedGauge.Store(int64(n))
+	l.unitStates.Store(&states)
 }
 
 func (l *claimLoop) warn(msg string, err error) {
@@ -690,7 +709,7 @@ func (l *claimLoop) stop() {
 		}
 		releases.Wait()
 		clear(l.owned)
-		l.ownedGauge.Store(0)
+		l.snapshotOwned()
 		if l.member != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), releaseWait)
 			if err := l.member.Resign(ctx); err != nil {
@@ -749,13 +768,58 @@ func registerClaimGauges(l *claimLoop) (metric.Registration, error) {
 	if err != nil {
 		return nil, err
 	}
+	ownedShard, err := meter.Int64ObservableGauge("wavehouse_ingest_shard_owned",
+		metric.WithDescription("1 for each shard this process holds and consumes"))
+	if err != nil {
+		return nil, err
+	}
+	pending, err := meter.Int64ObservableGauge("wavehouse_ingest_shard_pending",
+		metric.WithDescription("Rows stored on the shard and not yet delivered to any process, as the lowest-ranked member last read it; the other members report nothing"))
+	if err != nil {
+		return nil, err
+	}
+	ackPending, err := meter.Int64ObservableGauge("wavehouse_ingest_shard_ack_pending",
+		metric.WithDescription("Rows delivered from the shard and awaiting an ack or a nak, as the lowest-ranked member last read it; at wavehouse_ingest_shard_max_ack_pending the broker delivers nothing more from the shard"))
+	if err != nil {
+		return nil, err
+	}
+	maxAckPending, err := meter.Int64ObservableGauge("wavehouse_ingest_shard_max_ack_pending",
+		metric.WithDescription("The shard durable's max_ack_pending, as the lowest-ranked member last read it"))
+	if err != nil {
+		return nil, err
+	}
+	redelivered, err := meter.Int64ObservableGauge("wavehouse_ingest_shard_redelivered",
+		metric.WithDescription("Rows delivered from the shard more than once that still await an ack or a nak, as the lowest-ranked member last read it"))
+	if err != nil {
+		return nil, err
+	}
 	return meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		o.ObserveInt64(owned, l.ownedGauge.Load())
 		o.ObserveInt64(members, l.membersGauge.Load())
 		o.ObserveInt64(held, l.held.Load())
-		if l.rankZero.Load() {
-			o.ObserveInt64(unowned, l.unownedGauge.Load())
+		if units := l.ownedUnits.Load(); units != nil {
+			for _, u := range *units {
+				o.ObserveInt64(ownedShard, 1, shardAttr(u))
+			}
+		}
+		if !l.rankZero.Load() {
+			return nil
+		}
+		o.ObserveInt64(unowned, l.unownedGauge.Load())
+		if states := l.unitStates.Load(); states != nil {
+			for _, s := range *states {
+				o.ObserveInt64(pending, int64(s.Pending), shardAttr(s.Unit))
+				o.ObserveInt64(ackPending, int64(s.AckPending), shardAttr(s.Unit))
+				o.ObserveInt64(maxAckPending, int64(s.MaxAckPending), shardAttr(s.Unit))
+				o.ObserveInt64(redelivered, int64(s.Redelivered), shardAttr(s.Unit))
+			}
 		}
 		return nil
-	}, owned, members, unowned, held)
+	}, owned, members, unowned, held, ownedShard, pending, ackPending, maxAckPending, redelivered)
+}
+
+// shardAttr labels a per-shard series: bounded by the unit count, never by
+// tenants or tables.
+func shardAttr(unit string) metric.ObserveOption {
+	return metric.WithAttributes(attribute.String("shard", unit))
 }

@@ -15,12 +15,13 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
-	"github.com/Wave-RF/WaveHouse/internal/pipes"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/pkg/pipes"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
+	model "github.com/Wave-RF/WaveHouse/pkg/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -699,7 +700,7 @@ func TestNewRouter_MalformedTenantSurvivesTheTokenStrip(t *testing.T) {
 	})
 
 	t.Run("and on the reload route reloads nothing", func(t *testing.T) {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, settings.FileConfig), []byte(fullConfig(200)), 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, model.FileConfig), []byte(fullConfig(200)), 0o600))
 		rec := do(http.MethodPost, "/v1/ops/settings/reload?tenant=acme;x=1&"+token)
 		assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
 		assert.Equal(t, 100, store.DefaultMaxRows(), "a misread ?tenant= must not become a whole-tree reload")
@@ -1100,7 +1101,7 @@ func TestNewRouter_CORSPerTenant(t *testing.T) {
 
 		// A reload of acme's folder applies to acme's next request: no router
 		// rebuild, no hook.
-		require.NoError(t, os.WriteFile(filepath.Join(tenants.Dir(), "acme", settings.FileConfig), []byte(configWithOrigins(t, elsewhere)), 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(tenants.Dir(), "acme", model.FileConfig), []byte(configWithOrigins(t, elsewhere)), 0o600))
 		_, adopted, known := tenants.ReloadTenant("acme", "test")
 		require.True(t, adopted && known)
 		assert.Equal(t, elsewhere, allowOrigin(do(router, http.MethodGet, "/v1/health", "acme", elsewhere)))
