@@ -819,6 +819,28 @@ Which build each process runs is the `wavehouse_build_info` gauge, always `1`, l
 count by (version) (wavehouse_build_info)
 ```
 
+### Settings reloads
+
+Every process reads the settings directory and reloads it on its own, so a reload can be adopted by one pod and rejected, or only half applied, by the next. These metrics report each process's reloads; none carries a tenant label, and which tenant was rejected is in the reload's log line:
+
+| Metric | Meaning |
+| --- | --- |
+| `wavehouse_settings_reloads_total{trigger, result}` | Reloads since boot, boot's own included. `trigger` is `boot`, `sighup`, `watch` or `api`. `result` is `adopted` (every tenant's folder adopted, and every component reconciled with it), `partial` (a tenant's folder was rejected, or a component failed to reconcile) or `rejected` (nothing adopted: a flat directory with an error, a finding about the directory itself, or the one folder a `?tenant=` reload read). |
+| `wavehouse_settings_last_reload_successful` | `1` while the last reload's result was `adopted`, else `0`. |
+| `wavehouse_settings_last_reload_success_timestamp_seconds` | Unix time of the last reload whose result was `adopted`; `0` if none has been. |
+| `wavehouse_settings_tenants{state}` | Tenants this process holds, `served` or `rejected` (their folder failed its last validation, and their requests answer `503`). A flat directory is one served tenant. |
+| `wavehouse_settings_tenants_removed_total` | Tenants a reload stopped serving because their folder was gone. |
+| `wavehouse_settings_reconcile_failures_total{component}` | Components that failed to apply adopted settings: `clickhouse` (a tenant's pool not built or resized), `dedupe` (a tenant's embedded dedupe store not opened or closed as its `dedupe.enabled` asks) or `mq` (a tenant's embedded queue not opened at its `mq.max_bytes_gb`, or not resized to it). Each failure is logged as an error, and the next reload retries. |
+
+A component that fails to reconcile does not change what `POST /v1/ops/settings/reload` returns, which reports on the folders alone, but it makes the reload `partial`. A failure while boot applies the settings counts against the boot reload the same way.
+
+Alert when a process stops following its settings, and when a tenant starts being rejected:
+
+```promql
+wavehouse_settings_last_reload_successful == 0
+max by (instance) (wavehouse_settings_tenants{state="rejected"}) > 0
+```
+
 ### Separating the `/metrics` listener
 
 By default, `prometheus.port` is `0`, which mounts `/metrics` on the main API server port (typically `8080`). This is the friendliest setup for compose / quick-start use.
