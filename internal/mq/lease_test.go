@@ -367,7 +367,7 @@ func TestLeases_ResignAbortsAStuckRenewal(t *testing.T) {
 	term, err := a.TryAcquire(t.Context(), "sweeper")
 	require.NoError(t, err)
 	akv.stall()
-	time.Sleep(3 * testRenewEvery) // a renewal is now waiting on the stall
+	akv.awaitBlocked(t, 1) // a renewal is now waiting on the stall
 	start := time.Now()
 	require.NoError(t, term.Resign(t.Context()))
 	assert.Less(t, time.Since(start), time.Second)
