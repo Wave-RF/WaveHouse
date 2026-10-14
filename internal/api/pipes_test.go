@@ -16,11 +16,11 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
-	"github.com/Wave-RF/WaveHouse/internal/pipes"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/pkg/pipes"
+	"github.com/Wave-RF/WaveHouse/pkg/policy"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
@@ -238,7 +238,7 @@ func TestPipesHandler_Execute_RoleAuthorization(t *testing.T) {
 		)
 		// A real (non-nil) policy so the default admin role ("admin") is defined
 		// and bypasses the allowlist, per the matrix. With a nil policy nobody is
-		// admin (total lockout) — covered separately in internal/policy tests.
+		// admin (total lockout) — covered separately in pkg/policy tests.
 		h := NewPipesHandler(store, staticPolicy(&policy.Policy{}), nil, nil, noTimeout)
 
 		w := httptest.NewRecorder()

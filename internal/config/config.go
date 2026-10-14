@@ -60,7 +60,7 @@ const (
 
 // Settings locates the hot-reloadable settings directory — the four JSON
 // documents (roles.json, policies.json, pipes.json, config.json) validated by
-// internal/settings. Boot-tier by necessity: it's the pointer the reload
+// pkg/settings. Boot-tier by necessity: it's the pointer the reload
 // machinery follows, so it can't live behind itself. REQUIRED, with no
 // default: a baked-in path would turn a
 // missing mount into silent misconfiguration instead of an explicit operator
@@ -112,6 +112,11 @@ type Prometheus struct {
 	Enabled bool   `yaml:"enabled" env:"WH_PROMETHEUS_ENABLED"`
 	Path    string `yaml:"path" env:"WH_PROMETHEUS_PATH"`
 	Port    int    `yaml:"port" env:"WH_PROMETHEUS_PORT"`
+	// PerTableMetrics keeps the table label on the metrics that carry one.
+	// Off, each reports one series summed over every table, on every metric
+	// output (the MeterProvider is shared), so a schema with thousands of
+	// tables does not become thousands of series per metric.
+	PerTableMetrics bool `yaml:"per_table_metrics" env:"WH_METRICS_PER_TABLE"`
 }
 
 // OTelLogs sample rate applies to OTLP export of DEBUG/INFO only.
@@ -277,7 +282,7 @@ func defaults() Config {
 			Metrics: OTelMetrics{Enabled: true},
 			Logs:    OTelLogs{Enabled: true, SampleRate: 1.0},
 		},
-		Prometheus: Prometheus{Path: "/metrics"},
+		Prometheus: Prometheus{Path: "/metrics", PerTableMetrics: true},
 		Profiling:  Profiling{Addr: "127.0.0.1:6060"},
 	}
 }

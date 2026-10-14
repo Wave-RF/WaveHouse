@@ -18,8 +18,8 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 func TestRedisConfig_Validation(t *testing.T) {

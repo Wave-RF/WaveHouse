@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // errDynamoUnchecked is a store's open before the first table check has run.

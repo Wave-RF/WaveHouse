@@ -44,6 +44,7 @@ prometheus:
   enabled: false
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
+  per_table_metrics: true # false = no table label, one series over all tables (OTLP too)
 
 # Go's net/http/pprof under /debug/pprof/, on a listener of its own (never
 # server.port). Unauthenticated, so the address defaults to loopback.
@@ -129,6 +130,6 @@ auth:
 # directory with every key at its default; `wavehouse validate [dir]` checks
 # one (both resolve dir the same way: the argument, else WH_SETTINGS_DIR).
 # `make dev` seeds ./settings (gitignored) from the embedded seed on first
-# run, so local edits never touch the checked-in internal/settings/seed.
+# run, so local edits never touch the checked-in pkg/settings/seed.
 settings:
   dir: settings

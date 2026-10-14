@@ -1,14 +1,22 @@
+// Package settings is the runtime half of the settings directory: the
+// Registry of tenants and the Store each one's adopted snapshot lives in,
+// the reload triggers, the directory watcher, and WriteSeed. The model it
+// adopts — the document types, the validator, the embedded seed — is
+// pkg/settings, importable from outside the module.
 package settings
 
 import (
 	"iter"
 	"log/slog"
 	"maps"
+	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // Registry maps a tenant id to the Store holding that tenant's adopted
@@ -73,7 +81,7 @@ type entry struct {
 
 // adopt returns e after a validation pass over id's folder: holding doc, or
 // rejected when the folder yielded none.
-func (e entry) adopt(id tenant.ID, doc *Document) entry {
+func (e entry) adopt(id tenant.ID, doc *settings.Document) entry {
 	if doc == nil {
 		e.rejected = true
 		return e
@@ -92,7 +100,7 @@ func (e entry) adopt(id tenant.ID, doc *Document) entry {
 // the findings: the caller (boot) refuses to start. A nested directory with
 // a rejected tenant folder beside a valid one still opens; the rejected
 // tenant alone is not served.
-func Open(dir string) (*Registry, []Finding) {
+func Open(dir string) (*Registry, []settings.Finding) {
 	r := newRegistry(map[tenant.ID]entry{})
 	r.dir = dir
 	r.mu.Lock()
@@ -184,7 +192,7 @@ func (r *Registry) Known() iter.Seq2[tenant.ID, *Store] {
 // adopted, warnings and all, and the ones with an error finding were not.
 // trigger names the path that fired ("boot", "sighup", "watch", "api") and
 // tags every log line so operators can tell them apart.
-func (r *Registry) Reload(trigger string) ([]Finding, bool) {
+func (r *Registry) Reload(trigger string) ([]settings.Finding, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	findings, adopted, _ := r.reload(trigger, false)
@@ -194,14 +202,14 @@ func (r *Registry) Reload(trigger string) ([]Finding, bool) {
 // reload is Reload under mu. boot marks Open's first pass, which takes the
 // directory's shape rather than holding it to one. applied reports whether
 // the registry took the tree at all.
-func (r *Registry) reload(trigger string, boot bool) (findings []Finding, adopted, applied bool) {
+func (r *Registry) reload(trigger string, boot bool) (findings []settings.Finding, adopted, applied bool) {
 	tree, findings := r.validate(boot)
 	switch {
 	case tree == nil:
-	case boot && tree.Nested && !tree.serves():
+	case boot && tree.Nested && !tree.Serves():
 		// Boot only: on reload the same tree is every folder gone or broken,
 		// which drops every tenant and keeps running (see Registry).
-		findings = append(findings, Finding{Severity: SeverityError, Message: "no tenant to serve — a nested settings directory boots only with a tenant folder that validates"})
+		findings = append(findings, settings.Finding{Severity: settings.SeverityError, Message: "no tenant to serve — a nested settings directory boots only with a tenant folder that validates"})
 		tree = nil
 	case boot:
 		r.nested = tree.Nested
@@ -210,7 +218,7 @@ func (r *Registry) reload(trigger string, boot bool) (findings []Finding, adopte
 		if r.nested {
 			booted = "one folder per tenant"
 		}
-		findings = append(findings, Finding{Severity: SeverityError, Message: "the settings directory no longer has the shape this server booted with (" + booted + ") — switching shapes is stop, restructure, start"})
+		findings = append(findings, settings.Finding{Severity: settings.SeverityError, Message: "the settings directory no longer has the shape this server booted with (" + booted + ") — switching shapes is stop, restructure, start"})
 		tree = nil
 	}
 	// A flat directory with an error finding changes nothing, like a finding
@@ -266,11 +274,27 @@ func (r *Registry) reload(trigger string, boot bool) (findings []Finding, adopte
 // rather than as Validate's flat directory missing its files — so removing
 // the last tenant's folder removes the tenant, like any other. At Open an
 // empty root still reads as flat: nothing says it was meant to hold folders.
-func (r *Registry) validate(boot bool) (*Tree, []Finding) {
+func (r *Registry) validate(boot bool) (*settings.Tree, []settings.Finding) {
 	if !boot && r.nested && emptyRoot(r.dir) {
-		return &Tree{Nested: true, Tenants: map[tenant.ID]TenantResult{}}, nil
+		return &settings.Tree{Nested: true, Tenants: map[tenant.ID]settings.TenantResult{}}, nil
 	}
-	return Validate(r.dir)
+	return settings.Validate(r.dir)
+}
+
+// emptyRoot reports whether root can be listed and holds nothing but
+// dot-prefixed entries, which both shapes skip: what a nested root looks like
+// once its last tenant folder is removed.
+func emptyRoot(root string) bool {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), ".") {
+			return false
+		}
+	}
+	return true
 }
 
 // ReloadTenant is Reload for one tenant's folder of a nested directory: the
@@ -280,7 +304,7 @@ func (r *Registry) validate(boot bool) (*Tree, []Finding) {
 // a tenant the registry does not hold, and nothing is read: a whole-tree
 // Reload is what picks up a new folder. A flat directory is its default
 // tenant's folder, so there this is Reload.
-func (r *Registry) ReloadTenant(id tenant.ID, trigger string) (findings []Finding, adopted, known bool) {
+func (r *Registry) ReloadTenant(id tenant.ID, trigger string) (findings []settings.Finding, adopted, known bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	prev := *r.tenants.Load()
@@ -293,7 +317,7 @@ func (r *Registry) ReloadTenant(id tenant.ID, trigger string) (findings []Findin
 		return findings, adopted, true
 	}
 
-	doc, findings := validateFolder(r.dir, id.String())
+	doc, findings := settings.ValidateFolder(r.dir, id.String())
 	next := maps.Clone(prev)
 	next[id] = e.adopt(id, doc)
 	r.tenants.Store(&next)
@@ -320,9 +344,9 @@ func (r *Registry) adopted(ids []tenant.ID) {
 }
 
 // logFindings logs each finding under its trigger and counts them by severity.
-func logFindings(trigger string, findings []Finding) (errs, warns int) {
+func logFindings(trigger string, findings []settings.Finding) (errs, warns int) {
 	for _, f := range findings {
-		if f.Severity == SeverityError {
+		if f.Severity == settings.SeverityError {
 			errs++
 			slog.Error("settings finding", "trigger", trigger, "finding", f.String())
 		} else {

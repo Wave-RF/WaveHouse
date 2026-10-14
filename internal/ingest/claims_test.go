@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -31,6 +32,7 @@ type fakeShards struct {
 	events    []string                                // "<process> <verb> <unit>"
 	unowned   []string                                // the processes that asked
 	pinned    map[string]bool                         // units a gone owner's pin still holds
+	states    []mq.UnitState                          // what UnitStates answers
 }
 
 func newFakeShards(n int, extra ...string) *fakeShards {
@@ -167,11 +169,11 @@ func (p *fakeProc) ResetOrphaned(_ context.Context, unit string) (bool, error) {
 	return true, nil
 }
 
-func (p *fakeProc) Unowned(context.Context) (int, error) {
+func (p *fakeProc) UnitStates(context.Context) ([]mq.UnitState, error) {
 	p.f.mu.Lock()
 	defer p.f.mu.Unlock()
 	p.f.unowned = append(p.f.unowned, p.name)
-	return 0, nil
+	return slices.Clone(p.f.states), nil
 }
 
 func (p *fakeProc) DeadLetter(context.Context, *mq.Message, ...mq.PublishOpt) error { return nil }
@@ -597,7 +599,10 @@ func TestClaims_TakeoverWaitsForTheDeadOwnersPin(t *testing.T) {
 }
 
 // The gauges register on the meter provider in place when the claims start,
-// which the process sets after this package's instruments are made.
+// which the process sets after this package's instruments are made. The
+// per-shard series carry the unit's name as the shard label: the ones this
+// process holds, and, from the lowest member, every unit's backlog as the
+// broker reports it.
 func TestClaims_GaugesReport(t *testing.T) { //nolint:paralleltest // substitutes the package's claim meter
 	reader := sdkmetric.NewManualReader()
 	prev := claimMeter
@@ -605,24 +610,42 @@ func TestClaims_GaugesReport(t *testing.T) { //nolint:paralleltest // substitute
 	t.Cleanup(func() { claimMeter = prev })
 
 	f := newFakeShards(4)
+	f.states = []mq.UnitState{
+		{Unit: "S/u-00", Pending: 7, AckPending: 10, MaxAckPending: 10, Redelivered: 3, Held: true},
+		{Unit: "S/u-01", Pending: 2, Held: false},
+	}
 	startClaims(t, f, coord.NewLocal(), "a", ClaimConfig{}, nil)
 	require.Eventually(t, func() bool { return f.split("a") }, 5*time.Second, 10*time.Millisecond)
 	got := map[string]int64{}
+	byShard := map[string]map[string]int64{} // metric → shard → value
 	require.Eventually(t, func() bool {
 		var rm metricdata.ResourceMetrics
 		require.NoError(t, reader.Collect(t.Context(), &rm))
 		for _, sm := range rm.ScopeMetrics {
 			for _, m := range sm.Metrics {
-				if g, ok := m.Data.(metricdata.Gauge[int64]); ok && len(g.DataPoints) > 0 {
-					got[m.Name] = g.DataPoints[0].Value
+				g, ok := m.Data.(metricdata.Gauge[int64])
+				if !ok || len(g.DataPoints) == 0 {
+					continue
+				}
+				got[m.Name] = g.DataPoints[0].Value
+				byShard[m.Name] = map[string]int64{}
+				for _, dp := range g.DataPoints {
+					if shard, ok := dp.Attributes.Value(attribute.Key("shard")); ok {
+						byShard[m.Name][shard.AsString()] = dp.Value
+					}
 				}
 			}
 		}
-		return got["wavehouse_ingest_shards_owned"] == 4
-	}, 5*time.Second, 20*time.Millisecond, "%v", got)
+		return got["wavehouse_ingest_shards_owned"] == 4 && len(byShard["wavehouse_ingest_shard_pending"]) == 2
+	}, 5*time.Second, 20*time.Millisecond, "%v %v", got, byShard)
 	assert.Equal(t, int64(1), got["wavehouse_ingest_shard_members"])
-	assert.Contains(t, got, "wavehouse_ingest_shards_unowned", "the lowest member reports it")
+	assert.Equal(t, int64(1), got["wavehouse_ingest_shards_unowned"], "the lowest member reports it: u-01 has rows and no holder")
 	assert.Contains(t, got, "wavehouse_ingest_rows_held")
+	assert.Equal(t, map[string]int64{"S/u-00": 1, "S/u-01": 1, "S/u-02": 1, "S/u-03": 1}, byShard["wavehouse_ingest_shard_owned"])
+	assert.Equal(t, map[string]int64{"S/u-00": 7, "S/u-01": 2}, byShard["wavehouse_ingest_shard_pending"])
+	assert.Equal(t, map[string]int64{"S/u-00": 10, "S/u-01": 0}, byShard["wavehouse_ingest_shard_ack_pending"])
+	assert.Equal(t, map[string]int64{"S/u-00": 10, "S/u-01": 0}, byShard["wavehouse_ingest_shard_max_ack_pending"])
+	assert.Equal(t, map[string]int64{"S/u-00": 3, "S/u-01": 0}, byShard["wavehouse_ingest_shard_redelivered"])
 }
 
 // A row the worker lets go of without the broker confirming it (an ack that

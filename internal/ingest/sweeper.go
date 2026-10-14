@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // Sweeper implements the Active Sweeper pattern. It runs every minute and

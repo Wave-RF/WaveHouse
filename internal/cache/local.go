@@ -7,7 +7,7 @@ import (
 
 	"github.com/dgraph-io/ristretto/v2"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // LocalCache is an L1 in-process cache backed by Ristretto: one pool for

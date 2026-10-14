@@ -10,7 +10,7 @@ cmd = "go build -o ./tmp/wavehouse ./cmd/wavehouse"
 # entrypoint replaces the deprecated `bin` field
 entrypoint = ["./tmp/wavehouse"]
 include_ext = ["go", "yaml"]
-include_dir = ["cmd", "internal"]
+include_dir = ["cmd", "internal", "pkg"]
 exclude_regex = ["_test\\.go"]
 exclude_unchanged = true
 # Debounce rapid saves (ms)

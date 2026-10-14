@@ -10,8 +10,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Wave-RF/WaveHouse/internal/tenant"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
+	"github.com/Wave-RF/WaveHouse/pkg/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // newLoadedRegistry materializes a valid directory (with overrides applied)
@@ -44,22 +45,22 @@ func TestRegistry_For(t *testing.T) {
 func TestRegistry_ReloadAdoptsAndRejects(t *testing.T) {
 	t.Parallel()
 	reg := newLoadedRegistry(t, map[string]string{
-		FileConfig: configJSON(`{"query": {"default_max_rows": 500}}`),
+		settings.FileConfig: configJSON(`{"query": {"default_max_rows": 500}}`),
 	})
 	s, _ := reg.For(tenant.Default)
 	assert.Equal(t, 500, s.DefaultMaxRows())
 
 	// Break the directory: the reload must report the error and keep the
 	// previous snapshot — a bad edit can never evict the last good document.
-	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": -1}}`)), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), settings.FileConfig), []byte(configJSON(`{"query": {"default_max_rows": -1}}`)), 0o600))
 	findings, adopted := reg.Reload("test")
 	assert.False(t, adopted)
-	assert.True(t, HasErrors(findings))
+	assert.True(t, settings.HasErrors(findings))
 	assert.Equal(t, 500, s.DefaultMaxRows(), "rejected reload must keep the previous snapshot")
 
 	// Fix it: the next reload adopts again, into the same store — the handle a
 	// long-lived consumer holds keeps reading the latest document.
-	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 700}}`)), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), settings.FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 700}}`)), 0o600))
 	findings, adopted = reg.Reload("test")
 	require.True(t, adopted, "findings: %s", findingStrings(findings))
 	assert.Equal(t, 700, s.DefaultMaxRows())
@@ -68,13 +69,13 @@ func TestRegistry_ReloadAdoptsAndRejects(t *testing.T) {
 func TestRegistry_ReloadWithWarningsAdopts(t *testing.T) {
 	t.Parallel()
 	reg := newLoadedRegistry(t, map[string]string{
-		FilePolicies: `{}`, // empty policy: legal, warned (total lockout)
-		FilePipes:    `{}`, // drop the pipe so its analyst role reference doesn't dangle
+		settings.FilePolicies: `{}`, // empty policy: legal, warned (total lockout)
+		settings.FilePipes:    `{}`, // drop the pipe so its analyst role reference doesn't dangle
 	})
 	findings, adopted := reg.Reload("test")
 	assert.True(t, adopted, "warnings alone must not block adoption")
 	assert.NotEmpty(t, findings)
-	assert.False(t, HasErrors(findings))
+	assert.False(t, settings.HasErrors(findings))
 }
 
 // TestOpen_RejectsInvalid pins the boot contract: an invalid directory yields
@@ -83,14 +84,14 @@ func TestRegistry_ReloadWithWarningsAdopts(t *testing.T) {
 func TestOpen_RejectsInvalid(t *testing.T) {
 	t.Parallel()
 	files := validFiles()
-	files[FileConfig] = `{}` // every key missing
+	files[settings.FileConfig] = `{}` // every key missing
 	reg, findings := Open(writeDir(t, files))
 	assert.Nil(t, reg)
-	assert.True(t, HasErrors(findings))
+	assert.True(t, settings.HasErrors(findings))
 
 	reg, findings = Open(filepath.Join(t.TempDir(), "nope"))
 	assert.Nil(t, reg)
-	assert.True(t, HasErrors(findings))
+	assert.True(t, settings.HasErrors(findings))
 
 	// Nothing says an empty directory was meant to hold tenant folders, so
 	// it boots as the four files, missing.
@@ -105,13 +106,13 @@ func TestOpen_RejectsInvalid(t *testing.T) {
 func TestRegistry_SurvivesVanishedDirectory(t *testing.T) {
 	t.Parallel()
 	reg := newLoadedRegistry(t, map[string]string{
-		FileConfig: configJSON(`{"query": {"default_max_rows": 42}}`),
+		settings.FileConfig: configJSON(`{"query": {"default_max_rows": 42}}`),
 	})
 	s, _ := reg.For(tenant.Default)
 	require.NoError(t, os.RemoveAll(reg.Dir()))
 	findings, adopted := reg.Reload("test")
 	assert.False(t, adopted)
-	assert.True(t, HasErrors(findings))
+	assert.True(t, settings.HasErrors(findings))
 	assert.Equal(t, 42, s.DefaultMaxRows())
 	assert.Equal(t, "event_id", s.DedupeFor("clicks").IDField)
 }
@@ -130,12 +131,12 @@ func TestRegistry_AfterAdoptRunsOnlyOnAdoption(t *testing.T) {
 		seen = append(seen, s.DedupeEnabled())
 	})
 
-	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), FileConfig), []byte(configJSON(`{"dedupe": {"enabled": true}}`)), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), settings.FileConfig), []byte(configJSON(`{"dedupe": {"enabled": true}}`)), 0o600))
 	_, adopted := reg.Reload("test")
 	require.True(t, adopted)
 	assert.Equal(t, []bool{true}, seen, "hook sees the newly adopted snapshot")
 
-	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 0}}`)), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), settings.FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 0}}`)), 0o600))
 	_, adopted = reg.Reload("test")
 	require.False(t, adopted)
 	assert.Equal(t, []bool{true}, seen, "rejected reload must not fire the hook")
@@ -155,14 +156,14 @@ func writeTenant(t *testing.T, root, folder string, files map[string]string) {
 // the tenants of a test apart.
 func maxRowsFiles(maxRows int) map[string]string {
 	files := validFiles()
-	files[FileConfig] = configJSON(fmt.Sprintf(`{"query": {"default_max_rows": %d}}`, maxRows))
+	files[settings.FileConfig] = configJSON(fmt.Sprintf(`{"query": {"default_max_rows": %d}}`, maxRows))
 	return files
 }
 
 // brokenFiles is a tenant folder Validate rejects.
 func brokenFiles() map[string]string {
 	files := validFiles()
-	files[FileConfig] = configJSON(`{"query": {"default_max_rows": -1}}`)
+	files[settings.FileConfig] = configJSON(`{"query": {"default_max_rows": -1}}`)
 	return files
 }
 
@@ -252,7 +253,7 @@ func TestOpen_NestedNoTenantRefusesBoot(t *testing.T) {
 		t.Parallel()
 		reg, findings := Open(writeTree(t, map[string]map[string]string{"acme": maxRowsFiles(111), "globex": brokenFiles(), "lost+found": nil}))
 		require.NotNil(t, reg, "findings: %s", findingStrings(findings))
-		assert.True(t, HasErrors(findings))
+		assert.True(t, settings.HasErrors(findings))
 		assert.NotContains(t, findingStrings(findings), "error: no tenant to serve — a nested settings directory boots only with a tenant folder that validates")
 		acme, ok := reg.For("acme")
 		require.True(t, ok)
@@ -476,8 +477,8 @@ func TestRegistry_NestedReloadRemovesTheLastTenant(t *testing.T) {
 	require.True(t, ok, "a folder written back is a tenant again")
 	assert.Equal(t, 333, store.DefaultMaxRows())
 
-	flat := newLoadedRegistry(t, map[string]string{FileConfig: configJSON(`{"query": {"default_max_rows": 42}}`)})
-	for _, name := range Files() {
+	flat := newLoadedRegistry(t, map[string]string{settings.FileConfig: configJSON(`{"query": {"default_max_rows": 42}}`)})
+	for _, name := range settings.Files() {
 		require.NoError(t, os.Remove(filepath.Join(flat.Dir(), name)))
 	}
 	_, adopted = flat.Reload("test")
@@ -583,16 +584,16 @@ func TestRegistry_ReloadTenant(t *testing.T) {
 // is Reload — keep-previous on a rejection included — and it has no other.
 func TestRegistry_ReloadTenant_FlatDirectory(t *testing.T) {
 	t.Parallel()
-	reg := newLoadedRegistry(t, map[string]string{FileConfig: configJSON(`{"query": {"default_max_rows": 500}}`)})
+	reg := newLoadedRegistry(t, map[string]string{settings.FileConfig: configJSON(`{"query": {"default_max_rows": 500}}`)})
 	s, _ := reg.For(tenant.Default)
 
-	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 700}}`)), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), settings.FileConfig), []byte(configJSON(`{"query": {"default_max_rows": 700}}`)), 0o600))
 	_, adopted, known := reg.ReloadTenant(tenant.Default, "test")
 	assert.True(t, known)
 	assert.True(t, adopted)
 	assert.Equal(t, 700, s.DefaultMaxRows())
 
-	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), FileConfig), []byte(`not json`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(reg.Dir(), settings.FileConfig), []byte(`not json`), 0o600))
 	findings, adopted, known := reg.ReloadTenant(tenant.Default, "test")
 	assert.True(t, known)
 	assert.False(t, adopted)
@@ -655,8 +656,8 @@ func TestRegistry_RootLevelFailureChangesNothing(t *testing.T) {
 // was serving stays.
 func TestRegistry_FlatRootTurnedNestedIsRejected(t *testing.T) {
 	t.Parallel()
-	reg := newLoadedRegistry(t, map[string]string{FileConfig: configJSON(`{"query": {"default_max_rows": 42}}`)})
-	for _, name := range Files() {
+	reg := newLoadedRegistry(t, map[string]string{settings.FileConfig: configJSON(`{"query": {"default_max_rows": 42}}`)})
+	for _, name := range settings.Files() {
 		require.NoError(t, os.Remove(filepath.Join(reg.Dir(), name)))
 	}
 	writeTenant(t, reg.Dir(), "acme", validFiles())
