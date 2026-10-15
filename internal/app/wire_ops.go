@@ -40,6 +40,7 @@ func (a *App) wireOpsHTTP(authMW func(http.Handler) http.Handler) {
 		AuthMW:   authMW,
 	}
 	deps.MetricsHandler, deps.MetricsPath = a.inlineMetrics()
+	deps.TrustedProxies = a.cfg.Server.TrustedProxyPrefixes()
 	a.handler = api.NewOpsRouter(deps)
 	a.wireServers(nil)
 }

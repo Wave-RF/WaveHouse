@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // logLines runs log against a TraceHandler over a JSON handler and returns
@@ -160,4 +161,37 @@ func TestAnnotateSpan_TenantAlreadyResolved(t *testing.T) {
 
 	require.Len(t, rec.Ended(), 1)
 	assert.Contains(t, rec.Ended()[0].Attributes(), attribute.String(TenantKey, "acme"))
+}
+
+func TestTraceHandler_ClientAddress(t *testing.T) {
+	t.Parallel()
+	bare := logLines(t, func(l *slog.Logger) { l.InfoContext(WithRequest(context.Background(), "req-1"), "hello") })
+	require.Len(t, bare, 1)
+	assert.NotContains(t, bare[0], ClientAddressKey, "no address recorded, none logged")
+
+	ctx := WithRequest(context.Background(), "req-1")
+	SetRequestClient(ctx, "198.51.100.1")
+	lines := logLines(t, func(l *slog.Logger) { l.InfoContext(ctx, "hello") })
+	require.Len(t, lines, 1)
+	assert.Equal(t, "198.51.100.1", lines[0][ClientAddressKey])
+}
+
+// AnnotateSpan replaces a client.address the span already carries (otelhttp's,
+// read from X-Forwarded-For) with the request scope's.
+func TestAnnotateSpan_ReplacesClientAddress(t *testing.T) {
+	t.Parallel()
+	rec := tracetest.NewSpanRecorder()
+	tracer := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)).Tracer("test")
+
+	scoped := WithRequest(context.Background(), "req-1")
+	SetRequestClient(scoped, "198.51.100.1")
+	ctx, span := tracer.Start(scoped, "server", trace.WithAttributes(attribute.String(ClientAddressKey, "1.2.3.4")))
+	AnnotateSpan(ctx)
+	span.End()
+
+	require.Len(t, rec.Ended(), 1)
+	assert.ElementsMatch(t, []attribute.KeyValue{
+		attribute.String(RequestIDKey, "req-1"),
+		attribute.String(ClientAddressKey, "198.51.100.1"),
+	}, rec.Ended()[0].Attributes())
 }
