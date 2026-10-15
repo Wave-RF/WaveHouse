@@ -27,7 +27,7 @@ A running instance re-validates and re-adopts on any of three triggers, all funn
 - **`SIGHUP`** — `kill -HUP <pid>`.
 - **`POST /v1/ops/settings/reload`** (admin-only) — returns `{"adopted": bool, "findings": [...]}`; `200` when adopted, `422` when rejected.
 
-A reload that fails validation is logged (and reported by the endpoint) and the previous good settings stay in effect — an operator mid-edit, a deleted file, even a vanished directory degrades to a log line, never to a broken server. Warnings don't block adoption, matching `wavehouse validate`.
+A reload that fails validation is logged (and reported by the endpoint) and the previous good settings stay in effect — an operator mid-edit, a deleted file, even a vanished directory degrades to a log line, never to a broken server. Warnings don't block adoption, matching `wavehouse validate`. Each process also counts its reloads and their results in [metrics](/deployment#settings-reloads), so a reload rejected by one pod can be alerted on.
 
 "Previous good settings" is the in-memory snapshot of the running process, nothing more: there is no persisted copy of the files. A restart re-validates the directory from scratch and refuses to start on the same findings the reload rejected, so bad files never survive a restart silently — fix them (or run `wavehouse validate`) before bouncing the server.
 

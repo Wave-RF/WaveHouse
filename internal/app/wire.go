@@ -299,6 +299,7 @@ func (a *App) wireClickHouse() error {
 		if err != nil {
 			slog.Error("clickhouse pools reconciled in part; the next reload retries", "error", err)
 		}
+		a.tenants.Reconciled("clickhouse", err)
 		// The schema a moved tenant discovered is the previous database's
 		// (#638): its registry is dropped here, and the discovery hook, which
 		// runs after this one, builds it a fresh one over the pool it is on
@@ -526,8 +527,10 @@ func (a *App) wirePebbleDedupe() error {
 		}
 		return errors.Join(errs...)
 	}
-	a.tenants.AfterAdopt(func([]tenant.ID) { _ = reconcile() })
-	if err := reconcile(); err != nil && !nested {
+	a.tenants.AfterAdopt(func([]tenant.ID) { a.tenants.Reconciled("dedupe", reconcile()) })
+	err := reconcile()
+	a.tenants.Reconciled("dedupe", err)
+	if err != nil && !nested {
 		return fmt.Errorf("dedupe open: %w", err)
 	}
 	return nil
@@ -616,8 +619,10 @@ func (a *App) wireEmbeddedMQ(ctx context.Context) error {
 		}
 		return errors.Join(errs...)
 	}
-	a.tenants.AfterAdopt(func([]tenant.ID) { _ = reconcile(a.stopCtx) })
-	if err := reconcile(ctx); err != nil && !a.tenants.Nested() {
+	a.tenants.AfterAdopt(func([]tenant.ID) { a.tenants.Reconciled("mq", reconcile(a.stopCtx)) })
+	err = reconcile(ctx)
+	a.tenants.Reconciled("mq", err)
+	if err != nil && !a.tenants.Nested() {
 		return fmt.Errorf("mq open: %w", err)
 	}
 	return nil

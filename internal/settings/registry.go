@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Wave-RF/WaveHouse/pkg/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
@@ -65,6 +66,9 @@ type Registry struct {
 	// tenants is replaced whole by a reload, never edited, so a lookup is one
 	// lock-free load.
 	tenants atomic.Pointer[map[tenant.ID]entry]
+
+	// stats records how the reloads went, for Stats.
+	stats stats
 }
 
 // entry is one tenant the registry knows.
@@ -248,8 +252,8 @@ func (r *Registry) reload(trigger string, boot bool) (findings []settings.Findin
 			}
 		}
 		r.tenants.Store(&next)
-		r.adopted(adoptedIDs)
 	}
+	unreconciled := tree != nil && r.adopted(adoptedIDs)
 
 	errs, warns := logFindings(trigger, findings)
 	switch {
@@ -266,6 +270,14 @@ func (r *Registry) reload(trigger string, boot bool) (findings []settings.Findin
 	default:
 		slog.Info("settings adopted", "trigger", trigger, "dir", r.dir, "warnings", warns)
 	}
+	result := ResultAdopted
+	switch {
+	case tree == nil:
+		result = ResultRejected
+	case errs > 0 || unreconciled:
+		result = ResultPartial
+	}
+	r.stats.record(trigger, result, len(removedIDs), time.Now())
 	return findings, errs == 0, tree != nil
 }
 
@@ -325,22 +337,31 @@ func (r *Registry) ReloadTenant(id tenant.ID, trigger string) (findings []settin
 	if doc != nil {
 		adoptedIDs = []tenant.ID{id}
 	}
-	r.adopted(adoptedIDs)
+	unreconciled := r.adopted(adoptedIDs)
 	errs, warns := logFindings(trigger, findings)
+	result := ResultAdopted
 	if doc == nil {
+		result = ResultRejected
 		slog.Error("settings rejected — the tenant answers 503 until a reload adopts its folder", "trigger", trigger, "dir", r.dir, "tenant", id, "errors", errs, "warnings", warns)
 	} else {
+		if unreconciled {
+			result = ResultPartial
+		}
 		slog.Info("settings adopted", "trigger", trigger, "dir", r.dir, "tenant", id, "warnings", warns)
 	}
+	r.stats.record(trigger, result, 0, time.Now())
 	return findings, doc != nil, true
 }
 
 // adopted runs the AfterAdopt hooks for an applied reload that adopted ids —
-// none, when it only rejected or removed. Under mu.
-func (r *Registry) adopted(ids []tenant.ID) {
+// none, when it only rejected or removed — and reports whether a hook
+// reported a failure through Reconciled. Under mu.
+func (r *Registry) adopted(ids []tenant.ID) (unreconciled bool) {
+	r.stats.beginHooks()
 	for _, fn := range r.afterAdopt {
 		fn(ids)
 	}
+	return r.stats.endHooks()
 }
 
 // logFindings logs each finding under its trigger and counts them by severity.
@@ -361,9 +382,10 @@ func logFindings(trigger string, findings []settings.Finding) (errs, warns int) 
 // applied, serialized with the reload itself, with the tenants it adopted:
 // none for a reload that only rejected or removed a tenant, which a consumer
 // holding a resource per tenant needs to hear of as much as an adoption. A
-// reload rejected whole runs nothing, since nothing changed. Open's boot
-// adoption has already happened by the time a caller can register, so the
-// caller applies the boot state itself.
+// whole-directory reload rejected whole runs nothing, since nothing changed.
+// Open's boot adoption has already happened by the time a caller can
+// register, so the caller applies the boot state itself. A hook whose work can fail reports
+// how it went through Reconciled.
 func (r *Registry) AfterAdopt(fn func(adopted []tenant.ID)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

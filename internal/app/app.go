@@ -229,6 +229,9 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 		a.wireOpsHTTP(authMW)
 	}
 	a.wireProfiling()
+	// Last: the boot apply above can still take the boot reload's success
+	// back (settings.Registry.Reconciled), which no collection may see.
+	a.wireSettingsMetrics()
 	return a, nil
 }
 
