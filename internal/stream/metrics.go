@@ -17,6 +17,14 @@ const (
 	KindSchema    = "schema"    // column list for the rows that follow
 )
 
+// Drop reasons for the "reason" attribute on wavehouse_sse_dropped_frames_total:
+// whether the stream could not keep up, or ended with frames still owed to it.
+const (
+	DropBufferFull   = "buffer_full"   // the subscriber's queue was full: the client reads slower than events arrive
+	DropClientGone   = "client_gone"   // the client went away (a write failed, or it disconnected) with the frame unwritten
+	DropStreamClosed = "stream_closed" // the server ended the stream (shutdown, or its tenant no longer served) with the frame unwritten
+)
+
 // Metrics records SSE stream activity: how many streams are open, how long they
 // last, and how much is written out. The zero value (a nil *Metrics) is a no-op,
 // so the handler can hold one unconditionally and tests can skip wiring it.
@@ -27,6 +35,9 @@ type Metrics struct {
 	bytes    metric.Int64Counter
 	dropped  metric.Int64Counter
 	withheld metric.Int64Counter
+
+	meter     metric.Meter
+	queuePeak metric.Int64ObservableGauge
 }
 
 // NewMetrics builds the SSE instruments on the global meter provider. Call it
@@ -43,10 +54,15 @@ func NewMetrics() *Metrics {
 	bytes, _ := meter.Int64Counter("wavehouse_sse_bytes_sent_total",
 		metric.WithDescription("SSE bytes written to clients"), metric.WithUnit("By"))
 	dropped, _ := meter.Int64Counter("wavehouse_sse_dropped_frames_total",
-		metric.WithDescription("SSE frames dropped to a full subscriber queue (slow consumer)"))
+		metric.WithDescription("SSE frames never written to a client, by why (reason) and the streamed table"))
 	withheld, _ := meter.Int64Counter("wavehouse_sse_rows_withheld_total",
 		metric.WithDescription("Event rows withheld from a subscriber by the role's row-level-security filter (including fail-closed evaluations)"))
-	return &Metrics{active: active, duration: duration, frames: frames, bytes: bytes, dropped: dropped, withheld: withheld}
+	queuePeak, _ := meter.Int64ObservableGauge("wavehouse_sse_queue_peak_frames",
+		metric.WithDescription("Deepest any open SSE stream's outbound queue has been since the stream opened, in frames"))
+	return &Metrics{
+		active: active, duration: duration, frames: frames, bytes: bytes, dropped: dropped, withheld: withheld,
+		meter: meter, queuePeak: queuePeak,
+	}
 }
 
 // ConnOpened records a newly established stream.
@@ -77,13 +93,27 @@ func (m *Metrics) FrameSent(kind string, n int) {
 	m.bytes.Add(context.Background(), int64(n), attrs)
 }
 
-// FrameDropped records one frame dropped because a subscriber's queue was full —
-// the slow-consumer signal that was silent before #294. kind is a Kind* constant.
-func (m *Metrics) FrameDropped(kind string) {
+// FrameDropped records one frame of the given kind (a Kind* constant) on a
+// stream of table that never reached the client, and why (a Drop* constant).
+func (m *Metrics) FrameDropped(table, kind, reason string) {
 	if m == nil {
 		return
 	}
-	m.dropped.Add(context.Background(), 1, metric.WithAttributes(attribute.String("kind", kind)))
+	m.dropped.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("table", table), attribute.String("kind", kind), attribute.String("reason", reason)))
+}
+
+// observeQueuePeak reports peak, read at each collection, as the queue-peak
+// gauge. A peak only grows while its stream is open, so a burst that filled a
+// queue between two scrapes still shows at the next one.
+func (m *Metrics) observeQueuePeak(peak func() int64) {
+	if m == nil {
+		return
+	}
+	_, _ = m.meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		o.ObserveInt64(m.queuePeak, peak())
+		return nil
+	}, m.queuePeak)
 }
 
 // RowWithheld records one event row withheld from one subscriber (live or replay)

@@ -855,6 +855,26 @@ wavehouse_settings_last_reload_successful == 0
 max by (instance) (wavehouse_settings_tenants{state="rejected"}) > 0
 ```
 
+### Dropped SSE frames
+
+Each SSE stream has an outbound queue of 64 frames. When a client reads slower than its table's events arrive, the queue fills and the frames that do not fit are dropped. The drop is silent to the client: the stream carries on with later frames, so its `Last-Event-ID` moves past the gap, and a reconnect with it replays from after the gap, not across it. A client that notices a gap in its own rows can reconnect with `?since=` set to a time before it. A frame can also go unwritten because the stream ended with it queued. `wavehouse_sse_dropped_frames_total{table, kind, reason}` counts both, and `reason` tells them apart:
+
+| `reason` | Meaning |
+| --- | --- |
+| `buffer_full` | The stream's queue was full: the client, or the network to it, is slower than the table's events. A burst of ingest can do this to a client that keeps up the rest of the time. |
+| `client_gone` | The client disconnected, or a write to it failed, with the frame queued or being written. |
+| `stream_closed` | The server ended the stream with the frame queued: a shutdown, or its tenant no longer served. |
+
+`kind` is the frame's: `event`, `replay`, `schema` or `keepalive`. `table` is the streamed table when the tenant's schema has it, and empty otherwise, since the name comes from the client. A burst of drops often lands between two scrapes; `increase()` over a short window reads it as a count and clears soon after, where a 5-minute rate spreads it into a small average. Each `table`, `kind` and `reason` gets its series at its first drop, and neither `increase()` nor `rate()` counts a series' first sample, so the first burst for a combination can go unseen:
+
+```promql
+sum by (table) (increase(wavehouse_sse_dropped_frames_total{reason="buffer_full"}[1m])) > 0
+```
+
+`wavehouse_sse_queue_peak_frames` is the deepest any open stream's queue has been since the stream opened. A peak near 64 means a stream is close to dropping, and because a peak only falls when its stream closes, a fill between two scrapes still shows.
+
+The logs name the connection. Every stream logs `SSE stream opened` and `SSE stream closed` at `INFO`, with its `table` and `role` and, like every request's record, its `request_id` and `tenant` (the response's `X-Request-Id` is the same id). A stream dropping `buffer_full` frames logs `SSE stream dropping frames` at `WARN`, at most once every 10 seconds, with the frames dropped since its last such line (`frames_dropped`), its total so far, and its queue's depth, peak and capacity. Every close line says how the stream ended (`end`: `client_gone`, `shutdown` or `evicted`), how long it lasted (`duration`), how many frames it dropped to a full queue (`frames_dropped_total`) and how many it left queued (`frames_discarded`); it is a `WARN` rather than an `INFO` when the stream dropped `buffer_full` frames.
+
 ### Separating the `/metrics` listener
 
 By default, `prometheus.port` is `0`, which mounts `/metrics` on the main API server port (typically `8080`). This is the friendliest setup for compose / quick-start use.
@@ -863,7 +883,7 @@ For production posture where metrics should not be exposed on the public API lis
 
 ### Many tables
 
-Seven metrics carry a `table` label, so each grows by one series per table that sees traffic, multiplied by its other labels. At a few dozen tables that is noise; with table-per-tenant schemas or thousands of tables it shows up in your time-series database's memory and bill. Set `prometheus.per_table_metrics: false` (`WH_METRICS_PER_TABLE=false`) to drop the label and report each metric summed over every table, on the Prometheus endpoint and OTLP push alike. WaveHouse logs one `WARN` naming the setting once its metrics have carried more than 500 distinct tables. See [Configuration → Metric labels](/configuration#metric-labels).
+Eight metrics carry a `table` label, so each grows by one series per table that sees traffic, multiplied by its other labels. At a few dozen tables that is noise; with table-per-tenant schemas or thousands of tables it shows up in your time-series database's memory and bill. Set `prometheus.per_table_metrics: false` (`WH_METRICS_PER_TABLE=false`) to drop the label and report each metric summed over every table, on the Prometheus endpoint and OTLP push alike. WaveHouse logs one `WARN` naming the setting once its metrics have carried more than 500 distinct tables. See [Configuration → Metric labels](/configuration#metric-labels).
 
 ### Profiling
 
