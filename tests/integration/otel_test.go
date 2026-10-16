@@ -421,10 +421,11 @@ func TestOTel_Headers_AppliedToAllSignals(t *testing.T) {
 
 // TestOTel_IngestTraceContinuity follows one ingest request's trace past the
 // queue through the wired app: the server span and the handler's span under
-// the caller's traceparent, then, in the ingest process, a flush span linked
-// to the handler's span and an INSERT span under the flush. The link is what
-// ties a slow or failed insert back to the request that produced its rows
-// once the api and ingest roles run in separate processes.
+// the caller's traceparent (the suite trusts loopback as a proxy), then, in
+// the ingest process, a flush span linked to the handler's span and an
+// INSERT span under the flush. The link is what ties a slow or failed insert
+// back to the request that produced its rows once the api and ingest roles
+// run in separate processes.
 func TestOTel_IngestTraceContinuity(t *testing.T) {
 	// No t.Parallel: initAndShutdown mutates OTel globals, which the running
 	// app's handlers and worker read per request and per flush.
