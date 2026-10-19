@@ -1,7 +1,7 @@
-name: PR cache cleanup
+name: Cache cleanup
 
-# Deletes the Actions caches pull requests no longer need. Both jobs run the
-# default branch's copy of this workflow and execute nothing from a PR, so no
+# Deletes the Actions caches no run will read. Every job runs the default
+# branch's copy of this workflow and executes nothing from a PR, so no
 # PR-authored code holds the write token, and fork PRs are covered too.
 #
 # - When a PR closes (merged or not): every cache saved under its refs. The
@@ -18,6 +18,10 @@ name: PR cache cleanup
 #   and scripts/ci/prune-pr-build-cache.sh keeps at most one per job per
 #   open PR, and none for a closed one: a run still going when its PR
 #   closed can save after the close cleanup.
+# - After each CI run of a push to main: main's superseded generations.
+#   A dependency bump mints a new set of every hashed key, and
+#   scripts/ci/prune-main-cache.sh keeps only the newest of each family
+#   instead of leaving the old set to eviction.
 
 on:
   pull_request_target:
@@ -76,3 +80,25 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: scripts/ci/prune-pr-build-cache.sh
+
+  main-cache-prune:
+    name: Prune main's superseded caches
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: main-cache-prune
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Delete main's superseded cache generations
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: scripts/ci/prune-main-cache.sh

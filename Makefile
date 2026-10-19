@@ -515,6 +515,20 @@ test-integration-parts:
 test-prune-pr-build-cache:
 	$(call run,prune-pr-build-cache test,scripts/ci/prune-pr-build-cache.test.sh,)
 
+# test-prune-main-cache: assert scripts/ci/prune-main-cache.sh, which deletes
+# main's superseded cache generations with a write token: one wrongly
+# selected costs every later run its warm cache. A verify leaf.
+.PHONY: test-prune-main-cache
+test-prune-main-cache:
+	$(call run,prune-main-cache test,scripts/ci/prune-main-cache.test.sh,)
+
+# test-prefetch-test-images: assert scripts/ci/prefetch-test-images.sh, which
+# CI runs to pull each suite's test images early; it reads them from the Go
+# sources, so this holds that derivation against the real sources. A verify leaf.
+.PHONY: test-prefetch-test-images
+test-prefetch-test-images:
+	$(call run,prefetch-test-images test,scripts/ci/prefetch-test-images.test.sh,)
+
 # test-review-gate: feed the pre-push review hooks (.claude/hooks/
 # review-marker.sh and agent-bash-gate.sh) synthetic hook events in a scratch
 # repository with sibling worktrees: a marker must attest to the exact commit a
@@ -639,12 +653,12 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (24): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# Leaves (26): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) + test-md-rules (node --test over the WH001/WH002 fixtures)
 # for JS/TS + Markdown + prose; lint-sh (shellcheck), lint-gha (actionlint),
 # test-classify-paths, test-release-channel, test-go-toolchain, check-dockerfile-go, check-nats-versions, test-tagged-tests,
-# test-integration-parts, test-prune-pr-build-cache, test-review-gate,
+# test-integration-parts, test-prune-pr-build-cache, test-prune-main-cache, test-prefetch-test-images, test-review-gate,
 # test-remote-ci, test-githooks and test-hook-commands for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
 # nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
@@ -659,7 +673,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-go-toolchain check-dockerfile-go check-nats-versions test-tagged-tests test-integration-parts test-prune-pr-build-cache test-review-gate test-remote-ci test-githooks test-hook-commands vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-go-toolchain check-dockerfile-go check-nats-versions test-tagged-tests test-integration-parts test-prune-pr-build-cache test-prune-main-cache test-prefetch-test-images test-review-gate test-remote-ci test-githooks test-hook-commands vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.

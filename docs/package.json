@@ -34,7 +34,7 @@
     "remark-math": "^6.0.0",
     "satteri": "^0.10.5",
     "sharp": "^0.35.5",
-    "starlight-image-zoom": "^0.16.0",
+    "starlight-image-zoom": "^0.16.1",
     "starlight-links-validator": "^0.26.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3"

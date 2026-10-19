@@ -816,6 +816,7 @@ func TestHub_SlowConsumerDropIncrementsMetric(t *testing.T) {
 	require.NoError(t, reader.Collect(context.Background(), &rm))
 	assert.Equal(t, int64(1), sumByNameKind(rm, "wavehouse_sse_dropped_frames_total", KindEvent))
 	assert.Equal(t, int64(1), sumByNameKind(rm, "wavehouse_sse_dropped_frames_total", KindKeepalive))
+	assert.Equal(t, int64(2), droppedWhere(rm, map[string]string{"reason": DropBufferFull}))
 }
 
 func TestHub_ReplayProjector(t *testing.T) {

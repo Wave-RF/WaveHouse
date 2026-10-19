@@ -256,13 +256,15 @@ jobs:
       - name: Pull Docker Hub images through a mirror
         continue-on-error: true
         run: scripts/ci/docker-hub-mirror.sh
-      # Background pull overlaps the ~25s of cache restores below, so
-      # testcontainers finds the image already local (a concurrent pull of
-      # the same tag is safe — dockerd dedupes layer downloads). Image tag
-      # must match tests/integration/setup_test.go.
-      - name: Prefetch ClickHouse image (background)
-        if: matrix.part == 'app'
-        run: docker pull -q clickhouse/clickhouse-server:26.6.3.62 >/tmp/clickhouse-pull.log 2>&1 &
+      # Background pulls of the part's test images overlap the ~25s of cache
+      # restores below, so testcontainers finds them local instead of a test
+      # (or TestMain, for dynamodb-local) waiting on a pull. The script reads
+      # the images from the part's sources; a failed prefetch leaves the test
+      # to pull as before.
+      - name: Prefetch test images (background)
+        env:
+          PART: ${{ matrix.part }}
+        run: scripts/ci/prefetch-test-images.sh "$PART"
       # A suffix per part although the parts compile with the same flags:
       # parts sharing one key would race to save it, and the first to finish
       # would store only the objects of its own test packages.
@@ -279,6 +281,9 @@ jobs:
         env:
           PART: ${{ matrix.part }}
         run: make "test-integration-$PART" COV_DEFER=1
+      - name: Prefetch results
+        if: always()
+        run: cat /tmp/prefetch-images.log 2>/dev/null || true
       - name: Upload coverage fragment
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -308,12 +313,10 @@ jobs:
       - name: Pull Docker Hub images through a mirror
         continue-on-error: true
         run: scripts/ci/docker-hub-mirror.sh
-      # Background pull overlaps the ~35s of setup + build below, so the
-      # orchestrator finds the image already local (a concurrent pull of
-      # the same tag is safe — dockerd dedupes layer downloads). Image tag
-      # must match scripts/orchestrator/main.go.
-      - name: Prefetch ClickHouse image (background)
-        run: docker pull -q clickhouse/clickhouse-server:26.6.3.62 >/tmp/clickhouse-pull.log 2>&1 &
+      # As in the integration job: the orchestrator's images pull during the
+      # ~35s of setup + build below.
+      - name: Prefetch test images (background)
+        run: scripts/ci/prefetch-test-images.sh e2e
       # Suffix is -e2e-cov, not -e2e: this cache must carry the
       # cover-instrumented server objects build-cover compiles below, but
       # saves are gated on an exact-key miss — the pre-existing -e2e entry
@@ -330,6 +333,9 @@ jobs:
       # the cover binary + the SDK vitest suite.
       - name: Build SDK dist + cover binary, run E2E suite
         run: make -j "$(nproc)" test-e2e COV_DEFER=1
+      - name: Prefetch results
+        if: always()
+        run: cat /tmp/prefetch-images.log 2>/dev/null || true
       - name: Upload coverage fragment
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
