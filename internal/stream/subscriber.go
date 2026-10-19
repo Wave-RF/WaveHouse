@@ -1,6 +1,9 @@
 package stream
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // defaultSubscriberQueue is the per-connection outbound buffer. A cap >1 (the
 // keepalive-only queue was cap 1) lets live event frames queue while the handler
@@ -50,6 +53,21 @@ type Subscriber struct {
 	// producer — the event fan-out, replay, the keepalive wheel — is covered without
 	// each call site remembering to count. Nil-safe (nil in tests).
 	metric *Metrics
+	// table is the drop counter's table label: the streamed table when the
+	// Hub knows it (Hub.LabelTable), else "".
+	table string
+
+	// full counts this connection's buffer_full drops and peak the deepest its
+	// queue has been, for the handler's slow-consumer log line and the
+	// queue-peak gauge; dropped signals the handler (see Dropped).
+	full    atomic.Int64
+	peak    atomic.Int64
+	dropped chan struct{}
+
+	// closed holds the drop reason once Close has run: a frame sent after it,
+	// by a fan-out that took its snapshot before the handler deregistered, is
+	// counted under that reason instead of queuing where nothing reads it.
+	closed atomic.Pointer[string]
 
 	// schemaMu guards lastSchema against the connection's own handler goroutine,
 	// which reads nothing here but may run alongside the fan-out.
@@ -96,7 +114,14 @@ func (s *Subscriber) recordSchema(sig string) {
 // deep-copied — see the claims field for the snapshot rationale — and the shared
 // stream metrics (nil-safe) that Send counts drops on.
 func NewSubscriber(claims map[string]any, m *Metrics) *Subscriber {
+	return NewTableSubscriber("", claims, m)
+}
+
+// NewTableSubscriber is NewSubscriber whose dropped frames carry table as
+// their label: pass Hub.LabelTable's, never the request's raw value.
+func NewTableSubscriber(table string, claims map[string]any, m *Metrics) *Subscriber {
 	s := newSubscriber(defaultSubscriberQueue, m)
+	s.table = table
 	s.claims = cloneClaimsMap(claims)
 	return s
 }
@@ -135,7 +160,7 @@ func cloneClaimValue(v any) any {
 // the one place the drop-counting metric is wired, so the production
 // constructor and the drop tests share it.
 func newSubscriber(size int, m *Metrics) *Subscriber {
-	return &Subscriber{out: make(chan Frame, size), evict: make(chan struct{}), metric: m}
+	return &Subscriber{out: make(chan Frame, size), evict: make(chan struct{}), dropped: make(chan struct{}, 1), metric: m}
 }
 
 // Frames is the queue of ready-to-write frames; the handler writes whatever
@@ -149,13 +174,84 @@ func (s *Subscriber) Frames() <-chan Frame {
 // producer can forget to; callers may ignore the result (a keepalive that drops
 // coalesces harmlessly — the full queue keeps the stream alive anyway).
 func (s *Subscriber) Send(f Frame) bool {
-	select {
-	case s.out <- f:
-		return true
-	default:
-		s.metric.FrameDropped(f.Kind)
+	if s.closed.Load() != nil {
+		s.drop(f.Kind)
 		return false
 	}
+	select {
+	case s.out <- f:
+		s.notePeak(int64(len(s.out)))
+		// Close may have drained the queue between the check above and this
+		// send; draining again counts the frame rather than stranding it.
+		if r := s.closed.Load(); r != nil {
+			s.discard(*r)
+		}
+		return true
+	default:
+		s.drop(f.Kind)
+		return false
+	}
+}
+
+// drop counts one frame of kind that never reached the queue: under the
+// reason Close recorded once the stream has ended, else as a buffer_full drop.
+func (s *Subscriber) drop(kind string) {
+	if r := s.closed.Load(); r != nil {
+		s.metric.FrameDropped(s.table, kind, *r)
+		return
+	}
+	s.metric.FrameDropped(s.table, kind, DropBufferFull)
+	s.full.Add(1)
+	s.notePeak(int64(cap(s.out)))
+	select {
+	case s.dropped <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Subscriber) notePeak(depth int64) {
+	for {
+		p := s.peak.Load()
+		if depth <= p || s.peak.CompareAndSwap(p, depth) {
+			return
+		}
+	}
+}
+
+// discard empties the queue, counting each frame under reason, and reports
+// how many it took.
+func (s *Subscriber) discard(reason string) int {
+	n := 0
+	for {
+		select {
+		case f := <-s.out:
+			s.metric.FrameDropped(s.table, f.Kind, reason)
+			n++
+		default:
+			return n
+		}
+	}
+}
+
+// Close ends the subscriber's delivery once its handler has stopped writing:
+// every frame still queued, and any sent from here on, is counted as dropped
+// for reason (a Drop* constant). It reports how many were queued. Call it after
+// deregistering from the Hub and the keepalive wheel.
+func (s *Subscriber) Close(reason string) int {
+	s.closed.Store(&reason)
+	return s.discard(reason)
+}
+
+// Dropped receives, coalesced, after a buffer_full drop, so the handler can log
+// the drops without polling.
+func (s *Subscriber) Dropped() <-chan struct{} {
+	return s.dropped
+}
+
+// QueueStats reports the connection's buffer_full drops so far, its queue's
+// depth now, the deepest it has been, and its capacity.
+func (s *Subscriber) QueueStats() (dropped int64, depth, peak, capacity int) {
+	return s.full.Load(), len(s.out), int(s.peak.Load()), cap(s.out)
 }
 
 // Evict marks the subscriber for disconnection: its handler ends the stream.

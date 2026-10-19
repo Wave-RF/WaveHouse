@@ -99,7 +99,35 @@ type RegistrySource func(tenant.ID) *discovery.SchemaRegistry
 // equality/set predicates admit only a byte-identical value and ordering/!= admit
 // nothing (see policy.ColumnKind); metric may be nil.
 func NewHub(policyStore PolicySource, registry RegistrySource, metric *Metrics) *Hub {
-	return &Hub{topics: make(map[mq.Topic]*topicRoutes), policy: policyStore, registry: registry, metric: metric}
+	h := &Hub{topics: make(map[mq.Topic]*topicRoutes), policy: policyStore, registry: registry, metric: metric}
+	metric.observeQueuePeak(h.queuePeak)
+	return h
+}
+
+// LabelTable is table as a metric label for a stream of tenant id: the name
+// itself when the tenant's schema has the table, "" otherwise. A stream's table
+// comes from the client, so an unchecked label would let any caller mint series.
+func (h *Hub) LabelTable(id tenant.ID, table string) string {
+	if h.schema(id, table) == nil {
+		return ""
+	}
+	return table
+}
+
+// queuePeak is the deepest any registered subscriber's queue has been, 0 with
+// none registered.
+func (h *Hub) queuePeak() int64 {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	var peak int64
+	for _, tr := range h.topics {
+		for _, b := range tr.roles {
+			for _, sub := range b.Snapshot() {
+				peak = max(peak, sub.peak.Load())
+			}
+		}
+	}
+	return peak
 }
 
 // schema is tenant id's schema for table, nil when the hub has no registry
@@ -284,7 +312,7 @@ func (h *Hub) Broadcast(topic mq.Topic, raw []byte) {
 func deliver(sub *Subscriber, plan rolePlan) {
 	if plan.announce && sub.needsSchema(plan.sig) {
 		if !sub.Send(plan.schemaFrame()) {
-			sub.metric.FrameDropped(plan.data.Kind)
+			sub.drop(plan.data.Kind)
 			return
 		}
 		sub.recordSchema(plan.sig)

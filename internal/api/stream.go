@@ -14,6 +14,17 @@ import (
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
+// dropWarnInterval spaces one stream's slow-consumer WARN lines: drops in
+// between are summed into the next line, and the close line reports the total.
+const dropWarnInterval = 10 * time.Second
+
+// Why a stream ended, as its close log line says (the "end" field).
+const (
+	endClientGone = "client_gone" // the client disconnected, or a write to it failed
+	endShutdown   = "shutdown"    // the server began shutting down
+	endEvicted    = "evicted"     // its tenant is no longer served
+)
+
 // StreamHandler handles GET /v1/stream
 type StreamHandler struct {
 	Hub      *stream.Hub
@@ -96,6 +107,8 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	h.Metrics.ConnOpened()
 	connectedAt := time.Now()
 	defer func() { h.Metrics.ConnClosed(time.Since(connectedAt)) }()
+	ctx := r.Context()
+	slog.InfoContext(ctx, "SSE stream opened", "component", "stream", "table", table, "role", role)
 
 	// Register for live events before gap-fill so events arriving during replay
 	// buffer in the subscriber queue instead of being missed (an overlap with
@@ -105,7 +118,12 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// replayed frame and its live twin share a received_timestamp and are kept or
 	// dropped together. A consumer that cares keys on timestamp plus its own row
 	// identity.
-	sub := stream.NewSubscriber(claims, h.Metrics)
+	label := h.Hub.LabelTable(topic.Tenant, table)
+	sub := stream.NewTableSubscriber(label, claims, h.Metrics)
+	// Deferred ahead of the Hub and wheel removals so it runs after them: by
+	// then no producer can queue a frame Close would miss.
+	end := endClientGone
+	defer func() { h.closeStream(ctx, sub, table, role, end, time.Since(connectedAt)) }()
 
 	// Announce the column list BEFORE registering for live events: rows travel
 	// positionally, so a client that hasn't been told the columns can't read one.
@@ -116,6 +134,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if f, ok := h.Hub.SubscribeSchemaFrame(topic.Tenant, table, role, sub); ok {
 		n, err := w.Write(f.Data)
 		if err != nil {
+			h.Metrics.FrameDropped(label, f.Kind, stream.DropClientGone)
 			return
 		}
 		flusher.Flush()
@@ -127,6 +146,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// The registry stops serving a tenant before its hooks run, so a reload
 	// either finds this subscriber to evict or is seen here.
 	if h.Served != nil && !h.Served(topic.Tenant) {
+		end = endEvicted
 		return
 	}
 
@@ -148,9 +168,13 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		sendReplay := func(data []byte) bool {
 			// Zero frames means the event is filtered out for this role; two means
 			// the column list changed and is announced before the row.
-			for _, f := range project(data) {
+			frames := project(data)
+			for i, f := range frames {
 				n, err := w.Write(f.Data)
 				if err != nil {
+					for _, lost := range frames[i:] {
+						h.Metrics.FrameDropped(label, lost.Kind, stream.DropClientGone)
+					}
 					return false
 				}
 				flusher.Flush()
@@ -180,29 +204,63 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var lastWarn time.Time
+	var warned int64
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-h.Closing:
+			end = endShutdown
 			return
 		case <-sub.Evicted():
 			// Its tenant is no longer served (Hub.Prune). The client reconnects
 			// into that tenant's 404 or 503, and gap-fills via Last-Event-ID once
 			// the tenant is served again.
+			end = endEvicted
 			return
+		case <-sub.Dropped():
+			if now := time.Now(); now.Sub(lastWarn) >= dropWarnInterval {
+				dropped, depth, peak, capacity := sub.QueueStats()
+				slog.WarnContext(ctx, "SSE stream dropping frames",
+					"component", "stream", "table", table, "role", role,
+					"frames_dropped", dropped-warned, "frames_dropped_total", dropped,
+					"queue_depth", depth, "queue_peak", peak, "queue_capacity", capacity)
+				lastWarn, warned = now, dropped
+			}
 		case f := <-sub.Frames():
 			// One byte-pump for every frame kind: keepalive comments from the wheel and
 			// projected event frames from the Hub, already serialized. A write error
 			// means the client is gone (also a liveness probe on idle streams).
 			n, err := w.Write(f.Data)
 			if err != nil {
+				h.Metrics.FrameDropped(label, f.Kind, stream.DropClientGone)
 				return
 			}
 			flusher.Flush()
 			h.Metrics.FrameSent(f.Kind, n)
 		}
 	}
+}
+
+// closeStream discards what sub still has queued, counted under the reason
+// end implies, and logs the close: at WARN when the stream dropped frames to
+// a full queue, so a slow consumer's last line says whether it then
+// disconnected.
+func (h *StreamHandler) closeStream(ctx context.Context, sub *stream.Subscriber, table, role, end string, lived time.Duration) {
+	reason := stream.DropStreamClosed
+	if end == endClientGone {
+		reason = stream.DropClientGone
+	}
+	discarded := sub.Close(reason)
+	dropped, _, peak, capacity := sub.QueueStats()
+	level := slog.LevelInfo
+	if dropped > 0 {
+		level = slog.LevelWarn
+	}
+	slog.Log(ctx, level, "SSE stream closed", "component", "stream", "table", table, "role", role,
+		"end", end, "duration", lived, "frames_dropped_total", dropped, "frames_discarded", discarded,
+		"queue_peak", peak, "queue_capacity", capacity)
 }
 
 // replayContext is the gap-fill's context: the request's, cancelled early
