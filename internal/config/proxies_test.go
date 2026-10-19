@@ -25,6 +25,7 @@ func TestParseTrustedProxies(t *testing.T) {
 		{name: "hostname refused", entries: []string{"proxy.internal"}, wantErr: `"proxy.internal"`},
 		{name: "bad prefix length refused", entries: []string{"10.0.0.0/33"}, wantErr: `"10.0.0.0/33"`},
 		{name: "zoned address refused", entries: []string{"fe80::1%eth0"}, wantErr: `"fe80::1%eth0"`},
+		{name: "IPv4-mapped prefix shorter than /96 refused", entries: []string{"::ffff:0:0/80"}, wantErr: `"::ffff:0:0/80" is an IPv4-mapped prefix`},
 		{name: "port refused", entries: []string{"10.0.0.1:80"}, wantErr: `"10.0.0.1:80"`},
 	}
 	for _, tt := range tests {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"strings"
@@ -18,27 +19,34 @@ func ParseTrustedProxies(entries []string) ([]netip.Prefix, error) {
 		}
 		p, err := parseTrustedProxy(e)
 		if err != nil {
-			return nil, fmt.Errorf("server.trusted_proxies: %q is neither a CIDR nor an IP address", e)
+			return nil, fmt.Errorf("server.trusted_proxies: %q %w", e, err)
 		}
 		out = append(out, p)
 	}
 	return out, nil
 }
 
+var errNotAddress = errors.New("is neither a CIDR nor an IP address")
+
 func parseTrustedProxy(e string) (netip.Prefix, error) {
 	if !strings.Contains(e, "/") {
 		a, err := netip.ParseAddr(e)
 		if err != nil || a.Zone() != "" {
-			return netip.Prefix{}, fmt.Errorf("not an address")
+			return netip.Prefix{}, errNotAddress
 		}
 		a = a.Unmap()
 		return netip.PrefixFrom(a, a.BitLen()), nil
 	}
 	p, err := netip.ParsePrefix(e)
 	if err != nil {
-		return netip.Prefix{}, err
+		return netip.Prefix{}, errNotAddress
 	}
-	if a := p.Addr(); a.Is4In6() && p.Bits() >= 96 {
+	// Peers are unmapped before matching, so a mapped prefix must become IPv4;
+	// one shorter than /96 reaches past ::ffff:0:0/96 and has no IPv4 form.
+	if a := p.Addr(); a.Is4In6() {
+		if p.Bits() < 96 {
+			return netip.Prefix{}, errors.New("is an IPv4-mapped prefix shorter than /96: write it as an IPv4 CIDR")
+		}
 		p = netip.PrefixFrom(a.Unmap(), p.Bits()-96)
 	}
 	return p.Masked(), nil
