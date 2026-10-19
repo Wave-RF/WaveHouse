@@ -197,7 +197,7 @@ These limit the *whole* request regardless of traffic, so no keepalive extends t
 - **`X-Tenant-ID`** — **strip it at the edge unless you are deliberately using it.** It selects the [tenant](/deployment#multi-tenant-deployments) (absent means tenant `0`), and a settings directory that isn't nested defines no tenant other than `0`, so a gateway or mesh that stamps `X-Tenant-ID` with any other value turns every `/v1` route outside `/v1/ops/*` into a `404` (a `400` when the value is not a tenant id at all, a dotted hostname, say) — the SDK's `/v1/health` reachability ping included. It is resolved before authentication and never derived from the token, so a proxy that owns tenant selection must **replace** a client-supplied value, not add to it: two `X-Tenant-ID` lines are refused with `400`. That is a stricter version of the append-vs-replace hazard of `Content-Type` below — here even two agreeing lines are refused. Over a [nested settings directory](/deployment#the-nested-settings-directory) the proxy owns the tenant: derive it from the host or path and set it on **every** request, the CORS `OPTIONS` preflight included — the browser sends no custom header there, and WaveHouse reads the preflight's tenant the same way ([per-tenant CORS](/deployment#multi-tenant-deployments)). The name is hyphenated, so nginx's underscore rule does not apply.
 - **`X-Request-Id`** (optional) — set it to your proxy's request id (nginx `$request_id`, Envoy's `x-request-id`) and WaveHouse logs and traces the request under the same id and returns it on the response, so its log lines join your access log; **replace** a client-supplied value rather than appending, since two lines are ignored and a fresh id minted. An id longer than 128 characters, or with spaces or non-ASCII characters, is replaced the same way ([details](/deployment#following-one-request-or-one-tenant)).
 - **`X-Forwarded-For`** — have the proxy **append** the peer it received the request from (nginx `$proxy_add_x_forwarded_for`; Caddy's `reverse_proxy` sets it by default) and list the proxy in [`server.trusted_proxies`](/configuration#server): WaveHouse then logs and traces the request under the client's address, read as [Client address and trace context](#client-address-and-trace-context) describes. From a peer that is not listed the header is ignored.
-- **`traceparent` / `tracestate`** (optional) — a proxy with an OpenTelemetry module (nginx's `ngx_otel_module`, Caddy's `tracing` directive, Envoy) sends them, and a request from a listed proxy joins that trace, so list only a proxy that replaces a client's own `traceparent` rather than forwarding it unchanged. See [below](#client-address-and-trace-context).
+- **`traceparent` / `tracestate`** (optional) — a proxy with an OpenTelemetry module (nginx's `ngx_otel_module`, Caddy's `tracing` directive, Envoy) sends its own, and a request from a listed proxy joins that trace. A proxy without one forwards the client's untouched, so have it remove both headers, as the [example configurations](#example-configurations) do. See [below](#client-address-and-trace-context).
 - **`X-Forwarded-Proto` / `Host`** — set these for your own logs and any upstream that reads them. WaveHouse reads neither.
 
 :::caution[Don't expose `:8080` directly]
@@ -227,7 +227,9 @@ List only addresses your proxies use. A range that also holds clients lets a cli
 
 **Trace context.** A proxy with OpenTelemetry tracing sends a W3C `traceparent` (and `tracestate`), and a request from a listed proxy **joins that trace**: its server span is a child of the proxy's span, and its log records carry the proxy's `trace_id`. A `traceparent` from any other peer, a client calling WaveHouse directly or one whose proxy is not listed, starts a new trace that **links** to the one it named instead of joining it, so a client cannot write spans into your traces or pick the trace id its requests are logged under. With `server.trusted_proxies` empty, no incoming trace is joined.
 
-List the address each proxy connects to WaveHouse from: `127.0.0.1` for nginx or Caddy on the same host, as in the [example configurations](#example-configurations) (nginx's `$proxy_add_x_forwarded_for` appends the peer; Caddy's `reverse_proxy` sets the header by default), and likewise for a `cloudflared` running beside WaveHouse, behind which Cloudflare's edge has put the visitor's address in the header. A proxy whose upstream is `localhost`, like the Cloudflare Tunnel example's `http://localhost:8080`, may connect over IPv6, so list `::1` too: `trusted_proxies: [127.0.0.1, ::1]`. A proxy you left out is not an error; `client.address` just reads as the proxy's own address. Behind a load balancer and then an ingress, list both: each appends the peer it saw.
+Listing a proxy trusts the `traceparent` it forwards as well as its `X-Forwarded-For`. A proxy with tracing of its own replaces the client's; one without passes the client's through, and a listed proxy that does that lets any client join its own trace again. Remove both headers on such a proxy: nginx `proxy_set_header traceparent ""; proxy_set_header tracestate "";` (an empty value drops the header), Caddy `header_up -traceparent` and `header_up -tracestate`, and in front of a Cloudflare Tunnel a request-header Transform Rule that removes both.
+
+List the address each proxy connects to WaveHouse from: `127.0.0.1` for nginx or Caddy on the same host, as in the [example configurations](#example-configurations) (nginx's `$proxy_add_x_forwarded_for` appends the peer; Caddy's `reverse_proxy` sets the header by default), and likewise for a `cloudflared` running beside WaveHouse, behind which Cloudflare's edge has put the visitor's address in the header. A proxy whose upstream is `localhost`, like the Cloudflare Tunnel example's `http://localhost:8080`, may connect over IPv6, so list `::1` too: `trusted_proxies: [127.0.0.1, ::1]`. A proxy you left out is not an error; `client.address` just reads as the proxy's own address. Behind a load balancer and then an ingress, list both: each appends the peer it saw. When WaveHouse runs in a container, the peer is not `127.0.0.1`: a proxy on the host reaches a published port from the container network's gateway (often `172.17.0.1`), and a proxy container from its own address on that network. To find the address to list, send one request and read the span's `network.peer.address`, or `client.address` while the proxy is not yet listed.
 
 ## Fencing the admin surface
 
@@ -281,6 +283,8 @@ server {
         proxy_set_header      Host $host;
         proxy_set_header      X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header      X-Forwarded-Proto $scheme;
+        proxy_set_header      traceparent "";
+        proxy_set_header      tracestate "";
     }
 
     location / {
@@ -288,6 +292,10 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # Drop the client's trace context: trusted_proxies would join it.
+        # Leave these out if ngx_otel_module sends nginx's own.
+        proxy_set_header traceparent "";
+        proxy_set_header tracestate "";
     }
 }
 ```
@@ -309,9 +317,16 @@ wavehouse.example.com {
     # response timeout, so quiet streams already survive.
     reverse_proxy /v1/stream* 127.0.0.1:8080 {
         flush_interval -1
+        header_up -traceparent
+        header_up -tracestate
     }
 
-    reverse_proxy 127.0.0.1:8080
+    # Drop the client's trace context: trusted_proxies would join it.
+    # Leave these out if Caddy's tracing directive sends its own.
+    reverse_proxy 127.0.0.1:8080 {
+        header_up -traceparent
+        header_up -tracestate
+    }
 }
 ```
 
