@@ -64,7 +64,8 @@ func testMeterReader(t *testing.T) (*sdkmetric.MeterProvider, *sdkmetric.ManualR
 // TestHTTPMetrics_LabelsByRoutePattern: a request is recorded under the
 // route it matched, its pattern and not its path, so a path parameter adds
 // no series (the mount's own pattern when it was answered inside the mount
-// without reaching a route, unmatched when it reached no mount); under the
+// without reaching a route, as a mount's own gate refuses it, unmatched
+// when it reached no mount); under the
 // method, a closed set; and under its status class, a panic counting as the
 // 500 the recoverer answers.
 func TestHTTPMetrics_LabelsByRoutePattern(t *testing.T) {
@@ -82,6 +83,12 @@ func TestHTTPMetrics_LabelsByRoutePattern(t *testing.T) {
 			r.Post("/ingest", func(w http.ResponseWriter, _ *http.Request) { writeJSONError(w, http.StatusBadRequest, "bad") })
 			r.Get("/stream", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 		})
+		r.Route("/ops", func(r chi.Router) {
+			r.Use(func(http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { writeJSONError(w, http.StatusForbidden, "no") })
+			})
+			r.Post("/query", func(http.ResponseWriter, *http.Request) {})
+		})
 	})
 	r.Get("/boom", func(http.ResponseWriter, *http.Request) { panic("boom") })
 
@@ -93,6 +100,7 @@ func TestHTTPMetrics_LabelsByRoutePattern(t *testing.T) {
 		{"PURGE", "/v1/pipes/a"},
 		{http.MethodDelete, "/v1/pipes/a"},
 		{http.MethodGet, "/v1/nope"},
+		{http.MethodPost, "/v1/ops/query"},
 		{http.MethodGet, "/nope"},
 		{http.MethodGet, "/boom"},
 	} {
@@ -106,6 +114,7 @@ func TestHTTPMetrics_LabelsByRoutePattern(t *testing.T) {
 		"method=other,route=unmatched,status_class=4xx":      1,
 		"method=DELETE,route=/v1/*,status_class=4xx":         1,
 		"method=GET,route=/v1/*,status_class=4xx":            1,
+		"method=POST,route=/v1/ops/*,status_class=4xx":       1,
 		"method=GET,route=unmatched,status_class=4xx":        1,
 		"method=GET,route=/boom,status_class=5xx":            1,
 	}, histogramCounts(t, reader, "wavehouse_http_request_duration_seconds"),
