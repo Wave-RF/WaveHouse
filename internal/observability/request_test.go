@@ -195,3 +195,13 @@ func TestAnnotateSpan_ReplacesClientAddress(t *testing.T) {
 		attribute.String(ClientAddressKey, "198.51.100.1"),
 	}, rec.Ended()[0].Attributes())
 }
+
+// An unresolved client is left out of log records.
+func TestTraceHandler_UnresolvedClientAddress(t *testing.T) {
+	t.Parallel()
+	ctx := WithRequest(context.Background(), "req-1")
+	SetRequestClient(ctx, "")
+	lines := logLines(t, func(l *slog.Logger) { l.InfoContext(ctx, "hello") })
+	require.Len(t, lines, 1)
+	assert.NotContains(t, lines[0], ClientAddressKey)
+}

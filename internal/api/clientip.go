@@ -104,13 +104,17 @@ func normalizeAddr(a netip.Addr) netip.Addr {
 
 // clientAddress records the request's client address in the request scope,
 // so its log records and server span carry client.address. It runs after
-// requestID, which opens the scope.
+// requestID, which opens the scope. An address it cannot resolve is recorded
+// as empty, so the span does not keep the one otelhttp read from
+// X-Forwarded-For.
 func clientAddress(t trustedProxies) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var addr string
 			if a := t.clientAddr(r); a.IsValid() {
-				observability.SetRequestClient(r.Context(), a.String())
+				addr = a.String()
 			}
+			observability.SetRequestClient(r.Context(), addr)
 			next.ServeHTTP(w, r)
 		})
 	}

@@ -120,6 +120,9 @@ func TestNewOpsRouter_ClientAddressAndTraceContinuation(t *testing.T) {
 	}{
 		{name: "trusted proxy", remote: "10.0.0.1:4000", wantClient: "198.51.100.1", wantJoined: true},
 		{name: "direct client", remote: "203.0.113.9:4000", wantClient: "203.0.113.9"},
+		// otelhttp reads 198.51.100.1 from the header; an unparseable peer
+		// is trusted for nothing, so the span must not keep it.
+		{name: "unparseable peer", remote: "not-an-address", wantClient: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

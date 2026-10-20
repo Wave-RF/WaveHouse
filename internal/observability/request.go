@@ -62,7 +62,9 @@ func SetRequestTenant(ctx context.Context, tenant string) {
 }
 
 // SetRequestClient records the address the request came from on its scope
-// and on the span in ctx. Outside a request it still annotates the span.
+// and on the span in ctx. Outside a request it still annotates the span. An
+// empty addr marks the address unresolved: log records leave it out, and the
+// span's client.address is blanked rather than left as otelhttp's.
 func SetRequestClient(ctx context.Context, addr string) {
 	if s := scopeFrom(ctx); s != nil {
 		s.client.Store(&addr)
@@ -101,7 +103,7 @@ func addRequestAttrs(ctx context.Context, r *slog.Record) {
 		return
 	}
 	r.AddAttrs(slog.String(RequestIDKey, s.id))
-	if c := s.client.Load(); c != nil {
+	if c := s.client.Load(); c != nil && *c != "" {
 		r.AddAttrs(slog.String(ClientAddressKey, *c))
 	}
 	t := s.tenant.Load()
