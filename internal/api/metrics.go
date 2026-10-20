@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -21,8 +22,9 @@ var latencyBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10,
 // routeUnmatched is the route label of a request that reached no route or
 // mount: an unknown top-level path, a method chi does not route, or a CORS
 // preflight answered before routing. One answered inside a mount short of a
-// route (an unknown path under /v1, a tenant not served) carries the mount's
-// pattern, /v1/*.
+// route (an unknown path or an unsupported method under /v1) carries the
+// mount's pattern, /v1/*; one a group middleware refuses (a tenant not
+// served) has matched its route already and carries that.
 const routeUnmatched = "unmatched"
 
 // httpMetrics records each request's latency by route, method and status
@@ -114,8 +116,12 @@ const (
 	opOpsQuery        = "ops_query"  // raw SQL, POST /v1/ops/query
 )
 
-// resultOK is the "result" of a query ClickHouse answered.
-const resultOK = "ok"
+// Results that are not an error code: a query ClickHouse answered, and one
+// cut short because its client went away.
+const (
+	resultOK       = "ok"
+	resultCanceled = "canceled"
+)
 
 // queryMetrics records each ClickHouse call the query paths make: one per
 // statement sent, so a cache hit records none and callers coalesced onto one
@@ -131,16 +137,23 @@ func newQueryMetrics() *queryMetrics { return queryMetricsOn(otel.Meter(meterNam
 // queryMetricsOn builds the query-path instruments on meter.
 func queryMetricsOn(meter metric.Meter) *queryMetrics {
 	duration, _ := meter.Float64Histogram("wavehouse_clickhouse_query_duration_seconds",
-		metric.WithDescription("ClickHouse calls on the query paths by operation (query, pipe, pipe_write, ops_query) and result: ok, or the error code the response carries without its clickhouse. prefix (rejected, limit_exceeded, access_denied, misconfigured, unavailable, response_too_large, unknown)"),
+		metric.WithDescription("ClickHouse calls on the query paths by operation (query, pipe, pipe_write, ops_query) and result: ok, canceled (the client went away), or the error code the response carries without its clickhouse. prefix (rejected, limit_exceeded, access_denied, misconfigured, unavailable, response_too_large, unknown)"),
 		metric.WithUnit("s"), metric.WithExplicitBucketBoundaries(latencyBuckets...))
 	return &queryMetrics{duration: duration}
 }
 
 // observe records one call of operation that took d and ended in err,
-// classed as the response classes it (chFailureOf, under caps).
-func (m *queryMetrics) observe(operation string, d time.Duration, err error, caps queryCaps) {
+// classed as the response classes it (chFailureOf, under caps); reqCtx is the
+// request's own context. A call cut short because the client went away is
+// resultCanceled, not the unavailable its response would read as: nobody
+// reads that response, and ClickHouse was not the one that failed.
+func (m *queryMetrics) observe(reqCtx context.Context, operation string, d time.Duration, err error, caps queryCaps) {
 	result := resultOK
-	if err != nil {
+	switch {
+	case err == nil:
+	case errors.Is(err, context.Canceled) && reqCtx.Err() != nil:
+		result = resultCanceled
+	default:
 		result = chResult(chFailureOf(err, http.StatusInternalServerError, caps).code)
 	}
 	m.record(operation, d, result)

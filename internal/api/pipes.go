@@ -244,7 +244,7 @@ func (h *PipesHandler) run(ctx context.Context, store *settings.Store, conn driv
 	start := time.Now()
 	rows, err := executeCHQuery(queryCtx, conn, sql, params)
 	queryDuration := time.Since(start)
-	h.metrics.observe(operation, queryDuration, err, queryCaps{})
+	h.metrics.observe(ctx, operation, queryDuration, err, queryCaps{})
 	if err != nil {
 		return nil, 0, err
 	}

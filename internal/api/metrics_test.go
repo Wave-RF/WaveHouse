@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -216,10 +217,30 @@ func TestQueryMetrics_NilIsNoop(t *testing.T) {
 	t.Parallel()
 	var m *queryMetrics
 	assert.NotPanics(t, func() {
-		m.observe(opPipe, time.Second, nil, queryCaps{})
+		m.observe(context.Background(), opPipe, time.Second, nil, queryCaps{})
 		m.record(opOpsQuery, time.Second, resultOK)
 	})
 	var hm *httpMetrics
 	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 	assert.NotNil(t, hm.middleware(next))
+}
+
+// TestQueryMetrics_ClientGone: a call cut short because the client went away
+// is canceled, not unavailable, which would read as ClickHouse failing; a
+// cancel of WaveHouse's own (the time-cap backstop) with the client still
+// there stays unavailable.
+func TestQueryMetrics_ClientGone(t *testing.T) {
+	t.Parallel()
+	mp, reader := testMeterReader(t)
+	m := queryMetricsOn(mp.Meter(meterName))
+	gone, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := fmt.Errorf("clickhouse query: %w", context.Canceled)
+	m.observe(gone, opStructuredQuery, time.Millisecond, err, queryCaps{})
+	m.observe(t.Context(), opStructuredQuery, time.Millisecond, err, queryCaps{time: true})
+
+	assert.Equal(t, map[string]uint64{
+		"operation=query,result=canceled":    1,
+		"operation=query,result=unavailable": 1,
+	}, histogramCounts(t, reader, "wavehouse_clickhouse_query_duration_seconds"))
 }

@@ -257,7 +257,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 		rows, err := executeCHQuery(queryCtx, conn, result.SQL, result.Params)
 		queryDuration := time.Since(start)
-		h.metrics.observe(opStructuredQuery, queryDuration, err, caps)
+		h.metrics.observe(r.Context(), opStructuredQuery, queryDuration, err, caps)
 		if err != nil {
 			// TODO: depending on the error, we may actually want to cache it
 			return nil, err

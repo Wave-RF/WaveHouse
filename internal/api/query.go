@@ -271,7 +271,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	resp, err := h.clients.For(target).Do(httpReq)
 	if err != nil {
-		h.metrics.observe(opOpsQuery, time.Since(start), err, queryCaps{})
+		h.metrics.observe(r.Context(), opOpsQuery, time.Since(start), err, queryCaps{})
 		writeCHError(w, r, err, "clickhouse request failed: "+err.Error(), http.StatusBadGateway, queryCaps{})
 		return
 	}
@@ -286,7 +286,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, respCap+1))
 	elapsed := time.Since(start)
 	if err != nil {
-		h.metrics.observe(opOpsQuery, elapsed, err, queryCaps{})
+		h.metrics.observe(r.Context(), opOpsQuery, elapsed, err, queryCaps{})
 		writeCHError(w, r, err, "read clickhouse response: "+err.Error(), http.StatusBadGateway, queryCaps{})
 		return
 	}
@@ -308,7 +308,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		// exception code it sends with it does (#403). The message is
 		// ClickHouse's own text, verbatim.
 		chErr := chconn.NewHTTPError(&http.Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: io.NopCloser(bytes.NewReader(body))})
-		h.metrics.observe(opOpsQuery, elapsed, chErr, queryCaps{})
+		h.metrics.observe(r.Context(), opOpsQuery, elapsed, chErr, queryCaps{})
 		msg := strings.TrimSpace(string(body))
 		if msg == "" {
 			msg = fmt.Sprintf("clickhouse returned status %d", resp.StatusCode)
