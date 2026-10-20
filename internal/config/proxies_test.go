@@ -63,13 +63,18 @@ func TestValidate_TrustedProxies(t *testing.T) {
 
 func TestWarnings_TrustEveryPeer(t *testing.T) {
 	t.Parallel()
-	for _, all := range []string{"0.0.0.0/0", "::/0"} {
+	for all, family := range map[string]string{"0.0.0.0/0": "IPv4", "::/0": "IPv6"} {
 		cfg := defaults()
 		cfg.Server.TrustedProxies = []string{"10.0.0.0/8", all}
 		w := cfg.Warnings()
 		require.Len(t, w, 1, all)
-		assert.Contains(t, w[0], "every peer is trusted")
+		assert.Contains(t, w[0], "every "+family+" peer is trusted")
 	}
+
+	// Each /0 trusts only its own family, so both are named.
+	cfg := defaults()
+	cfg.Server.TrustedProxies = []string{"0.0.0.0/0", "::/0"}
+	assert.Len(t, cfg.Warnings(), 2)
 }
 
 func TestLoad_TrustedProxiesFromEnv(t *testing.T) {

@@ -64,13 +64,20 @@ func (c *Config) validateTrustedProxies() error {
 	return err
 }
 
-// trustedProxyWarnings flags a /0 entry: it trusts every peer, so a client
-// reaching the port directly chooses the address it is logged under.
+// trustedProxyWarnings flags each /0 entry: it trusts every peer of its address
+// family (peers are unmapped, so ::/0 covers only IPv6 ones), so a client of
+// that family reaching the port directly chooses the address it is logged under.
 func (c *Config) trustedProxyWarnings() []string {
+	var w []string
 	for _, p := range c.Server.TrustedProxyPrefixes() {
-		if p.Bits() == 0 {
-			return []string{"server.trusted_proxies includes " + p.String() + ": every peer is trusted, so a client that reaches server.port directly sets its own client.address through X-Forwarded-For and has its traceparent adopted; list only your proxies' addresses"}
+		if p.Bits() != 0 {
+			continue
 		}
+		family := "IPv4"
+		if p.Addr().Is6() {
+			family = "IPv6"
+		}
+		w = append(w, "server.trusted_proxies includes "+p.String()+": every "+family+" peer is trusted, so an "+family+" client that reaches server.port directly sets its own client.address through X-Forwarded-For and has its traceparent adopted; list only your proxies' addresses")
 	}
-	return nil
+	return w
 }
