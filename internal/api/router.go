@@ -171,6 +171,7 @@ func newProbeRouter(origins func(*http.Request) []string, proxies []netip.Prefix
 	trusted := trustedProxies(proxies)
 
 	r.Use(requestID)
+	r.Use(newHTTPMetrics().middleware)
 	// Not middleware.RealIP, which rewrote r.RemoteAddr from forwarded
 	// headers whoever sent them (chi deprecated it for the IP-spoofing
 	// GHSAs): clientAddress reads X-Forwarded-For from a trusted proxy only,

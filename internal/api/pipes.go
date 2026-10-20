@@ -44,10 +44,13 @@ type PipesHandler struct {
 	// without allocating 1 MiB per run); not a production knob. Mirrors
 	// StructuredQueryHandler / QueryHandler.
 	maxRequestBytes int64
+
+	// metrics records each ClickHouse call; nil records nothing.
+	metrics *queryMetrics
 }
 
 func NewPipesHandler(source func(*settings.Store) pipes.Source, policySource PolicySource, conn func(*settings.Store) driver.Conn, c cache.Cache, queryTimeout func(*settings.Store) time.Duration) *PipesHandler {
-	return &PipesHandler{Source: source, PolicySource: policySource, CHConn: conn, Cache: c, queryTimeout: queryTimeout}
+	return &PipesHandler{Source: source, PolicySource: policySource, CHConn: conn, Cache: c, queryTimeout: queryTimeout, metrics: newQueryMetrics()}
 }
 
 // List returns all named queries of the ?tenant= (admin endpoint).
@@ -190,7 +193,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		data, queryDuration, err := h.run(r.Context(), store, conn, sql, params)
+		data, queryDuration, err := h.run(r.Context(), store, conn, opPipe, sql, params)
 		if err != nil {
 			return nil, err
 		}
@@ -221,7 +224,7 @@ func (h *PipesHandler) executeWrite(w http.ResponseWriter, r *http.Request, stor
 		writeUnavailable(w, noConnectionMessage, retryAfterPool)
 		return
 	}
-	data, _, err := h.run(r.Context(), store, conn, sql, params)
+	data, _, err := h.run(r.Context(), store, conn, opPipeWrite, sql, params)
 	if err != nil {
 		writeCHWriteError(w, r, err, err.Error())
 		return
@@ -233,13 +236,15 @@ func (h *PipesHandler) executeWrite(w http.ResponseWriter, r *http.Request, stor
 }
 
 // run executes a pipe's bound SQL under the tenant's query timeout and
-// returns the rows as JSON with how long ClickHouse took.
-func (h *PipesHandler) run(ctx context.Context, store *settings.Store, conn driver.Conn, sql string, params []any) ([]byte, time.Duration, error) {
+// returns the rows as JSON with how long ClickHouse took, recording the call
+// as operation (opPipe or opPipeWrite).
+func (h *PipesHandler) run(ctx context.Context, store *settings.Store, conn driver.Conn, operation, sql string, params []any) ([]byte, time.Duration, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, timeoutOf(h.queryTimeout, store))
 	defer cancel()
 	start := time.Now()
 	rows, err := executeCHQuery(queryCtx, conn, sql, params)
 	queryDuration := time.Since(start)
+	h.metrics.observe(ctx, operation, queryDuration, err, queryCaps{})
 	if err != nil {
 		return nil, 0, err
 	}

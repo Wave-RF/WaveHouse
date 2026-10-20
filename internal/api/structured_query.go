@@ -48,6 +48,9 @@ type StructuredQueryHandler struct {
 	// 1 MiB per run; not a production tuning knob, hence unexported. Mirrors
 	// QueryHandler.
 	maxRequestBytes int64
+
+	// metrics records each ClickHouse call; nil records nothing.
+	metrics *queryMetrics
 }
 
 func NewStructuredQueryHandler(
@@ -67,6 +70,7 @@ func NewStructuredQueryHandler(
 		bucketSecs:     bucketSecs,
 		queryTimeout:   queryTimeout,
 		defaultMaxRows: defaultMaxRows,
+		metrics:        newQueryMetrics(),
 	}
 }
 
@@ -253,6 +257,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 		rows, err := executeCHQuery(queryCtx, conn, result.SQL, result.Params)
 		queryDuration := time.Since(start)
+		h.metrics.observe(r.Context(), opStructuredQuery, queryDuration, err, caps)
 		if err != nil {
 			// TODO: depending on the error, we may actually want to cache it
 			return nil, err
