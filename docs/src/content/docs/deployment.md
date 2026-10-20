@@ -833,6 +833,29 @@ Which build each process runs is the `wavehouse_build_info` gauge, always `1`, l
 count by (version) (wavehouse_build_info)
 ```
 
+### Request latency and ClickHouse queries
+
+Every process times its HTTP requests, and an API process times each statement its query paths send to ClickHouse. Both are histograms in seconds, with buckets from 5 ms to 30 s, and neither carries a tenant label:
+
+| Metric | Labels |
+| --- | --- |
+| `wavehouse_http_request_duration_seconds` | `route` is the route's pattern, such as `/v1/pipes/{name}`, never the path a client sent. A request answered under a prefix without reaching one of its routes (an unknown path or an unsupported method under `/v1`, or a tenant that is not served) is labeled with the prefix's pattern, such as `/v1/*`, and one that reached no prefix (an unknown top-level path, a method net/http does not name, or a CORS preflight) with `unmatched`. `method` is the request's, or `other` for a method net/http does not name. `status_class` is `2xx`, `3xx`, `4xx` or `5xx`; a panic counts as the `500` it answers. SSE streams on `/v1/stream` are not counted: `wavehouse_sse_stream_duration_seconds` is their lifetime. |
+| `wavehouse_clickhouse_query_duration_seconds` | `operation` is the path that sent the statement: `query` (`POST /v1/query`), `pipe` and `pipe_write` (a pipe that reads, and one that writes) or `ops_query` (raw SQL on `POST /v1/ops/query`, timed to the end of the response body). `result` is `ok`, or the [error code](/api#clickhouse-errors-on-the-query-paths) the response carries without its `clickhouse.` prefix: `rejected`, `limit_exceeded`, `access_denied`, `misconfigured`, `unavailable`, `response_too_large` or `unknown`. One value per statement sent: a cache hit records none, and requests coalesced onto one query record it once. |
+
+The histogram's `_count` series is the request or query rate, so the error rate needs no counter of its own. The share of requests answering `5xx`, and the queries ClickHouse could not take:
+
+```promql
+sum by (route) (rate(wavehouse_http_request_duration_seconds_count{status_class="5xx"}[5m]))
+  / sum by (route) (rate(wavehouse_http_request_duration_seconds_count[5m]))
+sum by (operation) (rate(wavehouse_clickhouse_query_duration_seconds_count{result="unavailable"}[5m])) > 0
+```
+
+The 99th percentile of each route's latency:
+
+```promql
+histogram_quantile(0.99, sum by (route, le) (rate(wavehouse_http_request_duration_seconds_bucket[5m])))
+```
+
 ### Settings reloads
 
 Every process reads the settings directory and reloads it on its own, so a reload can be adopted by one pod and rejected, or only half applied, by the next. These metrics report each process's reloads; none carries a tenant label, and which tenant was rejected is in the reload's log line:

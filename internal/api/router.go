@@ -165,6 +165,7 @@ func newProbeRouter(origins func(*http.Request) []string, health *HealthHandler,
 	r := chi.NewRouter()
 
 	r.Use(requestID)
+	r.Use(newHTTPMetrics().middleware)
 	// No middleware.RealIP: it rewrites r.RemoteAddr from spoofable forwarded
 	// headers on every request (chi deprecated it for the IP-spoofing GHSAs),
 	// and nothing here reads RemoteAddr — WaveHouse does no per-IP logic (that's

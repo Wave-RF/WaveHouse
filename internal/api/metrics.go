@@ -1,0 +1,161 @@
+package api
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+)
+
+// latencyBuckets are the boundaries, in seconds, of the request and query
+// latency histograms: Prometheus' default buckets, plus 30s for a query that
+// runs up to a long query_timeout.
+var latencyBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30}
+
+// routeUnmatched is the route label of a request that reached no route or
+// mount: an unknown top-level path, a method chi does not route, or a CORS
+// preflight answered before routing. One answered inside a mount short of a
+// route (an unknown path under /v1, a tenant not served) carries the mount's
+// pattern, /v1/*.
+const routeUnmatched = "unmatched"
+
+// httpMetrics records each request's latency by route, method and status
+// class. The zero value (a nil *httpMetrics) is a no-op.
+type httpMetrics struct {
+	duration metric.Float64Histogram
+}
+
+// meterName is the meter the api package's instruments are built on.
+const meterName = "wavehouse-api"
+
+// newHTTPMetrics builds the HTTP instruments on the global meter provider.
+// Call it after observability.InitProvider, like every other instrument.
+func newHTTPMetrics() *httpMetrics { return httpMetricsOn(otel.Meter(meterName)) }
+
+// httpMetricsOn builds the HTTP instruments on meter.
+func httpMetricsOn(meter metric.Meter) *httpMetrics {
+	duration, _ := meter.Float64Histogram("wavehouse_http_request_duration_seconds",
+		metric.WithDescription("HTTP request latency by route (the matched route pattern), method and status_class (2xx, 3xx, 4xx, 5xx); SSE streams on /v1/stream are not counted"),
+		metric.WithUnit("s"), metric.WithExplicitBucketBoundaries(latencyBuckets...))
+	return &httpMetrics{duration: duration}
+}
+
+// middleware times every request but the SSE streams, whose lifetime is
+// wavehouse_sse_stream_duration_seconds, not a latency. It runs outside
+// jsonRecoverer, so a recovered panic counts as the 500 it answers.
+func (m *httpMetrics) middleware(next http.Handler) http.Handler {
+	if m == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/stream") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		next.ServeHTTP(ww, r)
+		// The route pattern is complete only once routing has run, so it is
+		// read after the handler, never before.
+		route := routeUnmatched
+		if rctx := chi.RouteContext(r.Context()); rctx != nil {
+			if p := rctx.RoutePattern(); p != "" {
+				route = p
+			}
+		}
+		m.duration.Record(context.Background(), time.Since(start).Seconds(), metric.WithAttributes(
+			attribute.String("route", route),
+			attribute.String("method", methodLabel(r.Method)),
+			attribute.String("status_class", statusClass(ww.Status())),
+		))
+	})
+}
+
+// methodLabel is method when it is one of net/http's, and "other" otherwise:
+// the method is the client's to choose, and a label must stay a closed set.
+func methodLabel(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
+		return method
+	}
+	return "other"
+}
+
+// statusClass is status's class, "2xx" for a handler that wrote nothing
+// (net/http answers it 200).
+func statusClass(status int) string {
+	switch {
+	case status == 0 || status >= 200 && status < 300:
+		return "2xx"
+	case status < 200:
+		return "1xx"
+	case status < 400:
+		return "3xx"
+	case status < 500:
+		return "4xx"
+	}
+	return "5xx"
+}
+
+// Operations for the "operation" attribute on
+// wavehouse_clickhouse_query_duration_seconds: which query path ran the
+// statement.
+const (
+	opStructuredQuery = "query"      // POST /v1/query
+	opPipe            = "pipe"       // a pipe that reads, /v1/pipes/{name}
+	opPipeWrite       = "pipe_write" // a pipe that writes, /v1/pipes/{name}
+	opOpsQuery        = "ops_query"  // raw SQL, POST /v1/ops/query
+)
+
+// resultOK is the "result" of a query ClickHouse answered.
+const resultOK = "ok"
+
+// queryMetrics records each ClickHouse call the query paths make: one per
+// statement sent, so a cache hit records none and callers coalesced onto one
+// call record it once. The zero value (a nil *queryMetrics) is a no-op.
+type queryMetrics struct {
+	duration metric.Float64Histogram
+}
+
+// newQueryMetrics builds the query-path instruments on the global meter
+// provider. Call it after observability.InitProvider.
+func newQueryMetrics() *queryMetrics { return queryMetricsOn(otel.Meter(meterName)) }
+
+// queryMetricsOn builds the query-path instruments on meter.
+func queryMetricsOn(meter metric.Meter) *queryMetrics {
+	duration, _ := meter.Float64Histogram("wavehouse_clickhouse_query_duration_seconds",
+		metric.WithDescription("ClickHouse calls on the query paths by operation (query, pipe, pipe_write, ops_query) and result: ok, or the error code the response carries without its clickhouse. prefix (rejected, limit_exceeded, access_denied, misconfigured, unavailable, response_too_large, unknown)"),
+		metric.WithUnit("s"), metric.WithExplicitBucketBoundaries(latencyBuckets...))
+	return &queryMetrics{duration: duration}
+}
+
+// observe records one call of operation that took d and ended in err,
+// classed as the response classes it (chFailureOf, under caps).
+func (m *queryMetrics) observe(operation string, d time.Duration, err error, caps queryCaps) {
+	result := resultOK
+	if err != nil {
+		result = chResult(chFailureOf(err, http.StatusInternalServerError, caps).code)
+	}
+	m.record(operation, d, result)
+}
+
+// record records one call of operation that took d, with result as given.
+func (m *queryMetrics) record(operation string, d time.Duration, result string) {
+	if m == nil {
+		return
+	}
+	m.duration.Record(context.Background(), d.Seconds(), metric.WithAttributes(
+		attribute.String("operation", operation), attribute.String("result", result)))
+}
+
+// chResult is the "result" label of a failure answered with code.
+func chResult(code string) string {
+	return strings.TrimPrefix(code, "clickhouse.")
+}

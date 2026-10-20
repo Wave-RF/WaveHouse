@@ -70,6 +70,9 @@ type QueryHandler struct {
 	// body cap (maxRequestBodyBytes). When 0, the default applies. Same
 	// test-only purpose as maxResponseBytes.
 	maxRequestBytes int64
+
+	// metrics records each ClickHouse call; nil records nothing.
+	metrics *queryMetrics
 }
 
 const (
@@ -124,6 +127,7 @@ func NewQueryHandler(target func(*settings.Store) chconn.Target, queryTimeout fu
 		clients:      chconn.NewHTTPClients(proxyHTTPClient),
 		target:       target,
 		queryTimeout: queryTimeout,
+		metrics:      newQueryMetrics(),
 	}
 }
 
@@ -262,8 +266,12 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		httpReq.Header.Set("X-ClickHouse-Key", target.Password)
 	}
 
+	// The call is timed from the request to the end of the response body:
+	// ClickHouse streams the result, so the body is most of the query.
+	start := time.Now()
 	resp, err := h.clients.For(target).Do(httpReq)
 	if err != nil {
+		h.metrics.observe(opOpsQuery, time.Since(start), err, queryCaps{})
 		writeCHError(w, r, err, "clickhouse request failed: "+err.Error(), http.StatusBadGateway, queryCaps{})
 		return
 	}
@@ -276,11 +284,14 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		respCap = h.maxResponseBytes
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, respCap+1))
+	elapsed := time.Since(start)
 	if err != nil {
+		h.metrics.observe(opOpsQuery, elapsed, err, queryCaps{})
 		writeCHError(w, r, err, "read clickhouse response: "+err.Error(), http.StatusBadGateway, queryCaps{})
 		return
 	}
 	if int64(len(body)) > respCap {
+		h.metrics.record(opOpsQuery, elapsed, chResult(codeCHResponseTooLarge))
 		// The same query overflows again, so not retryable.
 		retryable := false
 		writeJSONErrorBody(w, http.StatusBadGateway, errorBody{
@@ -297,6 +308,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		// exception code it sends with it does (#403). The message is
 		// ClickHouse's own text, verbatim.
 		chErr := chconn.NewHTTPError(&http.Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: io.NopCloser(bytes.NewReader(body))})
+		h.metrics.observe(opOpsQuery, elapsed, chErr, queryCaps{})
 		msg := strings.TrimSpace(string(body))
 		if msg == "" {
 			msg = fmt.Sprintf("clickhouse returned status %d", resp.StatusCode)
@@ -304,6 +316,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		writeCHError(w, r, chErr, msg, http.StatusBadGateway, queryCaps{})
 		return
 	}
+	h.metrics.record(opOpsQuery, elapsed, resultOK)
 
 	// ClickHouse returns an empty body for mutations (TRUNCATE/INSERT/
 	// DELETE/etc. with no result set). Marshal those to `[]` so clients
