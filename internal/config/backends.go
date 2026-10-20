@@ -266,6 +266,7 @@ func (c *Config) NeedsDataDir() bool {
 // which one process cannot tell from many.
 func (c *Config) Warnings() []string {
 	out := append(c.natsWarnings(), c.profilingWarnings()...)
+	out = append(out, c.trustedProxyWarnings()...)
 	// The rest are the api role's: a process without it opens no cache it
 	// reads and no dedupe store, and a split's Deployments differ only in
 	// roles, so the API's warnings cover the others'.

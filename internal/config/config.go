@@ -135,6 +135,11 @@ type OTelLogs struct {
 type Server struct {
 	Port            int `yaml:"port" env:"WH_SERVER_PORT"`
 	ShutdownTimeout int `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT"`
+	// TrustedProxies names the reverse proxies whose X-Forwarded-For and
+	// traceparent are believed: CIDRs or bare addresses, parsed by
+	// TrustedProxyPrefixes. Empty, the default, trusts no peer: the client is
+	// the connection's own address and an incoming trace is linked, not joined.
+	TrustedProxies []string `yaml:"trusted_proxies" env:"WH_SERVER_TRUSTED_PROXIES"`
 }
 
 // ClickHouse holds the connection ceiling. The wiring — address, HTTP port
@@ -353,6 +358,9 @@ func (c *Config) Validate() error {
 	}
 
 	if err := c.validateProfiling(); err != nil {
+		return err
+	}
+	if err := c.validateTrustedProxies(); err != nil {
 		return err
 	}
 	if err := c.validateRoles(); err != nil {

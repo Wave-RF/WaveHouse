@@ -19,7 +19,8 @@ type TraceHandler struct {
 }
 
 // Handle pulls the trace_id and span_id from the context if they exist, and
-// request_id and tenant from the request scope (WithRequest) when there is one.
+// request_id, client.address and tenant from the request scope (WithRequest)
+// when there is one.
 func (h *TraceHandler) Handle(ctx context.Context, r slog.Record) error {
 	addRequestAttrs(ctx, &r)
 	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {

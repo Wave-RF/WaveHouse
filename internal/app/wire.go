@@ -1026,6 +1026,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	}
 
 	deps.MetricsHandler, deps.MetricsPath = a.inlineMetrics()
+	deps.TrustedProxies = a.cfg.Server.TrustedProxyPrefixes()
 	a.handler = api.NewRouter(deps)
 	a.wireServers(func() { close(closing) })
 }

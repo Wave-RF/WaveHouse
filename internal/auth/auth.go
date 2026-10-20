@@ -500,8 +500,8 @@ func middleware(current func(context.Context) (tenant.ID, *verifier), operatorKe
 					// WARN emitted on an authz denial. Correlation fields are
 					// deliberately NOT stamped per-call-site: the global
 					// TraceHandler (internal/observability) adds request_id,
-					// tenant and, when a span is active, trace_id/span_id to
-					// every line; the trusted-proxy client IP is #333.
+					// client.address, tenant and, when a span is active,
+					// trace_id/span_id to every line.
 					slog.LogAttrs(r.Context(), slog.LevelInfo, "operator key authenticated request",
 						slog.String("path", r.URL.Path),
 						slog.String("method", r.Method),
@@ -523,8 +523,8 @@ func middleware(current func(context.Context) (tenant.ID, *verifier), operatorKe
 					// other unauthenticated caller. WARN + a counter because a
 					// mismatch is a strong probing/brute-force signal: nobody
 					// sends a wrong operator key by accident. Same correlation-field
-					// handling as the audit line above: request_id and tenant from
-					// TraceHandler, the client IP in #333.
+					// handling as the audit line above: request_id, client.address
+					// and tenant from TraceHandler.
 					operatorKeyFailures.Add(r.Context(), 1)
 					slog.LogAttrs(r.Context(), slog.LevelWarn, "operator key authentication failed",
 						slog.String("path", r.URL.Path),

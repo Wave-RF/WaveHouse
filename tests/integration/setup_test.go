@@ -174,8 +174,10 @@ func setup() (int, func()) {
 	dataDir := mustTempDir()
 	cleanups.push(func() { _ = os.RemoveAll(dataDir) })
 	cfg := &config.Config{
-		DataDir:  dataDir,
-		Server:   config.Server{ShutdownTimeout: 10},
+		DataDir: dataDir,
+		// The suite's client dials from loopback and plays the proxy, so
+		// a traceparent it sends is joined (TestOTel_IngestTraceContinuity).
+		Server:   config.Server{ShutdownTimeout: 10, TrustedProxies: []string{"127.0.0.1", "::1"}},
 		MQ:       config.MQ{Backend: config.MQEmbedded},
 		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 30}, // 1 GB
 		Dedupe:   config.Dedupe{Backend: config.DedupePebble},

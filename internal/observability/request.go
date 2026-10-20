@@ -14,15 +14,19 @@ import (
 const (
 	RequestIDKey = "request_id"
 	TenantKey    = "tenant"
+	// ClientAddressKey is OpenTelemetry's semantic-convention name, which
+	// the HTTP server span already uses for the same value.
+	ClientAddressKey = "client.address"
 )
 
 // requestScope is what a request's log records and spans say about it: its
-// id, known when it arrives, and its tenant, known only once a later
-// middleware resolves it. The tenant is filled in place, so a record logged
-// through a context taken before resolution (the panic recoverer's, say)
-// still carries it.
+// id, known when it arrives, its client address, and its tenant, known only
+// once a later middleware resolves it. Both are filled in place, so a record
+// logged through a context taken before resolution (the panic recoverer's,
+// say) still carries them.
 type requestScope struct {
 	id     string
+	client atomic.Pointer[string]
 	tenant atomic.Pointer[string]
 }
 
@@ -57,8 +61,21 @@ func SetRequestTenant(ctx context.Context, tenant string) {
 	trace.SpanFromContext(ctx).SetAttributes(attribute.String(TenantKey, tenant))
 }
 
+// SetRequestClient records the address the request came from on its scope
+// and on the span in ctx. Outside a request it still annotates the span. An
+// empty addr marks the address unresolved: log records leave it out, and the
+// span's client.address is blanked rather than left as otelhttp's.
+func SetRequestClient(ctx context.Context, addr string) {
+	if s := scopeFrom(ctx); s != nil {
+		s.client.Store(&addr)
+	}
+	trace.SpanFromContext(ctx).SetAttributes(attribute.String(ClientAddressKey, addr))
+}
+
 // AnnotateSpan copies the request scope in ctx onto the span in ctx. Call it
-// once the server span exists: the scope is set up before it.
+// once the server span exists: the scope is set up before it. Its
+// client.address replaces the one otelhttp derives, which reads
+// X-Forwarded-For whoever sent it.
 func AnnotateSpan(ctx context.Context) {
 	s := scopeFrom(ctx)
 	if s == nil {
@@ -69,6 +86,9 @@ func AnnotateSpan(ctx context.Context) {
 		return
 	}
 	attrs := []attribute.KeyValue{attribute.String(RequestIDKey, s.id)}
+	if c := s.client.Load(); c != nil {
+		attrs = append(attrs, attribute.String(ClientAddressKey, *c))
+	}
 	if t := s.tenant.Load(); t != nil {
 		attrs = append(attrs, attribute.String(TenantKey, *t))
 	}
@@ -83,6 +103,9 @@ func addRequestAttrs(ctx context.Context, r *slog.Record) {
 		return
 	}
 	r.AddAttrs(slog.String(RequestIDKey, s.id))
+	if c := s.client.Load(); c != nil && *c != "" {
+		r.AddAttrs(slog.String(ClientAddressKey, *c))
+	}
 	t := s.tenant.Load()
 	if t == nil {
 		return

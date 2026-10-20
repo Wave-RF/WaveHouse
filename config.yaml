@@ -23,6 +23,11 @@ server:
   # release of the stores (5s) and the telemetry flush (3s) are fixed on
   # top, so size the kill grace at this plus 8s.
   shutdown_timeout: 10
+  # Reverse proxies (CIDRs or addresses) whose X-Forwarded-For names the
+  # client in logs and spans (client.address), and whose traceparent a
+  # request's trace joins. Empty trusts no peer: the client is the
+  # connection's own address, and an incoming traceparent is only linked.
+  trusted_proxies: []
 
 otel:
   enabled: false         # master switch — set true to export via OTLP gRPC
