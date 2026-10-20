@@ -124,6 +124,7 @@ Boot logs each of these at `WARN` rather than refusing. The first two are right 
 - **`mq.nats` set with `mq.backend=embedded`**, or **`coord.nats` set with `coord.backend=local`**: the block is ignored.
 - **`cache.redis.addrs` set with `cache.backend=local`**, in a process running `api`: the block is ignored.
 - **`cache.redis.tls.insecure_skip_verify` on**, in a process running `api`: the cache accepts any certificate (see [Cache](#cache)).
+- **`server.trusted_proxies` with a `/0` entry** (`0.0.0.0/0`, `::/0`), in every process, one per entry: every peer of that entry's address family is trusted (`0.0.0.0/0` every IPv4 peer, `::/0` every IPv6 one), so a client of that family that reaches `server.port` directly picks its own `client.address` and joins its `traceparent` to your traces (see [Reverse proxy](/reverse-proxy#client-address-and-trace-context)).
 - **`profiling.enabled` with a `profiling.addr` that is not loopback** (an empty host, `0.0.0.0`, a pod address), in every process: the unauthenticated pprof endpoints are reachable beyond the host (see [Profiling](#profiling)).
 - **`mq.backend=nats` and a tenant with dedupe on whose finite `dedupe.retention` is under the partitions' `duplicate_window`**, in a process running `api`, at boot and after every reload: see [Deployment → Create the topology](/deployment#create-the-topology).
 
@@ -158,6 +159,7 @@ Boot refuses a role set the selected backends cannot serve:
 | --- | --- | ------- | ----------- |
 | `server.port` | `WH_SERVER_PORT` | `8080` | HTTP server listen port. |
 | `server.shutdown_timeout` | `WH_SERVER_SHUTDOWN_TIMEOUT` | `10` | Seconds the drain phase of a stop may take: in-flight requests and ingest batches finish (open SSE streams end immediately). The release of the stores (5s) and the telemetry flush (3s) have fixed budgets on top, so a stop takes at most this plus 8s; see [Stopping](/deployment#stopping). |
+| `server.trusted_proxies` | `WH_SERVER_TRUSTED_PROXIES` | *(empty)* | The reverse proxies whose `X-Forwarded-For` names the client and whose `traceparent` a request's trace joins: CIDRs or bare addresses, a YAML list or a comma-separated variable. Empty trusts no peer, so the client is the connection's own address and an incoming trace is linked, not joined. An entry that is neither, or an IPv4-mapped prefix (`::ffff:…`) shorter than `/96`, refuses boot; a mapped prefix of `/96` or longer is read as the IPv4 CIDR it maps. See [Reverse proxy → Client address and trace context](/reverse-proxy#client-address-and-trace-context). |
 
 The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate TLS at a [reverse proxy](/reverse-proxy#tls) for internet-facing deployments. (The settings directory's `clickhouse.http_scheme` and `clickhouse.tls` are the *outbound* WaveHouse → ClickHouse hops, unrelated to your clients' TLS.)
 
@@ -359,6 +361,7 @@ instance_id: ""          # on every log line and span; empty = <hostname>-<8 hex
 server:
   port: 8080
   shutdown_timeout: 10
+  trusted_proxies: []    # CIDRs or addresses whose X-Forwarded-For and traceparent are believed; empty = none
 
 clickhouse:
   # addr, ports, database, username, password, query_timeout, tls, headers
@@ -467,6 +470,8 @@ WH_INSTANCE_ID=
 
 WH_SERVER_PORT=8080
 WH_SERVER_SHUTDOWN_TIMEOUT=10
+# Comma-separated CIDRs or addresses; empty = trust no peer.
+WH_SERVER_TRUSTED_PROXIES=
 
 WH_CH_MAX_TOTAL_CONNS=0
 

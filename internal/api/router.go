@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"runtime/debug"
 	"strings"
 
@@ -53,11 +54,15 @@ type Dependencies struct {
 	// exporter when observability.metrics.prometheus.enabled is true AND port is 0.
 	MetricsHandler http.Handler
 	MetricsPath    string
+	// TrustedProxies are the peers whose X-Forwarded-For names the client
+	// and whose traceparent the server span joins (server.trusted_proxies).
+	// Empty trusts no peer.
+	TrustedProxies []netip.Prefix
 }
 
 // NewRouter creates the chi router with all routes.
 func NewRouter(deps Dependencies) http.Handler {
-	r := newProbeRouter(corsOrigins(deps.Tenants, deps.CORSOrigins), deps.Health, deps.Version, deps.MetricsHandler, deps.MetricsPath)
+	r := newProbeRouter(corsOrigins(deps.Tenants, deps.CORSOrigins), deps.TrustedProxies, deps.Health, deps.Version, deps.MetricsHandler, deps.MetricsPath)
 
 	// API v1 endpoints. The JWT auth middleware always runs (no enable/disable
 	// switch) on both halves: the tenant routes, which resolve their tenant
@@ -161,15 +166,16 @@ func NewRouter(deps Dependencies) http.Handler {
 // newProbeRouter is what every listener serves, the API's and the ops-only
 // one alike: the middleware, the JSON 404/405, the probes, /version, and the
 // same-port metrics endpoint.
-func newProbeRouter(origins func(*http.Request) []string, health *HealthHandler, version *VersionHandler, metrics http.Handler, metricsPath string) chi.Router {
+func newProbeRouter(origins func(*http.Request) []string, proxies []netip.Prefix, health *HealthHandler, version *VersionHandler, metrics http.Handler, metricsPath string) chi.Router {
 	r := chi.NewRouter()
+	trusted := trustedProxies(proxies)
 
 	r.Use(requestID)
-	// No middleware.RealIP: it rewrites r.RemoteAddr from spoofable forwarded
-	// headers on every request (chi deprecated it for the IP-spoofing GHSAs),
-	// and nothing here reads RemoteAddr — WaveHouse does no per-IP logic (that's
-	// the reverse proxy's job). Trusted-proxy-aware client-IP capture for
-	// traces/logs is tracked in #333; don't re-add RealIP to get it.
+	// Not middleware.RealIP, which rewrote r.RemoteAddr from forwarded
+	// headers whoever sent them (chi deprecated it for the IP-spoofing
+	// GHSAs): clientAddress reads X-Forwarded-For from a trusted proxy only,
+	// for the logs and the span, and leaves RemoteAddr alone.
+	r.Use(clientAddress(trusted))
 	r.Use(jsonRecoverer)
 	r.Use(corsMiddleware(origins))
 
@@ -184,7 +190,14 @@ func newProbeRouter(origins func(*http.Request) []string, health *HealthHandler,
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 	})
 
+	// A request from a peer that is not a trusted proxy starts a trace of its
+	// own, linked to any traceparent it sent rather than joining it, so a
+	// client cannot write itself into the proxy's traces.
+	traced := otelhttp.NewMiddleware("wavehouse-api", otelhttp.WithPublicEndpointFn(func(r *http.Request) bool {
+		return !trusted.trustsPeer(r)
+	}))
 	r.Use(func(next http.Handler) http.Handler {
+		withSpan := traced(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Skip span creation on infra/probe paths:
 			//   /v1/stream    — long-lived streams (SSE); the standard
@@ -208,7 +221,7 @@ func newProbeRouter(origins func(*http.Request) []string, health *HealthHandler,
 				return
 			}
 			// Normal REST tracing for everything else
-			otelhttp.NewMiddleware("wavehouse-api")(next).ServeHTTP(w, r)
+			withSpan.ServeHTTP(w, r)
 		})
 	})
 	r.Use(annotateSpan)
@@ -249,6 +262,8 @@ type OpsDependencies struct {
 	AuthMW         func(http.Handler) http.Handler
 	MetricsHandler http.Handler
 	MetricsPath    string
+	// TrustedProxies is Dependencies.TrustedProxies.
+	TrustedProxies []netip.Prefix
 }
 
 // NewOpsRouter creates the router of a process without the api role. Every
@@ -256,7 +271,7 @@ type OpsDependencies struct {
 // handlers behind them are not wired here. The reload is gated by the
 // operator key alone, as the ops tree is over a nested directory.
 func NewOpsRouter(deps OpsDependencies) http.Handler {
-	r := newProbeRouter(nil, deps.Health, deps.Version, deps.MetricsHandler, deps.MetricsPath)
+	r := newProbeRouter(nil, deps.TrustedProxies, deps.Health, deps.Version, deps.MetricsHandler, deps.MetricsPath)
 	if deps.Settings != nil {
 		r.Route("/v1/ops", func(r chi.Router) {
 			r.Use(opsRequestTenant)
