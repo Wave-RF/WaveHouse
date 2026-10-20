@@ -23,8 +23,9 @@ var latencyBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10,
 // mount: an unknown top-level path, a method chi does not route, or a CORS
 // preflight answered before routing. One answered inside a mount short of a
 // route (an unknown path or an unsupported method under /v1) carries the
-// mount's pattern, /v1/*; one a group middleware refuses (a tenant not
-// served) has matched its route already and carries that.
+// mount's pattern, /v1/*, as does one the /v1/ops gates refuse, which run
+// before its routes (/v1/ops/*); one a group middleware refuses (a tenant
+// not served) has matched its route already and carries that.
 const routeUnmatched = "unmatched"
 
 // httpMetrics records each request's latency by route, method and status
