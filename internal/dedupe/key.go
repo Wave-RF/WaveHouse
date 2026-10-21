@@ -30,9 +30,9 @@ import (
 const (
 	keySep     = '/'
 	hashedMark = '#'
-	// MaxIDBytes is the longest escaped id stored verbatim: a DynamoDB
-	// partition key holds at most 2,048 bytes, and the tenant and table share
-	// them.
+	// MaxIDBytes is the longest escaped id AppendKey stores verbatim: a
+	// DynamoDB partition key holds at most 2,048 bytes, and the tenant and
+	// table share them. PartitionedKey may hash a shorter one.
 	MaxIDBytes = 1024
 	// TenantBuckets is how many partition keys one tenant's items spread
 	// over in a tenant-partitioned table, each with DynamoDB's own write
@@ -49,8 +49,9 @@ func KeyPrefix(id tenant.ID) []byte {
 	return append([]byte(id), keySep)
 }
 
-// Hashed reports whether k's id is stored as its SHA-256 rather than
+// Hashed reports whether AppendKey stores k's id as its SHA-256 rather than
 // verbatim: whether its escaped form is longer than MaxIDBytes.
+// PartitionedKey also hashes a shorter id when its sort key would not fit.
 func (k Key) Hashed() bool {
 	switch {
 	case len(k.ID) > MaxIDBytes:

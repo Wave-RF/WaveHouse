@@ -25,8 +25,9 @@ var ErrDisabled = errors.New("dedupe is disabled")
 // for dedupe, so publishing un-deduped is not a fallback.
 var ErrUnavailable = errors.New("dedupe store unavailable")
 
-// hashedIDCounter counts ids stored as their SHA-256 (Key.Hashed): an id
-// longer than MaxIDBytes is a producer sending something other than an id.
+// hashedIDCounter counts ids longer than MaxIDBytes (Key.Hashed), which a
+// producer sends only when it sends something other than an id: not the
+// shorter ids PartitionedKey hashes to fit a sort key.
 var hashedIDCounter, _ = otel.Meter("wavehouse-dedupe").Int64Counter(
 	"wavehouse_dedupe_hashed_id_total",
 	metric.WithDescription("Dedupe ids stored as their SHA-256 because they exceed the verbatim length limit"),
