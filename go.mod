@@ -1,6 +1,6 @@
 module github.com/Wave-RF/WaveHouse
 
-go 1.26.9
+go 1.26.10
 
 tool (
 	github.com/Zxilly/go-size-analyzer/cmd/gsa
@@ -27,11 +27,11 @@ require (
 	github.com/dgraph-io/ristretto/v2 v2.4.2
 	github.com/dustin/go-humanize v1.1.0
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/go-chi/chi/v5 v5.3.2
+	github.com/go-chi/chi/v5 v5.5.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/ilyakaznacheev/cleanenv v1.5.0
-	github.com/klauspost/compress v1.20.1
+	github.com/klauspost/compress v1.20.3
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.2
 	github.com/nats-io/jwt/v2 v2.8.2
@@ -40,7 +40,7 @@ require (
 	github.com/nats-io/nkeys v0.4.16
 	github.com/nats-io/nuid v1.0.1
 	github.com/prometheus/client_golang v1.25.0
-	github.com/redis/rueidis v1.0.78
+	github.com/redis/rueidis v1.0.79
 	github.com/samber/slog-multi v1.8.0
 	github.com/samber/slog-sampling v1.7.0
 	github.com/stretchr/testify v1.12.1
