@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/Wave-RF/WaveHouse/internal/keyenc"
+	"github.com/Wave-RF/WaveHouse/pkg/shard"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
@@ -22,25 +23,25 @@ import (
 // DynamoDB String, and holds no NUL, so it never meets a tenant ‖ NUL ‖ id
 // key written before #222.
 //
-// A tenant-partitioned DynamoDB table (PartitionedKey) splits the same key at
-// the tenant, so that one tenant's items can be listed without a scan:
+// A tenant-partitioned DynamoDB table (PartitionedKey) splits the same key
+// before the id, and spreads each table's ids over TableBuckets partition
+// keys, so that one table's writes are not held to one partition's:
 //
-//	pk  <tenant>/<bucket>       acme/7
-//	sk  <table>/<id>            clicks/evt-123
+//	pk  <tenant>/<table>/<bucket>   acme/clicks/12
+//	sk  <id>                        evt-123
 const (
 	keySep     = '/'
 	hashedMark = '#'
-	// MaxIDBytes is the longest escaped id AppendKey stores verbatim: a
-	// DynamoDB partition key holds at most 2,048 bytes, and the tenant and
-	// table share them. PartitionedKey may hash a shorter one.
+	// MaxIDBytes is the longest escaped id stored verbatim: a DynamoDB
+	// partition key holds at most 2,048 bytes, and the tenant and table share
+	// them; a tenant-partitioned table's sort key, which the id has to
+	// itself, holds 1,024.
 	MaxIDBytes = 1024
-	// TenantBuckets is how many partition keys one tenant's items spread
-	// over in a tenant-partitioned table, each with DynamoDB's own write
-	// ceiling. Changing it would move every item: it is a constant of the
-	// layout, never a setting.
-	TenantBuckets = 16
-	// maxSortKeyBytes is DynamoDB's limit on a sort key.
-	maxSortKeyBytes = 1024
+	// TableBuckets is how many partition keys one table's items spread over
+	// in a tenant-partitioned table, each held to DynamoDB's per-partition
+	// write ceiling. Changing it moves items, so it is a constant of the
+	// layout, never a setting; another count is another layout (dynamodb.go).
+	TableBuckets = 256
 )
 
 // KeyPrefix is the part of every key that names tenant id, so a backend
@@ -49,9 +50,8 @@ func KeyPrefix(id tenant.ID) []byte {
 	return append([]byte(id), keySep)
 }
 
-// Hashed reports whether AppendKey stores k's id as its SHA-256 rather than
+// Hashed reports whether k's id is stored as its SHA-256 rather than
 // verbatim: whether its escaped form is longer than MaxIDBytes.
-// PartitionedKey also hashes a shorter id when its sort key would not fit.
 func (k Key) Hashed() bool {
 	switch {
 	case len(k.ID) > MaxIDBytes:
@@ -65,32 +65,39 @@ func (k Key) Hashed() bool {
 // AppendKey appends k's stored form, under the tenant prefix from KeyPrefix,
 // to dst.
 func AppendKey(dst, prefix []byte, k Key) []byte {
-	dst = append(dst, prefix...)
+	dst = keyenc.AppendJoin(append(dst, prefix...), keySep, k.Table)
+	return appendID(append(dst, keySep), k)
+}
+
+// appendID appends k's id as AppendKey stores it.
+func appendID(dst []byte, k Key) []byte {
 	if k.Hashed() {
-		return appendHashed(dst, k)
+		return appendHashedID(dst, k.ID)
 	}
-	return keyenc.AppendJoin(dst, keySep, k.Table, k.ID)
+	return keyenc.AppendEscape(dst, k.ID)
 }
 
-func appendHashed(dst []byte, k Key) []byte {
-	sum := sha256.Sum256([]byte(k.ID))
-	dst = keyenc.AppendJoin(dst, keySep, k.Table)
-	return hex.AppendEncode(append(dst, keySep, hashedMark), sum[:])
+func appendHashedID(dst []byte, id string) []byte {
+	sum := sha256.Sum256([]byte(id))
+	return hex.AppendEncode(append(dst, hashedMark), sum[:])
 }
 
-// PartitionedKey is k's key in a tenant-partitioned table. sk is AppendKey's
-// form without the tenant, with the id hashed whenever sk would otherwise
-// pass DynamoDB's 1,024 bytes; pk is the tenant and sk's bucket, FNV-1a 64 of
-// sk mod TenantBuckets, in decimal. A tenant id holds no '/', so no two
-// tenants share a pk.
+// PartitionedKey is k's key in a tenant-partitioned table: sk is the id as
+// AppendKey stores it, except that an empty id, which a sort key cannot hold,
+// is stored hashed too; pk is the tenant, the table and sk's bucket among
+// TableBuckets, shard.Jump of shard.Mix of FNV-1a 64 over sk, in decimal.
+// Neither a tenant id nor an escaped table holds '/', so no two tables share
+// a pk.
 func PartitionedKey(id tenant.ID, k Key) (pk, sk string) {
-	b := AppendKey(nil, nil, k)
-	if len(b) > maxSortKeyBytes {
-		b = appendHashed(b[:0], k)
+	s := appendID(nil, k)
+	if len(s) == 0 {
+		s = appendHashedID(s, k.ID)
 	}
 	h := fnv.New64a()
-	_, _ = h.Write(b) // never fails
-	return string(id) + string(keySep) + strconv.FormatUint(h.Sum64()%TenantBuckets, 10), string(b)
+	_, _ = h.Write(s) // never fails
+	p := keyenc.AppendJoin(KeyPrefix(id), keySep, k.Table)
+	p = strconv.AppendInt(append(p, keySep), int64(shard.Jump(shard.Mix(h.Sum64()), TableBuckets)), 10)
+	return string(p), string(s)
 }
 
 // IdempotencyKey is k's message id for the queue under tenant id: the first

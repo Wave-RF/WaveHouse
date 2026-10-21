@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/keyenc"
+	"github.com/Wave-RF/WaveHouse/pkg/shard"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -34,41 +35,19 @@ func validSubjectPrefix(prefix string) error {
 }
 
 // natsRoute is where topic t's table lives among n partitions of v shards
-// each: jump consistent hash (Lamping and Veach, 2014) of FNV-1a 64 over the
-// tenant id and the table's subject token for the partition, and of the same
-// hash through the splitmix64 finalizer for the shard. The second hash has
-// to be independent of the first: with the same key, jump(h,2)=1 would force
-// jump(h,4)≠0, leaving shards of some partitions empty. The scope is left
+// each: shard.Jump of FNV-1a 64 over the tenant id and the table's subject
+// token for the partition, and of the same hash through shard.Mix for the
+// shard, which has to be independent of the partition. The scope is left
 // out, so a table's scopes share one shard and one owner. Consistent: growing
 // n (or v) by one moves about 1/(n+1) of the tables, each into the new
-// partition (or shard), where a modulus would move nearly all. This is the
-// one place a table is mapped.
+// partition (or shard). This is the one place a table is mapped.
 func natsRoute(t Topic, n, v int) (p, s int) {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(t.Tenant))
 	_, _ = h.Write([]byte{'.'})
 	_, _ = h.Write([]byte(keyenc.Escape(t.Table)))
 	key := h.Sum64()
-	return jumpHash(key, n), jumpHash(mix64(key), v)
-}
-
-// jumpHash maps key to one of n buckets such that growing n to n+1 moves a
-// key only into bucket n, and each key with probability 1/(n+1).
-func jumpHash(key uint64, n int) int {
-	var b, j int64 = -1, 0
-	for j < int64(n) {
-		b = j
-		key = key*2862933555777941757 + 1
-		j = int64(float64(b+1) * (float64(int64(1)<<31) / float64((key>>33)+1)))
-	}
-	return int(b)
-}
-
-// mix64 is splitmix64's finalizer.
-func mix64(z uint64) uint64 {
-	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
-	z = (z ^ (z >> 27)) * 0x94d049bb133111eb
-	return z ^ (z >> 31)
+	return shard.Jump(key, n), shard.Jump(shard.Mix(key), v)
 }
 
 // natsIngestPartition is every subject of ingest partition p: what its

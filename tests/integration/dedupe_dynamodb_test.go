@@ -25,6 +25,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe/dedupetest"
+	"github.com/Wave-RF/WaveHouse/internal/keyenc"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
@@ -196,30 +197,39 @@ func TestDedupeDynamo_Conformance(t *testing.T) {
 	}
 }
 
-// On a pk+sk table a tenant's items are its own TenantBuckets partitions and
-// nothing else: a Query of acme's finds every id acme committed, and none of
-// acme-2's or acme_x's, though those tenants committed the same ids.
-func TestDedupeDynamo_TenantPartitions(t *testing.T) {
+// On a pk+sk table a table's items are its own TableBuckets partitions and
+// nothing else: a Query of acme's events finds every id it committed there,
+// and none of the same ids committed to acme's events-2, acme-2's events or
+// acme_x's events, though those tenant and table names start the same way.
+func TestDedupeDynamo_TablePartitions(t *testing.T) {
 	t.Parallel()
 	table := newDynamoTable()
 	d := dynamoClient(t, table, dedupe.DynamoConfig{})
 	require.NoError(t, d.CreateTable(t.Context()))
+	type group struct {
+		tn    tenant.ID
+		table string
+	}
+	groups := []group{{"acme", "events"}, {"acme", "events-2"}, {"acme-2", "events"}, {"acme_x", "events"}}
 	var want []string
 	for i := range 64 {
-		want = append(want, fmt.Sprintf("events/e%d", i))
+		want = append(want, fmt.Sprintf("e%d", i))
 	}
-	for _, tn := range []tenant.ID{"acme", "acme-2", "acme_x"} {
-		m := openDynamo(t, d, tn)
-		for i := range 64 {
-			dup, err := dedupetest.Mark(t.Context(), m, dedupe.Key{Table: "events", ID: fmt.Sprintf("e%d", i)})
+	stores := map[tenant.ID]*dedupe.Managed{}
+	for _, g := range groups {
+		if stores[g.tn] == nil {
+			stores[g.tn] = openDynamo(t, d, g.tn)
+		}
+		for _, id := range want {
+			dup, err := dedupetest.Mark(t.Context(), stores[g.tn], dedupe.Key{Table: g.table, ID: id})
 			require.NoError(t, err)
 			require.False(t, dup)
 		}
 	}
 	raw := rawDynamo(t)
-	query := func(tn tenant.ID) (sks []string) {
-		for b := range dedupe.TenantBuckets {
-			pk := fmt.Sprintf("%s/%d", tn, b)
+	query := func(g group) (sks []string) {
+		for b := range dedupe.TableBuckets {
+			pk := fmt.Sprintf("%s/%s/%d", g.tn, keyenc.Escape(g.table), b)
 			pages := dynamodb.NewQueryPaginator(raw, &dynamodb.QueryInput{
 				TableName:                 aws.String(table),
 				ConsistentRead:            aws.Bool(true),
@@ -237,11 +247,11 @@ func TestDedupeDynamo_TenantPartitions(t *testing.T) {
 		}
 		return sks
 	}
-	assert.ElementsMatch(t, want, query("acme"))
-	assert.ElementsMatch(t, want, query("acme-2"), "the other tenants' items are there, under their own keys")
+	assert.ElementsMatch(t, want, query(groups[0]))
+	assert.ElementsMatch(t, want, query(groups[1]), "the other groups' items are there, under their own keys")
 	scan, err := raw.Scan(t.Context(), &dynamodb.ScanInput{TableName: aws.String(table), Select: types.SelectCount})
 	require.NoError(t, err)
-	assert.Equal(t, int32(3*64), scan.Count)
+	assert.EqualValues(t, len(groups)*len(want), scan.Count)
 }
 
 // 32 clients — 32 pods — race one id: DynamoDB's condition, not anything in

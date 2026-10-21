@@ -118,7 +118,9 @@ type dynamoAPI interface {
 	UpdateTimeToLive(context.Context, *dynamodb.UpdateTimeToLiveInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateTimeToLiveOutput, error)
 }
 
-// layout is the key schema Check found, which decides every item's key.
+// layout is the key schema Check found, which decides every item's key. The
+// key schema is all Check reads, so a layout added later (another bucket
+// count, say) must name its key attributes differently from these.
 type layout uint32
 
 const (

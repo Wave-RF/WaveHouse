@@ -538,7 +538,7 @@ func TestDynamo_ItemKeyFollowsTheLayout(t *testing.T) {
 		want   map[string]string
 	}{
 		{layoutPK, map[string]string{"pk": "acme/events/e1"}},
-		{layoutPKSK, map[string]string{"pk": "acme/7", "sk": "events/e1"}},
+		{layoutPKSK, map[string]string{"pk": "acme/events/36", "sk": "e1"}},
 	} {
 		t.Run(tc.layout.String(), func(t *testing.T) {
 			t.Parallel()

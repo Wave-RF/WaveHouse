@@ -13,11 +13,10 @@ import (
 // The table-to-(partition, shard) mapping is pinned: a change moves tables
 // on upgrade, so it must be deliberate. The values were derived apart from
 // this code (the paper's algorithm, FNV-1a 64 and splitmix64's finalizer,
-// in another language), not by running natsRoute.
+// in another language), not by running natsRoute; pkg/shard pins the two
+// primitives themselves.
 func TestNATSRoute_Golden(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, []int{0, 6, 87, 520}, []int{jumpHash(0, 1), jumpHash(1, 10), jumpHash(0xdeadbeef, 128), jumpHash(256, 1024)})
-	assert.Equal(t, []uint64{0, 0x5692161d100b05e5, 0x4e062702ec929eea}, []uint64{mix64(0), mix64(1), mix64(0xdeadbeef)})
 	ns, vs := []int{1, 2, 4, 7, 16, 64}, []int{1, 8, 32, 33, 100}
 	for _, tc := range []struct {
 		topic      Topic
