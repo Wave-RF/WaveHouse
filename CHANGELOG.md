@@ -55,6 +55,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Security
 
+- **Builds use Go 1.26.10, which distrusts eight compromised intermediate CA certificates** (`go.mod`, `deployments/Dockerfile`, `docs/src/content/docs/development.md`): the `go` directive moves from `1.26.9` to `1.26.10`, so the module's minimum Go version rises to 1.26.10, and `make`, CI, the release build and the source-build Dockerfile (`golang:1.26.10-alpine`) all use the patched toolchain. Go 1.26.10 makes `crypto/x509` drop every certificate chain that passes through one of eight eMudhra intermediate CA keys ([GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809), CVE-2026-111943). `govulncheck` reports it against 1.26.9, so `make verify`'s `vulncheck` leaf failed on every tree. Every chain WaveHouse verifies, as a TLS client of ClickHouse, NATS, Redis or any other endpoint, is filtered the same way, and Go has no setting to allow those intermediates again, so a server whose certificate chains through one of them needs a certificate from another issuer.
+
 - **Seven transitive npm packages move to patched releases** (`pnpm-lock.yaml`): brace-expansion 5.0.12, dompurify 3.4.16, fast-uri 3.1.8, js-yaml 3.15.2, mermaid 11.17.2, nanoid 3.3.20 and source-map-js 1.2.2, each within the range its dependent already allows, so no `package.json` changes. Mermaid 11.17.2 also brings `@mermaid-js/parser` 1.2.1 and two new dependencies, `fastdom` 1.0.12 and `strictdom` 1.0.1. They are dependencies of the docs site and the dev tooling; the server binary and the published SDK don't use them. Mermaid 11.17 lays out one state diagram on the ingest-pipeline page 36 px shorter, and the diagram audit is otherwise unchanged.
 
 ## [0.2.0] - 2026-10-13
