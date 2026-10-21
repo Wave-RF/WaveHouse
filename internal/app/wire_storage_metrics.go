@@ -168,34 +168,34 @@ func scrapeStorage(
 }
 
 // registerStorageMetrics registers the storage instruments on meter, read
-// from scrape on a collection more than ttl after the last successful one,
-// and from that one's result before. They are observable up-down counters, not
+// from scrape on a collection more than ttl after the last scrape, and from
+// that scrape's outcome before. They are observable up-down counters, not
 // gauges, so prometheus.per_table_metrics: false sums them over every table
 // (observability's tableView). A failed scrape observes nothing, so the
-// series go absent for the collection rather than stale or partial, and the
-// next collection scrapes again. It is
+// series go absent rather than stale or partial until a scrape more than ttl
+// later succeeds. It is
 // logged when the scrape starts failing, not on every collection after.
 func registerStorageMetrics(meter metric.Meter, scrape func(context.Context) (map[string]tableBytes, error), ttl time.Duration) (metric.Registration, error) {
 	var failing atomic.Bool
-	// The last successful scrape, reused for ttl. mu also serializes scrapes,
-	// so two readers collecting at once (OTLP and Prometheus) share one.
+	// The last scrape's outcome, failure included, reused for ttl: a hung
+	// ClickHouse then costs one storageScrapeTimeout per window rather than
+	// one per collection. mu also serializes scrapes, so collections arriving
+	// together (OTLP and Prometheus) wait for one and share its outcome.
 	var (
-		mu     sync.Mutex
-		last   map[string]tableBytes
-		lastAt time.Time
+		mu      sync.Mutex
+		last    map[string]tableBytes
+		lastErr error
+		lastAt  time.Time
 	)
 	cached := func(ctx context.Context) (map[string]tableBytes, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		if last != nil && time.Since(lastAt) < ttl {
-			return last, nil
+		if !lastAt.IsZero() && time.Since(lastAt) < ttl {
+			return last, lastErr
 		}
-		tables, err := scrape(ctx)
-		if err != nil {
-			return nil, err
-		}
-		last, lastAt = tables, time.Now()
-		return tables, nil
+		last, lastErr = scrape(ctx)
+		lastAt = time.Now()
+		return last, lastErr
 	}
 	var errs [3]error
 	var uncompressed, onDisk metric.Int64ObservableUpDownCounter
