@@ -3,6 +3,8 @@ package dedupe_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -40,6 +42,75 @@ func TestKeyLayout(t *testing.T) {
 	long := strings.Repeat("x", dedupe.MaxIDBytes+1)
 	sum := sha256.Sum256([]byte(long))
 	assert.Equal(t, "acme/t/#"+hex.EncodeToString(sum[:]), key("acme", dedupe.Key{Table: "t", ID: long}))
+}
+
+// The tenant-partitioned layout is pinned the same way, bucket included: the
+// same key in another bucket is another item, so a refactor that moved it
+// would forget every id stored. The buckets were computed apart from this
+// code, from FNV-1a 64's published offset and prime.
+func TestPartitionedKey(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("x", dedupe.MaxIDBytes+1)
+	sum := sha256.Sum256([]byte(long))
+	for _, tt := range []struct {
+		tn     tenant.ID
+		k      dedupe.Key
+		pk, sk string
+	}{
+		{"acme", dedupe.Key{Table: "clicks", ID: "evt-123"}, "acme/7", "clicks/evt-123"},
+		{"acme-co", dedupe.Key{Table: "db.t", ID: "a/b"}, "acme-co/2", "db%2Et/a%2Fb"},
+		{"0", dedupe.Key{Table: "", ID: ""}, "0/14", "/"},
+		{"0", dedupe.Key{Table: "t", ID: "#%café"}, "0/2", "t/%23%25caf%C3%A9"},
+		{"acme", dedupe.Key{Table: "t", ID: long}, "acme/2", "t/#" + hex.EncodeToString(sum[:])},
+	} {
+		pk, sk := dedupe.PartitionedKey(tt.tn, tt.k)
+		assert.Equal(t, tt.pk, pk, "%+v", tt.k)
+		assert.Equal(t, tt.sk, sk, "%+v", tt.k)
+	}
+}
+
+// A sort key holds at most 1,024 bytes, so this layout hashes an id once the
+// table, separator and id together would pass that, though AppendKey keeps
+// it verbatim up to 1,024 bytes of id alone.
+func TestPartitionedKey_HashesPastTheSortKeyLimit(t *testing.T) {
+	t.Parallel()
+	fits := dedupe.Key{Table: "t", ID: strings.Repeat("x", 1022)}
+	pk, sk := dedupe.PartitionedKey("a", fits)
+	assert.Equal(t, "a/4", pk)
+	assert.Equal(t, "t/"+fits.ID, sk)
+
+	over := dedupe.Key{Table: "t", ID: strings.Repeat("x", 1023)}
+	require.False(t, over.Hashed(), "verbatim in AppendKey's form")
+	sum := sha256.Sum256([]byte(over.ID))
+	pk, sk = dedupe.PartitionedKey("a", over)
+	assert.Equal(t, "a/10", pk)
+	assert.Equal(t, "t/#"+hex.EncodeToString(sum[:]), sk)
+}
+
+// A partition key splits back to its tenant, so no two tenants share one,
+// even where one id is a prefix of the other (acme, acme-2); and sequential
+// ids reach every bucket about evenly.
+func TestPartitionedKey_Buckets(t *testing.T) {
+	t.Parallel()
+	per := map[string]int{}
+	for _, tn := range []tenant.ID{"acme", "acme-2", "acme_x", "acm"} {
+		for i := range 1600 {
+			pk, _ := dedupe.PartitionedKey(tn, dedupe.Key{Table: "events", ID: fmt.Sprintf("evt-%d", i)})
+			got, b, ok := strings.Cut(pk, "/")
+			require.True(t, ok, pk)
+			require.Equal(t, string(tn), got)
+			n, err := strconv.Atoi(b)
+			require.NoError(t, err)
+			require.True(t, n >= 0 && n < dedupe.TenantBuckets, pk)
+			if tn == "acme" {
+				per[pk]++
+			}
+		}
+	}
+	assert.Len(t, per, dedupe.TenantBuckets)
+	for pk, n := range per {
+		assert.InDelta(t, 100, n, 25, pk)
+	}
 }
 
 // The limit is on the escaped id: 1,024 bytes that escape to more are hashed,
@@ -87,6 +158,11 @@ func TestKeyLayout_NoCollisions(t *testing.T) {
 			t.Fatalf("%q and %q share the key %q", prev, who, s)
 		}
 		seen[s] = who
+		// So is the partitioned key, which is the same text split at the
+		// tenant while the sort key is under DynamoDB's limit.
+		pk, sk := dedupe.PartitionedKey(tn, k)
+		require.Equal(t, s, string(tn)+"/"+sk)
+		require.True(t, strings.HasPrefix(pk, string(tn)+"/"), pk)
 		gotTenant, gotTable, idPart := decodeKey(t, s)
 		assert.Equal(t, string(tn), gotTenant)
 		assert.Equal(t, k.Table, gotTable)

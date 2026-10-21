@@ -651,12 +651,15 @@ What the backend requires of the table:
 
 | Attribute | Type | Role |
 |---|---|---|
-| `pk` | String | Partition key, and the only key: tenant, table and id as readable text, for example `acme/clicks/evt-123` (the table and id escaped the way NATS subject tokens are: letters, digits, `_` and `-` kept, every other byte written as `%XX`). No sort key. |
+| `pk` | String | Partition key: the tenant and one of its 16 buckets, for example `acme/7`. |
+| `sk` | String | Sort key: the table and id as readable text, for example `clicks/evt-123`, escaped the way NATS subject tokens are: letters, digits, `_` and `-` kept, every other byte written as `%XX`. |
 | `st` | Number | `1` = pending claim, `2` = committed. |
 | `ex` | Number | Epoch seconds: the lease end while pending, the retention end once committed; absent = never expires. |
 | `tk` | Binary | The claim token that `Release` matches. |
 
-Only `pk` is declared in the table definition. Turn TTL on for `ex`. Correctness never depends on TTL, because a claim whose `ex` has passed counts as absent whether or not DynamoDB has deleted it yet; TTL only reclaims the storage. TTL removes lapsed claims, and a committed id once its [`dedupe.retention`](/settings-directory#deduplication) ends. With the default retention `"0"` (forever) a committed item carries no `ex` and is kept, so the table grows by one item (about 200 bytes) per distinct id. Boot checks the table and logs a warning if TTL is off; a key schema that does not match is a misconfigured table, handled as described below.
+Only `pk` and `sk` are declared in the table definition. One tenant's items spread over 16 partition keys, `<tenant>/0` to `<tenant>/15`, the bucket being FNV-1a 64 of `sk` mod 16, in decimal. Listing a tenant's ids is then 16 `Query` calls rather than a scan of every tenant's, and its writes are not all on one partition key: DynamoDB documents a ceiling of 1,000 write units a second per partition, and each new id costs two (the claim and the commit). The count of 16 is part of the layout and is not configurable, since changing it would move every item. A sort key holds at most 1,024 bytes, so an id is stored as `#` plus its SHA-256 in hex once the escaped table name and id together would pass that, which is sooner than the 1,024-byte limit on the id alone that [`wavehouse_dedupe_hashed_id_total`](/settings-directory#deduplication) counts. Turn TTL on for `ex`. Correctness never depends on TTL, because a claim whose `ex` has passed counts as absent whether or not DynamoDB has deleted it yet; TTL only reclaims the storage. TTL removes lapsed claims, and a committed id once its [`dedupe.retention`](/settings-directory#deduplication) ends. With the default retention `"0"` (forever) a committed item carries no `ex` and is kept, so the table grows by one item (about 200 bytes) per distinct id. Boot checks the table, logs the key schema it found (`dedupe: dynamodb table checked`, with `key_schema=pk+sk` or `key_schema=pk`), and logs a warning if TTL is off; a key schema that is neither layout is a misconfigured table, handled as described below.
+
+**A table keyed by `pk` alone**, the layout this page described before `sk`, keeps working with no change: its `pk` holds tenant, table and id together (`acme/clicks/evt-123`), there is no setting, and boot writes each table in the layout its key schema has. Its cost is that finding one tenant's items means scanning the whole table, so create every new table with `pk` and `sk`. DynamoDB cannot change a key schema in place, so moving an existing deployment over means a new table, and a new table starts with no seen ids: an event accepted before the switch and retried after it is stored again, unless you first copy the items across, rewriting each one's key into the layout above. Switch every pod at once, since pods on different tables do not share seen ids.
 
 An example in Terraform. Replace the tags with your own conventions:
 
@@ -665,10 +668,16 @@ resource "aws_dynamodb_table" "wavehouse_dedupe" {
   name                        = "wavehouse-dedupe-${var.environment}"
   billing_mode                = "PAY_PER_REQUEST" # provisioned + auto scaling once traffic is steady
   hash_key                    = "pk"
+  range_key                   = "sk"
   deletion_protection_enabled = true
 
   attribute {
     name = "pk"
+    type = "S"
+  }
+
+  attribute {
+    name = "sk"
     type = "S"
   }
 
