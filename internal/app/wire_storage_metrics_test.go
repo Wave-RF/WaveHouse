@@ -13,6 +13,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
@@ -117,15 +118,11 @@ func assertNonMonotonicSums(t *testing.T, reader *sdkmetric.ManualReader) {
 
 func TestReadParts(t *testing.T) {
 	t.Parallel()
-	got, err := readParts(t.Context(), nil)
-	require.NoError(t, err, "a tenant on no pool does not fail the scrape")
-	assert.Nil(t, got, "and contributes no tables")
-
 	q := &stubPartsQuerier{rows: &stubPartsRows{rows: []partsRow{
 		{"events", 100, 10},
 		{"clicks", 7, 3},
 	}}}
-	got, err = readParts(t.Context(), q)
+	got, err := readParts(t.Context(), q)
 	require.NoError(t, err)
 	assert.Equal(t, partsQuery, q.query)
 	assert.Equal(t, map[string]tableBytes{
@@ -192,3 +189,31 @@ func (r *stubPartsRows) Scan(dest ...any) error {
 func (r *stubPartsRows) Err() error { return r.err }
 
 func (*stubPartsRows) Close() error { return nil }
+
+func TestTablesKey(t *testing.T) {
+	t.Parallel()
+	base := chconn.Params{
+		Addr: "ch:9000", HTTPPort: 8123, HTTPScheme: "http", Database: "db1",
+		Username: "u", QueryTimeout: 30, MaxOpenConns: 1, MaxIdleConns: 1,
+	}
+	otherHTTP, otherUser, otherPort, otherDB := base, base, base, base
+	otherHTTP.HTTPPort, otherHTTP.HTTPScheme = 8443, "https"
+	otherUser.Username = "v"
+	otherPort.Addr = "ch:9440"
+	otherDB.Database = "db2"
+	pools, err := chconn.NewPools(100, []chconn.Member{
+		{Tenant: "a", Params: base},
+		{Tenant: "b", Params: otherHTTP},
+		{Tenant: "c", Params: otherUser},
+		{Tenant: "d", Params: otherPort},
+		{Tenant: "e", Params: otherDB},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pools.Close() })
+	key := func(id tenant.ID) string { return tablesKey(pools.For(id)) }
+
+	assert.Equal(t, key("a"), key("b"), "another HTTP port or scheme reads the same tables")
+	assert.Equal(t, key("a"), key("c"), "another user reads the same tables")
+	assert.NotEqual(t, key("a"), key("d"), "another native address is another server")
+	assert.NotEqual(t, key("a"), key("e"), "another database is other tables")
+}

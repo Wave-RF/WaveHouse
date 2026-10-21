@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
@@ -54,26 +55,32 @@ func (a *App) wireStorageMetrics() {
 	a.add(component{name: "storage metrics", close: withoutContext(reg.Unregister)})
 }
 
-// scrapeStorage reads every served tenant's database, once per address and
-// database.
+// scrapeStorage reads every served tenant's database over its pool, once per
+// address and database: the pool's own, as chconn.Pools.SharingTables groups
+// tenants, so the grouping matches the connection read. A tenant on no pool
+// (its tuple could not be opened) has no tables to report and is skipped,
+// which under-reports nothing.
 func (a *App) scrapeStorage(ctx context.Context) (map[string]tableBytes, error) {
 	var ids []tenant.ID
+	pools := map[tenant.ID]*chconn.Manager{}
 	for id := range a.tenants.All() {
-		ids = append(ids, id)
+		if m := a.pools.For(id); m != nil {
+			ids = append(ids, id)
+			pools[id] = m
+		}
 	}
 	return scrapeStorage(ctx, ids,
-		func(id tenant.ID) string {
-			t := a.pools.Target(id)
-			return t.URL + "\x00" + t.Database
-		},
+		func(id tenant.ID) string { return tablesKey(pools[id]) },
 		func(ctx context.Context, id tenant.ID) (map[string]tableBytes, error) {
-			// For returns a nil *Manager for a tenant on no pool, which must
-			// reach readParts as a nil interface.
-			if m := a.pools.For(id); m != nil {
-				return readParts(ctx, m)
-			}
-			return readParts(ctx, nil)
+			return readParts(ctx, pools[id])
 		})
+}
+
+// tablesKey names the tables m reads: its address and database, whatever its
+// user or tls block.
+func tablesKey(m *chconn.Manager) string {
+	id := m.Identity()
+	return id.Addr + "\x00" + id.Database
 }
 
 // partsQuerier is the slice of chconn.Manager that readParts uses.
@@ -81,14 +88,8 @@ type partsQuerier interface {
 	Query(ctx context.Context, query string, args ...any) (driver.Rows, error)
 }
 
-// readParts runs partsQuery over q. A nil q is a tenant on no pool (its
-// tuple could not be opened): it has no tables to report, so it contributes
-// nothing rather than failing the scrape, and skipping it under-reports
-// nothing.
+// readParts runs partsQuery over q.
 func readParts(ctx context.Context, q partsQuerier) (map[string]tableBytes, error) {
-	if q == nil {
-		return nil, nil
-	}
 	rows, err := q.Query(ctx, partsQuery)
 	if err != nil {
 		return nil, err
