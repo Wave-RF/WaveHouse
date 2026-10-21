@@ -130,8 +130,7 @@ func TestDynamoDBDedupe_TwoInstancesShareSeenIDs(t *testing.T) {
 
 	// A claim another process holds is in flight on both pods, for as long
 	// as the configured lease says.
-	peer := dynamoClient(t, ddbTable, dedupe.DynamoConfig{}).Tenant(tenant.Default)
-	require.NoError(t, peer.Apply(true))
+	peer := openDynamo(t, dynamoClient(t, ddbTable, dedupe.DynamoConfig{}), tenant.Default)
 	claims, err := peer.Reserve(ctx, []dedupe.Key{{Table: chTable, ID: "e3"}}, time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, dedupe.Claimed, claims[0].Status)

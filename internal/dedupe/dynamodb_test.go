@@ -91,9 +91,12 @@ func openFake(t *testing.T, f *fakeDynamo) (*Dynamo, Deduplicator) {
 	return openFakeWith(t, f, DynamoConfig{Table: "dedupe"})
 }
 
+// openFakeWith opens tenant acme's store over a pk+sk table, so the fakes
+// find the id at the end of sk.
 func openFakeWith(t *testing.T, f *fakeDynamo, cfg DynamoConfig) (*Dynamo, Deduplicator) {
 	t.Helper()
 	d := newDynamo(f, cfg)
+	d.layout.Store(uint32(layoutPKSK))
 	d.commitBackoff = func(int) time.Duration { return 0 }
 	m := d.Tenant("acme")
 	require.NoError(t, m.Apply(true))
@@ -145,12 +148,12 @@ func TestClassify(t *testing.T) {
 func TestDynamo_ReserveReadsTheHeldItem(t *testing.T) {
 	t.Parallel()
 	_, m := openFake(t, &fakeDynamo{put: func(_ context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
-		id := in.Item[attrKey].(*types.AttributeValueMemberS).Value
+		id := in.Item[attrSort].(*types.AttributeValueMemberS).Value
 		switch id[len(id)-1] {
 		case 'd':
-			return nil, &types.ConditionalCheckFailedException{Item: map[string]types.AttributeValue{attrState: &types.AttributeValueMemberN{Value: stateCommitted}}}
+			return nil, &types.ConditionalCheckFailedException{Item: map[string]types.AttributeValue{attrSort: in.Item[attrSort], attrState: &types.AttributeValueMemberN{Value: stateCommitted}}}
 		case 'f':
-			return nil, &types.ConditionalCheckFailedException{Item: map[string]types.AttributeValue{attrState: &types.AttributeValueMemberN{Value: statePending}}}
+			return nil, &types.ConditionalCheckFailedException{Item: map[string]types.AttributeValue{attrSort: in.Item[attrSort], attrState: &types.AttributeValueMemberN{Value: statePending}}}
 		}
 		assert.Equal(t, condReserve, aws.ToString(in.ConditionExpression))
 		assert.Equal(t, types.ReturnValuesOnConditionCheckFailureAllOld, in.ReturnValuesOnConditionCheckFailure)
@@ -163,6 +166,28 @@ func TestDynamo_ReserveReadsTheHeldItem(t *testing.T) {
 	assert.Empty(t, claims[1].Token)
 }
 
+// A pk+sk store whose table was replaced since Check by one keyed by pk
+// alone meets another id's item under its pk, or one with no sk at all: it
+// fails, never answering for an id it has not seen.
+func TestDynamo_ReserveRefusesAnotherSortKey(t *testing.T) {
+	t.Parallel()
+	for _, sk := range []types.AttributeValue{&types.AttributeValueMemberS{Value: "events/other"}, nil} {
+		_, m := openFake(t, &fakeDynamo{put: func(_ context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+			held := maps.Clone(in.Item)
+			held[attrState] = &types.AttributeValueMemberN{Value: stateCommitted}
+			if sk == nil {
+				delete(held, attrSort)
+			} else {
+				held[attrSort] = sk
+			}
+			return nil, &types.ConditionalCheckFailedException{Item: held}
+		}})
+		_, err := m.Reserve(t.Context(), keys("e1"), time.Minute)
+		require.ErrorContains(t, err, "lost its sort key", "held sk %v", sk)
+		assert.NotErrorIs(t, err, ErrUnavailable, "a configuration error, not worth retrying")
+	}
+}
+
 // An SDK retry of a put whose first attempt was applied fails its condition
 // on the put's own item: that is the caller's claim, not another request's.
 func TestDynamo_RetriedPutKeepsItsOwnClaim(t *testing.T) {
@@ -172,7 +197,7 @@ func TestDynamo_RetriedPutKeepsItsOwnClaim(t *testing.T) {
 	var released []string
 	fake := &fakeDynamo{
 		put: func(_ context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
-			id := idOf(in.Item[attrKey])
+			id := idOf(in.Item[attrSort])
 			mu.Lock()
 			putTokens[id] = string(in.Item[attrToken].(*types.AttributeValueMemberB).Value)
 			mu.Unlock()
@@ -187,7 +212,7 @@ func TestDynamo_RetriedPutKeepsItsOwnClaim(t *testing.T) {
 			return nil, &types.InternalServerError{}
 		},
 		del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
-			id := idOf(in.Key[attrKey])
+			id := idOf(in.Key[attrSort])
 			mu.Lock()
 			defer mu.Unlock()
 			assert.Equal(t, putTokens[id], string(in.ExpressionAttributeValues[":tk"].(*types.AttributeValueMemberB).Value))
@@ -217,20 +242,20 @@ func TestDynamo_FailedReserveReleasesEveryPutThatMayHaveLanded(t *testing.T) {
 	var released []string
 	_, m := openFake(t, &fakeDynamo{
 		put: func(_ context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
-			id := in.Item[attrKey].(*types.AttributeValueMemberS).Value
+			id := in.Item[attrSort].(*types.AttributeValueMemberS).Value
 			mu.Lock()
 			putTokens[id] = string(in.Item[attrToken].(*types.AttributeValueMemberB).Value)
 			mu.Unlock()
 			switch id[len(id)-3:] {
 			case "dup":
-				return nil, &types.ConditionalCheckFailedException{Item: map[string]types.AttributeValue{attrState: &types.AttributeValueMemberN{Value: stateCommitted}}}
+				return nil, &types.ConditionalCheckFailedException{Item: map[string]types.AttributeValue{attrSort: in.Item[attrSort], attrState: &types.AttributeValueMemberN{Value: stateCommitted}}}
 			case "bad":
 				return nil, &types.InternalServerError{}
 			}
 			return &dynamodb.PutItemOutput{}, nil
 		},
 		del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
-			id := in.Key[attrKey].(*types.AttributeValueMemberS).Value
+			id := in.Key[attrSort].(*types.AttributeValueMemberS).Value
 			mu.Lock()
 			defer mu.Unlock()
 			assert.Equal(t, putTokens[id], string(in.ExpressionAttributeValues[":tk"].(*types.AttributeValueMemberB).Value), "released by the token it was put with")
@@ -265,15 +290,15 @@ func TestDynamo_CommitRetriesUnprocessedItems(t *testing.T) {
 		defer mu.Unlock()
 		var left []types.WriteRequest
 		for i, r := range reqs {
-			pk := r.PutRequest.Item[attrKey].(*types.AttributeValueMemberS).Value
+			sk := r.PutRequest.Item[attrSort].(*types.AttributeValueMemberS).Value
 			assert.Equal(t, stateCommitted, r.PutRequest.Item[attrState].(*types.AttributeValueMemberN).Value)
 			assert.Contains(t, r.PutRequest.Item, attrExpiry)
-			if i == len(reqs)-1 && !heldBack[pk] && len(reqs) > 1 {
-				heldBack[pk] = true
+			if i == len(reqs)-1 && !heldBack[sk] && len(reqs) > 1 {
+				heldBack[sk] = true
 				left = append(left, r)
 				continue
 			}
-			written[pk]++
+			written[sk]++
 		}
 		return &dynamodb.BatchWriteItemOutput{UnprocessedItems: map[string][]types.WriteRequest{"dedupe": left}}, nil
 	}})
@@ -288,8 +313,8 @@ func TestDynamo_CommitRetriesUnprocessedItems(t *testing.T) {
 	claims = append(claims, claims[0])
 	require.NoError(t, m.Commit(t.Context(), claims, time.Hour))
 	assert.Len(t, written, 60, "a key handed over twice is written once")
-	for pk, n := range written {
-		assert.Equal(t, 1, n, "%q", pk)
+	for sk, n := range written {
+		assert.Equal(t, 1, n, "%q", sk)
 	}
 	assert.Equal(t, int64(6), calls.Load(), "3 chunks, each retried once")
 }
@@ -351,7 +376,7 @@ func TestDynamo_ReleaseTreatsAFailedConditionAsDone(t *testing.T) {
 	t.Parallel()
 	_, m := openFake(t, &fakeDynamo{del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
 		assert.Equal(t, condRelease, aws.ToString(in.ConditionExpression))
-		id := in.Key[attrKey].(*types.AttributeValueMemberS).Value
+		id := in.Key[attrSort].(*types.AttributeValueMemberS).Value
 		if id[len(id)-1] == 'x' {
 			return nil, &types.ResourceNotFoundException{}
 		}
@@ -415,33 +440,145 @@ func TestBreaker_FailuresSpreadOutDoNotTrip(t *testing.T) {
 	require.NoError(t, b.allow(), "a success resets the count")
 }
 
+// describeTable is a DescribeTable answer with keys, each "name:HASH" or
+// "name:RANGE", and attribute definitions, each "name:S" (or N, B).
+func describeTable(keys []string, attrs ...string) *dynamodb.DescribeTableOutput {
+	t := &types.TableDescription{}
+	for _, k := range keys {
+		name, kind, _ := strings.Cut(k, ":")
+		t.KeySchema = append(t.KeySchema, types.KeySchemaElement{AttributeName: aws.String(name), KeyType: types.KeyType(kind)})
+	}
+	for _, a := range attrs {
+		name, kind, _ := strings.Cut(a, ":")
+		t.AttributeDefinitions = append(t.AttributeDefinitions, types.AttributeDefinition{AttributeName: aws.String(name), AttributeType: types.ScalarAttributeType(kind)})
+	}
+	return &dynamodb.DescribeTableOutput{Table: t}
+}
+
 func TestDynamo_Check(t *testing.T) {
 	t.Parallel()
-	good := &dynamodb.DescribeTableOutput{Table: &types.TableDescription{
-		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
-		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
-	}}
 	ttlOn := &dynamodb.DescribeTimeToLiveOutput{TimeToLiveDescription: &types.TimeToLiveDescription{
 		AttributeName: aws.String("ex"), TimeToLiveStatus: types.TimeToLiveStatusEnabled,
 	}}
-	check := func(table *dynamodb.DescribeTableOutput, ttl *dynamodb.DescribeTimeToLiveOutput, ttlErr error) error {
+	check := func(table *dynamodb.DescribeTableOutput, ttl *dynamodb.DescribeTimeToLiveOutput, ttlErr error) (layout, error) {
 		f := &fakeDynamo{
 			describe: func() (*dynamodb.DescribeTableOutput, error) { return table, nil },
 			ttl:      func() (*dynamodb.DescribeTimeToLiveOutput, error) { return ttl, ttlErr },
 		}
-		return newDynamo(f, DynamoConfig{Table: "dedupe"}).Check(t.Context())
+		d := newDynamo(f, DynamoConfig{Table: "dedupe"})
+		err := d.Check(t.Context())
+		return layout(d.layout.Load()), err
 	}
-	require.NoError(t, check(good, ttlOn, nil))
-	require.NoError(t, check(good, &dynamodb.DescribeTimeToLiveOutput{}, nil), "no TTL is a warning")
-	require.ErrorIs(t, check(good, nil, &types.InternalServerError{}), ErrUnavailable)
+	pkOnly := describeTable([]string{"pk:HASH"}, "pk:S")
+	for _, tc := range []struct {
+		name  string
+		table *dynamodb.DescribeTableOutput
+		want  layout
+	}{
+		{"pk alone", pkOnly, layoutPK},
+		{"pk and sk", describeTable([]string{"pk:HASH", "sk:RANGE"}, "pk:S", "sk:S"), layoutPKSK},
+		{"sk listed first", describeTable([]string{"sk:RANGE", "pk:HASH"}, "sk:S", "pk:S"), layoutPKSK},
+	} {
+		got, err := check(tc.table, ttlOn, nil)
+		require.NoError(t, err, tc.name)
+		assert.Equal(t, tc.want, got, tc.name)
+	}
+	for _, tc := range []struct {
+		name, msg string
+		table     *dynamodb.DescribeTableOutput
+	}{
+		{"pk as a sort key", "key schema", describeTable([]string{"pk:RANGE"}, "pk:S")},
+		{"sk alone", "key schema", describeTable([]string{"sk:HASH"}, "sk:S")},
+		{"another sort key", "key schema", describeTable([]string{"pk:HASH", "id:RANGE"}, "pk:S", "id:S")},
+		{"the keys swapped", "key schema", describeTable([]string{"sk:HASH", "pk:RANGE"}, "pk:S", "sk:S")},
+		{"binary pk", "pk must be a string", describeTable([]string{"pk:HASH"}, "pk:B")},
+		{"numeric sk", "sk must be a string", describeTable([]string{"pk:HASH", "sk:RANGE"}, "pk:S", "sk:N")},
+	} {
+		got, err := check(tc.table, ttlOn, nil)
+		require.ErrorContains(t, err, tc.msg, tc.name)
+		assert.NotErrorIs(t, err, ErrUnavailable, "%s: a misconfigured table", tc.name)
+		assert.Equal(t, layoutUnchecked, got, tc.name)
+	}
 
-	withRange := &dynamodb.DescribeTableOutput{Table: &types.TableDescription{
-		KeySchema: []types.KeySchemaElement{
-			{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash},
-			{AttributeName: aws.String("sk"), KeyType: types.KeyTypeRange},
+	_, err := check(pkOnly, &dynamodb.DescribeTimeToLiveOutput{}, nil)
+	require.NoError(t, err, "no TTL is a warning")
+	got, err := check(pkOnly, nil, &types.InternalServerError{})
+	require.ErrorIs(t, err, ErrUnavailable)
+	assert.Equal(t, layoutUnchecked, got, "a check that failed records no layout")
+}
+
+// A store opens only once Check has read the layout: keys for the wrong one
+// would be refused, or, put into a pk table, share one item per bucket.
+func TestDynamo_StoreWaitsForCheck(t *testing.T) {
+	t.Parallel()
+	d := newDynamo(&fakeDynamo{
+		describe: func() (*dynamodb.DescribeTableOutput, error) {
+			return describeTable([]string{"pk:HASH", "sk:RANGE"}, "pk:S", "sk:S"), nil
 		},
-	}}
-	assert.ErrorContains(t, check(withRange, ttlOn, nil), "key schema")
+		ttl: func() (*dynamodb.DescribeTimeToLiveOutput, error) { return &dynamodb.DescribeTimeToLiveOutput{}, nil },
+	}, DynamoConfig{Table: "dedupe"})
+	m := d.Tenant("acme")
+	require.ErrorIs(t, m.Apply(true), ErrUnavailable)
+	_, err := m.Reserve(t.Context(), keys("e1"), time.Minute)
+	require.ErrorIs(t, err, ErrUnavailable, "fails closed")
+
+	require.NoError(t, d.Check(t.Context()))
+	require.NoError(t, m.Apply(true))
+	claims, err := m.Reserve(t.Context(), keys("e1"), time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, Claimed, claims[0].Status)
+}
+
+// Reserve, Commit and Release all address the item the layout names: pk
+// from AppendKey alone, or pk and sk from PartitionedKey.
+func TestDynamo_ItemKeyFollowsTheLayout(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		layout layout
+		want   map[string]string
+	}{
+		{layoutPK, map[string]string{"pk": "acme/events/e1"}},
+		{layoutPKSK, map[string]string{"pk": "acme/events/36", "sk": "e1"}},
+	} {
+		t.Run(tc.layout.String(), func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			got := map[string]map[string]string{}
+			record := func(op string, item map[string]types.AttributeValue) {
+				mu.Lock()
+				defer mu.Unlock()
+				k := map[string]string{}
+				for _, name := range []string{attrKey, attrSort} {
+					if v, ok := item[name]; ok {
+						k[name] = v.(*types.AttributeValueMemberS).Value
+					}
+				}
+				got[op] = k
+			}
+			d := newDynamo(&fakeDynamo{
+				put: func(_ context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+					record("put", in.Item)
+					return &dynamodb.PutItemOutput{}, nil
+				},
+				batch: func(_ context.Context, in *dynamodb.BatchWriteItemInput) (*dynamodb.BatchWriteItemOutput, error) {
+					record("batch", in.RequestItems["dedupe"][0].PutRequest.Item)
+					return &dynamodb.BatchWriteItemOutput{}, nil
+				},
+				del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+					record("delete", in.Key)
+					return &dynamodb.DeleteItemOutput{}, nil
+				},
+			}, DynamoConfig{Table: "dedupe"})
+			d.layout.Store(uint32(tc.layout))
+			m := d.Tenant("acme")
+			require.NoError(t, m.Apply(true))
+			claims, err := m.Reserve(t.Context(), keys("e1"), time.Minute)
+			require.NoError(t, err)
+			require.NoError(t, m.Commit(t.Context(), claims, 0))
+			require.NoError(t, m.Release(t.Context(), claims))
+			assert.Equal(t, map[string]map[string]string{"put": tc.want, "batch": tc.want, "delete": tc.want}, got)
+		})
+	}
 }
 
 func TestDynamo_Config(t *testing.T) {
@@ -564,6 +701,7 @@ func TestDynamo_ThrottledCallEndsOnItsLastAttempt(t *testing.T) {
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("k", "s", "")),
 		config.WithHTTPClient(h))
 	require.NoError(t, err)
+	d.layout.Store(uint32(layoutPKSK))
 	m := d.Tenant("acme")
 	require.NoError(t, m.Apply(true))
 	calls := breakerTrips - 1
@@ -616,7 +754,7 @@ func TestDynamo_CommitAttemptsEveryChunk(t *testing.T) {
 	written := 0
 	_, m := openFakeWith(t, &fakeDynamo{batch: func(_ context.Context, in *dynamodb.BatchWriteItemInput) (*dynamodb.BatchWriteItemOutput, error) {
 		reqs := in.RequestItems["dedupe"]
-		if idOf(reqs[0].PutRequest.Item[attrKey]) == "00" {
+		if idOf(reqs[0].PutRequest.Item[attrSort]) == "00" {
 			return nil, &types.InternalServerError{}
 		}
 		mu.Lock()
@@ -662,7 +800,7 @@ func assertCancelLeavesNothing(t *testing.T, ks []Key) {
 	cancelled := make(chan struct{})
 	_, m := openFakeWith(t, &fakeDynamo{
 		put: func(ctx context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
-			id := idOf(in.Item[attrKey])
+			id := idOf(in.Item[attrSort])
 			tk := string(in.Item[attrToken].(*types.AttributeValueMemberB).Value)
 			mu.Lock()
 			sent = append(sent, id)
@@ -685,7 +823,7 @@ func assertCancelLeavesNothing(t *testing.T, ks []Key) {
 			}
 		},
 		del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
-			id := idOf(in.Key[attrKey])
+			id := idOf(in.Key[attrSort])
 			tk := string(in.ExpressionAttributeValues[":tk"].(*types.AttributeValueMemberB).Value)
 			mu.Lock()
 			defer mu.Unlock()
@@ -712,7 +850,7 @@ func TestDynamo_ReleaseAttemptsEveryClaim(t *testing.T) {
 	var deletes atomic.Int64
 	_, m := openFakeWith(t, &fakeDynamo{del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
 		deletes.Add(1)
-		if idOf(in.Key[attrKey]) == "k0" {
+		if idOf(in.Key[attrSort]) == "k0" {
 			return nil, &types.ProvisionedThroughputExceededException{}
 		}
 		return &dynamodb.DeleteItemOutput{}, nil
@@ -735,7 +873,7 @@ func TestDynamo_FailedMultiKeyReserve(t *testing.T) {
 	landed := map[string]bool{}
 	_, m := openFakeWith(t, &fakeDynamo{
 		put: func(ctx context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
-			id := idOf(in.Item[attrKey])
+			id := idOf(in.Item[attrSort])
 			mu.Lock()
 			put = append(put, id)
 			mu.Unlock()
@@ -752,7 +890,7 @@ func TestDynamo_FailedMultiKeyReserve(t *testing.T) {
 			return &dynamodb.PutItemOutput{}, nil
 		},
 		del: func(_ context.Context, in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
-			id := idOf(in.Key[attrKey])
+			id := idOf(in.Key[attrSort])
 			mu.Lock()
 			defer mu.Unlock()
 			released = append(released, id)

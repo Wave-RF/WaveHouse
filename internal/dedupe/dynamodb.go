@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,10 +28,11 @@ import (
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
-// The table's attributes. pk is the key from key.go and the only key
-// attribute; ex is the table's TTL attribute.
+// The table's attributes. pk is the partition key, and sk the sort key of a
+// tenant-partitioned table (key.go); ex is the table's TTL attribute.
 const (
 	attrKey    = "pk"
+	attrSort   = "sk"
 	attrState  = "st"
 	attrExpiry = "ex"
 	attrToken  = "tk"
@@ -39,7 +41,8 @@ const (
 	stateCommitted = "2"
 
 	// A claim is live while now < ex; one whose ex has passed is absent
-	// to Reserve, whether or not TTL has deleted it yet.
+	// to Reserve, whether or not TTL has deleted it yet. pk is in every
+	// item of both layouts.
 	condReserve = "attribute_not_exists(pk) OR ex <= :now"
 	condRelease = "tk = :tk AND st = :pending"
 
@@ -115,6 +118,36 @@ type dynamoAPI interface {
 	UpdateTimeToLive(context.Context, *dynamodb.UpdateTimeToLiveInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateTimeToLiveOutput, error)
 }
 
+// layout is the key schema Check found, which decides every item's key. The
+// key schema is all Check reads, so a layout added later (another bucket
+// count, say) must name its key attributes differently from these.
+type layout uint32
+
+const (
+	layoutUnchecked layout = iota
+	// layoutPK is pk alone, the key from AppendKey: the original layout,
+	// still served as it is.
+	layoutPK
+	// layoutPKSK is pk and sk, from PartitionedKey: what CreateTable makes.
+	layoutPKSK
+)
+
+func (l layout) String() string {
+	switch l {
+	case layoutPK:
+		return "pk"
+	case layoutPKSK:
+		return "pk+sk"
+	case layoutUnchecked:
+	}
+	return "unchecked"
+}
+
+// errUnchecked is a store's open before Check has read the key schema: a
+// guess would write the wrong keys, and the pk+sk layout's keys put in a pk
+// table would share one item per bucket.
+var errUnchecked = fmt.Errorf("%w: dynamodb table not checked yet", ErrUnavailable)
+
 // Dynamo is the DynamoDB implementation: every tenant's keys in one shared
 // table, so pods sharing the table share seen ids and Reserve's conditional
 // write is atomic across all of them. WaveHouse never creates the table in
@@ -125,6 +158,8 @@ type Dynamo struct {
 	now     func() time.Time
 	breaker *breaker
 	metrics dynamoMetrics
+	// layout is the last passing Check's; a store opens only once it is set.
+	layout atomic.Uint32
 	// commitBackoff is the wait before retrying the attempt'th round of
 	// unprocessed or throttled items.
 	commitBackoff func(attempt int) time.Duration
@@ -226,15 +261,22 @@ func newDynamo(api dynamoAPI, cfg DynamoConfig) *Dynamo {
 }
 
 // Tenant builds tenant id's store, closed, over its share of the table — the
-// Factory Stores takes. The client is shared, so opening a store is free.
+// Factory Stores takes. The client is shared, so opening a store is free; it
+// fails until Check has read the table's layout, which the store keeps.
 func (d *Dynamo) Tenant(id tenant.ID) *Managed {
-	prefix := KeyPrefix(id)
-	return NewManaged(func() (Deduplicator, error) { return &dynamoStore{d: d, prefix: prefix}, nil })
+	return NewManaged(func() (Deduplicator, error) {
+		l := layout(d.layout.Load())
+		if l == layoutUnchecked {
+			return nil, errUnchecked
+		}
+		return &dynamoStore{d: d, tenant: id, layout: l, prefix: KeyPrefix(id)}, nil
+	})
 }
 
-// Check verifies the table exists with the key schema this backend writes:
-// pk, a string, as the only key. TTL not enabled on ex is logged, not refused:
-// expiry never depends on it, only storage does.
+// Check verifies the table exists with a key schema this backend writes, and
+// records which: pk alone, or pk and sk (HASH and RANGE), each a string. TTL
+// not enabled on ex is logged, not refused: expiry never depends on it, only
+// storage does.
 func (d *Dynamo) Check(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*d.cfg.Timeout)
 	defer cancel()
@@ -242,14 +284,9 @@ func (d *Dynamo) Check(ctx context.Context) error {
 	if err != nil {
 		return classify("describe_table", err)
 	}
-	t := out.Table
-	if len(t.KeySchema) != 1 || aws.ToString(t.KeySchema[0].AttributeName) != attrKey || t.KeySchema[0].KeyType != types.KeyTypeHash {
-		return fmt.Errorf("dedupe: dynamodb table %s: key schema must be %s (HASH) alone", d.cfg.Table, attrKey)
-	}
-	for _, a := range t.AttributeDefinitions {
-		if aws.ToString(a.AttributeName) == attrKey && a.AttributeType != types.ScalarAttributeTypeS {
-			return fmt.Errorf("dedupe: dynamodb table %s: %s must be a string (S), is %s", d.cfg.Table, attrKey, a.AttributeType)
-		}
+	l, err := keyLayout(out.Table)
+	if err != nil {
+		return fmt.Errorf("dedupe: dynamodb table %s: %w", d.cfg.Table, err)
 	}
 	ttl, err := d.api.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: &d.cfg.Table})
 	if err != nil {
@@ -259,25 +296,59 @@ func (d *Dynamo) Check(ctx context.Context) error {
 		(desc.TimeToLiveStatus != types.TimeToLiveStatusEnabled && desc.TimeToLiveStatus != types.TimeToLiveStatusEnabling) {
 		slog.WarnContext(ctx, "dedupe: dynamodb table has no TTL on ex; expired ids are ignored but never deleted", "table", d.cfg.Table)
 	}
+	d.layout.Store(uint32(l))
+	slog.InfoContext(ctx, "dedupe: dynamodb table checked", "table", d.cfg.Table, "key_schema", l.String())
 	return nil
+}
+
+// keyLayout reads the layout from t's key schema, whatever order it lists
+// the keys in.
+func keyLayout(t *types.TableDescription) (layout, error) {
+	keys := map[types.KeyType]string{}
+	for _, k := range t.KeySchema {
+		keys[k.KeyType] = aws.ToString(k.AttributeName)
+	}
+	var l layout
+	switch {
+	case len(t.KeySchema) == 1 && keys[types.KeyTypeHash] == attrKey:
+		l = layoutPK
+	case len(t.KeySchema) == 2 && keys[types.KeyTypeHash] == attrKey && keys[types.KeyTypeRange] == attrSort:
+		l = layoutPKSK
+	default:
+		return 0, fmt.Errorf("key schema must be %s (HASH) alone, or %s (HASH) and %s (RANGE)", attrKey, attrKey, attrSort)
+	}
+	for _, a := range t.AttributeDefinitions {
+		name := aws.ToString(a.AttributeName)
+		if (name == attrKey || (name == attrSort && l == layoutPKSK)) && a.AttributeType != types.ScalarAttributeTypeS {
+			return 0, fmt.Errorf("%s must be a string (S), is %s", name, a.AttributeType)
+		}
+	}
+	return l, nil
 }
 
 // ErrCreateTableNeedsEndpoint refuses CreateTable against real AWS: the
 // production table belongs to the deployment's infrastructure code.
 var ErrCreateTableNeedsEndpoint = errors.New("dedupe: create_table is for dynamodb-local only; set the endpoint")
 
-// CreateTable creates the table on dynamodb-local, with TTL on ex, and waits
-// for it. A table that already exists is left as it is. Its errors are
-// classified as every call's are, so an endpoint not up yet is ErrUnavailable.
+// CreateTable creates the table on dynamodb-local, keyed by pk and sk, with
+// TTL on ex, and waits for it. A table that already exists is left as it is.
+// Its errors are classified as every call's are, so an endpoint not up yet is
+// ErrUnavailable.
 func (d *Dynamo) CreateTable(ctx context.Context) error {
 	if d.cfg.Endpoint == "" {
 		return ErrCreateTableNeedsEndpoint
 	}
 	_, err := d.api.CreateTable(ctx, &dynamodb.CreateTableInput{
-		TableName:            &d.cfg.Table,
-		BillingMode:          types.BillingModePayPerRequest,
-		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String(attrKey), AttributeType: types.ScalarAttributeTypeS}},
-		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String(attrKey), KeyType: types.KeyTypeHash}},
+		TableName:   &d.cfg.Table,
+		BillingMode: types.BillingModePayPerRequest,
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String(attrKey), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String(attrSort), AttributeType: types.ScalarAttributeTypeS},
+		},
+		KeySchema: []types.KeySchemaElement{
+			{AttributeName: aws.String(attrKey), KeyType: types.KeyTypeHash},
+			{AttributeName: aws.String(attrSort), KeyType: types.KeyTypeRange},
+		},
 	})
 	var inUse *types.ResourceInUseException
 	if errors.As(err, &inUse) {
@@ -316,7 +387,21 @@ func (d *Dynamo) call(ctx context.Context, op string, do func(context.Context) e
 // dynamoStore is one tenant's view of the table.
 type dynamoStore struct {
 	d      *Dynamo
+	tenant tenant.ID
+	layout layout
 	prefix []byte
+}
+
+// key is k's item key in the store's layout.
+func (s *dynamoStore) key(k Key) map[string]types.AttributeValue {
+	if s.layout == layoutPK {
+		return map[string]types.AttributeValue{attrKey: &types.AttributeValueMemberS{Value: string(AppendKey(nil, s.prefix, k))}}
+	}
+	pk, sk := PartitionedKey(s.tenant, k)
+	return map[string]types.AttributeValue{
+		attrKey:  &types.AttributeValueMemberS{Value: pk},
+		attrSort: &types.AttributeValueMemberS{Value: sk},
+	}
 }
 
 // Reserve puts every key's pending item in parallel, each conditional on no
@@ -391,12 +476,10 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 }
 
 func (s *dynamoStore) reserve(ctx context.Context, k Key, token, nowSec string, exp int64) (Status, error) {
-	item := map[string]types.AttributeValue{
-		attrKey:    &types.AttributeValueMemberS{Value: string(AppendKey(nil, s.prefix, k))},
-		attrState:  &types.AttributeValueMemberN{Value: statePending},
-		attrExpiry: &types.AttributeValueMemberN{Value: strconv.FormatInt(exp, 10)},
-		attrToken:  &types.AttributeValueMemberB{Value: []byte(token)},
-	}
+	item := s.key(k)
+	item[attrState] = &types.AttributeValueMemberN{Value: statePending}
+	item[attrExpiry] = &types.AttributeValueMemberN{Value: strconv.FormatInt(exp, 10)}
+	item[attrToken] = &types.AttributeValueMemberB{Value: []byte(token)}
 	err := s.d.call(ctx, opReserve, func(ctx context.Context) error {
 		_, err := s.d.api.PutItem(ctx, &dynamodb.PutItemInput{
 			TableName:                           &s.d.cfg.Table,
@@ -414,6 +497,11 @@ func (s *dynamoStore) reserve(ctx context.Context, k Key, token, nowSec string, 
 		}
 		return Claimed, nil
 	}
+	if s.layout == layoutPKSK && !sameString(held.Item, item, attrSort) {
+		// Another id's item: the table was replaced by one keyed by pk alone
+		// since Check, so answering from it would drop new ids as duplicates.
+		return 0, fmt.Errorf("dedupe: dynamodb table %s lost its sort key %s since it was checked; restart to check it again", s.d.cfg.Table, attrSort)
+	}
 	st, _ := held.Item[attrState].(*types.AttributeValueMemberN)
 	switch {
 	case st != nil && st.Value == stateCommitted:
@@ -424,6 +512,12 @@ func (s *dynamoStore) reserve(ctx context.Context, k Key, token, nowSec string, 
 		return Claimed, nil
 	}
 	return InFlight, nil
+}
+
+func sameString(a, b map[string]types.AttributeValue, name string) bool {
+	x, okA := a[name].(*types.AttributeValueMemberS)
+	y, okB := b[name].(*types.AttributeValueMemberS)
+	return okA && okB && x.Value == y.Value
 }
 
 func heldBy(item map[string]types.AttributeValue, token string) bool {
@@ -444,19 +538,16 @@ func (s *dynamoStore) Commit(ctx context.Context, claims []Claim, retention time
 	}
 	// BatchWriteItem refuses a key twice in one call; a caller merging
 	// claims from two Reserves could hand one over twice.
-	seen := make(map[string]bool, len(claims))
+	seen := make(map[Key]bool, len(claims))
 	writes := make([]types.WriteRequest, 0, len(claims))
 	for _, c := range claims {
-		pk := string(AppendKey(nil, s.prefix, c.Key))
-		if seen[pk] {
+		if seen[c.Key] {
 			continue
 		}
-		seen[pk] = true
-		item := map[string]types.AttributeValue{
-			attrKey:   &types.AttributeValueMemberS{Value: pk},
-			attrState: &types.AttributeValueMemberN{Value: stateCommitted},
-			attrToken: &types.AttributeValueMemberB{Value: []byte(c.Token)},
-		}
+		seen[c.Key] = true
+		item := s.key(c.Key)
+		item[attrState] = &types.AttributeValueMemberN{Value: stateCommitted}
+		item[attrToken] = &types.AttributeValueMemberB{Value: []byte(c.Token)}
 		if ex != nil {
 			item[attrExpiry] = ex
 		}
@@ -526,7 +617,7 @@ func (s *dynamoStore) Release(ctx context.Context, claims []Claim) error {
 		err := s.d.call(ctx, "delete_item", func(ctx context.Context) error {
 			_, err := s.d.api.DeleteItem(ctx, &dynamodb.DeleteItemInput{
 				TableName:           &s.d.cfg.Table,
-				Key:                 map[string]types.AttributeValue{attrKey: &types.AttributeValueMemberS{Value: string(AppendKey(nil, s.prefix, c.Key))}},
+				Key:                 s.key(c.Key),
 				ConditionExpression: aws.String(condRelease),
 				ExpressionAttributeValues: map[string]types.AttributeValue{
 					":tk":      &types.AttributeValueMemberB{Value: []byte(c.Token)},

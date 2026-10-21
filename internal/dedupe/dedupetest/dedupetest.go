@@ -340,6 +340,14 @@ var cases = []struct {
 		assert.Equal(t, []dedupe.Status{dedupe.Duplicate, dedupe.Claimed, dedupe.Duplicate},
 			statuses(reserve(t, d, long, longA, longB, hashLike)))
 	}},
+	{"an empty id is an id like any other", func(t *testing.T, s *suite) {
+		d := s.store(t, "acme")
+		empty := reserve(t, d, long, key(""))
+		require.Equal(t, dedupe.Claimed, empty[0].Status)
+		require.NoError(t, d.Commit(t.Context(), empty, 0))
+		assert.Equal(t, []dedupe.Status{dedupe.Duplicate, dedupe.Claimed},
+			statuses(reserve(t, d, long, key(""), dedupe.Key{Table: "other", ID: ""})))
+	}},
 	{"a late commit after a re-claim still lands", func(t *testing.T, s *suite) {
 		d := s.store(t, "acme")
 		first := reserve(t, d, lease, key("e1"))

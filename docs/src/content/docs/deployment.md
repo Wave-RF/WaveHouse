@@ -651,12 +651,29 @@ What the backend requires of the table:
 
 | Attribute | Type | Role |
 |---|---|---|
-| `pk` | String | Partition key, and the only key: tenant, table and id as readable text, for example `acme/clicks/evt-123` (the table and id escaped the way NATS subject tokens are: letters, digits, `_` and `-` kept, every other byte written as `%XX`). No sort key. |
+| `pk` | String | Partition key: the tenant, the ingest table and one of that table's 256 buckets, for example `acme/clicks/12`. The table name is escaped the way NATS subject tokens are: letters, digits, `_` and `-` kept, every other byte written as `%XX` in uppercase hex. |
+| `sk` | String | Sort key: the id, escaped the same way, for example `evt-123`. An id longer than 1,024 bytes once escaped, or an empty one, is stored as `#` plus its SHA-256 in hex. |
 | `st` | Number | `1` = pending claim, `2` = committed. |
 | `ex` | Number | Epoch seconds: the lease end while pending, the retention end once committed; absent = never expires. |
 | `tk` | Binary | The claim token that `Release` matches. |
 
-Only `pk` is declared in the table definition. Turn TTL on for `ex`. Correctness never depends on TTL, because a claim whose `ex` has passed counts as absent whether or not DynamoDB has deleted it yet; TTL only reclaims the storage. TTL removes lapsed claims, and a committed id once its [`dedupe.retention`](/settings-directory#deduplication) ends. With the default retention `"0"` (forever) a committed item carries no `ex` and is kept, so the table grows by one item (about 200 bytes) per distinct id. Boot checks the table and logs a warning if TTL is off; a key schema that does not match is a misconfigured table, handled as described below.
+Only `pk` and `sk` are declared in the dedupe table's definition. Each ingest table's ids spread over 256 partition keys, `<tenant>/<table>/0` to `<tenant>/<table>/255`. The bucket is the jump consistent hash, over 256, of FNV-1a 64 of `sk` passed through splitmix64's finalizer: the same functions the external broker routes tables with, in the public package `pkg/shard`. Your own tooling finds one ingest table's items with a paginated `Query` on each of its 256 keys, so deleting that table's dedupe data is deleting what those queries return. A tenant's items are found by the same queries, on each ingest table it has ever deduped into. Dropping a table from ClickHouse leaves its dedupe items in place until TTL removes them (under a finite retention), and DynamoDB cannot list partition keys, so unless you kept the table's name, only a `Scan` filtered on the tenant's `<tenant>/` prefix finds them (a tenant id holds no `/`, so `acme/` never matches `acme-2/`). WaveHouse itself makes no `Query` or `Scan`, so the policy below grants neither. The count of 256 is part of the layout and is not configurable, since changing it would move items.
+
+DynamoDB documents a ceiling of 1,000 write units a second per partition. A new id costs two (the claim and the commit) and a duplicate one, for items under 1 KB; an id close to the 1,024-byte limit makes its item larger and each write cost two units. Hashed over 256 keys, one ingest table's ids by that figure take about 128,000 new ids a second, once DynamoDB has spread the keys over partitions. DynamoDB does not split one key's items across partitions while its sort keys keep increasing, which time-ordered ids (ULIDs, UUIDv7, counters) do, so plan on the 256 keys rather than on a split. In practice the dedupe table binds first, across every tenant and ingest table it serves: its default quota is 40,000 write units a second (about 20,000 new ids), raised on request, and a new on-demand dedupe table starts at about 4,000 writes a second (about 2,000 new ids), serving up to double its previous peak within 30 minutes. Raise its warm throughput before onboarding a tenant that will start near those figures. Throttled claims count toward the circuit breaker described below, which every tenant on a pod shares, so one ingest table over its limit can fail the other tenants' dedupe requests on that pod too, a second at a time.
+
+Turn TTL on for `ex`. Correctness never depends on TTL, because a claim whose `ex` has passed counts as absent whether or not DynamoDB has deleted it yet; TTL only reclaims the storage. TTL removes lapsed claims, and a committed id once its [`dedupe.retention`](/settings-directory#deduplication) ends. With the default retention `"0"` (forever) a committed item carries no `ex` and is kept, so the dedupe table grows by one item (about 200 bytes) per distinct id. Boot checks the dedupe table, logs the key schema it found (`dedupe: dynamodb table checked`, with `key_schema=pk+sk` or `key_schema=pk`), and logs a warning if TTL is off; a key schema that is neither layout is a misconfigured table, handled as described below.
+
+**A dedupe table keyed by `pk` alone**, the only layout 0.2.0 accepts, is served the same way, with no setting: its `pk` holds tenant, ingest table and id together (`acme/clicks/evt-123`), and the backend writes to the dedupe table in whichever layout its key schema has. Every id is then its own partition key, so there is no per-ingest-table write ceiling; the cost is that finding one tenant's or one ingest table's items means scanning the whole dedupe table. Create new dedupe tables with `pk` and `sk`, whose per-ingest-table ceiling is above the dedupe table's default quota. The choice lasts the dedupe table's life. WaveHouse 0.2.0 treats a `pk`+`sk` table as misconfigured, so do not point a 0.2.0 pod at one. DynamoDB cannot change a key schema in place, so leave an existing dedupe table's definition as it is: adding `range_key` to it makes Terraform replace the table, which deletes its seen ids, or fails with deletion protection on. Each process checks the dedupe table only until a check first passes, and every store keeps the layout that check read, so a dedupe table replaced under the same name needs every pod restarted; until then, a `pk`+`sk` store on a table keyed by `pk` alone fails a claim that finds another id's item rather than answer it from that item.
+
+To move an existing deployment to a `pk`+`sk` table:
+
+1. Create the second dedupe table under a new name, and grant the pods' role the same five actions on it (the policy below names one table's ARN). Without them the pods' table check fails as a misconfigured table.
+2. Pause the producers that retry, then wait one [`dedupe.lease`](/configuration#dedupe) (30 seconds by default), so every claim already made is committed or has lapsed before the copy reads it. The copy holds only what it read: an id first seen on the old table after the copy passed it, or still pending when copied, would be new to the new table.
+3. Copy the items. An item's new `sk` is the last field of its old `pk`, the id as already stored, except that an empty one becomes `#` plus the SHA-256 in hex of no bytes; its new `pk` is the rest of the old `pk`, `<tenant>/<table>/`, followed by the bucket of that `sk`.
+4. Stop every pod, then start them all with `dedupe.dynamodb.table` set to the new dedupe table. A rolling restart leaves pods on different tables, which do not share seen ids.
+5. Resume the producers.
+
+Skipping the copy leaves the new dedupe table with no seen ids, so an event accepted before the switch and retried after it is stored again.
 
 An example in Terraform. Replace the tags with your own conventions:
 
@@ -665,10 +682,16 @@ resource "aws_dynamodb_table" "wavehouse_dedupe" {
   name                        = "wavehouse-dedupe-${var.environment}"
   billing_mode                = "PAY_PER_REQUEST" # provisioned + auto scaling once traffic is steady
   hash_key                    = "pk"
+  range_key                   = "sk"
   deletion_protection_enabled = true
 
   attribute {
     name = "pk"
+    type = "S"
+  }
+
+  attribute {
+    name = "sk"
     type = "S"
   }
 
@@ -721,7 +744,7 @@ For development against dynamodb-local, set `dedupe.dynamodb.endpoint` (for exam
 - **Credentials** come from the AWS SDK's default chain (EKS Pod Identity or IRSA in a pod; the environment or a profile locally), never from WaveHouse configuration.
 - **Point-in-time recovery** is not needed. The table records which ids have been seen, so losing it produces duplicate rows, not lost events.
 - **Cost:** every new event is two writes (the claim, then the commit), and a duplicate is one. On-demand, that is about $1.25 per million new events in us-east-1. Provisioned capacity with auto scaling is cheaper once traffic is steady. Storage is the other line: every distinct id stays in the table until its retention ends, forever at the default (see TTL above), at DynamoDB's per-GB-month rate.
-- **One table serves every tenant,** so one tenant's burst can throttle the rest. A throttled or unreachable table fails the ingest request closed rather than publishing un-deduped. After five throttled or unreachable claims in a row within one second, the backend stops calling the table for a second and fails every tenant's dedupe requests immediately (`wavehouse_dedupe_dynamodb_short_circuits_total`). A duplicate or in-flight answer is not a failure and resets the count.
+- **One dedupe table serves every tenant,** so one tenant's burst can throttle the rest. A throttled or unreachable dedupe table fails the ingest request closed rather than publishing un-deduped. After five throttled or unreachable claims in a row within one second, the backend stops calling the dedupe table for a second and fails every tenant's dedupe requests immediately (`wavehouse_dedupe_dynamodb_short_circuits_total`), including when only one ingest table's partition keys are throttled in a `pk`+`sk` table. A duplicate or in-flight answer is not a failure and resets the count.
 - **Metrics:** `wavehouse_dedupe_dynamodb_requests_total{op,outcome}`, `wavehouse_dedupe_dynamodb_request_duration_seconds{op}`, `wavehouse_dedupe_dynamodb_unprocessed_items_total`, `wavehouse_dedupe_dynamodb_short_circuits_total`. The table's own CloudWatch metrics `ThrottledRequests`, `SystemErrors` and `ConsumedWriteCapacityUnits` are worth alerting on too.
 
 ## Upgrading across the v2 ingest envelope

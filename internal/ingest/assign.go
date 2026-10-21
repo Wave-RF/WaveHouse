@@ -5,6 +5,8 @@ import (
 	"hash/fnv"
 	"slices"
 	"strconv"
+
+	"github.com/Wave-RF/WaveHouse/pkg/shard"
 )
 
 // assignUnits gives each unit to one of the live membership slots, by
@@ -61,14 +63,11 @@ func assignUnits(units []string, slots []int) map[string]int {
 }
 
 // unitScore is slot's rendezvous score for unit: FNV-1a 64 of the two,
-// through splitmix64's finalizer so that nearby slots score independently.
+// through shard.Mix so that nearby slots score independently.
 func unitScore(unit string, slot int) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(unit))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(strconv.Itoa(slot)))
-	z := h.Sum64()
-	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
-	z = (z ^ (z >> 27)) * 0x94d049bb133111eb
-	return z ^ (z >> 31)
+	return shard.Mix(h.Sum64())
 }

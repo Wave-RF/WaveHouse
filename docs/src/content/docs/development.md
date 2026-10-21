@@ -499,6 +499,7 @@ WaveHouse/
 │   ├── pipes/              # Named query pipes (types + parameter binding)
 │   ├── policy/             # Access control policies (types + evaluation)
 │   ├── settings/           # Settings model: document types, Finding, the validator (on disk and over bytes), embedded seed
+│   ├── shard/              # Placement hashing: Jump consistent hash, Mix finalizer
 │   └── tenant/             # Tenant id: type, grammar, reserved default, request header name
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)
@@ -525,7 +526,7 @@ WaveHouse/
 
 - **Strict Go formatting**: Use `gofumpt` (a stricter superset of `gofmt`, enforced by CI). `make fmt` checks it, as does `make verify` (what CI and the pre-commit hook run); `make fix` applies it.
 - **Interface-first design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) are defined as interfaces so implementations can be swapped behind a stable contract.
-- **Package boundaries**: The `internal/` directory ensures packages are private to this module; `pkg/` is the importable surface — what a settings writer outside this repository validates with — so a package there imports nothing under `internal/` and none of the server's runtime dependencies (the `public-packages` depguard rule).
+- **Package boundaries**: The `internal/` directory ensures packages are private to this module; `pkg/` is the importable surface — what a settings writer outside this repository validates with, and what a tool computing the same placements hashes with — so a package there imports nothing under `internal/` and none of the server's runtime dependencies (the `public-packages` depguard rule).
 - **Error handling**: Return errors to callers. Use `slog` for structured logging, through the default logger (`slog.InfoContext(ctx, …)` and its siblings) — constructors don't take a `*slog.Logger`; tests silence or capture it with `internal/testutil/logtest`.
 - **Schema-driven**: ClickHouse is the schema source of truth. WaveHouse discovers and validates against real table schemas.
 
