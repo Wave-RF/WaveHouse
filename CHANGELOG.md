@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Upgrading from 0.2.0 is a binary swap: no setting moves and nothing is migrated. Six changes can still need action ([Upgrading](https://wavehouse.dev/upgrading#from-020-to-021)):
 
-- **Proxies:** `server.trusted_proxies`, empty by default, now decides both a request span's `client.address` (from an unlisted peer, the proxy's own address, where 0.2.0 took the leftmost `X-Forwarded-For` entry) and whether an incoming `traceparent` is joined, so list every proxy that sends either.
+- **Proxies:** `server.trusted_proxies`, empty by default, now decides both a request span's `client.address` (from an unlisted peer, the proxy's own address, where 0.2.0 took the leftmost `X-Forwarded-For` entry) and whether an incoming `traceparent` is joined, so list every proxy that sends either, and have it append to `X-Forwarded-For` and drop the client's `traceparent`, since a listed proxy's headers are trusted.
 - **OpenTelemetry environment:** `OTEL_SERVICE_NAME`, or a `service.name` entry in `OTEL_RESOURCE_ATTRIBUTES`, now renames `service.name`, which 0.2.0 kept at `wavehouse`, and telemetry carries `service.instance.id`, a fresh value at every boot unless `instance_id` (or a `service.instance.id` entry in `OTEL_RESOURCE_ATTRIBUTES`) sets it.
 - **OTLP log level:** OTLP log export now honors `WH_LOG_LEVEL`, as stdout always did; 0.2.0 exported records below the level too, `DEBUG` ones at the default `INFO`.
 - **Platforms:** the release ships Linux binaries only (amd64 and arm64). On macOS, Windows or FreeBSD, run the container image or build with `go install`, which now needs Go 1.26.10.
