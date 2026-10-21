@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,7 +80,7 @@ func TestRegisterStorageMetrics(t *testing.T) {
 			return nil, scrapeErr
 		}
 		return tables, nil
-	})
+	}, 0) // no reuse: every collection scrapes
 	require.NoError(t, err)
 
 	got := collectSettingsMetrics(t, reader)
@@ -216,4 +218,59 @@ func TestTablesKey(t *testing.T) {
 	assert.Equal(t, key("a"), key("c"), "another user reads the same tables")
 	assert.NotEqual(t, key("a"), key("d"), "another native address is another server")
 	assert.NotEqual(t, key("a"), key("e"), "another database is other tables")
+}
+
+func TestRegisterStorageMetrics_ReusesScrape(t *testing.T) {
+	t.Parallel()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	var scrapes int
+	var scrapeErr error
+	_, err := registerStorageMetrics(mp.Meter("test"), func(context.Context) (map[string]tableBytes, error) {
+		scrapes++
+		if scrapeErr != nil {
+			return nil, scrapeErr
+		}
+		return map[string]tableBytes{"events": {uncompressed: int64(scrapes), onDisk: 1}}, nil
+	}, time.Hour)
+	require.NoError(t, err)
+
+	scrapeErr = errors.New("clickhouse down")
+	assert.Empty(t, collectSettingsMetrics(t, reader))
+	assert.Empty(t, collectSettingsMetrics(t, reader))
+	assert.Equal(t, 2, scrapes, "a failed scrape is not reused: the next collection tries again")
+
+	scrapeErr = nil
+	for range 3 {
+		got := collectSettingsMetrics(t, reader)
+		assert.Equal(t, map[string]int64{"table=events": 3}, got["wavehouse_clickhouse_uncompressed_bytes"])
+	}
+	assert.Equal(t, 3, scrapes, "a successful scrape is reused within the ttl")
+}
+
+func TestScrapeStorage_CapsConcurrency(t *testing.T) {
+	t.Parallel()
+	var ids []tenant.ID
+	for i := range 3 * storageScrapeConcurrency {
+		ids = append(ids, tenant.ID(fmt.Sprintf("t%d", i)))
+	}
+	var inFlight, peak atomic.Int64
+	_, err := scrapeStorage(t.Context(), ids,
+		func(id tenant.ID) string { return string(id) },
+		func(context.Context, tenant.ID) (map[string]tableBytes, error) {
+			n := inFlight.Add(1)
+			for {
+				p := peak.Load()
+				if n <= p || peak.CompareAndSwap(p, n) {
+					break
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+			inFlight.Add(-1)
+			return nil, nil
+		})
+	require.NoError(t, err)
+	assert.LessOrEqual(t, peak.Load(), int64(storageScrapeConcurrency), "at most storageScrapeConcurrency databases are read at once")
 }

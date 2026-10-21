@@ -884,7 +884,7 @@ max by (instance) (wavehouse_settings_tenants{state="rejected"}) > 0
 
 ### ClickHouse storage
 
-How much data each table holds in ClickHouse, before and after compression: the capacity signal for disk sizing, retention decisions and growth alerts, which the [#360](https://github.com/Wave-RF/WaveHouse/issues/360) disk-full incident had none of. Each collection runs one metadata-only aggregate over `system.parts` (active parts only) in each served tenant's database, over that tenant's own pool:
+How much data each table holds in ClickHouse, before and after compression: the capacity signal for disk sizing, retention decisions and growth alerts, which the [#360](https://github.com/Wave-RF/WaveHouse/issues/360) disk-full incident had none of. A collection runs one metadata-only aggregate over `system.parts` (active parts only) in each served tenant's database, over that tenant's own pool, at most 8 databases at once. A successful result is reused for 15 seconds, so OTLP export and `/metrics` scrapes inside that window send no further queries:
 
 | Metric | Meaning |
 | --- | --- |
@@ -898,9 +898,9 @@ What they measure, for an alert built on them:
 - **Currently stored**, not a lifetime ingest count: TTL expiry, mutations and merges shrink them.
 - **Only the tenants' databases.** Growth in ClickHouse's own `system` tables, the actual #360 culprit, is not covered.
 - **A series exists only once a table has active parts.** An empty table has no series, not a `0`.
-- **A failed scrape leaves them absent.** The scrape is bounded at 5 seconds, and if any database fails to answer within it, both metrics are left out of that collection rather than reported stale or short. A gap means the scrape failed, not that a table shrank, so alert on growth or a threshold over a window rather than on `absent()`. The first failure is logged at `WARN`, and the next success at `INFO`.
+- **A failed scrape leaves them absent.** The scrape is bounded at 5 seconds, and if any database fails to answer within it, both metrics are left out of that collection rather than reported stale or short, and the next collection tries again. A gap means the scrape failed, not that a table shrank, so alert on growth or a threshold over a window rather than on `absent()`. The first failure is logged at `WARN`, and the next success at `INFO`.
 
-Each collection queries ClickHouse, and `/metrics` takes no credential, so keep it off a public listener (see [Separating the `/metrics` listener](#separating-the-metrics-listener)).
+A collection more than 15 seconds after the last successful scrape queries ClickHouse, and `/metrics` takes no credential, so keep it off a public listener (see [Separating the `/metrics` listener](#separating-the-metrics-listener)).
 
 ```promql
 max by (table) (wavehouse_clickhouse_bytes_on_disk)

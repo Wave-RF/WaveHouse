@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +25,16 @@ import (
 // a hung server cannot stall the whole collection (the driver's default read
 // timeout is minutes).
 const storageScrapeTimeout = 5 * time.Second
+
+// storageScrapeTTL is how long a successful scrape is reused. Storage size
+// moves slowly, and without it every collection (each OTLP export and each
+// GET /metrics) would query every tenant database again.
+const storageScrapeTTL = 15 * time.Second
+
+// storageScrapeConcurrency caps the databases one scrape reads at once, so a
+// process serving many tenant databases on one server does not open a burst
+// of queries against it.
+const storageScrapeConcurrency = 8
 
 // partsQuery sums the active parts of the connection's own database per
 // table: what is stored now, so TTL expiry and merges shrink it.
@@ -47,7 +58,7 @@ func (a *App) wireStorageMetrics() {
 	if a.pools == nil || (!a.cfg.OTel.Enabled && !a.cfg.Prometheus.Enabled) {
 		return
 	}
-	reg, err := registerStorageMetrics(otel.Meter("wavehouse-storage"), a.scrapeStorage)
+	reg, err := registerStorageMetrics(otel.Meter("wavehouse-storage"), a.scrapeStorage, storageScrapeTTL)
 	if err != nil {
 		slog.Error("failed to register storage metrics", "error", err)
 		return
@@ -130,6 +141,7 @@ func scrapeStorage(
 	defer cancel()
 	results := make([]map[string]tableBytes, len(reps))
 	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(storageScrapeConcurrency)
 	for i, id := range reps {
 		g.Go(func() error {
 			r, err := read(gctx, id)
@@ -156,13 +168,35 @@ func scrapeStorage(
 }
 
 // registerStorageMetrics registers the storage instruments on meter, read
-// from scrape on every collection. They are observable up-down counters, not
+// from scrape on a collection more than ttl after the last successful one,
+// and from that one's result before. They are observable up-down counters, not
 // gauges, so prometheus.per_table_metrics: false sums them over every table
 // (observability's tableView). A failed scrape observes nothing, so the
-// series go absent for the collection rather than stale or partial. It is
+// series go absent for the collection rather than stale or partial, and the
+// next collection scrapes again. It is
 // logged when the scrape starts failing, not on every collection after.
-func registerStorageMetrics(meter metric.Meter, scrape func(context.Context) (map[string]tableBytes, error)) (metric.Registration, error) {
+func registerStorageMetrics(meter metric.Meter, scrape func(context.Context) (map[string]tableBytes, error), ttl time.Duration) (metric.Registration, error) {
 	var failing atomic.Bool
+	// The last successful scrape, reused for ttl. mu also serializes scrapes,
+	// so two readers collecting at once (OTLP and Prometheus) share one.
+	var (
+		mu     sync.Mutex
+		last   map[string]tableBytes
+		lastAt time.Time
+	)
+	cached := func(ctx context.Context) (map[string]tableBytes, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if last != nil && time.Since(lastAt) < ttl {
+			return last, nil
+		}
+		tables, err := scrape(ctx)
+		if err != nil {
+			return nil, err
+		}
+		last, lastAt = tables, time.Now()
+		return tables, nil
+	}
 	var errs [3]error
 	var uncompressed, onDisk metric.Int64ObservableUpDownCounter
 	uncompressed, errs[0] = meter.Int64ObservableUpDownCounter("wavehouse_clickhouse_uncompressed_bytes",
@@ -171,7 +205,7 @@ func registerStorageMetrics(meter metric.Meter, scrape func(context.Context) (ma
 		metric.WithDescription("Bytes each table occupies on disk (active parts in system.parts): compressed data plus marks and index files"))
 	var reg metric.Registration
 	reg, errs[2] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
-		tables, err := scrape(ctx)
+		tables, err := cached(ctx)
 		if err != nil {
 			if failing.CompareAndSwap(false, true) {
 				slog.Warn("clickhouse storage scrape failed; its metrics are absent until it succeeds", "error", err)
