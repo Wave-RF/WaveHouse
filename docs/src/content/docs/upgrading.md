@@ -7,6 +7,23 @@ sidebar:
 
 WaveHouse is pre-1.0, so a minor release can change configuration, wire formats and on-disk state without an automatic migration. This page lists what to do for each upgrade, in order. The [changelog](https://github.com/Wave-RF/WaveHouse/blob/main/CHANGELOG.md) has the full list of changes behind each step.
 
+## From 0.2.0 to 0.2.1
+
+0.2.1 is a binary swap: no setting moves, nothing is migrated, and the queue, the settings directory and the dedupe store carry over as they are. `@wavehouse/sdk` stays at 0.2.0, since the wire format did not change. Check these before you roll it out:
+
+1. **List your tracing proxies.** An incoming `traceparent` header is now joined only from a peer listed in [`server.trusted_proxies`](/configuration#server), which is empty by default. A request from any other peer starts a new trace linked to the one it named. If a proxy that traces (nginx's `ngx_otel_module`, Caddy's `tracing`, Envoy) sends `traceparent` to WaveHouse, list it to keep continuing its traces ([Reverse proxy](/reverse-proxy#client-address-and-trace-context)).
+2. **Pick an install method on a non-Linux host.** The GitHub Release now carries Linux binaries only, for amd64 and arm64. On macOS, Windows or FreeBSD, run the container image, which is unchanged, or build with `go install`.
+3. **Check your endpoints' certificates.** 0.2.1 is built with Go 1.26.10, which drops every certificate chain that passes through one of eight compromised eMudhra intermediate CA certificates ([GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809)). Go has no setting to allow them again, so a ClickHouse, NATS, Redis or other endpoint whose certificate chains through one needs a certificate from another issuer.
+4. **Adjust queries on the SSE drop metric.** `wavehouse_sse_dropped_frames_total` now also counts the frames a stream left unwritten when it ended, and carries a `reason` label (`buffer_full`, `client_gone`, `stream_closed`) and a `table` label. A query that sums the counter now sees the two new reasons too, so filter on `reason="buffer_full"` to keep the old meaning.
+
+A DynamoDB dedupe table keyed by `pk` alone, the only layout 0.2.0 accepts, keeps working unchanged. Create new dedupe tables keyed by `pk` and `sk` instead, so that an ingest table's ids can be found without a scan; [A shared dedupe table on DynamoDB](/deployment#a-shared-dedupe-table-on-dynamodb) describes both layouts and how to move to the new one.
+
+### Versions
+
+- **ClickHouse:** 0.2.1 is still tested against ClickHouse 26.6, and 26.8's change to how it reads a bare number in a `DateTime64` column is still open ([#536](https://github.com/Wave-RF/WaveHouse/issues/536)), so stay on 26.6.
+- **NATS:** an external NATS (`mq.backend: nats`) still needs 2.14 or later, and 2.15 is now the recommended line: a 2.14 server boots with an advisory naming it.
+- **Go:** building from source or with `go install` needs Go 1.26.10 or later.
+
 ## From 0.1.0 to 0.2.0
 
 0.2.0 moves every behavioral setting out of `config.yaml` and the environment into a [settings directory](/settings-directory), replaces the policy and pipes stored in NATS KV with files in that directory, and changes the streaming wire format. So the upgrade is a conversion and a drain, not a binary swap. Most of the work happens while 0.1.0 is still serving; ingest pauses only for the switch-over at the end. Upgrade `@wavehouse/sdk` in the same window as the server.
