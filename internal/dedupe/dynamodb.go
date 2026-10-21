@@ -495,6 +495,11 @@ func (s *dynamoStore) reserve(ctx context.Context, k Key, token, nowSec string, 
 		}
 		return Claimed, nil
 	}
+	if s.layout == layoutPKSK && !sameString(held.Item, item, attrSort) {
+		// Another id's item: the table was replaced by one keyed by pk alone
+		// since Check, so answering from it would drop new ids as duplicates.
+		return 0, fmt.Errorf("dedupe: dynamodb table %s lost its sort key %s since it was checked; restart to check it again", s.d.cfg.Table, attrSort)
+	}
 	st, _ := held.Item[attrState].(*types.AttributeValueMemberN)
 	switch {
 	case st != nil && st.Value == stateCommitted:
@@ -505,6 +510,12 @@ func (s *dynamoStore) reserve(ctx context.Context, k Key, token, nowSec string, 
 		return Claimed, nil
 	}
 	return InFlight, nil
+}
+
+func sameString(a, b map[string]types.AttributeValue, name string) bool {
+	x, okA := a[name].(*types.AttributeValueMemberS)
+	y, okB := b[name].(*types.AttributeValueMemberS)
+	return okA && okB && x.Value == y.Value
 }
 
 func heldBy(item map[string]types.AttributeValue, token string) bool {

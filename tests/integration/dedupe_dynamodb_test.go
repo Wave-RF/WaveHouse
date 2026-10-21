@@ -398,6 +398,36 @@ func TestDedupeDynamo_Unreachable(t *testing.T) {
 	assert.ErrorIs(t, d.Check(t.Context()), dedupe.ErrUnavailable)
 }
 
+// A pk+sk table replaced under the same name by one keyed by pk alone, under
+// a running store: the store fails closed instead of reading the item another
+// id in its bucket left as this id's.
+func TestDedupeDynamo_LostSortKeyFailsClosed(t *testing.T) {
+	t.Parallel()
+	table := newDynamoTable()
+	d := dynamoClient(t, table, dedupe.DynamoConfig{})
+	require.NoError(t, d.CreateTable(t.Context()))
+	m := openDynamo(t, d, "acme")
+	_, err := rawDynamo(t).DeleteTable(t.Context(), &dynamodb.DeleteTableInput{TableName: aws.String(table)})
+	require.NoError(t, err)
+	createPKTable(t, table)
+
+	first := dedupe.Key{Table: "events", ID: "e0"}
+	bucket, _ := dedupe.PartitionedKey("acme", first)
+	second := first
+	for i := 1; ; i++ {
+		second.ID = fmt.Sprintf("e%d", i)
+		if pk, _ := dedupe.PartitionedKey("acme", second); pk == bucket {
+			break
+		}
+	}
+	dup, err := dedupetest.Mark(t.Context(), m, first)
+	require.NoError(t, err)
+	require.False(t, dup)
+	_, err = m.Reserve(t.Context(), []dedupe.Key{second}, time.Minute)
+	require.ErrorContains(t, err, "lost its sort key")
+	assert.False(t, errors.Is(err, dedupe.ErrUnavailable), "a configuration error, not worth retrying")
+}
+
 // A table deleted under a running process is a configuration bug, not worth
 // retrying.
 func TestDedupeDynamo_ConfigErrorsAreNotUnavailable(t *testing.T) {

@@ -151,9 +151,9 @@ func TestDynamo_ReserveReadsTheHeldItem(t *testing.T) {
 		id := in.Item[attrSort].(*types.AttributeValueMemberS).Value
 		switch id[len(id)-1] {
 		case 'd':
-			return nil, &types.ConditionalCheckFailedException{Item: map[string]types.AttributeValue{attrState: &types.AttributeValueMemberN{Value: stateCommitted}}}
+			return nil, &types.ConditionalCheckFailedException{Item: map[string]types.AttributeValue{attrSort: in.Item[attrSort], attrState: &types.AttributeValueMemberN{Value: stateCommitted}}}
 		case 'f':
-			return nil, &types.ConditionalCheckFailedException{Item: map[string]types.AttributeValue{attrState: &types.AttributeValueMemberN{Value: statePending}}}
+			return nil, &types.ConditionalCheckFailedException{Item: map[string]types.AttributeValue{attrSort: in.Item[attrSort], attrState: &types.AttributeValueMemberN{Value: statePending}}}
 		}
 		assert.Equal(t, condReserve, aws.ToString(in.ConditionExpression))
 		assert.Equal(t, types.ReturnValuesOnConditionCheckFailureAllOld, in.ReturnValuesOnConditionCheckFailure)
@@ -164,6 +164,28 @@ func TestDynamo_ReserveReadsTheHeldItem(t *testing.T) {
 	assert.Equal(t, []Status{Claimed, Duplicate, InFlight}, []Status{claims[0].Status, claims[1].Status, claims[2].Status})
 	assert.Len(t, claims[0].Token, tokenBytes)
 	assert.Empty(t, claims[1].Token)
+}
+
+// A pk+sk store whose table was replaced since Check by one keyed by pk
+// alone meets another id's item under its pk, or one with no sk at all: it
+// fails, never answering for an id it has not seen.
+func TestDynamo_ReserveRefusesAnotherSortKey(t *testing.T) {
+	t.Parallel()
+	for _, sk := range []types.AttributeValue{&types.AttributeValueMemberS{Value: "events/other"}, nil} {
+		_, m := openFake(t, &fakeDynamo{put: func(_ context.Context, in *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+			held := maps.Clone(in.Item)
+			held[attrState] = &types.AttributeValueMemberN{Value: stateCommitted}
+			if sk == nil {
+				delete(held, attrSort)
+			} else {
+				held[attrSort] = sk
+			}
+			return nil, &types.ConditionalCheckFailedException{Item: held}
+		}})
+		_, err := m.Reserve(t.Context(), keys("e1"), time.Minute)
+		require.ErrorContains(t, err, "lost its sort key", "held sk %v", sk)
+		assert.NotErrorIs(t, err, ErrUnavailable, "a configuration error, not worth retrying")
+	}
 }
 
 // An SDK retry of a put whose first attempt was applied fails its condition
@@ -226,7 +248,7 @@ func TestDynamo_FailedReserveReleasesEveryPutThatMayHaveLanded(t *testing.T) {
 			mu.Unlock()
 			switch id[len(id)-3:] {
 			case "dup":
-				return nil, &types.ConditionalCheckFailedException{Item: map[string]types.AttributeValue{attrState: &types.AttributeValueMemberN{Value: stateCommitted}}}
+				return nil, &types.ConditionalCheckFailedException{Item: map[string]types.AttributeValue{attrSort: in.Item[attrSort], attrState: &types.AttributeValueMemberN{Value: stateCommitted}}}
 			case "bad":
 				return nil, &types.InternalServerError{}
 			}
