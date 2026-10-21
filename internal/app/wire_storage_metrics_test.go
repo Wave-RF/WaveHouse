@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -113,3 +114,81 @@ func assertNonMonotonicSums(t *testing.T, reader *sdkmetric.ManualReader) {
 	}
 	assert.Equal(t, 2, seen)
 }
+
+func TestReadParts(t *testing.T) {
+	t.Parallel()
+	got, err := readParts(t.Context(), nil)
+	require.NoError(t, err, "a tenant on no pool does not fail the scrape")
+	assert.Nil(t, got, "and contributes no tables")
+
+	q := &stubPartsQuerier{rows: &stubPartsRows{rows: []partsRow{
+		{"events", 100, 10},
+		{"clicks", 7, 3},
+	}}}
+	got, err = readParts(t.Context(), q)
+	require.NoError(t, err)
+	assert.Equal(t, partsQuery, q.query)
+	assert.Equal(t, map[string]tableBytes{
+		"events": {uncompressed: 100, onDisk: 10},
+		"clicks": {uncompressed: 7, onDisk: 3},
+	}, got)
+
+	_, err = readParts(t.Context(), &stubPartsQuerier{err: errors.New("clickhouse down")})
+	require.ErrorContains(t, err, "clickhouse down")
+
+	_, err = readParts(t.Context(), &stubPartsQuerier{rows: &stubPartsRows{
+		rows: []partsRow{{"events", 1, 1}}, err: errors.New("stream aborted"),
+	}})
+	require.ErrorContains(t, err, "stream aborted", "a mid-stream failure fails the read")
+
+	_, err = readParts(t.Context(), &stubPartsQuerier{rows: &stubPartsRows{
+		rows: []partsRow{{"events", 1, 1}}, scanErr: errors.New("bad column"),
+	}})
+	require.ErrorContains(t, err, "bad column")
+}
+
+type stubPartsQuerier struct {
+	rows  driver.Rows
+	err   error
+	query string
+}
+
+func (q *stubPartsQuerier) Query(_ context.Context, query string, _ ...any) (driver.Rows, error) {
+	q.query = query
+	if q.err != nil {
+		return nil, q.err
+	}
+	return q.rows, nil
+}
+
+type partsRow struct {
+	table                string
+	uncompressed, onDisk uint64
+}
+
+// stubPartsRows serves partsRow tuples; the embedded nil driver.Rows panics
+// on any method readParts should not call.
+type stubPartsRows struct {
+	driver.Rows
+	rows    []partsRow
+	err     error
+	scanErr error
+	i       int
+}
+
+func (r *stubPartsRows) Next() bool { r.i++; return r.i <= len(r.rows) }
+
+func (r *stubPartsRows) Scan(dest ...any) error {
+	if r.scanErr != nil {
+		return r.scanErr
+	}
+	row := r.rows[r.i-1]
+	*(dest[0].(*string)) = row.table
+	*(dest[1].(*uint64)) = row.uncompressed
+	*(dest[2].(*uint64)) = row.onDisk
+	return nil
+}
+
+func (r *stubPartsRows) Err() error { return r.err }
+
+func (*stubPartsRows) Close() error { return nil }

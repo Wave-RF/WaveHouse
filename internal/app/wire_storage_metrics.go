@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -66,27 +67,44 @@ func (a *App) scrapeStorage(ctx context.Context) (map[string]tableBytes, error) 
 			return t.URL + "\x00" + t.Database
 		},
 		func(ctx context.Context, id tenant.ID) (map[string]tableBytes, error) {
-			m := a.pools.For(id)
-			if m == nil {
-				return nil, fmt.Errorf("tenant %s has no ClickHouse pool", id)
+			// For returns a nil *Manager for a tenant on no pool, which must
+			// reach readParts as a nil interface.
+			if m := a.pools.For(id); m != nil {
+				return readParts(ctx, m)
 			}
-			rows, err := m.Query(ctx, partsQuery)
-			if err != nil {
-				return nil, err
-			}
-			defer func() { _ = rows.Close() }()
-			out := map[string]tableBytes{}
-			for rows.Next() {
-				var table string
-				var uncompressed, onDisk uint64
-				if err := rows.Scan(&table, &uncompressed, &onDisk); err != nil {
-					return nil, err
-				}
-				// #nosec G115 -- byte totals from system.parts can't exceed MaxInt64 (~9.2 EB).
-				out[table] = tableBytes{uncompressed: int64(uncompressed), onDisk: int64(onDisk)}
-			}
-			return out, rows.Err()
+			return readParts(ctx, nil)
 		})
+}
+
+// partsQuerier is the slice of chconn.Manager that readParts uses.
+type partsQuerier interface {
+	Query(ctx context.Context, query string, args ...any) (driver.Rows, error)
+}
+
+// readParts runs partsQuery over q. A nil q is a tenant on no pool (its
+// tuple could not be opened): it has no tables to report, so it contributes
+// nothing rather than failing the scrape, and skipping it under-reports
+// nothing.
+func readParts(ctx context.Context, q partsQuerier) (map[string]tableBytes, error) {
+	if q == nil {
+		return nil, nil
+	}
+	rows, err := q.Query(ctx, partsQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]tableBytes{}
+	for rows.Next() {
+		var table string
+		var uncompressed, onDisk uint64
+		if err := rows.Scan(&table, &uncompressed, &onDisk); err != nil {
+			return nil, err
+		}
+		// #nosec G115 -- byte totals from system.parts can't exceed MaxInt64 (~9.2 EB).
+		out[table] = tableBytes{uncompressed: int64(uncompressed), onDisk: int64(onDisk)}
+	}
+	return out, rows.Err()
 }
 
 // scrapeStorage reads the tables of ids' databases with read, at once, once
