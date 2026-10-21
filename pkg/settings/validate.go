@@ -576,6 +576,11 @@ func (v *validator) checkClickHouse(ch *ClickHouseConfig) {
 	} else if *ch.QueryTimeout < 1 {
 		v.errorf(FileConfig, "clickhouse.query_timeout", "must be >= 1 second, got %d", *ch.QueryTimeout)
 	}
+	if ch.InsertTimeout == nil {
+		v.required("clickhouse.insert_timeout")
+	} else if *ch.InsertTimeout < 1 {
+		v.errorf(FileConfig, "clickhouse.insert_timeout", "must be >= 1 second, got %d", *ch.InsertTimeout)
+	}
 	if ch.TLS == nil {
 		v.required("clickhouse.tls")
 	} else {
@@ -829,6 +834,25 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 			}
 		}
 	}
+	if i := c.Ingest; i == nil {
+		v.required("ingest")
+	} else {
+		if i.MaxBatchBytes == nil {
+			v.required("ingest.max_batch_bytes")
+		} else if *i.MaxBatchBytes < 1 {
+			v.errorf(FileConfig, "ingest.max_batch_bytes", "must be >= 1 byte, got %d", *i.MaxBatchBytes)
+		}
+		if i.MaxBatchWaitMS == nil {
+			v.required("ingest.max_batch_wait_ms")
+		} else if *i.MaxBatchWaitMS < 1 {
+			v.errorf(FileConfig, "ingest.max_batch_wait_ms", "must be >= 1 ms, got %d", *i.MaxBatchWaitMS)
+		}
+		if i.RetryBackoffMax == nil {
+			v.required("ingest.retry_backoff_max")
+		} else if *i.RetryBackoffMax < 1 {
+			v.errorf(FileConfig, "ingest.retry_backoff_max", "must be >= 1 second, got %d", *i.RetryBackoffMax)
+		}
+	}
 	if q := c.Query; q == nil {
 		v.required("query")
 	} else {
@@ -867,6 +891,11 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 			v.required("stream.gap_window_minutes")
 		} else if *s.GapWindowMinutes < 0 {
 			v.errorf(FileConfig, "stream.gap_window_minutes", "must be >= 0, got %d", *s.GapWindowMinutes)
+		}
+		if s.SubscriberQueue == nil {
+			v.required("stream.subscriber_queue")
+		} else if *s.SubscriberQueue < 1 {
+			v.errorf(FileConfig, "stream.subscriber_queue", "must be >= 1, got %d", *s.SubscriberQueue)
 		}
 	}
 

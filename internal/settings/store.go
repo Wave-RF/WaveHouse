@@ -210,6 +210,34 @@ func (s *Store) DLQFor(table string) bool {
 	return *d.Enabled
 }
 
+// Ingest is the adopted batching of the tenant's tables and the deadline of
+// its inserts, resolved as one value from one snapshot so a batch is never
+// sized by one document and timed by another, and so the two the queue's
+// redelivery timeout must cover (internal/app checks them against boot
+// config's mq.ack_wait) come from one document.
+type Ingest struct {
+	// MaxBatchBytes flushes a table's batch once its rows' JSON reaches it.
+	MaxBatchBytes int
+	// MaxBatchWait flushes a batch this long after its first row.
+	MaxBatchWait time.Duration
+	// InsertTimeout is the deadline of each INSERT (clickhouse.insert_timeout).
+	InsertTimeout time.Duration
+	// RetryBackoffMax caps the retry backoff of a ClickHouse that cannot take
+	// the tenant's inserts.
+	RetryBackoffMax time.Duration
+}
+
+// Ingest returns the adopted ingest batching, insert deadline and retry cap.
+func (s *Store) Ingest() Ingest {
+	c := s.doc().Config
+	return Ingest{
+		MaxBatchBytes:   *c.Ingest.MaxBatchBytes,
+		MaxBatchWait:    time.Duration(*c.Ingest.MaxBatchWaitMS) * time.Millisecond,
+		InsertTimeout:   time.Duration(*c.ClickHouse.InsertTimeout) * time.Second,
+		RetryBackoffMax: time.Duration(*c.Ingest.RetryBackoffMax) * time.Second,
+	}
+}
+
 // DefaultMaxRows returns the fallback result LIMIT for structured queries.
 func (s *Store) DefaultMaxRows() int {
 	return *s.doc().Config.Query.DefaultMaxRows
@@ -232,6 +260,12 @@ func (s *Store) Keepalive() (period time.Duration, buckets int) {
 // gap-fill.
 func (s *Store) GapWindow() time.Duration {
 	return time.Duration(*s.doc().Config.Stream.GapWindowMinutes) * time.Minute
+}
+
+// SubscriberQueue returns the outbound queue, in frames, of each SSE
+// connection opened from now on.
+func (s *Store) SubscriberQueue() int {
+	return *s.doc().Config.Stream.SubscriberQueue
 }
 
 // MQMaxBytes returns the disk budget of the tenant's ingest queue in bytes.

@@ -10,11 +10,12 @@ import (
 )
 
 // Retry backoff for a ClickHouse that cannot take inserts. The delay doubles
-// per consecutive failure from retryBase to retryCap; each is jittered down
-// to half so the tables and replicas of one outage do not return in step.
+// per consecutive failure from retryBase to the tenant's cap
+// (ingest.retry_backoff_max, Limits.RetryBackoffMax, read per flush); each
+// is jittered down to half so the tables and replicas of one outage do not
+// return in step.
 const (
 	retryBase = time.Second
-	retryCap  = 30 * time.Second
 	// outageLogEvery bounds the log lines one ongoing outage writes.
 	outageLogEvery = 30 * time.Second
 )
@@ -154,11 +155,12 @@ func (b *backoff) waiting(now time.Time) (time.Duration, bool) {
 }
 
 // fail records an availability failure and returns how long the failed rows
-// should stay away. Failures that land while the backoff is already running
-// (flushes that started before the first one reported) do not escalate it.
-// log is true when this failure should be logged: the first of an outage,
-// then at most once per outageLogEvery.
-func (b *backoff) fail(now time.Time) (wait time.Duration, first, log bool) {
+// should stay away: the doubling delay, no longer than ceiling (never
+// under retryBase, the floor the doubling starts from). Failures that land while
+// the backoff is already running (flushes that started before the first one
+// reported) do not escalate it. log is true when this failure should be
+// logged: the first of an outage, then at most once per outageLogEvery.
+func (b *backoff) fail(now time.Time, ceiling time.Duration) (wait time.Duration, first, log bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.failures > 0 && now.Before(b.until) {
@@ -173,9 +175,9 @@ func (b *backoff) fail(now time.Time) (wait time.Duration, first, log bool) {
 			b.open.Add(1)
 		}
 	}
-	d := retryCap
-	if shift := b.failures - 1; shift < 5 { // 1s·2^5 already passes the cap
-		d = min(retryBase<<shift, retryCap)
+	d := max(ceiling, retryBase)
+	if shift := b.failures - 1; shift < 30 { // past that the doubling passes any cap, and would overflow
+		d = min(retryBase<<shift, d)
 	}
 	d = d/2 + b.spread(d/2)
 	b.until = now.Add(d)

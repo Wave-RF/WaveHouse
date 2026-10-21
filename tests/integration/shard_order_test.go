@@ -136,7 +136,7 @@ func startWorkerProc(t *testing.T, url, id string, lease time.Duration, cfg inge
 	q, err := ingest.ClaimShards(p.broker, leases, cfg)
 	require.NoError(t, err)
 	p.stop, p.failed, err = ingest.StartIngestWorker(context.WithoutCancel(ctx), q, &testutil.MockCache{},
-		func(tenant.ID) chconn.Target { return chconn.Target{URL: chURL, Database: "db"} }, nil)
+		func(tenant.ID) chconn.Target { return chconn.Target{URL: chURL, Database: "db"} }, nil, seedLimits, ingest.ConsumerSettings{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = p.stop(context.Background()) })
 	return p

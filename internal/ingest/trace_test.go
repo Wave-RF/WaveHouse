@@ -208,8 +208,8 @@ func TestIngestTraceContinuity_EndToEnd(t *testing.T) {
 		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
-		maxBatch: defaultMaxBatch,
-		maxWait:  200 * time.Millisecond,
+		limits:   limitsOf(Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: 200 * time.Millisecond}),
+		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	worker.wg.Add(1)
 	go worker.dispatchLoop(ctx, cons)

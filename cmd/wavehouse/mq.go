@@ -53,12 +53,14 @@ func runMQManifests(args []string, stdout, stderr io.Writer) int {
 	consumer := fs.String("ingest-consumer", mq.DefaultNATSIngestConsumer, "the shard durables' name prefix (mq.nats.ingest_consumer)")
 	history := fs.String("history-stream", "", "the history stream (mq.nats.history_stream); empty is <PREFIX>_HISTORY")
 	publishTimeout := fs.Duration("publish-timeout", mq.DefaultNATSPublishTimeout, "one publish attempt's bound (mq.nats.publish_timeout); the partitions' duplicate window covers every attempt")
+	ackWait := fs.Duration("ack-wait", mq.DefaultAckWait, "every shard durable's ackWait (mq.ack_wait), the ingest worker's redelivery timeout")
+	maxAckPending := fs.Int("max-ack-pending", mq.DefaultMaxAckPending, "every shard durable's maxAckPending (mq.max_ack_pending), the rows delivered and unacked a shard may hold")
 	bucket := fs.String("coord-bucket", "", "the lease KV bucket (coord.nats.bucket); empty is <prefix>_coord")
 	lease := fs.Duration("dedupe-lease", dedupe.DefaultLease, "the dedupe.lease the partitions' duplicate window must cover")
 	fileStore := fs.String("file-store", mq.FormatStoreSize(mq.DefaultNATSFileStore), "every server's JetStream max_file_store (the Helm chart's fileStore.maxSize, else its PVC size), which the streams' maxBytes must fit in")
 	partitionBytes := fs.String("partition-max-bytes", "", "each ingest partition's maxBytes; empty is 15% of --file-store")
 	fs.Usage = func() {
-		_, _ = fmt.Fprint(fs.Output(), `usage: wavehouse mq manifests [--partitions N] [--shards V] [--prefix wh] [--replicas 3] [--ingest-consumer wh-ingest] [--history-stream S] [--publish-timeout 5s] [--coord-bucket B] [--dedupe-lease 30s] [--file-store 100Gi] [--partition-max-bytes 15Gi]
+		_, _ = fmt.Fprint(fs.Output(), `usage: wavehouse mq manifests [--partitions N] [--shards V] [--prefix wh] [--replicas 3] [--ingest-consumer wh-ingest] [--history-stream S] [--publish-timeout 5s] [--ack-wait 60s] [--max-ack-pending 10000] [--coord-bucket B] [--dedupe-lease 30s] [--file-store 100Gi] [--partition-max-bytes 15Gi]
 
 Print the nack (jetstream.nats.io/v1beta2) Stream, Consumer and KeyValue
 resources for the JetStream topology WaveHouse needs under mq.backend: nats
@@ -97,6 +99,14 @@ It refuses streams that together reserve more than --file-store.
 		_, _ = fmt.Fprintf(stderr, "wavehouse mq manifests: --publish-timeout must be positive\n")
 		return 2
 	}
+	if *ackWait <= 0 {
+		_, _ = fmt.Fprintf(stderr, "wavehouse mq manifests: --ack-wait must be positive\n")
+		return 2
+	}
+	if *maxAckPending < 1 {
+		_, _ = fmt.Fprintf(stderr, "wavehouse mq manifests: --max-ack-pending must be at least 1\n")
+		return 2
+	}
 	store, err := positiveSize(*fileStore)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "wavehouse mq manifests: --file-store: %v\n", err)
@@ -113,6 +123,7 @@ It refuses streams that together reserve more than --file-store.
 		Topology: mq.NATSTopology{
 			Prefix: *prefix, Partitions: *partitions, Shards: *shards, IngestConsumer: *consumer, HistoryStream: *history,
 			PublishTimeout: *publishTimeout, CoordBucket: *bucket, DedupeLease: *lease,
+			AckWait: *ackWait, MaxAckPending: *maxAckPending,
 		},
 		Replicas:          *replicas,
 		FileStore:         store,

@@ -50,7 +50,9 @@ type NATSTopology struct {
 	// when it holds none there, and then the bucket is not checked.
 	CoordBucket string
 	// AckWait, MaxAckPending and Prefetch are what the ingest worker asks of
-	// the durable (internal/ingest/worker.go, which imports this package).
+	// the durable: boot config's mq.ack_wait, mq.max_ack_pending and
+	// mq.prefetch (internal/app hands them over), which the operator's
+	// durables must agree with (durable), as they must with Shards.
 	AckWait       time.Duration
 	MaxAckPending int
 	Prefetch      int
@@ -66,9 +68,14 @@ const (
 	MaxNATSShards             = 256
 	DefaultNATSIngestConsumer = "wh-ingest"
 	DefaultNATSPublishTimeout = 5 * time.Second
-	defaultNATSAckWait        = 60 * time.Second
-	defaultNATSMaxAckPending  = 10_000
-	defaultNATSPrefetch       = 500
+	// DefaultAckWait, DefaultMaxAckPending and DefaultPrefetch are the one
+	// definition of what boot config's mq.ack_wait, mq.max_ack_pending and
+	// mq.prefetch default to, on either backend: internal/config mirrors
+	// them, since it cannot import this package, and a test there pins the
+	// two together; `wavehouse mq manifests` defaults its flags from them.
+	DefaultAckWait       = 60 * time.Second
+	DefaultMaxAckPending = 10_000
+	DefaultPrefetch      = 500
 )
 
 // withDefaults fills t's zero fields.
@@ -92,13 +99,13 @@ func (t NATSTopology) withDefaults() NATSTopology {
 		t.PublishTimeout = DefaultNATSPublishTimeout
 	}
 	if t.AckWait == 0 {
-		t.AckWait = defaultNATSAckWait
+		t.AckWait = DefaultAckWait
 	}
 	if t.MaxAckPending == 0 {
-		t.MaxAckPending = defaultNATSMaxAckPending
+		t.MaxAckPending = DefaultMaxAckPending
 	}
 	if t.Prefetch == 0 {
-		t.Prefetch = defaultNATSPrefetch
+		t.Prefetch = DefaultPrefetch
 	}
 	return t
 }
@@ -123,6 +130,17 @@ func (t NATSTopology) validate() error {
 	}
 	if !natsBucketName.MatchString(t.coordBucket()) {
 		return fmt.Errorf("coord bucket %q must be a KV bucket name of [a-zA-Z0-9_-]", t.coordBucket())
+	}
+	// Zero took the defaults above; config.Validate holds the configured
+	// values to the same, and max_ack_pending to at least the prefetch.
+	if t.AckWait <= 0 {
+		return fmt.Errorf("ack wait must be positive, got %s", t.AckWait)
+	}
+	if t.MaxAckPending < 1 {
+		return fmt.Errorf("max ack pending must be at least 1, got %d", t.MaxAckPending)
+	}
+	if t.Prefetch < 1 {
+		return fmt.Errorf("prefetch must be at least 1, got %d", t.Prefetch)
 	}
 	return nil
 }
@@ -531,7 +549,7 @@ func (v *topologyVerifier) durable(ctx context.Context, s jetstream.Stream, name
 		req("ack_policy", "is %s; must be explicit", cfg.AckPolicy)
 	}
 	if cfg.AckWait < t.AckWait {
-		req("ack_wait", "is %s; must be at least %s, the ingest worker's", cfg.AckWait, t.AckWait)
+		req("ack_wait", "is %s; must be at least %s, the ingest worker's (mq.ack_wait)", cfg.AckWait, t.AckWait)
 	}
 	if cfg.MaxDeliver != -1 {
 		req("max_deliver", "is %d; must be -1, or a row that is never written stays in the partition undelivered", cfg.MaxDeliver)
@@ -540,7 +558,7 @@ func (v *topologyVerifier) durable(ctx context.Context, s jetstream.Stream, name
 	case cfg.MaxAckPending <= 0:
 		req("max_ack_pending", "is %d; must be set", cfg.MaxAckPending)
 	case cfg.MaxAckPending < t.MaxAckPending:
-		v.add(FindingRecommended, obj, "max_ack_pending", "is %d; the ingest worker expects %d", cfg.MaxAckPending, t.MaxAckPending)
+		v.add(FindingRecommended, obj, "max_ack_pending", "is %d; the ingest worker expects %d (mq.max_ack_pending)", cfg.MaxAckPending, t.MaxAckPending)
 	}
 	if cfg.DeliverPolicy != jetstream.DeliverAllPolicy {
 		req("deliver_policy", "is %s; must be all", cfg.DeliverPolicy)
@@ -565,7 +583,7 @@ func (v *topologyVerifier) durable(ctx context.Context, s jetstream.Stream, name
 		req("max_expires", "is %s; must be unset or at least %s, or the server may refuse WaveHouse's pulls", cfg.MaxRequestExpires, natsPullExpiry)
 	}
 	if cfg.MaxRequestBatch != 0 && cfg.MaxRequestBatch < t.Prefetch {
-		req("max_request_batch", "is %d; must be 0 or at least %d, the prefetch of a worker that owns this one shard", cfg.MaxRequestBatch, t.Prefetch)
+		req("max_request_batch", "is %d; must be 0 or at least %d, the prefetch of a worker that owns this one shard (mq.prefetch)", cfg.MaxRequestBatch, t.Prefetch)
 	}
 	// One puller receives at a time: the one the server pinned.
 	if cfg.PriorityPolicy != jetstream.PriorityPolicyPinned {

@@ -113,3 +113,18 @@ func TestInitProvider_ShutdownParallelBounded(t *testing.T) {
 	assert.Less(t, elapsed, 3*time.Second,
 		"OTel shutdown must stay bounded by its context deadline (#288); took %s", elapsed)
 }
+
+// The export cadences are the SDK's own variables when set: an option passed
+// to the SDK would override them, so the fallbacks go in only while each
+// variable is unset (#778). Not parallel: t.Setenv.
+func TestExportCadence_LeavesTheSDKVariablesInForce(t *testing.T) {
+	t.Setenv("OTEL_BSP_SCHEDULE_DELAY", "")
+	t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "")
+	assert.Len(t, traceBatchOptions(), 1, "unset: the 5s fallback is passed")
+	assert.Len(t, metricReaderOptions(), 1, "unset: the 15s fallback is passed")
+
+	t.Setenv("OTEL_BSP_SCHEDULE_DELAY", "1000")
+	t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "30000")
+	assert.Empty(t, traceBatchOptions(), "set: nothing overrides the variable")
+	assert.Empty(t, metricReaderOptions(), "set: nothing overrides the variable")
+}

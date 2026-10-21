@@ -37,8 +37,6 @@ func (a *App) wireNATSMQ(ctx context.Context) error {
 			ServerName: n.TLS.ServerName, HandshakeFirst: n.TLS.HandshakeFirst,
 		},
 		JSDomain: n.JSDomain,
-		// AckWait, MaxAckPending and Prefetch are left to mq's defaults,
-		// which are the ingest worker's own.
 		Topology: mq.NATSTopology{
 			Prefix:         n.SubjectPrefix,
 			Partitions:     n.Partitions,
@@ -49,6 +47,12 @@ func (a *App) wireNATSMQ(ctx context.Context) error {
 			DedupeLease:    a.dedupeLease(),
 			// Boot waits for the lease bucket with the rest of the topology.
 			CoordBucket: a.coordBucket(),
+			// What the ingest worker's consumer asks of the shard durables
+			// (wireIngestWorker hands it the same values), checked against
+			// the operator's at boot like the shard count.
+			AckWait:       a.cfg.MQ.AckWait,
+			MaxAckPending: a.cfg.MQ.MaxAckPending,
+			Prefetch:      a.cfg.MQ.Prefetch,
 		},
 		ConnectTimeout: n.ConnectTimeout,
 		TopologyWait:   n.TopologyWait,

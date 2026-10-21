@@ -114,7 +114,10 @@ type App struct {
 	sseMetrics  *stream.Metrics
 	hub         *stream.Hub
 	keepalives  *keepalives
-	handler     http.Handler
+	// ingestLimits is each served tenant's batch limits as the ingest
+	// worker applies them, checked against mq.ack_wait at adoption.
+	ingestLimits *ingestLimits
+	handler      http.Handler
 	// readiness is what /readyz consults beyond the ClickHouse pools, added
 	// by the wiring of a backend that can stop answering: the external NATS.
 	readiness []api.Check
@@ -217,7 +220,9 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 		a.wireStreaming()
 	}
 	if ingestRole {
-		a.wireIngestWorker()
+		if err := a.wireIngestWorker(); err != nil {
+			return nil, err
+		}
 	}
 	if apiRole {
 		authMW := a.wireAuth()

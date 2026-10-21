@@ -66,9 +66,16 @@ type IngestWorker struct {
 	// re-points the tenant applies to the next flush; the zero Target is a
 	// tenant on no pool, whose batch goes to the dead-letter decision whole
 	// (parkBatch).
-	target   func(tenant.ID) chconn.Target
-	maxBatch int
-	maxWait  time.Duration
+	target func(tenant.ID) chconn.Target
+	// limits resolves a tenant's batch limits (internal/app, from the
+	// tenant's config.json), read when a table's batch starts, so a settings
+	// reload applies to the next batch. false is a tenant with none — not
+	// served, or none adopted — whose batch is parked like that of a tenant
+	// on no pool (parkBatch).
+	limits func(tenant.ID) (Limits, bool)
+	// consumer is what the durable consumer was created with; its Prefetch
+	// also sizes the channels between delivery and the batches.
+	consumer ConsumerSettings
 	// dlqEnabled reports, per tenant table, whether a row ClickHouse still
 	// rejects after row-by-row isolation — or every row of a batch with no
 	// ClickHouse connection — is parked on the DLQ (settings.Store.DLQFor in production;
@@ -126,31 +133,68 @@ var retryCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 	metric.WithDescription("Rows handed back to the ingest queue for a delayed retry because ClickHouse could not take them, by reason"),
 )
 
-// Batching defaults; overridable on the struct for tests.
-// TODO: eventually make this configurable not just in tests
-const (
-	defaultMaxBatch = 500
-	defaultMaxWait  = 5 * time.Second
-)
+// Limits is one tenant's batching, from its settings (ingest.* in its
+// config.json): the two flush triggers of each of its tables' batches, read
+// at each batch's first row.
+type Limits struct {
+	// MaxBatchBytes flushes a batch once its rows' JSON — each envelope's
+	// row, one JSONCompactEachRow line, so an estimate of the uncompressed
+	// INSERT body — reaches it. A "try to flush" threshold, not a hard cap:
+	// rows that arrive while a flush is in flight coalesce into the next
+	// batch, which can pass it. A batch never holds more rows than the
+	// consumer delivers unacked (ConsumerSettings.MaxAckPending), so a target
+	// above that many rows is reached by the timer alone.
+	MaxBatchBytes int
+	// MaxBatchWait flushes a batch this long after its first row.
+	MaxBatchWait time.Duration
+	// InsertTimeout is the deadline of each INSERT the batch's flush sends
+	// (clickhouse.insert_timeout), row-by-row isolation included; 0 is
+	// none. A timed-out insert is retried with backoff like any other
+	// failure to take it.
+	InsertTimeout time.Duration
+	// RetryBackoffMax caps the backoff a ClickHouse that cannot take the
+	// tenant's inserts is retried under (ingest.retry_backoff_max): the
+	// delay doubles from a second up to it. The backoff is per pool, so the
+	// cap applied is that of the tenant whose flush met the failure.
+	RetryBackoffMax time.Duration
+}
 
-// Consumer/consume tuning, fixed at creation. Invariants: pullMaxMessages ≤
-// maxAckPending, and ackWait > defaultMaxWait + CH flush (else in-flight
-// messages are redelivered mid-processing → duplicate inserts).
-const (
-	// Server-side cap on a tenant's unacked messages; suspends that tenant's
-	// delivery when hit (backpressure), and no other tenant's. The worker holds
-	// every delivered row until its batch is acked, so while ClickHouse stalls
-	// it can hold up to maxAckPending rows per tenant: the in-memory bound
-	// grows with the tenants served.
-	maxAckPending = 10_000 // TODO: raise if NATS delivery becomes the bottleneck
+// ConsumerSettings is what the worker asks of the queue's durable consumer,
+// the same on either backend: boot config's mq.ack_wait, mq.max_ack_pending
+// and mq.prefetch, one value per process (internal/app). A zero field takes
+// mq's default, which is what boot config defaults to. Invariants: Prefetch
+// ≤ MaxAckPending (config.Validate), and AckWait > a tenant's
+// Limits.MaxBatchWait + Limits.InsertTimeout, checked when the tenant's
+// settings are adopted (internal/app), else in-flight messages are
+// redelivered mid-processing → duplicate inserts.
+type ConsumerSettings struct {
+	// AckWait is the redelivery timeout.
+	AckWait time.Duration
+	// MaxAckPending is the server-side cap on a delivery unit's unacked
+	// messages — a tenant's embedded queue, or a shard of the operator's
+	// partitions; it suspends that unit's delivery when hit (backpressure),
+	// and no other unit's. The worker holds every delivered row until its
+	// batch is acked, so while ClickHouse stalls it can hold up to this many
+	// rows per unit: the in-memory bound grows with the units served.
+	MaxAckPending int
+	// Prefetch is the client fetch-ahead in front of msgChan, shared by the
+	// units the consumer serves (mq.Consumer.Consume).
+	Prefetch int
+}
 
-	// Client prefetch buffer in front of msgChan (was the implicit jetstream
-	// default), shared by the tenants' queues (mq.Consumer.Consume).
-	pullMaxMessages = 500
-
-	// Redelivery timeout. 60s ≈ 5s batch + ~30s HTTP timeout + margin.
-	ackWait = 60 * time.Second
-)
+// withDefaults fills c's zero fields with mq's defaults.
+func (c ConsumerSettings) withDefaults() ConsumerSettings {
+	if c.AckWait <= 0 {
+		c.AckWait = mq.DefaultAckWait
+	}
+	if c.MaxAckPending <= 0 {
+		c.MaxAckPending = mq.DefaultMaxAckPending
+	}
+	if c.Prefetch <= 0 {
+		c.Prefetch = mq.DefaultPrefetch
+	}
+	return c
+}
 
 // StartIngestWorker starts the batch consumer. stop drains it under the given
 // deadline. failed receives at most one error, if the worker ends on its own:
@@ -163,6 +207,8 @@ func StartIngestWorker(
 	ctx context.Context, queue Queue, cache cache.Cache,
 	target func(tenant.ID) chconn.Target,
 	dlqEnabled func(id tenant.ID, table string) bool,
+	limits func(id tenant.ID) (Limits, bool),
+	consumer ConsumerSettings,
 ) (stop func(context.Context) error, failed <-chan error, err error) {
 	if queue == nil {
 		return nil, nil, fmt.Errorf("message queue is nil")
@@ -173,11 +219,15 @@ func StartIngestWorker(
 	if target == nil {
 		return nil, nil, fmt.Errorf("clickhouse target is nil")
 	}
+	if limits == nil {
+		return nil, nil, fmt.Errorf("batch limits are nil")
+	}
 
+	consumer = consumer.withDefaults()
 	cons, err := queue.CreateConsumer(ctx, mq.ConsumerConfig{
 		Durable:       BufferConsumerName,
-		AckWait:       ackWait,
-		MaxAckPending: maxAckPending,
+		AckWait:       consumer.AckWait,
+		MaxAckPending: consumer.MaxAckPending,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -189,8 +239,8 @@ func StartIngestWorker(
 		clients:    chconn.NewHTTPClients(ingestHTTPClient),
 		cache:      cache,
 		target:     target,
-		maxBatch:   defaultMaxBatch,
-		maxWait:    defaultMaxWait,
+		limits:     limits,
+		consumer:   consumer,
 		dlqEnabled: dlqEnabled,
 	}
 
@@ -209,7 +259,10 @@ func StartIngestWorker(
 
 // ingestHTTPClient is the worker's client for the ClickHouse HTTP
 // interface: a transport tuned for high-throughput inserts, with the
-// target's TLS config for an https target.
+// target's TLS config for an https target. It sets no Timeout: every
+// request carries its tenant's insert deadline (Limits.InsertTimeout, in
+// insertToClickHouse), and a client-wide one would cap every tenant sharing
+// the client at one value.
 func ingestHTTPClient(tlsCfg *tls.Config) *http.Client {
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
@@ -226,7 +279,7 @@ func ingestHTTPClient(tlsCfg *tls.Config) *http.Client {
 		MaxIdleConnsPerHost:   100,
 		MaxConnsPerHost:       100,
 	}
-	return &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	return &http.Client{Transport: transport}
 }
 
 // waitOrDeadline returns nil once wg drains, or ctx.Err() if ctx fires first
@@ -262,20 +315,23 @@ func waitOrDeadline(ctx context.Context, wg *sync.WaitGroup) error {
 func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 	defer w.wg.Done()
 
-	msgChan := make(chan *mq.Message, w.maxBatch*2)
+	// Room for two fetch-aheads, so delivery keeps fetching while the
+	// routing of the last fetch is under way.
+	msgChan := make(chan *mq.Message, w.consumer.Prefetch*2)
 	abandon := make(chan struct{})
 
-	// Pull consumer with a push-like callback (the client prefetches pullMaxMessages,
-	// shared by the tenants' queues). It runs on one delivery goroutine per tenant,
-	// so the handoff is a channel send, safe from all of them at once. Hand off to
-	// msgChan only, so a consume goroutine never blocks on flush work.
+	// Pull consumer with a push-like callback (the client prefetches
+	// consumer.Prefetch, shared by the tenants' queues). It runs on one
+	// delivery goroutine per tenant, so the handoff is a channel send, safe
+	// from all of them at once. Hand off to msgChan only, so a consume
+	// goroutine never blocks on flush work.
 	stop, deliveryEnded, err := cons.Consume(func(msg *mq.Message) {
 		select {
 		case msgChan <- msg:
 		case <-abandon:
 			nakAbandoned(msg)
 		}
-	}, pullMaxMessages)
+	}, w.consumer.Prefetch)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to start consumer", "error", err)
 		w.failed <- fmt.Errorf("ingest worker: start consumer: %w", err)
@@ -301,8 +357,9 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 	}()
 
 	// flushCtx carries values (trace) but is never cancelled: a started flush must
-	// finish so data already in ClickHouse gets acked rather than redelivered. It
-	// is bounded by the HTTP client timeout; shutdown waits up to stopFunc's deadline.
+	// finish so data already in ClickHouse gets acked rather than redelivered. Each
+	// of its INSERTs is bounded by the tenant's insert deadline; shutdown waits up
+	// to stopFunc's deadline.
 	flushCtx := context.WithoutCancel(ctx)
 
 	// One loop per tenant table (#583): the dead-letter switch, and in turn
@@ -341,7 +398,9 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 		key := batchKey{tenant: pm.tenant, table: pm.tableName}
 		ch, exists := tableChans[key]
 		if !exists {
-			ch = make(chan parsedMsg, w.maxBatch)
+			// One fetch-ahead of room, so a table's loop taking a batch
+			// never holds up the routing of the rows behind it.
+			ch = make(chan parsedMsg, w.consumer.Prefetch)
 			tableChans[key] = ch
 
 			// TODO(#263): tableLoops are spawned per distinct tenant table and
@@ -431,7 +490,13 @@ type tableBatcher struct {
 	table string
 
 	batch []parsedMsg
-	timer *time.Timer
+	// bytes is the batch's rows' JSON so far, against limits.MaxBatchBytes.
+	bytes int
+	// limits is the batch's tenant's, read at its first row; ok is false
+	// for a tenant with none, whose rows are flushed at once to be parked.
+	limits Limits
+	ok     bool
+	timer  *time.Timer
 
 	// flushing is closed by the flush goroutine when it finishes, and is nil while
 	// no flush is running. Because a receive on a nil channel blocks forever, the
@@ -444,26 +509,35 @@ type tableBatcher struct {
 }
 
 func newTableBatcher(w *IngestWorker, table string) *tableBatcher {
-	t := time.NewTimer(w.maxWait)
-	t.Stop() // created disarmed; armed when the first row of a batch arrives
+	t := time.NewTimer(time.Hour)
+	t.Stop() // created disarmed; armed when the first row of a batch arrives, with its tenant's wait
 	return &tableBatcher{w: w, table: table, timer: t}
 }
 
-// add appends a row, arming the deadline timer on the first row of a batch and
-// requesting a flush once the batch is full. A row whose ClickHouse pool is
-// inside a backoff window is handed straight back to the MQ instead: holding
-// it here would only pin it in memory until a flush that is certain to hand
-// it back, so the backlog of an outage stays in the queue, not in the worker.
+// add appends a row, reading the tenant's limits and arming the deadline
+// timer on the first row of a batch, and requesting a flush once the batch's
+// rows' JSON reaches the byte target. A row whose ClickHouse pool is inside a
+// backoff window is handed straight back to the MQ instead: holding it here
+// would only pin it in memory until a flush that is certain to hand it back,
+// so the backlog of an outage stays in the queue, not in the worker.
 func (b *tableBatcher) add(ctx context.Context, pm parsedMsg) {
 	if wait, ok := b.w.backoffs.waiting(func() chconn.Target { return b.w.target(pm.tenant) }, b.table, b.w.clock()); ok {
 		b.w.retryLater(ctx, b.table, []parsedMsg{pm}, wait, "backoff")
 		return
 	}
 	if len(b.batch) == 0 {
-		b.timer.Reset(b.w.maxWait)
+		// Every row of this loop is one tenant's (dispatchLoop keys its
+		// loops by tenant table), so the first row names whose limits size
+		// the batch; read once per batch, so a reload lands between
+		// batches, never inside one.
+		b.limits, b.ok = b.w.limits(pm.tenant)
+		if b.ok {
+			b.timer.Reset(b.limits.MaxBatchWait)
+		}
 	}
 	b.batch = append(b.batch, pm)
-	if len(b.batch) >= b.w.maxBatch {
+	b.bytes += len(pm.row)
+	if !b.ok || b.bytes >= b.limits.MaxBatchBytes {
 		b.requestFlush(ctx)
 	}
 }
@@ -482,7 +556,7 @@ func (b *tableBatcher) requestFlush(ctx context.Context) {
 		return
 	}
 	rows := b.batch
-	b.batch = nil
+	b.batch, b.bytes = nil, 0
 	b.flushQueued = false
 	b.timer.Stop() // this batch is leaving, so drop its deadline
 	done := make(chan struct{})
@@ -494,9 +568,10 @@ func (b *tableBatcher) requestFlush(ctx context.Context) {
 }
 
 // onFlushDone frees the in-flight slot. It starts the next flush only if a
-// trigger fired while the previous one was running (the batch overflowed past
-// maxBatch, or its deadline elapsed). Otherwise a partial batch keeps waiting for
-// its own size or timer trigger — a flush completing is not itself a trigger.
+// trigger fired while the previous one was running (the batch's bytes passed
+// the target, or its deadline elapsed). Otherwise a partial batch keeps
+// waiting for its own size or timer trigger — a flush completing is not
+// itself a trigger.
 func (b *tableBatcher) onFlushDone(ctx context.Context) {
 	b.flushing = nil
 	if b.flushQueued {
@@ -646,11 +721,11 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 //     together. The same applies to a failure that lands mid-isolation: the
 //     rows not yet settled go back, none to the DLQ.
 //
-// A batch whose tenant has no ClickHouse connection is not tried at all: it
-// meets its DLQ switch once, whole, whatever its column lists (parkBatch).
-// tableLoop guarantees at most one concurrent flushTable per tenant table;
-// different tables — two tenants' tables of one name included — may flush
-// concurrently.
+// A batch whose tenant has no ClickHouse connection, or no batch limits, is
+// not tried at all: it meets its DLQ switch once, whole, whatever its column
+// lists (parkBatch). tableLoop guarantees at most one concurrent flushTable
+// per tenant table; different tables — two tenants' tables of one name
+// included — may flush concurrently.
 func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []parsedMsg) {
 	if len(msgs) == 0 {
 		return
@@ -659,6 +734,11 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 	t := w.target(id)
 	if t.URL == "" {
 		w.parkBatch(ctx, tableName, msgs, noTargetError(id))
+		return
+	}
+	lim, ok := w.limits(id)
+	if !ok {
+		w.parkBatch(ctx, tableName, msgs, noLimitsError(id))
 		return
 	}
 
@@ -682,7 +762,7 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 	// signature and this is a single group.
 	groups := groupByColumns(msgs)
 	for i, group := range groups {
-		unsettled, err := w.flushGroup(ctx, tableName, group)
+		unsettled, err := w.flushGroup(ctx, tableName, group, lim.InsertTimeout)
 		if err == nil {
 			continue
 		}
@@ -698,7 +778,7 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 		} else {
 			table.release()
 		}
-		wait, first, log := failed.fail(w.clock())
+		wait, first, log := failed.fail(w.clock(), lim.RetryBackoffMax)
 		if log {
 			msg := scope + " cannot take inserts, retrying with backoff; no row goes to the DLQ"
 			if !first {
@@ -746,20 +826,21 @@ func groupByColumns(msgs []parsedMsg) [][]parsedMsg {
 
 // flushGroup inserts one (table, column list) batch, falling back to row-by-row
 // isolation when ClickHouse rejects it, or refuses it in a way a smaller insert
-// may avoid (chconn.Splittable). Every message in group shares a column
-// signature, so the first one's columns describe them all.
+// may avoid (chconn.Splittable), each INSERT under the tenant's timeout. Every
+// message in group shares a column signature, so the first one's columns
+// describe them all.
 //
 // err is non-nil when ClickHouse could not take a request — the bulk insert or
 // any isolated row (see flushTable) — and unsettled is then every row not yet
 // acked, dead-lettered or left for redelivery: the whole group, or what
 // isolation had not reached. A rejected row is settled; it never makes err.
-func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group []parsedMsg) (unsettled []parsedMsg, err error) {
+func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group []parsedMsg, timeout time.Duration) (unsettled []parsedMsg, err error) {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, flushSpanName, flushSpanOptions(tableName, group)...)
 	defer span.End()
 	defer func() { recordSpanError(span, err) }()
 	cols := group[0].columns
 
-	err = w.insertToClickHouse(ctx, tableName, cols, group)
+	err = w.insertToClickHouse(ctx, tableName, cols, group, timeout)
 	if err == nil {
 		w.handleSuccess(ctx, tableName, group)
 		return nil, nil
@@ -774,7 +855,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 	// sink the whole batch.
 	// TODO: potentially could try a binary search or something eventually maybe? unclear if faster...
 	for i, pm := range group {
-		singleErr := w.insertToClickHouse(ctx, tableName, cols, []parsedMsg{pm})
+		singleErr := w.insertToClickHouse(ctx, tableName, cols, []parsedMsg{pm}, timeout)
 		switch {
 		case singleErr == nil:
 			w.handleSuccess(ctx, tableName, []parsedMsg{pm})
@@ -817,9 +898,10 @@ func (w *IngestWorker) retryLater(ctx context.Context, tableName string, msgs []
 }
 
 // insertToClickHouse writes one group as a single INSERT naming columns
-// explicitly, so the positional rows land in the right slots. Callers group by
+// explicitly, so the positional rows land in the right slots, under timeout
+// (0 is none) from the request to the end of the response. Callers group by
 // column list first: a batch spanning two lists cannot share one statement.
-func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, columns []string, msgs []parsedMsg) (err error) {
+func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, columns []string, msgs []parsedMsg, timeout time.Duration) (err error) {
 	var buf bytes.Buffer
 	for _, m := range msgs {
 		buf.Write(m.row)
@@ -845,6 +927,11 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	ctx, span := otel.Tracer(tracerName).Start(ctx, insertSpanName, insertSpanOptions(t, tableName, len(msgs))...)
 	defer span.End()
 	defer func() { recordSpanError(span, err) }()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	q := url.Values{}
 	q.Set("database", t.Database)
 	q.Set("param_target_table", tableName)
@@ -901,19 +988,26 @@ func noTargetError(id tenant.ID) error {
 	return fmt.Errorf("no ClickHouse connection is open for tenant %s", id)
 }
 
-// parkBatch disposes of a batch whose tenant has no ClickHouse connection in
-// one pass: row-by-row isolation would fail every row the same way, logging
-// two lines each. The tenant's DLQ switch is asked once for the batch, which
-// is parked under its own topic — a tenant no longer served reads as on
-// (dlqFor in internal/app) — or, switched off, left unacked for redelivery
-// until the tenant has a pool.
+// noLimitsError is the failure of tenant id's inserts while it has no batch
+// limits: no longer served, or its settings refused (internal/app). No
+// request is made.
+func noLimitsError(id tenant.ID) error {
+	return fmt.Errorf("no ingest limits are adopted for tenant %s", id)
+}
+
+// parkBatch disposes of a batch whose tenant has no ClickHouse connection,
+// or no batch limits, in one pass: row-by-row isolation would fail every row
+// the same way, logging two lines each. The tenant's DLQ switch is asked
+// once for the batch, which is parked under its own topic — a tenant no
+// longer served reads as on (dlqFor in internal/app) — or, switched off,
+// left unacked for redelivery until the tenant has what it lacks.
 func (w *IngestWorker) parkBatch(ctx context.Context, tableName string, msgs []parsedMsg, cause error) {
 	id := msgs[0].tenant
 	if w.dlqEnabled != nil && !w.dlqEnabled(id, tableName) {
-		slog.ErrorContext(ctx, "no ClickHouse connection for tenant, DLQ disabled for table — batch left unacked, NATS will redeliver it until the tenant has one or dlq is enabled", "tenant", id, "table", tableName, "rows", len(msgs))
+		slog.ErrorContext(ctx, "batch cannot be inserted, DLQ disabled for table — left unacked, NATS will redeliver it until it can be or dlq is enabled", "tenant", id, "table", tableName, "rows", len(msgs), "cause", cause)
 		return
 	}
-	slog.ErrorContext(ctx, "no ClickHouse connection for tenant, parking the batch on the DLQ", "tenant", id, "table", tableName, "rows", len(msgs))
+	slog.ErrorContext(ctx, "batch cannot be inserted, parking it on the DLQ", "tenant", id, "table", tableName, "rows", len(msgs), "cause", cause)
 	for _, pm := range msgs {
 		w.sendToDLQ(ctx, tableName, pm, cause.Error())
 	}

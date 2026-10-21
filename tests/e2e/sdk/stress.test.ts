@@ -8,7 +8,7 @@ describe("Stress & Concurrency", () => {
 
   it("handles high-volume concurrent inserts and reads", async () => {
     const concurrency = 20; // Number of parallel workers
-    const insertsPerWorker = 25; // 500 total inserts (hits the exact batch limit)
+    const insertsPerWorker = 25; // 500 total inserts
     const runId = testId();
 
     // Blast inserts concurrently
@@ -37,9 +37,9 @@ describe("Stress & Concurrency", () => {
 
     await Promise.all([...workers, ...readWorkers]);
 
-    // Verify all data landed intact
-    // Because we inserted exactly 500 items, ingest worker should flush immediately,
-    // making this relatively fast.
+    // Verify all data landed intact. These narrow rows stay under the
+    // fixture's ingest.max_batch_bytes, so the batch flushes on the 5s timer
+    // (ingest.max_batch_wait_ms) at the latest, well inside the wait.
     await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT count() as cnt FROM default.${T.clicks} WHERE session_id = 'session-${runId}'`,

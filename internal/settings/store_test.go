@@ -107,6 +107,7 @@ func TestStore_SeedIsValid(t *testing.T) {
 	assert.Equal(t, ClickHouse{Addr: "localhost:9000", HTTPPort: 8123, HTTPScheme: "http", Database: "default", Username: "default", QueryTimeout: 30 * time.Second, Headers: map[string]string{}, MaxOpenConns: 10, MaxIdleConns: 5}, s.ClickHouse())
 	assert.Equal(t, Auth{JWKSURL: "", RoleClaim: "role"}, s.Auth())
 	assert.True(t, s.DLQFor("anything"))
+	assert.Equal(t, Ingest{MaxBatchBytes: 262144, MaxBatchWait: 5 * time.Second, InsertTimeout: 30 * time.Second, RetryBackoffMax: 30 * time.Second}, s.Ingest())
 	assert.Equal(t, 10000, s.DefaultMaxRows())
 	assert.Equal(t, 60, s.TimestampBucketSeconds())
 	assert.Equal(t, 60*time.Second, s.SchemaRefreshInterval())
@@ -114,6 +115,7 @@ func TestStore_SeedIsValid(t *testing.T) {
 	assert.Equal(t, 30*time.Second, period)
 	assert.Equal(t, 3, buckets)
 	assert.Equal(t, 15*time.Minute, s.GapWindow())
+	assert.Equal(t, 64, s.SubscriberQueue())
 	assert.Equal(t, int64(50)<<30, s.MQMaxBytes())
 	assert.Equal(t, []string{"*"}, s.CORSOrigins())
 
@@ -129,8 +131,9 @@ func TestStore_SeedIsValid(t *testing.T) {
 func TestStore_TypedAccessors(t *testing.T) {
 	t.Parallel()
 	s := newLoadedStore(t, map[string]string{
-		settings.FileConfig: configJSON(`{"query": {"default_max_rows": 250, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 5}, "stream": {"keepalive_interval": 10, "keepalive_buckets": 2, "gap_window_minutes": 0}, "mq": {"max_bytes_gb": 2}, "cors": {"allowed_origins": ["https://app.example.com"]}}`),
+		settings.FileConfig: configJSON(`{"clickhouse": {"insert_timeout": 7}, "ingest": {"max_batch_bytes": 1048576, "max_batch_wait_ms": 250, "retry_backoff_max": 120}, "query": {"default_max_rows": 250, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 5}, "stream": {"keepalive_interval": 10, "keepalive_buckets": 2, "gap_window_minutes": 0, "subscriber_queue": 8}, "mq": {"max_bytes_gb": 2}, "cors": {"allowed_origins": ["https://app.example.com"]}}`),
 	})
+	assert.Equal(t, Ingest{MaxBatchBytes: 1 << 20, MaxBatchWait: 250 * time.Millisecond, InsertTimeout: 7 * time.Second, RetryBackoffMax: 2 * time.Minute}, s.Ingest())
 	assert.Equal(t, 250, s.DefaultMaxRows())
 	assert.Equal(t, 0, s.TimestampBucketSeconds())
 	assert.Equal(t, 5*time.Second, s.SchemaRefreshInterval())
@@ -138,6 +141,7 @@ func TestStore_TypedAccessors(t *testing.T) {
 	assert.Equal(t, 10*time.Second, period)
 	assert.Equal(t, 2, buckets)
 	assert.Equal(t, time.Duration(0), s.GapWindow())
+	assert.Equal(t, 8, s.SubscriberQueue())
 	assert.Equal(t, int64(2)<<30, s.MQMaxBytes())
 	assert.Equal(t, []string{"https://app.example.com"}, s.CORSOrigins())
 }

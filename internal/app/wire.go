@@ -802,19 +802,36 @@ func (a *App) wireStreaming() {
 // consumer is created when Run starts it; at shutdown the in-flight batches
 // drain within the shutdown timeout. Over a sharded queue (mq.backend: nats)
 // it consumes only the shards this process is assigned (ingest.ClaimShards),
-// so each table has one writer.
-func (a *App) wireIngestWorker() {
+// so each table has one writer. Each served tenant's batch limits are
+// adopted here, checked against the consumer's ack wait at boot and after
+// every reload (ingestLimits): boot refuses a tenant whose limits do not
+// fit, naming both values.
+func (a *App) wireIngestWorker() error {
+	// The consumer settings are boot config's, one value per process: under
+	// nats the shard durables must agree with them (wireNATSMQ).
+	if a.cfg.MQ.AckWait <= 0 {
+		return errors.New("mq.ack_wait is zero: a Config built without config.Load must set mq.ack_wait, mq.max_ack_pending and mq.prefetch")
+	}
+	consumer := ingest.ConsumerSettings{AckWait: a.cfg.MQ.AckWait, MaxAckPending: a.cfg.MQ.MaxAckPending, Prefetch: a.cfg.MQ.Prefetch}
+	limits := newIngestLimits(a.tenants, consumer.AckWait)
+	if err := limits.reconcile(true); err != nil {
+		return fmt.Errorf("ingest limits: %w", err)
+	}
+	a.ingestLimits = limits
+	a.tenants.AfterAdopt(func([]tenant.ID) { a.tenants.Reconciled("ingest", limits.reconcile(false)) })
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
 		var queue ingest.Queue = a.mq
 		if _, ok := a.mq.(mq.Sharded); ok {
 			// One process per shard at a time, balanced over the ingest
-			// processes through the shared coordinator.
+			// processes through the shared coordinator, each holding at most
+			// its share of max_ack_pending rows and handing a shard over
+			// within the ack wait.
 			var err error
-			if queue, err = ingest.ClaimShards(a.mq, a.coord, ingest.ClaimConfig{}); err != nil {
+			if queue, err = ingest.ClaimShards(a.mq, a.coord, ingest.ClaimConfig{Handover: consumer.AckWait, MaxHeld: consumer.MaxAckPending, SlotExpiry: consumer.AckWait}); err != nil {
 				return err
 			}
 		}
-		stop, failed, err := ingest.StartIngestWorker(ctx, queue, sharedTables{Cache: a.cache, sharing: a.pools.SharingTables}, a.pools.Target, dlqFor(a.tenants))
+		stop, failed, err := ingest.StartIngestWorker(ctx, queue, sharedTables{Cache: a.cache, sharing: a.pools.SharingTables}, a.pools.Target, dlqFor(a.tenants), limits.For, consumer)
 		if err != nil {
 			return err
 		}
@@ -835,6 +852,7 @@ func (a *App) wireIngestWorker() {
 		}
 		return workerErr
 	}})
+	return nil
 }
 
 // wireAuth builds the JWT middleware: one verifier per tenant being served,
@@ -989,6 +1007,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	streamHandler := api.NewStreamHandler(a.hub, a.mq)
 	streamHandler.Metrics = a.sseMetrics
 	streamHandler.Heartbeater = a.keepaliveFor
+	streamHandler.SubscriberQueue = (*settings.Store).SubscriberQueue
 	streamHandler.Served = a.served
 	// Closed when the API server begins shutting down, ending every open
 	// stream at once (see serve).

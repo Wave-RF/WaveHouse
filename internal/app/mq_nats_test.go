@@ -26,11 +26,12 @@ func natsConfig(t *testing.T, url string) *config.Config {
 	pw := filepath.Join(t.TempDir(), "nats-password")
 	require.NoError(t, os.WriteFile(pw, []byte(natstest.Password(natstest.WaveHouseUser)+"\n"), 0o600))
 	cfg := testConfig(t, writeSettings(t, nil))
-	cfg.MQ = config.MQ{Backend: config.MQNATS, NATS: config.MQNATSConfig{
+	cfg.MQ.Backend = config.MQNATS
+	cfg.MQ.NATS = config.MQNATSConfig{
 		URLs: []string{url}, User: natstest.WaveHouseUser, PasswordFile: pw,
 		SubjectPrefix: "wh", Partitions: 4, Shards: 8, IngestConsumer: "wh-ingest",
 		ConnectTimeout: 5 * time.Second, PublishTimeout: 5 * time.Second, TopologyWait: 10 * time.Second,
-	}}
+	}
 	return cfg
 }
 
@@ -78,7 +79,7 @@ func TestNew_NATSWiresNoSweeper(t *testing.T) { //nolint:paralleltest // capture
 	cfg := natsConfig(t, srv.URL())
 	cfg.Roles = config.AllRoles()
 	cfg.Coord.Backend = config.CoordNATS
-	day := map[string]any{"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": 24 * 60}
+	day := map[string]any{"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": 24 * 60, "subscriber_queue": 64}
 	rewriteSettings(t, cfg.Settings.Dir, map[string]any{"stream": day})
 	a := newApp(t, cfg, Options{})
 	assert.NotContains(t, componentNames(a), "sweeper")

@@ -16,10 +16,10 @@ import (
 const tracerName = "wavehouse-ingest"
 
 // maxFlushLinks bounds how many producer spans one flush span links to. A
-// batch holds up to defaultMaxBatch rows and each may come from its own
-// request; a span carrying thousands of links is more than any backend
-// renders, so the first ones stand for the rest and `producers` counts them
-// all.
+// batch holds as many rows as its tenant's byte target admits, up to the
+// consumer's max ack pending, and each may come from its own request; a
+// span carrying thousands of links is more than any backend renders, so the
+// first ones stand for the rest and `producers` counts them all.
 const maxFlushLinks = 128
 
 // The worker's span names. Each span is started and ended at its call site

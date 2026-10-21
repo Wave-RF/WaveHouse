@@ -53,8 +53,30 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockPublisher
 		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: "http://test-clickhouse:8123", Username: "test_user", Password: "test_pass", Database: "test_db"}
 		},
+		// No batching: every row flushes at once; a test that batches sets its
+		// own. The backoff cap is the seed's.
+		limits: limitsOf(Limits{RetryBackoffMax: testCap}),
 	}
 	return w, pub, cache, func() { w.ackWg.Wait() }
+}
+
+// limitsOf is a limits getter that answers lim for every tenant.
+func limitsOf(lim Limits) func(tenant.ID) (Limits, bool) {
+	return func(tenant.ID) (Limits, bool) { return lim, true }
+}
+
+// rowBytes is the size of the row makeEnvelope encodes for data: what a
+// batch's byte trigger counts, so a test can size the trigger in rows.
+func rowBytes(t *testing.T, data map[string]any) int {
+	t.Helper()
+	cols := slices.Sorted(maps.Keys(data))
+	schema := make([]discovery.Column, len(cols))
+	for i, c := range cols {
+		schema[i] = discovery.Column{Name: c, Position: uint64(i + 1)}
+	}
+	row, err := EncodeCompactRow(schema, data)
+	require.NoError(t, err)
+	return len(row)
 }
 
 // makeEnvelope returns the JSON wire format the worker reads off NATS. Column
@@ -135,7 +157,7 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 			t.Parallel()
 			q, c := tt.setup(t)
 			_, _, err := StartIngestWorker(context.Background(), q, c,
-				func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
+				func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil, limitsOf(Limits{}), ConsumerSettings{})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErrSub)
 		})
@@ -186,9 +208,9 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Construct the worker directly so the flush timer can use a short maxWait —
-	// the single-event batch then flushes on the timer in ~200ms instead of the
-	// 5s default. StartIngestWorker's own setup is covered by
+	// Construct the worker directly so the flush timer can use a short batch
+	// wait — the single-event batch then flushes on the timer in ~200ms
+	// instead of the seed's 5s. StartIngestWorker's own setup is covered by
 	// TestStartIngestWorker_Validation + _StopFunc.
 	worker := &IngestWorker{
 		dlq:     emb,
@@ -197,8 +219,8 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
-		maxBatch: defaultMaxBatch,
-		maxWait:  200 * time.Millisecond,
+		limits:   limitsOf(Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: 200 * time.Millisecond}),
+		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	worker.wg.Add(1)
 	go worker.dispatchLoop(ctx, cons)
@@ -263,7 +285,7 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	stopFn, _, err := StartIngestWorker(ctx, emb, &testutil.MockCache{},
 		func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
-		}, nil)
+		}, nil, limitsOf(Limits{}), ConsumerSettings{})
 	require.NoError(t, err)
 	// The deadline below abandons the worker, not its insert: finish the insert
 	// and join the worker before the broker closes under its ack.
@@ -301,7 +323,7 @@ func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 	// chURL is never dialed: with no messages there is no flush, so a dummy
 	// host/port is fine.
 	stopFn, _, err := StartIngestWorker(context.Background(), emb, &testutil.MockCache{},
-		func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
+		func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil, limitsOf(Limits{}), ConsumerSettings{})
 	require.NoError(t, err)
 
 	// Nothing to flush, so shutdown drains immediately and returns nil before the
@@ -350,7 +372,7 @@ func TestInsertToClickHouse_BuildsCorrectRequest(t *testing.T) {
 
 	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
-	})
+	}, 0)
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), rt.Hits())
 }
@@ -372,7 +394,7 @@ func TestInsertToClickHouse_MultipleMessages_JSONCompactEachRow(t *testing.T) {
 		{row: []byte(`[1]`)},
 		{row: []byte(`[2]`)},
 		{row: []byte(`[3]`)},
-	})
+	}, 0)
 	require.NoError(t, err)
 }
 
@@ -394,7 +416,7 @@ func TestInsertToClickHouse_SafelyParameterizesTableName(t *testing.T) {
 
 	err := w.insertToClickHouse(context.Background(), malicious, []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
-	})
+	}, 0)
 	require.NoError(t, err)
 }
 
@@ -412,7 +434,7 @@ func TestInsertToClickHouse_HTTPError_ReturnsBody(t *testing.T) {
 
 	err := w.insertToClickHouse(context.Background(), "missing_table", []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
-	})
+	}, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HTTP 400")
 	assert.Contains(t, err.Error(), "Unknown table")
@@ -432,7 +454,7 @@ func TestInsertToClickHouse_500Error(t *testing.T) {
 
 	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
-	})
+	}, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HTTP 500")
 }
@@ -448,7 +470,7 @@ func TestInsertToClickHouse_NetworkError(t *testing.T) {
 
 	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
-	})
+	}, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "connection refused")
 }
@@ -1016,13 +1038,13 @@ func closedChan() chan struct{} {
 	return ch
 }
 
-// newTestBatcher builds a tableBatcher backed by mocks. maxWait is long so the
-// deadline timer never fires during these tests; wait() drains background acks.
+// newTestBatcher builds a tableBatcher backed by mocks: a batch of three rows
+// of the shape these tests add, and a batch wait so long the deadline timer
+// never fires during them; wait() drains background acks.
 func newTestBatcher(t *testing.T, rt http.RoundTripper) (b *tableBatcher, w *IngestWorker, wait func()) {
 	t.Helper()
 	w, _, _, wait = newTestWorker(rt)
-	w.maxBatch = 3
-	w.maxWait = time.Hour
+	w.limits = limitsOf(Limits{MaxBatchBytes: 3 * rowBytes(t, map[string]any{"id": 1}), MaxBatchWait: time.Hour})
 	b = newTableBatcher(w, "events")
 	t.Cleanup(func() { b.timer.Stop() })
 	return b, w, wait
@@ -1129,17 +1151,21 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 	t.Parallel()
 
 	const (
-		// worker.go config values. maxWait is deliberately far longer than the
-		// assertion window below (production's defaultMaxWait), so a
-		// size-trigger flush and a batch stranded waiting out the timer (the
-		// regression pinned here) can't blur together on a slow CI runner.
-		maxBatch = 100
-		maxWait  = 30 * time.Second
+		// The batch wait is deliberately far longer than the assertion
+		// window below (the seed's 5s), so a size-trigger flush and a batch
+		// stranded waiting out the timer (the regression pinned here) can't
+		// blur together on a slow CI runner.
+		maxWait = 30 * time.Second
 
 		// test values
-		batchA = 5 // intentionally under maxBatch
-		batchB = maxBatch
+		batchA = 5 // intentionally under the byte trigger
+		batchB = 100
 	)
+	// The byte trigger is exactly table B's rows: A's five never reach it.
+	batchBytes := 0
+	for i := range batchB {
+		batchBytes += rowBytes(t, map[string]any{"id": i})
+	}
 
 	emb := testutil.NewEmbeddedMQ(t, 8*1024*1024)
 
@@ -1178,8 +1204,8 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
-		maxBatch: maxBatch,
-		maxWait:  maxWait,
+		limits:   limitsOf(Limits{MaxBatchBytes: batchBytes, MaxBatchWait: maxWait}),
+		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	worker.wg.Add(1)
 	go worker.dispatchLoop(ctx, cons)
@@ -1195,24 +1221,24 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// 2. Then publish exactly maxBatch events to table B — should hit B's
-	//    own size trigger and flush immediately, regardless of what A did.
+	// 2. Then publish exactly a batch's worth of events to table B — should
+	//    hit B's own size trigger and flush immediately, regardless of what A did.
 	for i := range batchB {
 		err = emb.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: "tableB"},
 			makeEnvelope(t, "tableB", "", map[string]any{"id": i}))
 		require.NoError(t, err)
 	}
 
-	// All B rows must reach ClickHouse within production's defaultMaxWait —
-	// proof they flushed on B's own size trigger faster than the real 5s
-	// timer bound, not on this test's (30s) timer.
+	// All B rows must reach ClickHouse within the seed's 5s batch wait —
+	// proof they flushed on B's own size trigger faster than that timer
+	// bound, not on this test's (30s) timer.
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return rowsByTable["tableB"] >= batchB
-	}, defaultMaxWait, 25*time.Millisecond,
-		"table B hit maxBatch and should flush on its own size trigger "+
-			"before production's defaultMaxWait timer bound "+
+	}, 5*time.Second, 25*time.Millisecond,
+		"table B hit the byte trigger and should flush on its own size trigger "+
+			"before the seed's 5s timer bound "+
 			"(table A's prior events must not strand B rows in a batch "+
 			"that waits for the maxWait timer)",
 	)
@@ -1227,10 +1253,11 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 	t.Parallel()
 
 	const (
-		maxBatch = 3
-		maxWait  = 30 * time.Second // long: the leftover row's timer never fires during this test
-		total    = 4                // 3 → one full batch on the size trigger; 1 leftover
+		full    = 3                // rows that reach the byte trigger
+		maxWait = 30 * time.Second // long: the leftover row's timer never fires during this test
+		total   = 4                // 3 → one full batch on the size trigger; 1 leftover
 	)
+	batchBytes := full * rowBytes(t, map[string]any{"id": 0}) // every row below is one digit
 
 	emb := testutil.NewEmbeddedMQ(t, 8*1024*1024)
 
@@ -1271,8 +1298,8 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
-		maxBatch: maxBatch,
-		maxWait:  maxWait,
+		limits:   limitsOf(Limits{MaxBatchBytes: batchBytes, MaxBatchWait: maxWait}),
+		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	worker.wg.Add(1)
 	go worker.dispatchLoop(ctx, cons)
@@ -1287,11 +1314,11 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// The first full batch (maxBatch rows) flushes on the size trigger.
+	// The first full batch flushes on the size trigger.
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return rows >= maxBatch
+		return rows >= full
 	}, 3*time.Second, 25*time.Millisecond, "first full batch should flush on the size trigger")
 
 	// The leftover row must NOT flush just because that flush completed — with a
@@ -1299,7 +1326,7 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 	assert.Never(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return rows > maxBatch
+		return rows > full
 	}, 750*time.Millisecond, 50*time.Millisecond,
 		"leftover row must wait for its own size/timer, not flush when the prior flush completes")
 }
@@ -1686,9 +1713,8 @@ func TestDispatchLoop_DeliveryEndedFailsLoud(t *testing.T) {
 
 	rt := &testutil.MockRoundTripper{}
 	w, _, _, _ := newTestWorker(rt)
-	w.maxBatch = 100
-	w.maxWait = time.Hour                                        // only the shutdown flush can write the row
-	w.dlqEnabled = func(tenant.ID, string) bool { return false } // the sentinel is acked-and-dropped, no publish
+	w.limits = limitsOf(Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: time.Hour}) // only the shutdown flush can write the row
+	w.dlqEnabled = func(tenant.ID, string) bool { return false }                 // the sentinel is acked-and-dropped, no publish
 
 	held := newIngestMsg(t, "events", "", map[string]any{"id": 1})
 	sentinel := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"}, MsgData: []byte("not json")}
@@ -1739,7 +1765,7 @@ func TestDispatchLoop_HandoffReturnsOnCancel(t *testing.T) {
 	t.Parallel()
 
 	w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-	w.maxBatch = 1                                               // msgChan holds 2
+	w.consumer.Prefetch = 1                                      // msgChan holds 2
 	w.dlqEnabled = func(tenant.ID, string) bool { return false } // any message parsed is acked-and-dropped, no publish
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1836,7 +1862,7 @@ func TestFlushTable_DLQSwitchIsTheRowsTenants(t *testing.T) {
 // in one INSERT.
 func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 	t.Parallel()
-	const maxBatch = 2
+	const batchRows = 2
 
 	emb := testutil.NewEmbeddedMQ(t, 8*1024*1024, "acme", "globex")
 
@@ -1870,8 +1896,10 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 		target: func(id tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db_" + string(id)}
 		},
-		maxBatch: maxBatch,
-		maxWait:  30 * time.Second, // the size trigger is the one under test
+		// Two of acme's rows reach the trigger; globex's are longer, so two
+		// of its do too, and one of either does not.
+		limits:   limitsOf(Limits{MaxBatchBytes: batchRows * rowBytes(t, map[string]any{"id": "acme-0"}), MaxBatchWait: 30 * time.Second}), // the size trigger is the one under test
+		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	worker.wg.Add(1)
 	go worker.dispatchLoop(ctx, cons)
@@ -1880,7 +1908,7 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 		worker.wg.Wait()
 	})
 
-	for i := range maxBatch {
+	for i := range batchRows {
 		for _, id := range []tenant.ID{"acme", "globex"} {
 			require.NoError(t, emb.Publish(ctx, mq.Topic{Tenant: id, Table: "events"},
 				makeEnvelope(t, "events", "", map[string]any{"id": fmt.Sprintf("%s-%d", id, i)})))
@@ -1891,9 +1919,9 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(bodies) == 2
-	}, defaultMaxWait, 25*time.Millisecond, "each tenant's table hits its own size trigger")
+	}, 5*time.Second, 25*time.Millisecond, "each tenant's table hits its own size trigger")
 	// Invalidation follows the INSERT's answer, on the worker's side.
-	require.Eventually(t, func() bool { return len(mc.GetNamespaces()) == 2 }, defaultMaxWait, 25*time.Millisecond)
+	require.Eventually(t, func() bool { return len(mc.GetNamespaces()) == 2 }, 5*time.Second, 25*time.Millisecond)
 	assert.ElementsMatch(t, []cache.Namespace{{Tenant: "acme", Table: "events"}, {Tenant: "globex", Table: "events"}}, mc.GetNamespaces(),
 		"each batch bumps its own tenant's namespaces")
 	mu.Lock()
@@ -1901,8 +1929,8 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 	for _, id := range []string{"acme", "globex"} {
 		body, ok := bodies["db_"+id]
 		require.True(t, ok, "tenant %s's batch reached its own target", id)
-		assert.Equal(t, maxBatch, strings.Count(body, "\n"), "a full batch: %q", body)
-		assert.Equal(t, maxBatch, strings.Count(body, id), "only tenant %s's rows: %q", id, body)
+		assert.Equal(t, batchRows, strings.Count(body, "\n"), "a full batch: %q", body)
+		assert.Equal(t, batchRows, strings.Count(body, id), "only tenant %s's rows: %q", id, body)
 	}
 }
 
@@ -1925,10 +1953,52 @@ func TestInsertToClickHouse_SetsConfiguredHeaders(t *testing.T) {
 			Headers: map[string]string{"X-Proxy-Token": "abc", "Content-Type": "text/plain", "X-ClickHouse-User": "someone-else"},
 		}
 	}
-	require.NoError(t, w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}}))
+	require.NoError(t, w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}}, 0))
 	assert.Equal(t, "abc", got.Get("X-Proxy-Token"))
 	assert.Equal(t, "application/json", got.Get("Content-Type"))
 	assert.Equal(t, "test_user", got.Get("X-ClickHouse-User"))
+}
+
+// TestInsertToClickHouse_AppliesTheTenantsDeadline: each INSERT carries the
+// tenant's insert timeout as its request deadline — the flush reads it with
+// the tenant's limits, and the shared client sets none of its own — and a
+// timed-out insert fails as unavailable, to be retried, never parked.
+func TestInsertToClickHouse_AppliesTheTenantsDeadline(t *testing.T) {
+	t.Parallel()
+	var (
+		deadline    time.Time
+		hasDeadline bool
+	)
+	rt := &testutil.MockRoundTripper{Fn: func(req *http.Request) (*http.Response, error) {
+		deadline, hasDeadline = req.Context().Deadline()
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
+	}}
+	w, _, _, wait := newTestWorker(rt)
+	require.NoError(t, w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}}, 0))
+	assert.False(t, hasDeadline, "no timeout, no deadline")
+
+	w.limits = limitsOf(Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: time.Hour, InsertTimeout: 7 * time.Second})
+	before := time.Now()
+	w.flushTable(context.Background(), "events", parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1})))
+	wait()
+	require.True(t, hasDeadline, "the flush applies the tenant's insert timeout")
+	assert.WithinDuration(t, before.Add(7*time.Second), deadline, time.Second)
+	assert.Zero(t, ingestHTTPClient(nil).Timeout, "the shared client sets no timeout of its own")
+
+	stop := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select { // answers only once the client has given up
+		case <-r.Context().Done():
+		case <-stop:
+		}
+	}))
+	t.Cleanup(slow.Close)
+	t.Cleanup(func() { close(stop) }) // runs first: lets the handler return before Close waits on it
+	w.clients = chconn.NewHTTPClients(ingestHTTPClient)
+	w.target = func(tenant.ID) chconn.Target { return chconn.Target{URL: slow.URL, Database: "db"} }
+	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}}, 50*time.Millisecond)
+	require.Error(t, err)
+	assert.Equal(t, chconn.Unavailable, chconn.Classify(err), "a timed-out insert is retried, never dead-lettered")
 }
 
 // TestInsertToClickHouse_UsesTargetTLS: an https target is dialed with the
@@ -1948,7 +2018,7 @@ func TestInsertToClickHouse_UsesTargetTLS(t *testing.T) {
 	w, _, _, _ := newTestWorker(nil)
 	w.clients = chconn.NewHTTPClients(ingestHTTPClient)
 	insert := func() error {
-		return w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}})
+		return w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}}, 0)
 	}
 
 	w.target = target(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12})
@@ -1974,7 +2044,7 @@ func TestInsertToClickHouse_NoTargetIsAnError(t *testing.T) {
 		asked = append(asked, id)
 		return chconn.Target{}
 	}
-	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`), tenant: "acme"}})
+	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`), tenant: "acme"}}, 0)
 	require.ErrorContains(t, err, "no ClickHouse connection is open for tenant acme")
 	assert.Equal(t, []tenant.ID{"acme"}, asked, "the target is the batch's own tenant's")
 	assert.Zero(t, rt.Hits())
@@ -2319,7 +2389,7 @@ func TestFlushTable_PoolBacksOffTogether(t *testing.T) {
 
 	// The backoff elapses and ClickHouse is back: the next flush probes,
 	// succeeds, and the pool is open again for everyone.
-	clock = clock.Add(retryCap)
+	clock = clock.Add(testCap)
 	down.Store(false)
 	c := newIngestMsg(t, "clicks", "", map[string]any{"id": 3})
 	w.flushTable(context.Background(), "clicks", parseAll(t, w, c))
@@ -2370,7 +2440,7 @@ func TestTableBatcher_Add_HandsRowsBackWhileThePoolBacksOff(t *testing.T) {
 	b, w, _ := newTestBatcher(t, okRoundTripper())
 	clock := time.Unix(1_000, 0)
 	w.now = func() time.Time { return clock }
-	wait, _, _ := w.backoffs.forTarget(w.target(tenant.Default)).fail(clock)
+	wait, _, _ := w.backoffs.forTarget(w.target(tenant.Default)).fail(clock, testCap)
 
 	early := newIngestMsg(t, "events", "", map[string]any{"id": 1})
 	b.add(context.Background(), parseAll(t, w, early)[0])
@@ -2398,7 +2468,7 @@ func TestTableBatcher_Add_ResolvesNoTargetWhileNothingBacksOff(t *testing.T) {
 	b.add(context.Background(), parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1}))[0])
 	assert.Zero(t, resolved.Load(), "no target is resolved while every backoff is closed")
 
-	w.backoffs.forTable(target(tenant.Default), "other").fail(w.clock())
+	w.backoffs.forTable(target(tenant.Default), "other").fail(w.clock(), testCap)
 	b.add(context.Background(), parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 2}))[0])
 	assert.Equal(t, int32(1), resolved.Load(), "an open backoff anywhere makes the check resolve the target")
 	assert.Len(t, b.batch, 2, "another table's backoff does not hold this one's rows")
@@ -2463,7 +2533,7 @@ func TestTableBatcher_Add_HandsRowsBackWhileTheProbeIsOut(t *testing.T) {
 	clock := time.Unix(1_000, 0)
 	w.now = func() time.Time { return clock }
 	pool := w.backoffs.forTarget(w.target(tenant.Default))
-	wait, _, _ := pool.fail(clock)
+	wait, _, _ := pool.fail(clock, testCap)
 	clock = clock.Add(wait)
 	_, ok := pool.allow(clock)
 	require.True(t, ok, "the probe is claimed")
@@ -2545,8 +2615,8 @@ func scriptedWorker(t *testing.T, cons mq.Consumer, rec func(string), gate func(
 		cache:   &testutil.MockCache{},
 		target:  func(tenant.ID) chconn.Target { return chconn.Target{URL: ch.URL, Database: "db"} },
 		// Flushed only at the stop.
-		maxBatch: defaultMaxBatch,
-		maxWait:  time.Hour,
+		limits:   limitsOf(Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: time.Hour}),
+		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	finished := make(chan struct{})

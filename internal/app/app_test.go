@@ -117,7 +117,7 @@ func testConfig(t *testing.T, settingsDir string) *config.Config {
 	return &config.Config{
 		DataDir:  storedir.New(t),
 		Server:   config.Server{Port: closedPort(t), ShutdownTimeout: 2},
-		MQ:       config.MQ{Backend: config.MQEmbedded},
+		MQ:       config.MQ{Backend: config.MQEmbedded, AckWait: mq.DefaultAckWait, MaxAckPending: mq.DefaultMaxAckPending, Prefetch: mq.DefaultPrefetch},
 		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
 		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
 		Coord:    config.Coord{Backend: config.CoordLocal},
@@ -892,7 +892,7 @@ func TestRedisConfig_UsernameDBTLSMapped(t *testing.T) {
 
 // keepalive is a config.json patch setting the stream block's keepalive pair.
 func keepalive(interval, buckets int) map[string]any {
-	return map[string]any{"stream": map[string]any{"keepalive_interval": interval, "keepalive_buckets": buckets, "gap_window_minutes": 15}}
+	return map[string]any{"stream": map[string]any{"keepalive_interval": interval, "keepalive_buckets": buckets, "gap_window_minutes": 15, "subscriber_queue": 64}}
 }
 
 // hookedKeepalives opens the settings directory dir and builds its tenants'
@@ -1243,7 +1243,7 @@ func TestRun_KeepsEachTenantsStreamsAliveAtItsOwnInterval(t *testing.T) {
 }
 
 func gapWindow(minutes int) map[string]any {
-	return map[string]any{"stream": map[string]any{"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": minutes}}
+	return map[string]any{"stream": map[string]any{"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": minutes, "subscriber_queue": 64}}
 }
 
 // Each tenant keeps its own stream.gap_window_minutes, since each has a queue
@@ -1849,7 +1849,7 @@ func TestRun_StopEndsOpenStreams(t *testing.T) {
 // at addr with the native pool sized to open.
 func poolSettings(addr string, open int) map[string]any {
 	return map[string]any{"clickhouse": map[string]any{
-		"addr": addr, "http_port": 8123, "http_scheme": "http", "database": "default", "username": "default", "password": "", "query_timeout": 30,
+		"addr": addr, "http_port": 8123, "http_scheme": "http", "database": "default", "username": "default", "password": "", "query_timeout": 30, "insert_timeout": 30,
 		"tls":     map[string]any{"enabled": false, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": false, "server_name": ""},
 		"headers": map[string]any{}, "max_open_conns": open, "max_idle_conns": 5,
 	}}

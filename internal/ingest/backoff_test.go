@@ -13,6 +13,9 @@ import (
 // noJitter makes every spread 0, so a delay is exactly half its step.
 func noJitter(int64) int64 { return 0 }
 
+// testCap is the seed's ingest.retry_backoff_max.
+const testCap = 30 * time.Second
+
 func TestBackoff_ClosedAllowsEveryFlush(t *testing.T) {
 	t.Parallel()
 	b := &backoff{jitter: noJitter}
@@ -34,7 +37,7 @@ func TestBackoff_EscalatesToTheCap(t *testing.T) {
 	for range 8 {
 		_, ok := b.allow(now)
 		require.True(t, ok, "the backoff has elapsed, so a probe may try")
-		wait, _, _ := b.fail(now)
+		wait, _, _ := b.fail(now, testCap)
 		got = append(got, wait)
 		now = now.Add(wait)
 	}
@@ -43,10 +46,35 @@ func TestBackoff_EscalatesToTheCap(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+// The cap is the tenant's, read per failure: a longer one lets the doubling
+// run on, and one under the base — a value the settings refuse, or a tenant
+// with none — floors at the base rather than retrying in a tight loop.
+func TestBackoff_CapIsTheTenants(t *testing.T) {
+	t.Parallel()
+	b := &backoff{jitter: noJitter}
+	now := time.Unix(0, 0)
+	var got []time.Duration
+	for range 8 {
+		wait, _, _ := b.fail(now, 2*time.Minute)
+		got = append(got, wait)
+		now = now.Add(wait)
+	}
+	// Half of 1s, 2s, 4s, 8s, 16s, 32s, 64s, then the 2m cap.
+	want := []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 32 * time.Second, time.Minute}
+	assert.Equal(t, want, got)
+
+	floor := &backoff{jitter: noJitter}
+	wait, _, _ := floor.fail(now, 0)
+	assert.Equal(t, retryBase/2, wait)
+	now = now.Add(wait)
+	wait, _, _ = floor.fail(now, 0)
+	assert.Equal(t, retryBase/2, wait, "capped at the base")
+}
+
 func TestBackoff_JitterStaysWithinTheStep(t *testing.T) {
 	t.Parallel()
 	b := &backoff{jitter: func(n int64) int64 { return n - 1 }}
-	wait, first, log := b.fail(time.Unix(0, 0))
+	wait, first, log := b.fail(time.Unix(0, 0), testCap)
 	assert.True(t, first)
 	assert.True(t, log)
 	assert.Less(t, wait, retryBase)
@@ -57,7 +85,7 @@ func TestBackoff_OpenTurnsFlushesAwayUntilItElapses(t *testing.T) {
 	t.Parallel()
 	b := &backoff{jitter: noJitter}
 	t0 := time.Unix(100, 0)
-	wait, first, _ := b.fail(t0)
+	wait, first, _ := b.fail(t0, testCap)
 	require.True(t, first)
 
 	// Inside the window: turned away for what is left of it.
@@ -67,7 +95,7 @@ func TestBackoff_OpenTurnsFlushesAwayUntilItElapses(t *testing.T) {
 
 	// A failure reported late, from a flush that started before the first
 	// one reported, does not escalate the running backoff.
-	late, lateFirst, lateLog := b.fail(t0.Add(200 * time.Millisecond))
+	late, lateFirst, lateLog := b.fail(t0.Add(200*time.Millisecond), testCap)
 	assert.False(t, lateFirst)
 	assert.False(t, lateLog)
 	assert.Equal(t, wait-200*time.Millisecond, late)
@@ -98,7 +126,7 @@ func TestBackoff_LogsAnOngoingOutageAtABoundedRate(t *testing.T) {
 	now := time.Unix(0, 0)
 	var logged int
 	for range 20 { // ~2.5 minutes of failed probes at the capped backoff
-		_, _, log := b.fail(now)
+		_, _, log := b.fail(now, testCap)
 		if log {
 			logged++
 		}
@@ -111,7 +139,7 @@ func TestBackoff_LogsAnOngoingOutageAtABoundedRate(t *testing.T) {
 func TestBackoff_ReleaseReturnsAnUnusedProbe(t *testing.T) {
 	t.Parallel()
 	b := &backoff{jitter: noJitter}
-	wait, _, _ := b.fail(time.Unix(0, 0))
+	wait, _, _ := b.fail(time.Unix(0, 0), testCap)
 	after := time.Unix(0, 0).Add(wait)
 	_, ok := b.allow(after)
 	require.True(t, ok)
@@ -125,7 +153,7 @@ func TestBackoffs_TableAndPoolAreSeparate(t *testing.T) {
 	var bs backoffs
 	tgt := chconn.Target{URL: "http://a:8123", Username: "u", Database: "d"}
 	now := time.Unix(0, 0)
-	bs.forTable(tgt, "ro").fail(now)
+	bs.forTable(tgt, "ro").fail(now, testCap)
 
 	_, ok := bs.waiting(func() chconn.Target { return tgt }, "ro", now)
 	assert.True(t, ok, "the failing table waits")
