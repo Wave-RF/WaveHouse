@@ -663,7 +663,7 @@ Only `pk` and `sk` are declared in the table definition. One tenant's items spre
 
 To move an existing deployment to a `pk`+`sk` table:
 
-1. Pause the producers that retry. The copy holds only what it read, so an id first seen on the old table after the copy passed it, or still pending when copied, would be new to the new table.
+1. Pause the producers that retry, then wait one [`dedupe.lease`](/configuration#dedupe) (30 seconds by default), so every claim already made is committed or has lapsed before the copy reads it. The copy holds only what it read: an id first seen on the old table after the copy passed it, or still pending when copied, would be new to the new table.
 2. Create the second table under a new name, and grant the pods' role the same five actions on it (the policy below names one table's ARN). Without them the pods' table check fails as a misconfigured table.
 3. Copy the items. An item's new `sk` is its old `pk` without the leading `<tenant>/`, unless that would pass 1,024 bytes, in which case its id becomes `#` plus the SHA-256, in hex, of the id unescaped from the old `pk` (each `%XX` back to its byte); its new `pk` is `<tenant>/<bucket>` of that `sk`.
 4. Stop every pod, then start them all with `dedupe.dynamodb.table` set to the new table. A rolling restart leaves pods on different tables, which do not share seen ids.
