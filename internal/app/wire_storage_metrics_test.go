@@ -1,0 +1,115 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
+)
+
+func TestScrapeStorage(t *testing.T) {
+	t.Parallel()
+	// acme and initech share a database; globex has its own.
+	keys := map[tenant.ID]string{"acme": "db1", "globex": "db2", "initech": "db1"}
+	data := map[string]map[string]tableBytes{
+		"db1": {"events": {uncompressed: 100, onDisk: 10}, "clicks": {uncompressed: 7, onDisk: 3}},
+		"db2": {"events": {uncompressed: 50, onDisk: 5}},
+	}
+	var mu sync.Mutex
+	var reads []tenant.ID
+	read := func(ctx context.Context, id tenant.ID) (map[string]tableBytes, error) {
+		deadline, ok := ctx.Deadline()
+		assert.True(t, ok, "the scrape is bounded")
+		assert.WithinDuration(t, time.Now().Add(storageScrapeTimeout), deadline, time.Second)
+		mu.Lock()
+		reads = append(reads, id)
+		mu.Unlock()
+		return data[keys[id]], nil
+	}
+
+	got, err := scrapeStorage(t.Context(), []tenant.ID{"acme", "globex", "initech"},
+		func(id tenant.ID) string { return keys[id] }, read)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []tenant.ID{"acme", "globex"}, reads, "a database two tenants share is read once")
+	assert.Equal(t, map[string]tableBytes{
+		"events": {uncompressed: 150, onDisk: 15},
+		"clicks": {uncompressed: 7, onDisk: 3},
+	}, got, "a table name in several databases reports their sum")
+
+	failing := func(_ context.Context, id tenant.ID) (map[string]tableBytes, error) {
+		if id == "globex" {
+			return nil, errors.New("clickhouse down")
+		}
+		return data[keys[id]], nil
+	}
+	got, err = scrapeStorage(t.Context(), []tenant.ID{"acme", "globex"},
+		func(id tenant.ID) string { return keys[id] }, failing)
+	require.ErrorContains(t, err, "tenant globex: clickhouse down")
+	assert.Nil(t, got, "one database failing fails the whole scrape")
+
+	got, err = scrapeStorage(t.Context(), nil, nil, nil)
+	require.NoError(t, err)
+	assert.Empty(t, got, "no tenants, no tables")
+}
+
+func TestRegisterStorageMetrics(t *testing.T) {
+	t.Parallel()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	tables := map[string]tableBytes{
+		"events": {uncompressed: 75_000_000_000, onDisk: 1_400_000_000},
+		"clicks": {uncompressed: 10, onDisk: 3},
+	}
+	var scrapeErr error
+	reg, err := registerStorageMetrics(mp.Meter("test"), func(context.Context) (map[string]tableBytes, error) {
+		if scrapeErr != nil {
+			return nil, scrapeErr
+		}
+		return tables, nil
+	})
+	require.NoError(t, err)
+
+	got := collectSettingsMetrics(t, reader)
+	assert.Equal(t, map[string]int64{"table=events": 75_000_000_000, "table=clicks": 10}, got["wavehouse_clickhouse_uncompressed_bytes"])
+	assert.Equal(t, map[string]int64{"table=events": 1_400_000_000, "table=clicks": 3}, got["wavehouse_clickhouse_bytes_on_disk"])
+	assertNonMonotonicSums(t, reader)
+
+	scrapeErr = errors.New("clickhouse down")
+	assert.Empty(t, collectSettingsMetrics(t, reader), "a failed scrape leaves the series absent, not stale")
+
+	scrapeErr = nil
+	got = collectSettingsMetrics(t, reader)
+	assert.Equal(t, map[string]int64{"table=events": 1_400_000_000, "table=clicks": 3}, got["wavehouse_clickhouse_bytes_on_disk"], "the next good scrape reports again")
+
+	require.NoError(t, reg.Unregister())
+	assert.Empty(t, collectSettingsMetrics(t, reader), "Close unregisters the callback")
+}
+
+// assertNonMonotonicSums checks the storage instruments are up-down
+// counters: the table label may only sit on a sum, which
+// prometheus.per_table_metrics: false folds into a total (#538).
+func assertNonMonotonicSums(t *testing.T, reader *sdkmetric.ManualReader) {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	seen := 0
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "%s is a sum, not a gauge", m.Name)
+			assert.False(t, sum.IsMonotonic, "%s can go down", m.Name)
+			seen++
+		}
+	}
+	assert.Equal(t, 2, seen)
+}
