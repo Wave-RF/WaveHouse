@@ -884,7 +884,7 @@ max by (instance) (wavehouse_settings_tenants{state="rejected"}) > 0
 
 ### ClickHouse storage
 
-How much data each table holds in ClickHouse, before and after compression: the capacity signal for disk sizing, retention decisions and growth alerts. A collection runs one metadata-only aggregate over `system.parts` (active parts only) in each served tenant's database, over that tenant's own pool, at most 8 databases at once. Each result is reused for 15 seconds, a failure included, so OTLP export and `/metrics` scrapes inside that window send no further queries and a hung ClickHouse holds up at most one of them:
+How much data each table holds in ClickHouse, before and after compression: the capacity signal for disk sizing, retention decisions and growth alerts. A collection runs one metadata-only aggregate over `system.parts` (active parts only) in each served tenant's database, over that tenant's own pool, at most 8 databases at once. Each result is reused for 15 seconds, a failure included, so OTLP export and `/metrics` scrapes inside that window send no further queries, and a hung ClickHouse costs at most one 5-second wait per 15 seconds (a collection arriving during it waits on the same scrape):
 
 | Metric | Meaning |
 | --- | --- |
@@ -896,6 +896,7 @@ Sum over `table` for the totals and divide for the compression ratio, which coun
 What they measure, for an alert built on them:
 
 - **Currently stored**, not a lifetime ingest count: TTL expiry, mutations and merges shrink them.
+- **Only served tenants.** A tenant a reload rejects or removes drops out of the sums until it is served again, so a table's figure can fall without any data being deleted (see `wavehouse_settings_tenants{state="rejected"}` under [Settings reloads](#settings-reloads)).
 - **Only the tenants' databases.** Growth in ClickHouse's own `system` tables (query and part logs, for example) is not covered; watch the server's disk directly for that.
 - **A series exists only once a table has active parts.** An empty table has no series, not a `0`.
 - **A failed scrape leaves them absent.** The scrape is bounded at 5 seconds, and if any database fails to answer within it, both metrics are left out rather than reported stale or short, until a scrape 15 seconds or more later succeeds. While ClickHouse does not answer, one collection in each 15 seconds waits up to 5 seconds for it, and a collection arriving meanwhile, such as a `/metrics` scrape during an OTLP export, waits for that one rather than starting its own, so keep Prometheus' `scrape_timeout` above 5 seconds (its default is 10). A gap means the scrape failed, not that a table shrank, so alert on growth or a threshold over a window rather than on `absent()`. The first failure is logged at `WARN`, and the next success at `INFO`.

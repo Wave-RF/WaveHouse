@@ -26,9 +26,10 @@ import (
 // timeout is minutes).
 const storageScrapeTimeout = 5 * time.Second
 
-// storageScrapeTTL is how long a successful scrape is reused. Storage size
-// moves slowly, and without it every collection (each OTLP export and each
-// GET /metrics) would query every tenant database again.
+// storageScrapeTTL is how long a scrape's outcome, failure included, is
+// reused. Storage size moves slowly, and without it every collection (each
+// OTLP export and each GET /metrics) would query every tenant database again,
+// and a hung server would cost each one a storageScrapeTimeout.
 const storageScrapeTTL = 15 * time.Second
 
 // storageScrapeConcurrency caps the databases one scrape reads at once, so a
@@ -173,8 +174,8 @@ func scrapeStorage(
 // gauges, so prometheus.per_table_metrics: false sums them over every table
 // (observability's tableView). A failed scrape observes nothing, so the
 // series go absent rather than stale or partial until a scrape more than ttl
-// later succeeds. It is
-// logged when the scrape starts failing, not on every collection after.
+// later succeeds. It is logged when the scrape starts failing, not on every
+// collection after.
 func registerStorageMetrics(meter metric.Meter, scrape func(context.Context) (map[string]tableBytes, error), ttl time.Duration) (metric.Registration, error) {
 	var failing atomic.Bool
 	// The last scrape's outcome, failure included, reused for ttl: a hung
