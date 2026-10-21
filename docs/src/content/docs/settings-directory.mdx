@@ -39,7 +39,7 @@ Every file is decoded strictly: an unknown key, a duplicate key, a UTF-8 byte or
 
 ## Validating from Go
 
-A program that writes settings directories — a control plane, a provisioning tool, a GitOps generator — can check a directory with the server's own rules before it hands it over: no running server, nothing on disk. The settings model and its validator are public packages of the server module, versioned by its release tags, so **validate with the package from the same tag as the server**: `go get github.com/Wave-RF/WaveHouse@vX.Y.Z` checks with exactly the rules a `vX.Y.Z` server applies, and a writer that re-implemented them would drift the first time they changed.
+A program that writes settings directories — a control plane, a provisioning tool, a GitOps generator — can check a directory with the server's own rules before it hands it over: no running server, nothing on disk. The settings model and its validator are public packages of the server module, versioned by its release tags, so **validate with the package from the same tag as the server**: `go get github.com/Wave-RF/WaveHouse@vX.Y.Z` checks with exactly the rules a `vX.Y.Z` server applies, and a writer that re-implemented them would drift the first time they changed. The packages are public from v0.2.1; v0.2.0 has none to import.
 
 ```go
 import (
