@@ -160,7 +160,9 @@ func TestQueryHandler_NilHTTPClientReturnsError(t *testing.T) {
 // TestQueryHandler_ForwardsSQLToClickHouse pins the proxy contract:
 //   - Request SQL is sent as the HTTP body verbatim.
 //   - default_format=JSON and date_time_output_format=iso are set so the
-//     response envelope is predictable.
+//     response envelope is predictable, and
+//     output_format_json_escape_forward_slashes=0 so `/` is spelled as on
+//     /v1/query.
 //   - Database from constructor lands in the query string.
 //   - X-ClickHouse-User / X-ClickHouse-Key headers carry the credentials.
 //
@@ -203,6 +205,7 @@ func TestQueryHandler_ForwardsSQLToClickHouse(t *testing.T) {
 	assert.Equal(t, "/", gotPath)
 	assert.Contains(t, gotQuery, "default_format=JSON")
 	assert.Contains(t, gotQuery, "date_time_output_format=iso")
+	assert.Contains(t, gotQuery, "output_format_json_escape_forward_slashes=0")
 	assert.Contains(t, gotQuery, "database=default")
 	assert.Equal(t, sql, gotBody, "SQL body must be forwarded verbatim, no parsing")
 	assert.Equal(t, "default", gotUser, "username must be sent via X-ClickHouse-User")

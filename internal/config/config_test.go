@@ -39,6 +39,9 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, 8080, cfg.Server.Port)
 	assert.Equal(t, 10, cfg.Server.ShutdownTimeout)
 	assert.Equal(t, 0, cfg.ClickHouse.MaxTotalConns, "no connection ceiling by default")
+	assert.Empty(t, cfg.ClickHouse.ChtypesCache, "the SDK's own cache by default")
+	assert.True(t, cfg.ClickHouse.ChtypesAutofetch, "a missing line is fetched by default")
+	assert.Nil(t, cfg.ClickHouse.ChtypesBases(), "the SDK's own registry by default")
 	assert.Empty(t, cfg.Auth.OperatorKey, "operator key is empty by default (feature off)")
 	assert.Equal(t, "./data", cfg.DataDir)
 	assert.False(t, cfg.OTel.Enabled)
@@ -57,6 +60,9 @@ server:
   port: 9090
 clickhouse:
   max_total_conns: 40
+  chtypes_cache: /var/cache/chtypes
+  chtypes_autofetch: false
+  chtypes_artifacts_url: "https://mirror.example/chtypes/v1, https://registry.example/chtypes/v1"
 auth:
   operator_key: "op-key"
 `
@@ -68,6 +74,9 @@ auth:
 
 	assert.Equal(t, 9090, cfg.Server.Port)
 	assert.Equal(t, 40, cfg.ClickHouse.MaxTotalConns)
+	assert.Equal(t, "/var/cache/chtypes", cfg.ClickHouse.ChtypesCache)
+	assert.False(t, cfg.ClickHouse.ChtypesAutofetch)
+	assert.Equal(t, []string{"https://mirror.example/chtypes/v1", "https://registry.example/chtypes/v1"}, cfg.ClickHouse.ChtypesBases())
 	assert.Equal(t, "op-key", cfg.Auth.OperatorKey)
 }
 
@@ -76,6 +85,24 @@ func TestLoad_OperatorKey_FromEnv(t *testing.T) {
 	cfg, err := Load("nonexistent.yaml")
 	require.NoError(t, err)
 	assert.Equal(t, "env-operator-key", cfg.Auth.OperatorKey)
+}
+
+// The variables are bound, so boot's refusal of unbound WH_* names lets them
+// through and Load reads them.
+func TestLoad_Chtypes_FromEnv(t *testing.T) {
+	t.Setenv("WH_CHTYPES_CACHE", "/srv/chtypes")
+	t.Setenv("WH_CHTYPES_ARTIFACTS_URL", "http://proxy.internal:5000/chtypes/v1")
+	cfg, err := Load("nonexistent.yaml")
+	require.NoError(t, err)
+	assert.Equal(t, "/srv/chtypes", cfg.ClickHouse.ChtypesCache)
+	assert.Equal(t, []string{"http://proxy.internal:5000/chtypes/v1"}, cfg.ClickHouse.ChtypesBases())
+}
+
+func TestLoad_ChtypesArtifactsURL_RefusesANonURL(t *testing.T) {
+	t.Setenv("WH_CHTYPES_ARTIFACTS_URL", "https://ok.example/chtypes/v1,registry.example/chtypes/v1")
+	_, err := Load("nonexistent.yaml")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `clickhouse.chtypes_artifacts_url (WH_CHTYPES_ARTIFACTS_URL): "registry.example/chtypes/v1"`)
 }
 
 func TestLoad_EnvOverridesYAML(t *testing.T) {

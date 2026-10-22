@@ -146,7 +146,7 @@ func TestStatusClass(t *testing.T) {
 }
 
 // TestQueryMetrics_ClickHouseErrors: each failed ClickHouse call on the
-// native query paths is recorded once, under the code its response carries.
+// query paths is recorded once, under the code its response carries.
 func TestQueryMetrics_ClickHouseErrors(t *testing.T) {
 	t.Parallel()
 	for _, tc := range chErrorCases(t) {
@@ -157,7 +157,9 @@ func TestQueryMetrics_ClickHouseErrors(t *testing.T) {
 			mp, reader := testMeterReader(t)
 			perms := tc.caps
 			perms.AllowColumns = []string{"*"}
-			sq := newCapturingHandler(t, &failingConn{err: tc.err}, policyWithViewer(perms))
+			f, rd := tc.fake()
+			sq := newCapturingHandler(t, f, policyWithViewer(perms))
+			sq.ch = rd
 			sq.metrics = queryMetricsOn(mp.Meter(meterName))
 			sq.Handle(httptest.NewRecorder(), withTenant(viewerRequest(t, query.StructuredQuery{Columns: []string{"page"}})))
 			assert.Equal(t, map[string]uint64{"operation=query,result=" + want: 1},
@@ -168,15 +170,22 @@ func TestQueryMetrics_ClickHouseErrors(t *testing.T) {
 			}
 			mp, reader = testMeterReader(t)
 			store := staticPipes(&pipes.NamedQuery{Name: "p", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}})
-			p := NewPipesHandler(store, staticPolicy(&policy.Policy{}), fixedConn(&failingConn{err: tc.err}), nil, func(*settings.Store) time.Duration { return time.Second })
+			f, rd = tc.fake()
+			p := NewPipesHandler(store, staticPolicy(&policy.Policy{}), f.target, nil, func(*settings.Store) time.Duration { return time.Second })
+			p.ch = rd
 			p.metrics = queryMetricsOn(mp.Meter(meterName))
 			r := pipesRequest(t, http.MethodGet, "/v1/pipes/p", "p", nil)
 			p.Execute(httptest.NewRecorder(), withTenant(r.WithContext(auth.WithRole(r.Context(), "viewer"))))
 			assert.Equal(t, map[string]uint64{"operation=pipe,result=" + want: 1},
 				histogramCounts(t, reader, "wavehouse_clickhouse_query_duration_seconds"))
 
+			if tc.readOnly {
+				return // only a read is sent under readonly=2
+			}
 			mp, reader = testMeterReader(t)
-			wp := writerPipesHandler(t, &writeConn{err: tc.err}, nil, &pipes.NamedQuery{Name: "log", SQL: "INSERT INTO audit_log VALUES ({{msg}}, now())"})
+			f, rd = tc.fake()
+			wp := writerPipesHandler(t, f, nil, &pipes.NamedQuery{Name: "log", SQL: "INSERT INTO audit_log VALUES ({{msg}}, now())"})
+			wp.ch = rd
 			wp.metrics = queryMetricsOn(mp.Meter(meterName))
 			pipeCallAs(t, wp, "log")
 			assert.Equal(t, map[string]uint64{"operation=pipe_write,result=" + want: 1},

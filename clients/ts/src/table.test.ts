@@ -116,7 +116,7 @@ describe("TableRef", () => {
     expect(result.data).toMatchObject({ ok: true, total: 0, succeeded: 0, failed: 0 });
   });
 
-  it("insert() array surfaces per-record failures without erroring", async () => {
+  it("insert() array surfaces per-record failures (a failed check) without erroring", async () => {
     fetchSpy.mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -126,7 +126,7 @@ describe("TableRef", () => {
           duplicates: 0,
           results: [
             { index: 1, ok: true },
-            { index: 2, error: "validation failed" },
+            { index: 2, error: 'check failed for column "org_id"' },
           ],
         }),
         { status: 200 },
@@ -143,7 +143,7 @@ describe("TableRef", () => {
     expect(result.data?.failed).toBe(1);
     expect(result.data?.results).toEqual([
       { index: 1, ok: true },
-      { index: 2, error: "validation failed" },
+      { index: 2, error: 'check failed for column "org_id"' },
     ]);
   });
 

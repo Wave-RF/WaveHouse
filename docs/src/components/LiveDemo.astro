@@ -178,8 +178,9 @@ const DEMO_HOST = "stats.wavehouse.dev";
   const posthog = () =>
     (window as { posthog?: { capture: (event: string, props?: object) => void } }).posthog;
 
-  // Backfill rows come back RFC3339 from ClickHouse, but live SSE rows carry
-  // the producer's payload as ingested — a zone-less ClickHouse-style
+  // Backfill rows come back RFC3339 from ClickHouse. Live SSE rows do too from
+  // a server with the chtypes type layer, but an older one sends the producer's
+  // payload as ingested — a zone-less ClickHouse-style
   // "YYYY-MM-DD HH:MM:SS[.fff]" (UTC by the gh_events contract), which
   // Date.parse would read as LOCAL time. Normalize to ISO-8601 UTC.
   function normTs(ts: string): string {
@@ -358,9 +359,10 @@ const DEMO_HOST = "stats.wavehouse.dev";
     // --- Feed.
     const seen = new Set<string>();
     // Normalize every key part across the two row sources: backfill rows are
-    // ClickHouse-materialized (RFC3339 ts, ""/0 defaults) while live SSE rows
-    // are raw producer payloads (zone-less ts, fields possibly absent) — raw
-    // interpolation would never dedup a row seen via both paths.
+    // ClickHouse-materialized (RFC3339 ts, ""/0 defaults) while an older
+    // server's live SSE rows are raw producer payloads (zone-less ts, fields
+    // possibly absent) — raw interpolation would never dedup a row seen via
+    // both paths.
     const rowKey = (r: GhRow) =>
       `${r.event_type}|${r.action || ""}|${r.actor_login}|${normTs(r.event_ts || "")}|${Number(r.number) || 0}`;
 

@@ -45,8 +45,8 @@ type Column struct {
 	HasDefault bool   `json:"has_default"`
 	// DefaultKind is how the column's default is declared, verbatim from
 	// system.columns.default_kind: "" (none), "DEFAULT", "MATERIALIZED",
-	// "ALIAS", or "EPHEMERAL". It is what decides whether a record may carry a
-	// value for the column — see IsInsertable. HasDefault is the boolean
+	// "ALIAS", or "EPHEMERAL". It is what decides whether an INSERT may name the
+	// column — see IsInsertable. HasDefault is the boolean
 	// reading of the same field, so the two never disagree about whether a
 	// default exists.
 	DefaultKind string `json:"default_kind,omitempty"`
@@ -59,12 +59,6 @@ type Column struct {
 	// carries the ordinal itself so a caller holding a lone Column still knows
 	// where it sits.
 	Position uint64 `json:"position"`
-
-	// tsSpec is a DateTime/DateTime64 column's canonicalization spec, resolved
-	// once at schema build (Refresh). nil for non-timestamp columns, hand-built
-	// Column literals, and unresolvable zones — CanonicalizeTimestamps passes
-	// those through untouched (fail-open, #372).
-	tsSpec *timestampSpec
 }
 
 // TableSchema holds the discovered schema for one ClickHouse table. Columns is
@@ -87,15 +81,6 @@ type TableSchema struct {
 	// system.tables by the time the second query ran — the two scans are not one
 	// snapshot, so a consumer must not treat an empty DDL as "no such table".
 	DDL string `json:"-"`
-
-	// insertable/insertableNames memoize InsertableColumns/InsertableColumnNames,
-	// which are per-table constants that the ingest path would otherwise rebuild
-	// once per record — on a 20-column table that is ~2 KB of garbage per record.
-	// Filled once by cacheInsertable when the registry builds the schema, and
-	// never written again, so concurrent readers need no lock. A TableSchema
-	// built as a literal (tests) leaves them nil and takes the uncached path.
-	insertable      []Column
-	insertableNames []string
 }
 
 // ColumnNames returns the table's column names in their discovered order
@@ -105,8 +90,8 @@ type TableSchema struct {
 // schema with no columns.
 func (ts *TableSchema) ColumnNames() []string { return columnNames(ts.Columns) }
 
-// IsInsertable reports whether a record may carry a value for this column —
-// whether naming it in an INSERT's column list is legal.
+// IsInsertable reports whether naming this column in an INSERT's column list
+// is legal.
 //
 // ClickHouse refuses exactly two kinds, verified against a live server
 // (26.6.3): a MATERIALIZED column is `Cannot insert column …, because it is
@@ -115,6 +100,11 @@ func (ts *TableSchema) ColumnNames() []string { return columnNames(ts.Columns) }
 // no storage to write. Everything else takes a value: a plain column, a
 // DEFAULT column, and an EPHEMERAL one, which exists precisely to be inserted
 // into (it is insert-only — never stored, never selected).
+//
+// It is not what an ingested record may carry, nor what a published row
+// holds: both are the type layer's (typelayer.Table.WireColumns, and the
+// EPHEMERAL columns it lets a record supply), and an EPHEMERAL column is
+// never on the wire.
 func (c Column) IsInsertable() bool {
 	switch c.DefaultKind {
 	case "MATERIALIZED", "ALIAS":
@@ -124,43 +114,7 @@ func (c Column) IsInsertable() bool {
 	}
 }
 
-// InsertableColumns returns the columns a record may carry, in declaration
-// order — the positional contract for a row on the ingest path. Computed
-// columns are left out because naming one in an INSERT is an error, not
-// because they are uninteresting: they stay in Columns, so the schema endpoint
-// and the query path still see the whole table.
-func (ts *TableSchema) InsertableColumns() []Column {
-	if ts.insertable != nil {
-		return ts.insertable
-	}
-	return computeInsertable(ts.Columns)
-}
-
-// cacheInsertable fills the memoized subsets. Called once per table per refresh,
-// before the schema is published to readers.
-func (ts *TableSchema) cacheInsertable() {
-	ts.insertable = computeInsertable(ts.Columns)
-	ts.insertableNames = columnNames(ts.insertable)
-}
-
-// computeInsertable filters to the columns a record may carry, preserving
-// declaration order — the positional contract the wire envelope depends on.
-func computeInsertable(cols []Column) []Column {
-	out := make([]Column, 0, len(cols))
-	for _, c := range cols {
-		if c.IsInsertable() {
-			out = append(out, c)
-		}
-	}
-	// Cap the slice to its length. The memo is handed to every caller by
-	// reference, and on a table with a computed column cap > len — so an append
-	// by some future caller would write into the shared, concurrently-read
-	// backing array instead of copying. Capping forces that append to allocate.
-	return out[:len(out):len(out)]
-}
-
-// columnNames projects a column slice to its names, shared by ColumnNames and
-// InsertableColumnNames so the two cannot drift.
+// columnNames projects a column slice to its names.
 func columnNames(cols []Column) []string {
 	names := make([]string, 0, len(cols))
 	for _, c := range cols {
@@ -171,12 +125,12 @@ func columnNames(cols []Column) []string {
 
 // Lookup returns the named column and whether the table declares it. Matching
 // is exact, as ClickHouse's own column resolution is. Linear over Columns, which
-// is the right shape for the per-record call sites: schemas are small and the
-// caller asks about one or two columns.
+// is the right shape for its call sites: schemas are small and the caller asks
+// about one or two columns.
 //
 // It returns the Column rather than a bool because "does the table have it" is
 // rarely the whole question — a caller on the ingest path also has to know
-// whether a record may carry a value for it (IsInsertable).
+// whether an INSERT may name it (IsInsertable).
 func (ts *TableSchema) Lookup(name string) (Column, bool) {
 	for _, c := range ts.Columns {
 		if c.Name == name {
@@ -184,15 +138,6 @@ func (ts *TableSchema) Lookup(name string) (Column, bool) {
 		}
 	}
 	return Column{}, false
-}
-
-// InsertableColumnNames is InsertableColumns reduced to names, for the wire
-// envelope's column list. Returns an empty (non-nil) slice when none qualify.
-func (ts *TableSchema) InsertableColumnNames() []string {
-	if ts.insertableNames != nil {
-		return ts.insertableNames
-	}
-	return columnNames(ts.InsertableColumns())
 }
 
 // SchemaRegistry discovers and caches one tenant's ClickHouse table schemas.
@@ -223,7 +168,33 @@ type SchemaRegistry struct {
 	// serverVersion is the ClickHouse version string from the last successful
 	// Refresh, guarded by mu alongside tables.
 	serverVersion string
+	// serverTZ is the server's default time zone name from the same Refresh,
+	// guarded by mu. ClickHouse reads zone-less timestamps in it, so the type
+	// layer has to parse in the same zone or it answers about another instant.
+	serverTZ string
+	// onRefresh are the hooks a successful Refresh runs with what it
+	// published; registered before the first Refresh, guarded by mu.
+	onRefresh []RefreshHook
+	// readGen numbers refreshes in the order they start, before any read.
+	readGen atomic.Uint64
+	// publishMu makes a Refresh's publish, its hooks and the loaded flag one
+	// step, and guards publishedGen, the readGen of the snapshot published
+	// last. A refresh publishes only if it started after that one, so when
+	// two overlap (the loop and a manual one) and the one that started first
+	// finishes last, its snapshot — possibly read before a table the other
+	// saw was created — is dropped rather than replacing the other's. Hooks
+	// therefore run one refresh at a time, in start order, and are never
+	// handed a snapshot from a refresh that started before the one whose
+	// snapshot they are replacing.
+	publishMu    sync.Mutex
+	publishedGen uint64
 }
+
+// RefreshHook is told what a successful Refresh published: the server's
+// version and default time zone name (verbatim from ClickHouse) and every
+// discovered table, in no particular order. The schemas are the registry's
+// own and must not be modified.
+type RefreshHook func(serverVersion, serverTZ string, tables []*TableSchema)
 
 // Source yields a tenant's connection and the database it discovers from,
 // one snapshot: the database is the one the connection's own pool was
@@ -246,13 +217,35 @@ func NewSchemaRegistry(source Source, id tenant.ID, refreshInterval func(tenant.
 	}
 }
 
-// Refresh rebuilds the in-memory schema cache: it discovers the server's default
-// time zone and version, queries system.columns, attaches each table's DDL from
-// system.tables, and precomputes timestamp column specs.
+// OnRefresh registers a hook every successful Refresh runs after it publishes
+// the new schemas and before it marks the registry loaded, so a reader that
+// sees Loaded() also sees every hook's work for the first refresh (the type
+// layer binds here). Hooks run synchronously on the refreshing goroutine, in
+// registration order, and must be registered before the first Refresh. A
+// failed Refresh runs none: the previous schemas stay, and so does whatever
+// the hooks built from them. Neither does a Refresh that a later-started one
+// has already published past.
+func (sr *SchemaRegistry) OnRefresh(hook RefreshHook) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	sr.onRefresh = append(sr.onRefresh, hook)
+}
+
+// Refresh rebuilds the in-memory schema cache: it discovers the server's
+// default time zone and version, queries system.columns, attaches each table's
+// DDL from system.tables, and then runs the OnRefresh hooks before marking the
+// registry loaded. A refresh that started before the one whose snapshot is
+// already published returns nil without publishing: the published refresh
+// started later, so it saw everything committed before this one started.
 func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
 	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")
 	defer span.End()
+
+	// Taken before the first read, so a refresh that starts after a table is
+	// created has a higher generation than every refresh that could have
+	// read the database without it.
+	gen := sr.readGen.Add(1)
 
 	// One connection and one database per refresh, read together: a reload
 	// that moves the tenant to another pool or database applies to the NEXT
@@ -267,8 +260,8 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 		return fmt.Errorf("%w for tenant %s", ErrNoConnection, sr.tenant)
 	}
 
-	// ClickHouse interprets zone-less timestamp strings in the server's default
-	// zone; canonicalization applies the same rule so the instant never changes (#372).
+	// The server's default zone, kept with the schemas so the type layer reads
+	// the tenant's rows and filters in it.
 	var tzName string
 	if err := conn.QueryRow(ctx, "SELECT timezone()").Scan(&tzName); err != nil {
 		return fmt.Errorf("query server timezone: %w", err)
@@ -283,16 +276,6 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	var serverVersion string
 	if err := conn.QueryRow(ctx, "SELECT version()").Scan(&serverVersion); err != nil {
 		return fmt.Errorf("query server version: %w", err)
-	}
-
-	var serverTZ *time.Location
-	if loc, err := loadLocation(tzName); err == nil {
-		serverTZ = loc
-	} else {
-		// Unresolvable — warn, not fatal, and no UTC fallback (that could move
-		// instants). A nil server zone means zone-less values pass through.
-		slog.WarnContext(ctx, "cannot resolve server timezone; zone-less timestamps will pass through un-canonicalized",
-			"timezone", tzName, "error", err)
 	}
 
 	rows, err := conn.Query(ctx,
@@ -342,17 +325,39 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 		return err
 	}
 
+	var noDDL []string
+	published := make([]*TableSchema, 0, len(tables))
 	for _, ts := range tables {
-		resolveTimestampSpecs(ctx, ts, serverTZ)
-		ts.cacheInsertable()
+		published = append(published, ts)
+		if ts.DDL == "" {
+			noDDL = append(noDDL, ts.Name)
+		}
 	}
 
+	sr.publishMu.Lock()
+	defer sr.publishMu.Unlock()
+	if gen < sr.publishedGen {
+		slog.DebugContext(ctx, "schema refresh superseded by a later one; not published", "tenant", sr.tenant)
+		return nil
+	}
+	sr.publishedGen = gen
 	sr.mu.Lock()
 	sr.tables = tables
 	sr.serverVersion = serverVersion
+	sr.serverTZ = tzName
+	hooks := sr.onRefresh
 	sr.mu.Unlock()
-	sr.loaded.Store(true)
 	slog.InfoContext(ctx, "schema registry refreshed", "tenant", sr.tenant, "tables", len(tables), "server_tz", tzName, "server_version", serverVersion)
+	if len(noDDL) > 0 {
+		// The two scans are not one snapshot, so a table can be missing its
+		// CREATE statement without being missing. One line per refresh, not
+		// one per table.
+		slog.WarnContext(ctx, "tables discovered without DDL", "tenant", sr.tenant, "tables", noDDL)
+	}
+	for _, hook := range hooks {
+		hook(serverVersion, tzName, published)
+	}
+	sr.loaded.Store(true)
 
 	return nil
 }
@@ -399,6 +404,16 @@ func (sr *SchemaRegistry) ServerVersion() string {
 	sr.mu.RLock()
 	defer sr.mu.RUnlock()
 	return sr.serverVersion
+}
+
+// ServerTimezone returns the server's default time zone name captured by the
+// last successful Refresh, or "" before the first one. It is the name
+// ClickHouse reported, not a resolved location: the type layer hands it
+// straight to the parser that reads the rows.
+func (sr *SchemaRegistry) ServerTimezone() string {
+	sr.mu.RLock()
+	defer sr.mu.RUnlock()
+	return sr.serverTZ
 }
 
 // Get returns the schema for a table, or nil if not found — before the first

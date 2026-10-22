@@ -1,6 +1,8 @@
 package query
 
 import (
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -136,8 +138,45 @@ func TestBuild_InFilter(t *testing.T) {
 	}
 	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
-	assert.Contains(t, result.SQL, "`page` IN (?,?)")
-	assert.Len(t, result.Params, 2)
+	// One placeholder for the whole list, bound as one external table.
+	assert.Contains(t, result.SQL, "`page` IN ?")
+	require.Len(t, result.Params, 1)
+	assert.Equal(t, listParam{Values: []any{"/home", "/about"}}, result.Params[0])
+
+	b, err := result.Bind()
+	require.NoError(t, err)
+	assert.Contains(t, b.SQL, "`page` IN (SELECT v FROM _p0)")
+	assert.Empty(t, b.Params)
+	assert.Equal(t, []Table{{Name: "_p0", Data: rowBinary("/home", "/about")}}, b.Tables)
+}
+
+// rowBinary is the RowBinary a Table carries for vals.
+func rowBinary(vals ...string) []byte {
+	var b []byte
+	for _, v := range vals {
+		b = binary.AppendUvarint(b, uint64(len(v)))
+		b = append(b, v...)
+	}
+	return b
+}
+
+// bindTexts binds res and returns its SQL and parameter values, failing on a
+// table: a test of scalar binding.
+func bindTexts(t *testing.T, res *BuildResult) (string, []string) {
+	t.Helper()
+	b, err := res.Bind()
+	require.NoError(t, err)
+	require.Empty(t, b.Tables)
+	return b.SQL, paramValues(b)
+}
+
+// paramValues are b's parameter values in placeholder order, nil for none.
+func paramValues(b *Bound) []string {
+	var out []string
+	for _, p := range b.Params {
+		out = append(out, p.Value)
+	}
+	return out
 }
 
 func TestBuild_OrderBy(t *testing.T) {
@@ -178,10 +217,18 @@ func TestBuild_TimeRange(t *testing.T) {
 	assert.Len(t, result.Params, 1)
 }
 
-// permsWithFilter returns resolved permissions carrying a row-filter predicate,
-// shaped exactly as policy.Evaluate emits one (quoted column, positional '?').
+// permsWithFilter returns resolved permissions carrying a row-filter predicate
+// on org_id (a String column), resolved by policy.Evaluate itself.
 func permsWithFilter() *policy.ResolvedPermissions {
-	return &policy.ResolvedPermissions{Allowed: true, Select: &policy.ResolvedSelect{WhereClause: "`org_id` = ?", WhereParams: []any{"org-1"}}}
+	return permsFiltering(map[string]policy.Filter{"org_id": {Eq: new("org-1")}}, nil)
+}
+
+// permsFiltering resolves a read grant carrying filter for role "r" on clicks.
+func permsFiltering(filter map[string]policy.Filter, claims map[string]any) *policy.ResolvedPermissions {
+	p := &policy.Policy{Tables: map[string]policy.TablePolicy{
+		"clicks": {"r": {Select: &policy.SelectPermissions{Filter: filter}}},
+	}}
+	return policy.Evaluate(p, "r", "clicks", "select", claims)
 }
 
 // TestBuild_PolicyPredicate pins the structural emission of the row-level-
@@ -257,6 +304,148 @@ func TestBuild_PolicyPredicate_SurvivesCraftedIdentifiers(t *testing.T) {
 			assert.Equal(t, []any{"org-1"}, result.Params)
 		})
 	}
+}
+
+// TestBuild_PolicyPredicate_IntegerColumnsBindThroughTheStrictCast pins the
+// query path's half of the integer-claim rule: a policy claim compared against
+// an integer column (any width, Nullable or LowCardinality) renders as
+// chsql.StrictInt over ONE {pN:String} parameter, on every operator and on
+// each element of an _in list, while every other column keeps the plain
+// {pN:String} form. The typelayer renders the same expression for the stream
+// and the insert check.
+func TestBuild_PolicyPredicate_IntegerColumnsBindThroughTheStrictCast(t *testing.T) {
+	t.Parallel()
+	schema := &discovery.TableSchema{Name: "clicks", Columns: []discovery.Column{
+		{Name: "page", Type: "String"},
+		{Name: "u64", Type: "UInt64"},
+		{Name: "i8", Type: "Int8"},
+		{Name: "nu256", Type: "Nullable(UInt256)"},
+		{Name: "lci32", Type: "LowCardinality(Nullable(Int32))"},
+		{Name: "org_id", Type: "String"},
+		{Name: "amount", Type: "Decimal(18, 4)"},
+		{Name: "flag", Type: "Bool"},
+	}}
+	e := func(p, typ string) string {
+		c := "accurateCastOrNull({" + p + ":String}, '" + typ + "')"
+		return "if(toString(" + c + ") = {" + p + ":String}, " + c + ", NULL)"
+	}
+	tests := []struct {
+		name       string
+		column     string
+		filter     policy.Filter
+		claims     map[string]any
+		wantWhere  string
+		wantParams []string
+	}{
+		{
+			"eq on UInt64", "u64",
+			policy.Filter{Eq: new("{{ jwt.t }}")},
+			map[string]any{"t": "5"},
+			"`u64` = " + e("p0", "UInt64"),
+			[]string{"5"},
+		},
+		{
+			"neq on Int8", "i8",
+			policy.Filter{Neq: new("-3")},
+			nil,
+			"`i8` != " + e("p0", "Int8"),
+			[]string{"-3"},
+		},
+		{
+			"gt on Nullable(UInt256) casts to the bare type", "nu256",
+			policy.Filter{Gt: new("7")},
+			nil,
+			"`nu256` > " + e("p0", "UInt256"),
+			[]string{"7"},
+		},
+		{
+			"lt on LowCardinality(Nullable(Int32)) casts to the bare type", "lci32",
+			policy.Filter{Lt: new("9")},
+			nil,
+			"`lci32` < " + e("p0", "Int32"),
+			[]string{"9"},
+		},
+		{
+			"in on UInt64 casts each element", "u64",
+			policy.Filter{In: new("{{ jwt.ts }}")},
+			map[string]any{"ts": []any{"5", "18446744073709551621", "007"}},
+			"`u64` IN (" + e("p0", "UInt64") + "," + e("p1", "UInt64") + "," + e("p2", "UInt64") + ")",
+			[]string{"5", "18446744073709551621", "007"},
+		},
+		{
+			"a claim needing escape is encoded once", "u64",
+			policy.Filter{Eq: new("{{ jwt.t }}")},
+			map[string]any{"t": `a\b`},
+			"`u64` = " + e("p0", "UInt64"),
+			[]string{`a\\b`},
+		},
+		{
+			"eq on String keeps the plain form", "org_id",
+			policy.Filter{Eq: new("acme")},
+			nil,
+			"`org_id` = {p0:String}",
+			[]string{"acme"},
+		},
+		{
+			"in on String keeps the plain form", "org_id",
+			policy.Filter{In: new("{{ jwt.ts }}")},
+			map[string]any{"ts": []any{"a", "b"}},
+			"`org_id` IN ({p0:String},{p1:String})",
+			[]string{"a", "b"},
+		},
+		{
+			"Decimal keeps the plain form", "amount",
+			policy.Filter{Gt: new("1.50")},
+			nil,
+			"`amount` > {p0:String}",
+			[]string{"1.50"},
+		},
+		{
+			"Bool keeps the plain form", "flag",
+			policy.Filter{Eq: new("true")},
+			nil,
+			"`flag` = {p0:String}",
+			[]string{"true"},
+		},
+		{
+			"an unresolvable claim still fails closed", "u64",
+			policy.Filter{Eq: new("{{ jwt.absent }}")},
+			nil,
+			"1 = 0", nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			perms := permsFiltering(map[string]policy.Filter{tt.column: tt.filter}, tt.claims)
+			res, err := Build("clicks", &StructuredQuery{Columns: []string{"page"}}, schema, perms, 0, DefaultMaxRows)
+			require.NoError(t, err)
+			sql, params := bindTexts(t, res)
+			assert.Equal(t, "SELECT `page` FROM `clicks` WHERE ("+tt.wantWhere+") LIMIT 10000", sql)
+			assert.Equal(t, tt.wantParams, params)
+		})
+	}
+}
+
+// TestBuild_PolicyPredicate_CallerFiltersKeepThePlainForm: the strict cast is
+// for policy claims only. A caller's own filter on an integer column binds as
+// a plain {pN:String}, and its `in` list as a table converted with
+// accurateCastOrNull — it can only narrow what the policy already admits.
+func TestBuild_PolicyPredicate_CallerFiltersKeepThePlainForm(t *testing.T) {
+	t.Parallel()
+	perms := permsFiltering(map[string]policy.Filter{"count": {Eq: new("5")}}, nil)
+	sq := &StructuredQuery{Columns: []string{"page"}, Filters: []Filter{
+		{Column: "count", Op: "gt", Value: json.Number("1")},
+		{Column: "count", Op: "in", Value: []any{json.Number("1"), json.Number("2")}},
+	}}
+	res, err := Build("clicks", sq, testSchema(), perms, 0, DefaultMaxRows)
+	require.NoError(t, err)
+	b, err := res.Bind()
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT `page` FROM `clicks` WHERE (`count` = "+chsql.StrictInt("p0", "UInt64")+
+		") AND `count` > {p1:String} AND `count` IN (SELECT accurateCastOrNull(v, 'UInt64') FROM _p2) LIMIT 10000", b.SQL)
+	assert.Equal(t, []string{"5", "1"}, paramValues(b))
+	assert.Equal(t, []Table{{Name: "_p2", Data: rowBinary("1", "2")}}, b.Tables)
 }
 
 // TestBuild_PolicyMaxRows pins the role's max_rows cap folded into Build's LIMIT
@@ -411,9 +600,10 @@ func TestResolveTimeValue_RelativeDuration(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, result)
 	assert.NotEqual(t, "1h", result, "relative duration should resolve to a timestamp")
-
-	assert.NotContains(t, result, "T", "must not emit the RFC3339 T separator")
-	assert.NotContains(t, result, "Z", "must not emit the RFC3339 Z zone suffix")
+	// RFC 3339 in UTC: the Z is what makes the column's zone irrelevant.
+	_, err = time.Parse(time.RFC3339Nano, result)
+	require.NoError(t, err)
+	assert.True(t, strings.HasSuffix(result, "Z"), result)
 }
 
 func TestResolveTimeValue_RFC3339(t *testing.T) {
@@ -421,7 +611,12 @@ func TestResolveTimeValue_RFC3339(t *testing.T) {
 
 	result, err := resolveTimeValue("2024-01-01T00:00:00Z", 0)
 	require.NoError(t, err)
-	assert.Equal(t, "2024-01-01 00:00:00", result)
+	assert.Equal(t, "2024-01-01T00:00:00Z", result)
+
+	// An offset is normalised to the same instant in UTC; a fraction is kept.
+	result, err = resolveTimeValue("2024-01-01T09:00:00.25+09:00", 0)
+	require.NoError(t, err)
+	assert.Equal(t, "2024-01-01T00:00:00.25Z", result)
 }
 
 func TestResolveTimeValue_WithBucketing(t *testing.T) {
@@ -429,7 +624,7 @@ func TestResolveTimeValue_WithBucketing(t *testing.T) {
 	// With 60s buckets, a time at :30 should truncate to :00.
 	result, err := resolveTimeValue("2024-01-01T12:34:30Z", 60)
 	require.NoError(t, err)
-	assert.Equal(t, "2024-01-01 12:34:00", result)
+	assert.Equal(t, "2024-01-01T12:34:00Z", result)
 }
 
 func TestExpandDayWeek(t *testing.T) {
@@ -453,13 +648,13 @@ func TestExpandDayWeek(t *testing.T) {
 func TestResolveTimeValue_DayWeekSuffix(t *testing.T) {
 	t.Parallel()
 	// "7d"/"2w" are documented (sdk.md) but not Go durations; they must resolve
-	// to a real ClickHouse DateTime, not fall through as the raw string (#285).
+	// to an instant, not fall through as the raw string (#285).
 	for _, in := range []string{"7d", "2w", "1d12h"} {
 		result, err := resolveTimeValue(in, 0)
 		require.NoError(t, err, "resolveTimeValue(%q)", in)
 		assert.NotEqual(t, in, result, "%q must resolve, not pass through raw", in)
-		assert.NotContains(t, result, "T")
-		assert.NotContains(t, result, "Z")
+		_, err = time.Parse(time.RFC3339Nano, result)
+		require.NoError(t, err, "resolveTimeValue(%q) = %q", in, result)
 	}
 
 	// "7d" must resolve to the same instant as its hour-equivalent "168h".
@@ -490,30 +685,41 @@ func TestBucketTime_ZeroBucket(t *testing.T) {
 	assert.Equal(t, ts, got, "zero bucket should not truncate")
 }
 
-func TestCoerceFilterValue(t *testing.T) {
+// TestConversionFor pins how a column's type, as system.columns spells it,
+// picks the conversion ClickHouse applies to a bound String.
+func TestConversionFor(t *testing.T) {
 	t.Parallel()
-
 	tests := []struct {
-		name    string
-		input   any
-		wantTyp string
-		wantVal any
+		typ  string
+		want conversion
 	}{
-		{"RFC3339", "2026-04-02T16:02:07Z", "string", "2026-04-02 16:02:07"},
-		{"RFC3339Nano", "2026-04-02T16:02:07.666Z", "string", "2026-04-02 16:02:07.666"},
-		{"RFC3339Nano_short", "2026-04-02T16:02:07.15Z", "string", "2026-04-02 16:02:07.15"},
-		{"plain_string", "hello", "string", "hello"},
-		{"number", 42, "int", 42},
-		{"nil", nil, "<nil>", nil},
+		{"DateTime", conversion{kind: parseTime, scale: 8}},
+		{"DateTime('Asia/Tokyo')", conversion{kind: parseTime, scale: 8, zone: "Asia/Tokyo"}},
+		{"DateTime64(3)", conversion{kind: parseTime, scale: 8}},
+		{"DateTime64(3, 'America/New_York')", conversion{kind: parseTime, scale: 8, zone: "America/New_York"}},
+		{"DateTime64(9, 'UTC')", conversion{kind: parseTime, scale: 9, zone: "UTC"}},
+		{"Nullable(DateTime64(6, 'Etc/GMT+5'))", conversion{kind: parseTime, scale: 8, zone: "Etc/GMT+5"}},
+		{"LowCardinality(Nullable(DateTime('America/Argentina/Buenos_Aires')))", conversion{kind: parseTime, scale: 8, zone: "America/Argentina/Buenos_Aires"}},
+		{"Date", conversion{kind: parseDate}},
+		{"Nullable(Date32)", conversion{kind: parseDate32}},
+		{"String", conversion{kind: asString}},
+		{"LowCardinality(String)", conversion{kind: asString}},
+		{"", conversion{kind: asString}},
+		{"UInt64", conversion{kind: castTo, typ: "UInt64"}},
+		{"LowCardinality(Nullable(Int32))", conversion{kind: castTo, typ: "Int32"}},
+		{"Decimal(18, 4)", conversion{kind: castTo, typ: "Decimal(18, 4)"}},
+		{"Enum8('a' = 1, 'b' = 2)", conversion{kind: castTo, typ: "Enum8('a' = 1, 'b' = 2)"}},
+		{"Array(DateTime)", conversion{kind: castTo, typ: "Array(DateTime)"}},
+		// A DateTime type it cannot read leaves ClickHouse to refuse what it
+		// cannot compare, rather than guess the zone.
+		{"DateTime64(x)", conversion{kind: asString}},
+		{"DateTime('a\\'b')", conversion{kind: asString}},
+		{"DateTime64(3, 'UTC', 1)", conversion{kind: asString}},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(tt.typ, func(t *testing.T) {
 			t.Parallel()
-			got := coerceFilterValue(tt.input)
-			assert.Equal(t, tt.wantTyp, fmt.Sprintf("%T", got))
-			if tt.wantVal != nil {
-				assert.Equal(t, tt.wantVal, got)
-			}
+			assert.Equal(t, tt.want, conversionFor(tt.typ))
 		})
 	}
 }
@@ -538,10 +744,74 @@ func TestBuild_FilterWithTimestampValue(t *testing.T) {
 	result, err := Build("events", sq, schema, nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Contains(t, result.SQL, "`received_timestamp` < ?")
-	require.Len(t, result.Params, 1)
-	strVal, isString := result.Params[0].(string)
-	assert.True(t, isString, "timestamp filter value should be coerced to formatted string, got %T", result.Params[0])
-	assert.Equal(t, "2026-04-02 16:02:07.666", strVal)
+
+	sql, params := bindTexts(t, result)
+	assert.Contains(t, sql, "`received_timestamp` < parseDateTime64BestEffort({p0:String}, 8)")
+	assert.Equal(t, []string{"2026-04-02T16:02:07.666Z"}, params, "the value reaches ClickHouse as written")
+}
+
+// TestBuild_TimestampValuesParseInClickHouse: a filter value on a Date or
+// DateTime column — wrapped or not, scalar or inside an `in` list — reaches
+// ClickHouse as written and is parsed there, in the column's declared zone
+// when it has one. The same text on any other column is compared as it is,
+// and like never converts.
+func TestBuild_TimestampValuesParseInClickHouse(t *testing.T) {
+	t.Parallel()
+	schema := &discovery.TableSchema{Name: "events", Columns: []discovery.Column{
+		{Name: "dt", Type: "DateTime"},
+		{Name: "dtz", Type: "DateTime('Europe/Berlin')"},
+		{Name: "dt64", Type: "Nullable(DateTime64(3, 'UTC'))"},
+		{Name: "dt9", Type: "DateTime64(9, 'Asia/Tokyo')"},
+		{Name: "lc", Type: "LowCardinality(Nullable(DateTime))"},
+		{Name: "label", Type: "String"},
+		{Name: "day", Type: "Date"},
+		{Name: "day32", Type: "Date32"},
+	}}
+	const rfc = "2026-04-02T16:02:07.666Z"
+	tests := []struct {
+		column, op string
+		value      any
+		wantWhere  string
+		wantParams []string
+		wantTable  []byte
+	}{
+		{"dt", "eq", rfc, "`dt` = parseDateTime64BestEffort({p0:String}, 8)", []string{rfc}, nil},
+		{"dtz", "gte", rfc, "`dtz` >= parseDateTime64BestEffort({p0:String}, 8, 'Europe/Berlin')", []string{rfc}, nil},
+		{"dt64", "neq", rfc, "`dt64` != parseDateTime64BestEffort({p0:String}, 8, 'UTC')", []string{rfc}, nil},
+		{"dt9", "lt", rfc, "`dt9` < parseDateTime64BestEffort({p0:String}, 9, 'Asia/Tokyo')", []string{rfc}, nil},
+		{"lc", "lte", rfc, "`lc` <= parseDateTime64BestEffort({p0:String}, 8)", []string{rfc}, nil},
+		{"dtz", "eq", "2026-04-02 16:02:07", "`dtz` = parseDateTime64BestEffort({p0:String}, 8, 'Europe/Berlin')", []string{"2026-04-02 16:02:07"}, nil},
+		{"dt", "gt", json.Number("1782014400"), "`dt` > parseDateTime64BestEffort({p0:String}, 8)", []string{"1782014400"}, nil},
+		{"day", "eq", rfc, "`day` = toDate(parseDateTime64BestEffort({p0:String}, 8))", []string{rfc}, nil},
+		{"day32", "eq", "1950-01-01", "`day32` = toDate32(parseDateTime64BestEffort({p0:String}, 8))", []string{"1950-01-01"}, nil},
+		{"label", "eq", rfc, "`label` = {p0:String}", []string{rfc}, nil},
+		{"dt", "like", "2026-%", "`dt` LIKE {p0:String}", []string{"2026-%"}, nil},
+		{
+			"dt64", "in",
+			[]any{rfc, "2026-04-02 16:02:07"},
+			"`dt64` IN (SELECT parseDateTime64BestEffort(v, 8, 'UTC') FROM _p0)", nil,
+			rowBinary(rfc, "2026-04-02 16:02:07"),
+		},
+		{"day", "in", []any{"2026-04-02"}, "`day` IN (SELECT toDate(parseDateTime64BestEffort(v, 8)) FROM _p0)", nil, rowBinary("2026-04-02")},
+		{"label", "in", []any{rfc}, "`label` IN (SELECT v FROM _p0)", nil, rowBinary(rfc)},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s %s %v", tt.column, tt.op, tt.value), func(t *testing.T) {
+			t.Parallel()
+			sq := &StructuredQuery{Columns: []string{"label"}, Filters: []Filter{{Column: tt.column, Op: tt.op, Value: tt.value}}}
+			result, err := Build("events", sq, schema, nil, 0, DefaultMaxRows)
+			require.NoError(t, err)
+			b, err := result.Bind()
+			require.NoError(t, err)
+			assert.Equal(t, "SELECT `label` FROM `events` WHERE "+tt.wantWhere+" LIMIT 10000", b.SQL)
+			assert.Equal(t, tt.wantParams, paramValues(b))
+			if tt.wantTable == nil {
+				assert.Empty(t, b.Tables)
+			} else {
+				assert.Equal(t, []Table{{Name: "_p0", Data: tt.wantTable}}, b.Tables)
+			}
+		})
+	}
 }
 
 func TestBuild_TableNameWithBacktick(t *testing.T) {
@@ -573,8 +843,8 @@ func TestBuild_InvalidColumns(t *testing.T) {
 			sq: &StructuredQuery{
 				Columns: []string{"page"},
 				// A non-schema order column is allowed as an alias reference and
-				// backtick-quoted; only a '?' (which clickhouse-go's binder would
-				// miscount) is rejected.
+				// backtick-quoted; only a '?' (which the positional-to-named rewrite
+				// would miscount) is rejected.
 				OrderBy: []OrderClause{{Column: "we?ird", Dir: "asc"}},
 			},
 			wantErr: "unsupported order column",
@@ -621,26 +891,29 @@ func TestBuild_TimeRange_SinceOnly(t *testing.T) {
 	assert.NotContains(t, result.SQL, "`ts` <= ?")
 }
 
-func TestBuild_TimeRange_ClickHouseDateTimeFormat(t *testing.T) {
+// TestBuild_TimeRange_BoundsAreRFC3339: time_range bounds are instants in
+// UTC, bound through the column's conversion, so the column's zone cannot
+// shift them (#238 was a T-separated bound ClickHouse refused).
+func TestBuild_TimeRange_BoundsAreRFC3339(t *testing.T) {
 	t.Parallel()
+	schema := &discovery.TableSchema{Name: "clicks", Columns: []discovery.Column{
+		{Name: "page", Type: "String"},
+		{Name: "ts", Type: "DateTime('Asia/Tokyo')"},
+	}}
 	sq := &StructuredQuery{
 		Columns: []string{"page"},
 		TimeRange: &TimeRange{
 			Column: "ts",
-			Since:  "2024-01-01T00:00:00Z",
+			Since:  "2024-01-01T09:00:00+09:00",
 			Until:  "2024-01-02T03:04:05Z",
 		},
 	}
-	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
+	result, err := Build("clicks", sq, schema, nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
-	require.Len(t, result.Params, 2)
-	assert.Equal(t, "2024-01-01 00:00:00", result.Params[0])
-	assert.Equal(t, "2024-01-02 03:04:05", result.Params[1])
-	for _, p := range result.Params {
-		s, ok := p.(string)
-		require.True(t, ok, "time_range bound must be a formatted string param")
-		assert.NotContains(t, s, "T", "must not bind an RFC3339 T-separated string (#238)")
-	}
+	sql, params := bindTexts(t, result)
+	assert.Equal(t, "SELECT `page` FROM `clicks` WHERE `ts` >= parseDateTime64BestEffort({p0:String}, 8, 'Asia/Tokyo')"+
+		" AND `ts` <= parseDateTime64BestEffort({p1:String}, 8, 'Asia/Tokyo') LIMIT 10000", sql)
+	assert.Equal(t, []string{"2024-01-01T00:00:00Z", "2024-01-02T03:04:05Z"}, params)
 }
 
 func TestBuild_FilterUnsupportedOp(t *testing.T) {
@@ -855,7 +1128,7 @@ func TestBuild_AggregationAliasQuotedAndContained(t *testing.T) {
 }
 
 // TestBuild_RejectsBindUnsafeAlias keeps the one alias rejection that remains: a
-// '?' would be miscounted by clickhouse-go's positional value binder.
+// '?' would be miscounted by the positional-to-named parameter rewrite.
 func TestBuild_RejectsBindUnsafeAlias(t *testing.T) {
 	t.Parallel()
 	sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "we?ird"}}}
@@ -1001,4 +1274,160 @@ func TestBuild_InsertResolvedGrantIsRejected(t *testing.T) {
 	res, err := Build("clicks", &StructuredQuery{Columns: []string{"page"}}, testSchema(), selectResolved, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.NotNil(t, res)
+}
+
+// TestBind pins the ClickHouse binding rule: every positional `?` becomes a
+// named parameter or an external table, every scalar binds as String and
+// every list as a table, in the order the WHERE assembly emitted them.
+func TestBind(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		sql        string
+		params     []any
+		wantSQL    string
+		wantParams []Param
+		wantTables []Table
+	}{
+		{
+			name:    "no parameters",
+			sql:     "SELECT `page` FROM `clicks` LIMIT 10",
+			wantSQL: "SELECT `page` FROM `clicks` LIMIT 10",
+		},
+		{
+			name:       "policy predicate keeps its leading position",
+			sql:        "SELECT `page` FROM `clicks` WHERE (`org_id` = ?) AND `page` = ? LIMIT 100",
+			params:     []any{"org-1", "/home"},
+			wantSQL:    "SELECT `page` FROM `clicks` WHERE (`org_id` = {p0:String}) AND `page` = {p1:String} LIMIT 100",
+			wantParams: []Param{{"p0", "org-1"}, {"p1", "/home"}},
+		},
+		{
+			name:       "list binds as one table, named after its position",
+			sql:        "SELECT * FROM `t` WHERE `a` = ? AND `page` IN ? AND `b` = ? LIMIT 10",
+			params:     []any{"x", listParam{Values: []any{"/a", "/b"}}, "y"},
+			wantSQL:    "SELECT * FROM `t` WHERE `a` = {p0:String} AND `page` IN (SELECT v FROM _p1) AND `b` = {p2:String} LIMIT 10",
+			wantParams: []Param{{"p0", "x"}, {"p2", "y"}},
+			wantTables: []Table{{Name: "_p1", Data: rowBinary("/a", "/b")}},
+		},
+		{
+			name:       "a list on a typed column is cast element by element",
+			sql:        "SELECT * FROM `t` WHERE `e` IN ? LIMIT 10",
+			params:     []any{listParam{Values: []any{"it's"}, Conv: conversionFor("Enum8('it\\'s' = 1)")}},
+			wantSQL:    "SELECT * FROM `t` WHERE `e` IN (SELECT accurateCastOrNull(v, 'Enum8(\\'it\\\\\\'s\\' = 1)') FROM _p0) LIMIT 10",
+			wantTables: []Table{{Name: "_p0", Data: rowBinary("it's")}},
+		},
+		{
+			name:       "a timestamp parses in ClickHouse",
+			sql:        "SELECT * FROM `t` WHERE `ts` > ? LIMIT 10",
+			params:     []any{conversionFor("DateTime('Asia/Tokyo')").scalar("2026-06-21T04:00:00.5Z")},
+			wantSQL:    "SELECT * FROM `t` WHERE `ts` > parseDateTime64BestEffort({p0:String}, 8, 'Asia/Tokyo') LIMIT 10",
+			wantParams: []Param{{"p0", "2026-06-21T04:00:00.5Z"}},
+		},
+		{
+			name:   "numbers keep the caller's own digits",
+			sql:    "SELECT * FROM `t` WHERE `a` = ? AND `b` = ? AND `c` = ? LIMIT 10",
+			params: []any{json.Number("12.50"), json.Number("9007199254740993"), true},
+			wantSQL: "SELECT * FROM `t` WHERE `a` = {p0:String} AND `b` = {p1:String} " +
+				"AND `c` = {p2:String} LIMIT 10",
+			wantParams: []Param{{"p0", "12.50"}, {"p1", "9007199254740993"}, {"p2", "true"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			b, err := (&BuildResult{SQL: tt.sql, Params: tt.params}).Bind()
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantSQL, b.SQL)
+			assert.Equal(t, tt.wantParams, b.Params)
+			assert.Equal(t, tt.wantTables, b.Tables)
+		})
+	}
+}
+
+// TestBind_Encoding pins how a value travels. A scalar {p:String} is read by
+// ClickHouse's escaped-text reader, so a raw backslash is taken as the start
+// of an escape sequence ("a\b" came back holding a backspace, measured on
+// 26.6.3.62) and a raw tab ends the field outright (code 457, measured again
+// on 26.8.15.10); chsql.EscapeStringParam encodes both. An `in` list's
+// elements travel as RowBinary, each one's bytes as written behind its
+// length, so nothing in one can end it or reach the SQL.
+func TestBind_Encoding(t *testing.T) {
+	t.Parallel()
+	scalars := []struct {
+		name      string
+		value     any
+		wantParam string
+	}{
+		{"plain", "hello", "hello"},
+		{"single quote needs nothing", "it's", "it's"},
+		{"backslash", `a\b`, `a\\b`},
+		{"windows path", `C:\Users\x`, `C:\\Users\\x`},
+		{"tab", "a\tb", `a\tb`},
+		{"newline", "a\nb", `a\nb`},
+		{"carriage return", "a\rb", `a\rb`},
+		{"a literal backslash-n", `a\nb`, `a\\nb`},
+		{"like pattern", "%foo%", "%foo%"},
+	}
+	for _, tt := range scalars {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, params := bindTexts(t, &BuildResult{SQL: "SELECT ?", Params: []any{tt.value}})
+			assert.Equal(t, []string{tt.wantParam}, params)
+		})
+	}
+
+	t.Run("list elements are their own bytes", func(t *testing.T) {
+		t.Parallel()
+		vals := []string{`it's`, `a\b`, "a\tb", "a\nb", `']) OR 1=1 --`, "", "\x00z", strings.Repeat("x", 300)}
+		list := make([]any, len(vals))
+		for i, v := range vals {
+			list[i] = v
+		}
+		b, err := (&BuildResult{SQL: "SELECT * FROM t WHERE c IN ?", Params: []any{listParam{Values: list}}}).Bind()
+		require.NoError(t, err)
+		assert.Equal(t, "SELECT * FROM t WHERE c IN (SELECT v FROM _p0)", b.SQL)
+		require.Len(t, b.Tables, 1)
+		// Decode the RowBinary back: varint length, then the bytes.
+		var got []string
+		for data := b.Tables[0].Data; len(data) > 0; {
+			n, w := binary.Uvarint(data)
+			require.Positive(t, w)
+			end := w + int(n) //nolint:gosec // G115: a test value's length, far below MaxInt
+			got = append(got, string(data[w:end]))
+			data = data[end:]
+		}
+		assert.Equal(t, vals, got)
+	})
+}
+
+// TestBind_Rejects covers the values and shapes that have no honest binding.
+// A JSON null is the notable one: it used to bind as `col = NULL` (never
+// true), where an empty String parameter would compare against the empty
+// string — a different question, so it is refused (→ 400).
+func TestBind_Rejects(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		sql     string
+		params  []any
+		wantErr string
+	}{
+		{"null value", "SELECT ?", []any{nil}, "must not be null"},
+		{"null in a list", "SELECT ?", []any{listParam{Values: []any{"a", nil}}}, "must not be null"},
+		{"null timestamp", "SELECT ?", []any{conversionFor("DateTime").scalar(nil)}, "must not be null"},
+		{"object value", "SELECT ?", []any{map[string]any{"k": "v"}}, "unsupported filter value type"},
+		{"list as a scalar", "SELECT ?", []any{[]any{"a"}}, "unsupported filter value type"},
+		{"nested list", "SELECT ?", []any{listParam{Values: []any{[]any{"a"}}}}, "nested list"},
+		{"more values than placeholders", "SELECT 1", []any{"a"}, "only 0 placeholders"},
+		{"more placeholders than values", "SELECT ?, ?", []any{"a"}, "more placeholders"},
+		{"placeholder with no values", "SELECT ?", nil, "no bound values"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := (&BuildResult{SQL: tt.sql, Params: tt.params}).Bind()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }

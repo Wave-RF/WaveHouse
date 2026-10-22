@@ -246,7 +246,7 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 		e.nc.Close()
 		return nil, fmt.Errorf("register mq gauges: %w", err)
 	}
-	e.stopping, e.stop = context.WithCancel(context.Background()) //nolint:gosec // G118: Close calls it
+	e.stopping, e.stop = context.WithCancel(context.Background())
 	go e.watch(orDefault(cfg.recheckEvery, topologyRecheck), orDefault(cfg.historyEvery, historyPoll))
 	return e, nil
 }
@@ -868,7 +868,7 @@ func (e *ExternalNATS) UnitStates(ctx context.Context) ([]UnitState, error) {
 		info := c.CachedInfo()
 		states = append(states, UnitState{
 			Unit:          u.id(),
-			Pending:       int(min(info.NumPending, uint64(math.MaxInt))), //nolint:gosec // G115: clamped
+			Pending:       int(min(info.NumPending, uint64(math.MaxInt))),
 			AckPending:    info.NumAckPending,
 			MaxAckPending: info.Config.MaxAckPending,
 			Redelivered:   info.NumRedelivered,
@@ -1004,7 +1004,7 @@ func (e *ExternalNATS) ReplaySince(ctx context.Context, topic Topic, since time.
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		batch, err := cons.Fetch(int(min(remaining, replayBatch)), jetstream.FetchMaxWait(replayPullWait)) //nolint:gosec // capped
+		batch, err := cons.Fetch(int(min(remaining, replayBatch)), jetstream.FetchMaxWait(replayPullWait))
 		if err != nil {
 			return fmt.Errorf("replay fetch: %w", err)
 		}
@@ -1077,7 +1077,7 @@ func (e *ExternalNATS) Stats() (observability.MQStats, error) {
 	s := e.nc.Stats()
 	return observability.MQStats{
 		Connections: boolGauge(e.nc.IsConnected()),
-		InMsgs:      int64(min(s.InMsgs, uint64(1<<62))), //nolint:gosec // capped
+		InMsgs:      int64(min(s.InMsgs, uint64(1<<62))),
 	}, nil
 }
 

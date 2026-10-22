@@ -49,11 +49,11 @@ The `parts_to_delay_insert` and `parts_to_throw_insert` thresholds are documente
 
 Even if you remember to batch client-side, a naive ingest path has no safe way to tell a client "slow down" or "that payload was malformed":
 
-- **Validation happens late.** ClickHouse will accept an insert with a `String` where you expected a `UInt32` — it just rejects the whole block at parse time, and only after the network round-trip. There is no "this field is unknown" signal at the HTTP boundary; you build that yourself.
+- **Validation happens late.** ClickHouse takes the request, then rejects the whole block at parse time when one row has a `String` where you expected a `UInt32` — after the network round-trip — and by default silently drops a field it does not know. There is no "this field is unknown" signal at the HTTP boundary; you build that yourself.
 - **No backpressure channel.** If the merger falls behind, ClickHouse raises an error at the *next* insert. The client has already left.
 - **No DLQ.** Bad events that fail to insert are either lost or logged into ClickHouse's error log. Good luck replaying yesterday's dropped rows.
 
-WaveHouse fixes all three at the gateway: validates every payload against the real `system.columns` schema before accepting, returns `503 Service Unavailable` with a `Retry-After` header when the NATS WAL fills, and retries a ClickHouse outage with backoff while routing rows ClickHouse rejects to a dedicated dead-letter stream, one per tenant, you can inspect via `GET /v1/ops/dlq/stats`.
+WaveHouse fixes all three at the gateway: validates every payload with ClickHouse's own parser, compiled from the real `system.columns` schema, before accepting, returns `503 Service Unavailable` with a `Retry-After` header when the NATS WAL fills, and retries a ClickHouse outage with backoff while routing rows ClickHouse rejects to a dead-letter stream (one per tenant on the embedded queue) you can inspect via `GET /v1/ops/dlq/stats`.
 
 ### No real-time push
 
@@ -110,7 +110,7 @@ flowchart TB
 
 ### No row/column access control
 
-ClickHouse has users and role grants, but nothing like row-level security driven by a JWT claim. If your product serves multiple tenants from a shared table, you're writing middleware to inject `WHERE tenant_id = ?` on every query — and hoping you never miss one. WaveHouse ships Hasura-style policies as a JSON file in the settings directory: per-role `allow_columns`, row-level `filter` with JWT claim templating (`{{ jwt.app_metadata.tenant_id }}`), validated on every load and hot-reloaded on edit.
+ClickHouse has users and role grants, but nothing like row-level security driven by a JWT claim. If your product serves multiple tenants from a shared table, you're writing middleware to inject `WHERE tenant_id = ?` on every query — and hoping you never miss one. WaveHouse ships Hasura-style policies as a JSON file in the settings directory: per-role `allow_columns`, row-level `filter` with JWT claim templating (`{{ jwt.app_metadata.tenant_id }}`), validated on every load and hot-reloaded on edit (or on SIGHUP or the reload endpoint, for a nested directory).
 
 ## Part II — What people actually build instead
 
@@ -136,7 +136,7 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    subgraph single["WAVEHOUSE: 1 BINARY + CLICKHOUSE"]
+    subgraph single["WAVEHOUSE: 1 PROCESS + CLICKHOUSE"]
         direction TB
         Cs2["Clients"]:::neutral
         Cs2 <--> WHone["WaveHouse<br/>embedded NATS · cache · auth ·<br/>streaming · DLQ · dedup"]:::wh
@@ -156,7 +156,7 @@ flowchart TB
 | Real-time push | WebSocket service + bridge from Kafka | Built in (`/v1/stream`) |
 | Schema validation | Custom code in ingest API | Built in (discovers `system.columns`) |
 | Row/column access control | Custom middleware or a dedicated service | Built in (Hasura-style, JWT-driven) |
-| Dead letter queue | Custom retry + dead topic on Kafka | Built in (a dead-letter stream per tenant) |
+| Dead letter queue | Custom retry + dead topic on Kafka | Built in (a dead-letter stream per tenant on the embedded queue) |
 | Client SDK | Each team writes one | `@wavehouse/sdk` (TypeScript, one dependency, codegen) |
 
 The DIY path works — big teams run it — but the ops cost is not small. You're paying for a Kafka cluster (or Confluent bill), a second service you wrote from scratch, and all the debugging hours when the batching consumer stalls at 3 a.m.
@@ -171,7 +171,7 @@ Where it differs from WaveHouse:
 
 | Dimension | Tinybird | WaveHouse |
 | --------- | -------- | --------- |
-| Hosting | SaaS only (managed tiers: Developer $49/mo → Enterprise custom) | Self-host, single binary |
+| Hosting | SaaS only (managed tiers: Developer $49/mo → Enterprise custom) | Self-host, one binary + local artifact |
 | Pricing model | Pay for allocated vCPU/QPS/storage; egress fees for cross-region | Your infra; no per-query or per-GB fee |
 | Data residency | Their infrastructure | Your infrastructure |
 | Source of truth for schema | Tinybird datasource definitions | Your ClickHouse tables (`system.columns`) |
@@ -186,11 +186,11 @@ Tinybird wins on "zero ops to start." WaveHouse wins on "own your data plane and
 
 | Concern | Direct ClickHouse | Kafka + ClickHouse (DIY) | Tinybird | **WaveHouse** |
 | ------- | ----------------- | ----------------------- | -------- | ------------- |
-| Single-binary deployment | — | — | N/A (SaaS) | ✓ |
+| Single-process deployment | — | — | N/A (SaaS) | ✓ |
 | Self-hosted | ✓ | ✓ | ✗ | ✓ |
 | Handles N-row inserts safely | ✗ merge blowup | ✓ via Kafka | ✓ | ✓ native |
 | Schema validation at the edge | ✗ | Custom | ✓ | ✓ (discovers schema) |
-| Dead letter queue | ✗ | Custom | Partial | ✓ dead-letter stream per tenant |
+| Dead letter queue | ✗ | Custom | Partial | ✓ dead-letter stream (per tenant on the embedded queue) |
 | Backpressure (503 + Retry-After) | ✗ | Custom | ✓ | ✓ |
 | Idempotent ingest (dedup by ID) | ✗ | Custom | ✓ | ✓ optional |
 | Real-time push (SSE) | ✗ | Custom service | ✗ | ✓ native, gap-fill |
@@ -243,7 +243,7 @@ flowchart TB
 | NATS JetStream publish | ~1 ms | ~5 ms |
 | API `200 OK` to client | ~2 ms | ~8 ms |
 | Hub broadcast to SSE subscriber | ~1 ms | ~10 ms |
-| Batch flush to ClickHouse | 5 s (configurable) | 5 s + ClickHouse insert time |
+| Batch flush to ClickHouse | ≤ 5 s (sooner at 500 rows; fixed) | 5 s + ClickHouse insert time |
 | Query cache hit (L1) | < 0.5 ms | ~1 ms |
 | Query cache miss → ClickHouse | depends on query | depends on query |
 

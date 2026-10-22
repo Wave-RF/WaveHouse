@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +19,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 	"github.com/Wave-RF/WaveHouse/pkg/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
@@ -33,12 +36,12 @@ func TestNew_RolesChooseTheComponents(t *testing.T) {
 		want  []string
 	}{
 		{"every role", config.AllRoles(), []string{
-			"clickhouse", "schema discovery", "dedupe", "mq", "cache", "coord",
+			"clickhouse", "type layer", "schema discovery", "dedupe", "mq", "cache", "coord",
 			"sweeper", "hub bridge", "keepalive", "ingest worker",
 			"auth", "sighup", "settings watcher", "http server",
 		}},
 		{"api", []config.Role{config.RoleAPI}, []string{
-			"clickhouse", "schema discovery", "dedupe", "mq", "cache", "coord",
+			"clickhouse", "type layer", "schema discovery", "dedupe", "mq", "cache", "coord",
 			"hub bridge", "keepalive",
 			"auth", "sighup", "settings watcher", "http server",
 		}},
@@ -68,11 +71,62 @@ func TestNew_RolesChooseTheComponents(t *testing.T) {
 	}
 }
 
+// Only the api role opens the type layer. Over a search path holding no
+// chtypes artifact, with autofetch off, a process without it boots — the
+// ingest worker needs only the static insert settings — and an API process
+// refuses to start, naming where it looked.
+func TestNew_OnlyTheAPIRoleNeedsTheArtifact(t *testing.T) {
+	// No explicit directory, no $CHTYPES_CACHE, an empty per-user cache, and
+	// no fetch on demand.
+	t.Setenv("CHTYPES_CACHE", "")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if _, err := typelayer.NewEngine(typelayer.Config{}); err == nil {
+		t.Skip("a chtypes artifact is installed in a system directory, so this host has no search path without one")
+	}
+
+	for _, roles := range [][]config.Role{
+		{config.RoleIngest},
+		{config.RoleSweeper},
+		{config.RoleIngest, config.RoleSweeper},
+	} {
+		t.Run(fmt.Sprint(roles), func(t *testing.T) {
+			cfg := testConfig(t, writeSettings(t, nil))
+			cfg.Roles = roles
+			a := newApp(t, cfg, Options{})
+			assert.Nil(t, a.Types())
+			assert.NotContains(t, componentNames(a), "type layer")
+		})
+	}
+
+	t.Run("api", func(t *testing.T) {
+		guardGlobals(t)
+		cfg := testConfig(t, writeSettings(t, nil))
+		cfg.Roles = []config.Role{config.RoleAPI}
+		a, err := New(t.Context(), Options{Config: cfg})
+		require.ErrorContains(t, err, "type layer: chtypes: no artifact installed for")
+		assert.Nil(t, a)
+	})
+
+	// With autofetch on, nothing installed is not a boot failure: a tenant's
+	// line is fetched when it first binds.
+	t.Run("api with autofetch", func(t *testing.T) {
+		guardGlobals(t)
+		cfg := testConfig(t, writeSettings(t, nil))
+		cfg.Roles = []config.Role{config.RoleAPI}
+		cfg.ClickHouse.ChtypesAutofetch = true
+		cfg.ClickHouse.ChtypesArtifactsURL = "file://" + t.TempDir() // publishes nothing
+		a, err := New(t.Context(), Options{Config: cfg})
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, a.Close(context.Background())) })
+		assert.NotNil(t, a.Types())
+	})
+}
+
 func TestNew_RefusesAConfigWithoutRoles(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig(t, writeSettings(t, nil))
 	cfg.Roles = nil
-	_, err := New(t.Context(), Options{Config: cfg})
+	_, err := newForTest(t.Context(), t, Options{Config: cfg})
 	require.ErrorContains(t, err, "roles is empty")
 }
 

@@ -71,6 +71,7 @@ func bootRedisApp(t *testing.T, redisAddr, prefix string, timeout time.Duration)
 	ctx := context.Background()
 	settingsDir, err := writeTestSettings(e.ch)
 	require.NoError(t, err)
+	t.Cleanup(func() { removeTestSettings(settingsDir) })
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
