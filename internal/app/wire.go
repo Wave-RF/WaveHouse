@@ -804,8 +804,9 @@ func (a *App) wireStreaming() {
 // it consumes only the shards this process is assigned (ingest.ClaimShards),
 // so each table has one writer. Each served tenant's batch limits are
 // adopted here, checked against the consumer's ack wait at boot and after
-// every reload (ingestLimits): boot refuses a tenant whose limits do not
-// fit, naming both values.
+// every reload (ingestLimits): a tenant whose limits do not fit refuses boot
+// over a flat directory, naming both values, and is served with none over a
+// nested one, the registry's rule for the shape.
 func (a *App) wireIngestWorker() error {
 	// The consumer settings are boot config's, one value per process: under
 	// nats the shard durables must agree with them (wireNATSMQ).
@@ -814,7 +815,9 @@ func (a *App) wireIngestWorker() error {
 	}
 	consumer := ingest.ConsumerSettings{AckWait: a.cfg.MQ.AckWait, MaxAckPending: a.cfg.MQ.MaxAckPending, Prefetch: a.cfg.MQ.Prefetch}
 	limits := newIngestLimits(a.tenants, consumer.AckWait)
-	if err := limits.reconcile(true); err != nil {
+	err := limits.reconcile(true)
+	a.tenants.Reconciled("ingest", err)
+	if err != nil && !a.tenants.Nested() {
 		return fmt.Errorf("ingest limits: %w", err)
 	}
 	a.ingestLimits = limits

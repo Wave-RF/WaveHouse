@@ -20,8 +20,8 @@ var seedIngestLimits = ingest.Limits{MaxBatchBytes: 262144, MaxBatchWait: 5 * ti
 // A batch's wait plus its insert deadline must stay under mq.ack_wait, or
 // the queue redelivers the rows of a batch still inserting. The settings
 // directory cannot see boot config, so the ingest process checks it: at
-// boot a violation refuses to start, naming both values; the boundary is
-// strict.
+// boot over a flat directory a violation refuses to start, naming both
+// values; the boundary is strict.
 func TestNew_IngestLimitsOverAckWaitRefuseBoot(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig(t, writeSettings(t, nil))
@@ -34,6 +34,36 @@ func TestNew_IngestLimitsOverAckWaitRefuseBoot(t *testing.T) {
 	lim, ok := a.ingestLimits.For(tenant.Default)
 	require.True(t, ok)
 	assert.Equal(t, seedIngestLimits, lim)
+}
+
+// Over a nested directory a tenant whose values fail the rule at boot is
+// served with none — the registry's rule for the shape, as the queue budget
+// and the dedupe stores follow it — logged and counted, so the worker hands
+// its rows back to the queue (its tests), and every other tenant boots with
+// its limits; the reload that fixes the folder adopts them.
+func TestNew_NestedIngestLimitsRefusedServeTheTenantWithNone(t *testing.T) {
+	t.Parallel()
+	root := writeNestedSettings(t, map[string]map[string]any{
+		"acme":   nil,
+		"globex": {"ingest": map[string]any{"max_batch_bytes": 1024, "max_batch_wait_ms": 30_000, "retry_backoff_max": 30}}, // 30s + 30s, not under 60s
+	})
+	a := newApp(t, testConfig(t, root), Options{})
+	got, ok := a.ingestLimits.For("acme")
+	require.True(t, ok, "the other tenant boots with its limits")
+	assert.Equal(t, seedIngestLimits, got)
+	_, ok = a.ingestLimits.For("globex")
+	assert.False(t, ok, "refused at boot with none to keep")
+	stats := a.tenants.Stats()
+	assert.Equal(t, int64(1), stats.ReconcileFailures["ingest"])
+	assert.False(t, stats.LastSuccessful, "the boot adoption is partial")
+
+	addTenantFolder(t, root, "globex", nil)
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	got, ok = a.ingestLimits.For("globex")
+	require.True(t, ok, "the reload that fixes the folder adopts its limits")
+	assert.Equal(t, seedIngestLimits, got)
+	assert.True(t, a.tenants.Stats().LastSuccessful)
 }
 
 // On a reload, a tenant whose new values fail the rule keeps the ones it

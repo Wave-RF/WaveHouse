@@ -230,15 +230,24 @@ func TestIngestTraceContinuity_EndToEnd(t *testing.T) {
 	req2.End()
 
 	require.Eventually(t, func() bool { return inserts.Load() >= 1 }, 6*time.Second, 25*time.Millisecond, "the worker never inserted")
+	// The flush span ends after its insert's, once the batch is acked, so
+	// wait for the flush spans holding all three rows rather than for the
+	// insert span: read right after the insert's end, the flushes could be
+	// empty, or a split batch's second flush still open.
 	require.Eventually(t, func() bool {
-		n := 0
+		rows := int64(0)
 		for _, s := range rec.Ended() {
-			if s.Name() == "clickhouse.insert" {
-				n++
+			if s.Name() != "IngestWorker.Flush" {
+				continue
+			}
+			for _, kv := range s.Attributes() {
+				if kv.Key == "rows" {
+					rows += kv.Value.AsInt64()
+				}
 			}
 		}
-		return n >= 1
-	}, 4*time.Second, 25*time.Millisecond, "the insert span never ended")
+		return rows >= 3
+	}, 4*time.Second, 25*time.Millisecond, "the flush spans never ended")
 
 	// One batch, since all three rows arrived inside the flush window; a
 	// loaded host may split them, so collect every flush span.

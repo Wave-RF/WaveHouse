@@ -27,8 +27,10 @@ import (
 // reload retries; a tenant newly served with none to keep has no limits, and
 // the worker hands its rows back to the queue, one ack wait at a time, until
 // a reload adopts valid ones — nothing of its is parked, since its ingest
-// keeps accepting rows. At boot a failure refuses to start, naming both
-// values.
+// keeps accepting rows. At boot a refusal follows the registry's rule for
+// the shape, as the queue budget and the dedupe stores do: fatal over a flat
+// directory, naming both values; over a nested one the tenant is served with
+// none, logged and counted as on a reload, and the other tenants boot.
 type ingestLimits struct {
 	tenants *settings.Registry
 	ackWait time.Duration
@@ -70,8 +72,9 @@ func (l *ingestLimits) For(id tenant.ID) (ingest.Limits, bool) {
 
 // reconcile adopts every served tenant's limits that fit mq.ack_wait, keeps
 // the previous ones of a tenant whose new ones do not, and forgets the
-// tenants no longer served. It returns every refusal, which boot refuses
-// on and a reload reports; on a reload each is logged too.
+// tenants no longer served. It returns every refusal, which boot over a flat
+// directory refuses on; otherwise — a reload, or boot over a nested
+// directory, where the other tenants boot — each is logged too.
 func (l *ingestLimits) reconcile(boot bool) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -88,8 +91,8 @@ func (l *ingestLimits) reconcile(boot bool) error {
 		errs = append(errs, fmt.Errorf("tenant %s: %w", id, err))
 		prev, had := cur[id]
 		next[id] = prev
-		if boot {
-			continue
+		if boot && !l.tenants.Nested() {
+			continue // the caller refuses boot on the error, which names the values
 		}
 		if had && prev.ok {
 			slog.Error("ingest limits refused; keeping the previous values, the next reload retries", "tenant", id, "error", err)
