@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -535,6 +536,15 @@ func (v *validator) checkTableName(mapPath, table string) {
 	}
 }
 
+// maxSeconds and maxMillis bound the integer duration keys: a larger count
+// overflows the time.Duration the store converts it to, wrapping to a
+// duration nothing asked for (a clickhouse.insert_timeout of
+// 36028797018963969 seconds would wrap to one second), so it is refused.
+const (
+	maxSeconds = math.MaxInt64 / int64(time.Second)
+	maxMillis  = math.MaxInt64 / int64(time.Millisecond)
+)
+
 // checkClickHouse validates the connection wiring: every field required, the
 // native address a host:port, the HTTP port in range, the scheme http or
 // https, and the timeout positive. Reachability is deliberately not checked
@@ -578,8 +588,8 @@ func (v *validator) checkClickHouse(ch *ClickHouseConfig) {
 	}
 	if ch.InsertTimeout == nil {
 		v.required("clickhouse.insert_timeout")
-	} else if *ch.InsertTimeout < 1 {
-		v.errorf(FileConfig, "clickhouse.insert_timeout", "must be >= 1 second, got %d", *ch.InsertTimeout)
+	} else if *ch.InsertTimeout < 1 || int64(*ch.InsertTimeout) > maxSeconds {
+		v.errorf(FileConfig, "clickhouse.insert_timeout", "must be in 1-%d seconds, got %d", maxSeconds, *ch.InsertTimeout)
 	}
 	if ch.TLS == nil {
 		v.required("clickhouse.tls")
@@ -844,13 +854,13 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 		}
 		if i.MaxBatchWaitMS == nil {
 			v.required("ingest.max_batch_wait_ms")
-		} else if *i.MaxBatchWaitMS < 1 {
-			v.errorf(FileConfig, "ingest.max_batch_wait_ms", "must be >= 1 ms, got %d", *i.MaxBatchWaitMS)
+		} else if *i.MaxBatchWaitMS < 1 || int64(*i.MaxBatchWaitMS) > maxMillis {
+			v.errorf(FileConfig, "ingest.max_batch_wait_ms", "must be in 1-%d ms, got %d", maxMillis, *i.MaxBatchWaitMS)
 		}
 		if i.RetryBackoffMax == nil {
 			v.required("ingest.retry_backoff_max")
-		} else if *i.RetryBackoffMax < 1 {
-			v.errorf(FileConfig, "ingest.retry_backoff_max", "must be >= 1 second, got %d", *i.RetryBackoffMax)
+		} else if *i.RetryBackoffMax < 1 || int64(*i.RetryBackoffMax) > maxSeconds {
+			v.errorf(FileConfig, "ingest.retry_backoff_max", "must be in 1-%d seconds, got %d", maxSeconds, *i.RetryBackoffMax)
 		}
 	}
 	if q := c.Query; q == nil {

@@ -116,10 +116,11 @@ func TestIngestLimits_ForReconcilesAServedTenantOnMiss(t *testing.T) {
 	assert.False(t, ok, "values that fail the rule, with none to keep")
 }
 
-// The rule itself, at its boundary, and against a value that wrapped on its
-// way from the file's integer to a duration: a negative wait, deadline or
-// sum must be refused, never pass as "under" the ack wait, since a negative
-// insert deadline would leave the INSERT unbounded.
+// The rule itself, at its boundary; against a negative wait or deadline,
+// which only a Limits built outside the validator carries (a negative insert
+// deadline would leave the INSERT unbounded); and against two values that
+// each fit a duration but sum past one, as validated values can (a wrapped
+// sum would read as under the ack wait): none may pass.
 func TestCheckIngestLimits(t *testing.T) {
 	t.Parallel()
 	lim := ingest.Limits{MaxBatchWait: 5 * time.Second, InsertTimeout: 30 * time.Second}
@@ -127,12 +128,12 @@ func TestCheckIngestLimits(t *testing.T) {
 	assert.ErrorContains(t, checkIngestLimits(lim, 35*time.Second), "is not under mq.ack_wait 35s")
 	assert.ErrorContains(t, checkIngestLimits(lim, time.Minute/2), "not under mq.ack_wait 30s")
 
-	huge := int64(30_000_000_000) // 30s written in nanoseconds: the seconds-to-duration conversion wraps
+	huge := int64(30_000_000_000) // 30s written in nanoseconds, a count the validator refuses in a file: its conversion wraps
 	wrapped := time.Duration(huge) * time.Second
 	require.Negative(t, wrapped, "the case under test")
 	assert.Error(t, checkIngestLimits(ingest.Limits{MaxBatchWait: 5 * time.Second, InsertTimeout: wrapped}, time.Minute), "a wrapped insert deadline")
 	assert.Error(t, checkIngestLimits(ingest.Limits{MaxBatchWait: wrapped, InsertTimeout: 30 * time.Second}, time.Minute), "a wrapped wait")
-	// Each in range, their sum wrapped.
+	// Each fits a duration, as validated values do; their sum wraps.
 	big := time.Duration(1<<62) + time.Second
 	assert.Error(t, checkIngestLimits(ingest.Limits{MaxBatchWait: big, InsertTimeout: big}, time.Minute), "a wrapped sum")
 	assert.Error(t, checkIngestLimits(ingest.Limits{MaxBatchWait: 0, InsertTimeout: 30 * time.Second}, time.Minute), "a zero wait")

@@ -116,13 +116,13 @@ func limitsOf(store *settings.Store) ingest.Limits {
 // INSERT deadlines the rule does not count, so the seeds keep the sum well
 // under the ack wait; a flush-level bound is not built.
 func checkIngestLimits(lim ingest.Limits, ackWait time.Duration) error {
-	// Compared without adding: the validated integers are converted to
-	// durations by multiplication, which wraps for a value off by orders of
-	// magnitude, and so could their sum; a wrapped value can land anywhere,
-	// negative included, and a negative insert deadline would leave the
-	// INSERT unbounded. So each must be positive on its own, and the insert
-	// must fit what the wait leaves of the ack wait: whatever a wrap
-	// produces, what passes lies inside (0, ackWait).
+	// Compared without adding: each value fits a duration (the validator
+	// bounds the file's integers), but two can still sum past one, and a
+	// wrapped sum lands anywhere, negative included. So each must be
+	// positive on its own — a Limits built outside the validator can hold
+	// anything, and a negative insert deadline would leave the INSERT
+	// unbounded — and the insert must fit what the wait leaves of the ack
+	// wait: what passes lies inside (0, ackWait).
 	wait, insert := lim.MaxBatchWait, lim.InsertTimeout
 	if wait <= 0 || insert <= 0 || wait >= ackWait || insert >= ackWait-wait {
 		return fmt.Errorf("ingest.max_batch_wait_ms %d plus clickhouse.insert_timeout %d is not under mq.ack_wait %s: the queue would redeliver the rows of a batch still inserting, and they would insert twice",
