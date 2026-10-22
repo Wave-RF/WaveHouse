@@ -396,6 +396,46 @@ describe("QueryBuilder", () => {
     expect(received[0].page).toBe("/home");
   });
 
+  it("filters a stream's timestamps by instant, not by spelling", () => {
+    // The server renders a DateTime64(3) as `…00.000Z`; a filter may say `…00Z`
+    // or use an offset. Compared as strings, `…00.000Z` < `…00Z`.
+    let next: ((e: any) => void) | undefined;
+    mockCreateStream.mockReturnValue({
+      subscribe(sub: any) {
+        next = sub.next;
+        return () => {};
+      },
+      close() {},
+    } as any);
+    const seen = (b: QueryBuilder, ts: string[]): string[] => {
+      const got: string[] = [];
+      b.stream().subscribe({ next: (e: any) => got.push(e.data.ts) });
+      for (const t of ts) next?.({ table: "clicks", timestamp: t, data: { ts: t } });
+      return got;
+    };
+    const rows = [
+      "2026-01-15T10:29:59.999Z",
+      "2026-01-15T10:30:00.000Z",
+      "2026-01-15T10:30:00.001Z",
+    ];
+
+    expect(seen(builder().where("ts", ">", "2026-01-15T10:30:00Z"), rows)).toEqual([rows[2]]);
+    expect(seen(builder().where("ts", ">=", "2026-01-15T12:30:00+02:00"), rows)).toEqual(
+      rows.slice(1),
+    );
+    expect(seen(builder().where("ts", "<", "2026-01-15T10:30:00Z"), rows)).toEqual([rows[0]]);
+    expect(seen(builder().where("ts", "=", "2026-01-15T10:30:00Z"), rows)).toEqual([rows[1]]);
+    expect(seen(builder().where("ts", "!=", "2026-01-15T10:30:00Z"), rows)).toEqual([
+      rows[0],
+      rows[2],
+    ]);
+    expect(seen(builder().where("ts", "in", ["2026-01-15T10:30:00.001+00:00"]), rows)).toEqual([
+      rows[2],
+    ]);
+    // Strings that are not timestamps keep strict equality and string order.
+    expect(seen(builder().where("ts", ">", "/a"), ["/b", "/a"])).toEqual(["/b"]);
+  });
+
   // --- Complex chain ---
 
   it("builds a complex query", async () => {

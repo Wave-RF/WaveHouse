@@ -119,18 +119,18 @@ func TestClickHouseRoutes_NoPoolIs503(t *testing.T) {
 		DefaultRole: "viewer",
 		Tables:      map[string]policy.TablePolicy{"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}}}},
 	})
-	noConn := func(*settings.Store) driver.Conn { return nil }
+	noTarget := func(*settings.Store) chconn.Target { return chconn.Target{} }
 
 	t.Run("structured query", func(t *testing.T) {
 		t.Parallel()
-		h := NewStructuredQueryHandler(noConn, nil, fixedRegistry(reg), allowAll, nil, noTimeout, nil)
+		h := NewStructuredQueryHandler(noTarget, nil, fixedRegistry(reg), allowAll, nil, noTimeout, nil)
 		w := httptest.NewRecorder()
 		h.Handle(w, withTenant(structuredQueryRequest(t, "clicks", selectAllQuery())))
 		assertUnavailable(t, w, noConnectionMessage, retryAfterPool)
 	})
 	t.Run("pipe execute", func(t *testing.T) {
 		t.Parallel()
-		h := NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), allowAll, noConn, nil, noTimeout)
+		h := NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), allowAll, noTarget, nil, noTimeout)
 		w := httptest.NewRecorder()
 		h.Execute(w, withTenant(pipesRequest(t, http.MethodGet, "/v1/pipes/top_pages", "top_pages", nil)))
 		assertUnavailable(t, w, noConnectionMessage, retryAfterPool)
@@ -139,7 +139,7 @@ func TestClickHouseRoutes_NoPoolIs503(t *testing.T) {
 	// keeps its Retry-After where a failed write's answer drops it.
 	t.Run("write pipe execute", func(t *testing.T) {
 		t.Parallel()
-		h := NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "log", SQL: "INSERT INTO audit_log VALUES (1)", AllowedRoles: []string{"viewer"}}), allowAll, noConn, nil, noTimeout)
+		h := NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "log", SQL: "INSERT INTO audit_log VALUES (1)", AllowedRoles: []string{"viewer"}}), allowAll, noTarget, nil, noTimeout)
 		w := httptest.NewRecorder()
 		h.Execute(w, withTenant(pipesRequest(t, http.MethodGet, "/v1/pipes/log", "log", nil)))
 		assertUnavailable(t, w, noConnectionMessage, retryAfterPool)
@@ -249,8 +249,8 @@ func TestClickHouseOpsRoutes_TenantParam(t *testing.T) {
 	}
 }
 
-// The ClickHouse-side getters — the connection, the registry, the HTTP
-// target and the query deadline — receive the request's own tenant store
+// The ClickHouse-side getters — the registry, the HTTP target and the query
+// deadline — receive the request's own tenant store
 // through the real router, on the routes that reach ClickHouse: two tenants
 // alternating never hand one the other's.
 func TestNewRouter_ClickHouseGettersReceiveTheRequestTenantsStore(t *testing.T) {
@@ -262,14 +262,19 @@ func TestNewRouter_ClickHouseGettersReceiveTheRequestTenantsStore(t *testing.T) 
 		DefaultRole: "viewer",
 		Tables:      map[string]policy.TablePolicy{"clicks": {"viewer": {Select: &policy.SelectPermissions{AllowColumns: []string{"page"}}}}},
 	})
-	conn := func(s *settings.Store) driver.Conn { record(s); return &countingConn{} }
+	ch := &fakeCH{}
+	target := func(s *settings.Store) chconn.Target { record(s); return ch.target(s) }
 	registry := func(s *settings.Store) *discovery.SchemaRegistry { record(s); return reg }
 	timeout := func(s *settings.Store) time.Duration { record(s); return time.Second }
+	sq := NewStructuredQueryHandler(target, nil, registry, viewer, func(*settings.Store) int { return 60 }, timeout, nil)
+	sq.ch = ch.reader()
+	pipesHandler := NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), viewer, target, nil, timeout)
+	pipesHandler.ch = ch.reader()
 	router := NewRouter(Dependencies{
 		Tenants:         tenants,
 		Ingest:          NewIngestHandler(registry, &testutil.MockPublisher{}),
-		StructuredQuery: NewStructuredQueryHandler(conn, nil, registry, viewer, func(*settings.Store) int { return 60 }, timeout, nil),
-		Pipes:           NewPipesHandler(staticPipes(&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}}), viewer, conn, nil, timeout),
+		StructuredQuery: sq,
+		Pipes:           pipesHandler,
 		Query:           &QueryHandler{},
 		SSE:             NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:          &HealthHandler{},

@@ -182,9 +182,9 @@ func (r *stubPartsRows) Scan(dest ...any) error {
 		return r.scanErr
 	}
 	row := r.rows[r.i-1]
-	*(dest[0].(*string)) = row.table
-	*(dest[1].(*uint64)) = row.uncompressed
-	*(dest[2].(*uint64)) = row.onDisk
+	*dest[0].(*string) = row.table
+	*dest[1].(*uint64) = row.uncompressed
+	*dest[2].(*uint64) = row.onDisk
 	return nil
 }
 

@@ -100,11 +100,11 @@ type TenantConfig struct {
 // certificate file that cannot be read or parsed is the one exception: boot
 // refuses, and a reload keeps the previous connection.
 type ClickHouseConfig struct {
-	// Addr is the native-protocol host:port (schema discovery, structured
-	// queries, pipes, /readyz).
+	// Addr is the native-protocol host:port (schema discovery, /readyz, the
+	// storage metrics); queries and inserts go over the HTTP interface.
 	Addr *string `json:"addr"`
-	// HTTPPort and HTTPScheme address the HTTP interface (ingest INSERTs and
-	// the raw-SQL proxy) on the same host as Addr.
+	// HTTPPort and HTTPScheme address the HTTP interface (structured queries,
+	// pipes, ingest INSERTs and the raw-SQL proxy) on the same host as Addr.
 	HTTPPort   *int    `json:"http_port"`
 	HTTPScheme *string `json:"http_scheme"`
 	Database   *string `json:"database"`
@@ -119,12 +119,14 @@ type ClickHouseConfig struct {
 	// material applies to whichever hop uses TLS. Paths, checked for shape
 	// only — the files are read when the connection is (re)built.
 	TLS *ClickHouseTLS `json:"tls"`
-	// Headers are set on every HTTP-interface request (ingest INSERTs, the
-	// raw-SQL proxy) ahead of WaveHouse's own credential and content-type
-	// headers, which therefore win. The native protocol carries none.
+	// Headers are set on every HTTP-interface request (structured queries,
+	// pipes, ingest INSERTs, the raw-SQL proxy) ahead of WaveHouse's own
+	// credential and content-type headers, which therefore win. The native
+	// protocol (discovery, /readyz) carries none.
 	Headers map[string]string `json:"headers"`
 	// MaxOpenConns and MaxIdleConns size the native driver's pool: each
-	// >= 1, open >= idle.
+	// >= 1, open >= idle. MaxOpenConns also caps the HTTP connections
+	// structured queries and pipes hold.
 	MaxOpenConns *int `json:"max_open_conns"`
 	MaxIdleConns *int `json:"max_idle_conns"`
 }

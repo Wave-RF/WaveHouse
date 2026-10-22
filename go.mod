@@ -1,6 +1,6 @@
 module github.com/Wave-RF/WaveHouse
 
-go 1.26.10
+go 1.27.3
 
 tool (
 	github.com/Zxilly/go-size-analyzer/cmd/gsa
@@ -29,7 +29,6 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-chi/chi/v5 v5.5.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/google/uuid v1.6.0
 	github.com/ilyakaznacheev/cleanenv v1.5.0
 	github.com/klauspost/compress v1.20.3
 	github.com/moby/moby/api v1.56.1
@@ -45,6 +44,7 @@ require (
 	github.com/samber/slog-sampling v1.7.0
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
+	github.com/wave-rf/chtypes/go/v2 v2.0.0-dev.11
 	go.opentelemetry.io/contrib/bridges/otelslog v0.21.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.72.0
@@ -151,6 +151,7 @@ require (
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
 	github.com/google/subcommands v1.2.0 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.31.0 // indirect
 	github.com/jedib0t/go-pretty/v6 v6.7.10 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect

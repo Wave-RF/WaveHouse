@@ -9,7 +9,9 @@
 # safe: dockerd dedupes layer downloads.
 #
 # The images are read from the suite's Go sources (`fooImage = "<ref>"` and
-# `Image: "<ref>"`), so no tag is written down twice.
+# `Image: "<ref>"`), so no tag is written down twice. ClickHouse is the
+# exception no suite spells out as a literal: every suite runs the one version
+# internal/chversion pins, so its tag is read from there.
 #
 # Usage: scripts/ci/prefetch-test-images.sh [--list] <suite>
 #   <suite>  an integration part (app, backends) or e2e
@@ -34,6 +36,8 @@ esac
 images="$(grep -rhoE --include='*.go' '[A-Za-z]*Image[[:space:]]*[:=][[:space:]]*"[^"]+"' "${dirs[@]}" |
   sed -E 's/.*"([^"]+)"$/\1/' |
   grep -E '^[a-z0-9.-]+(/[a-z0-9._-]+)*:[A-Za-z0-9._-]+$' | sort -u || true)"
+clickhouse="$(sed -nE 's#^const Test = "([^"]+)"$#clickhouse/clickhouse-server:\1#p' internal/chversion/chversion.go)"
+images="$(printf '%s\n%s\n' "$images" "$clickhouse" | sed '/^$/d' | sort -u)"
 
 if [ "$list" = 1 ]; then
   [ -n "$images" ] && echo "$images"

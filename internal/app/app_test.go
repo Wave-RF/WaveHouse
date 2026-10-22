@@ -42,6 +42,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer/typelayertest"
 	model "github.com/Wave-RF/WaveHouse/pkg/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
@@ -73,9 +74,10 @@ func closedPort(t *testing.T) int {
 	return tcp.Port
 }
 
-// writeSettings materializes the embedded seed with the ClickHouse address
-// pointed at a closed port, then applies patch to config.json's top-level
-// blocks (each value re-marshaled whole).
+// writeSettings materializes the embedded seed with the ClickHouse native and
+// HTTP ports pointed at closed ones — the query paths speak HTTP, so a
+// developer's ClickHouse on :8123 must not answer them — then applies patch to
+// config.json's top-level blocks (each value re-marshaled whole).
 func writeSettings(t *testing.T, patch map[string]any) string {
 	t.Helper()
 	files, err := model.Seed()
@@ -85,6 +87,7 @@ func writeSettings(t *testing.T, patch map[string]any) string {
 	var ch map[string]any
 	require.NoError(t, json.Unmarshal(doc["clickhouse"], &ch))
 	ch["addr"] = closedAddr(t)
+	ch["http_port"] = closedPort(t)
 	doc["clickhouse"], err = json.Marshal(ch)
 	require.NoError(t, err)
 	// The seed's auth block validates no token; the tests mint HMAC tokens.
@@ -146,10 +149,23 @@ func guardGlobals(t *testing.T) {
 func newApp(t *testing.T, cfg *config.Config, opts Options) *App {
 	t.Helper()
 	opts.Config = cfg
-	a, err := New(t.Context(), opts)
+	a, err := newForTest(t.Context(), t, opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, a.Close(context.Background())) })
 	return a
+}
+
+// newForTest is New for a test. A boot with the api role opens the type
+// layer, which, with a test config's autofetch off, refuses to start without a
+// chtypes artifact, so the artifact is fetched first and such a test is
+// skipped where it cannot be — or failed under WAVEHOUSE_TEST_REQUIRE_CHTYPES=1,
+// as CI runs it.
+func newForTest(ctx context.Context, t *testing.T, opts Options) (*App, error) {
+	t.Helper()
+	if opts.Config != nil && opts.Config.Has(config.RoleAPI) {
+		typelayertest.SkipWithoutArtifact(t)
+	}
+	return New(ctx, opts)
 }
 
 func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
@@ -174,6 +190,7 @@ func TestNew_DegradedBootServesDiagnostics(t *testing.T) {
 
 	assert.NotNil(t, a.Registry())
 	assert.NotNil(t, a.MQ())
+	assert.NotNil(t, a.Types())
 	assert.NoError(t, a.Close(context.Background()))
 	assert.NoError(t, a.Close(context.Background()), "Close is idempotent")
 }
@@ -409,7 +426,7 @@ func TestNew_NestedWithoutAnOperatorKeyWarnsTheOpsTreeIsClosed(t *testing.T) {
 		logs := logtest.Capture(t, slog.LevelWarn)
 		cfg := testConfig(t, settingsDir)
 		cfg.Auth.OperatorKey = operatorKey
-		a, err := New(t.Context(), Options{Config: cfg})
+		a, err := newForTest(t.Context(), t, Options{Config: cfg})
 		require.NoError(t, err)
 		t.Cleanup(func() { assert.NoError(t, a.Close(context.Background())) })
 		return logs.String()
@@ -586,7 +603,7 @@ func TestNew_RefusesALayerWithoutABackend(t *testing.T) {
 			t.Parallel()
 			cfg := testConfig(t, writeSettings(t, nil))
 			tc.unset(cfg)
-			_, err := New(t.Context(), Options{Config: cfg})
+			_, err := newForTest(t.Context(), t, Options{Config: cfg})
 			require.ErrorContains(t, err, tc.key+` "" has no wiring`)
 		})
 	}
@@ -610,7 +627,7 @@ func TestNew_DedupeOpenFailure(t *testing.T) {
 		t.Parallel()
 		cfg := testConfig(t, writeSettings(t, dedupeOn))
 		block(t, cfg.DataDir)
-		_, err := New(t.Context(), Options{Config: cfg})
+		_, err := newForTest(t.Context(), t, Options{Config: cfg})
 		require.ErrorContains(t, err, "dedupe open")
 	})
 	t.Run("nested fails closed", func(t *testing.T) {
@@ -649,7 +666,7 @@ func TestNew_QueueOpenFailure(t *testing.T) {
 		t.Parallel()
 		cfg := testConfig(t, writeSettings(t, nil))
 		block(t, cfg.DataDir, "DLQ_0")
-		_, err := New(t.Context(), Options{Config: cfg})
+		_, err := newForTest(t.Context(), t, Options{Config: cfg})
 		require.ErrorContains(t, err, "mq open")
 	})
 	t.Run("nested costs the tenant alone", func(t *testing.T) {
@@ -675,7 +692,7 @@ func TestNew_QueueSetupHonorsTheBootContext(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err := New(ctx, Options{Config: testConfig(t, writeSettings(t, nil))})
+	_, err := newForTest(ctx, t, Options{Config: testConfig(t, writeSettings(t, nil))})
 	require.ErrorIs(t, err, context.Canceled)
 	require.ErrorContains(t, err, "mq open")
 }
@@ -831,7 +848,7 @@ func TestNew_RedisCacheRefusesAnUnreadableTLSFile(t *testing.T) {
 	t.Parallel()
 	cfg := redisTestConfig(t, writeSettings(t, nil), closedAddr(t))
 	cfg.Cache.Redis.TLS = config.CacheRedisTLS{Enabled: true, CAFile: filepath.Join(t.TempDir(), "gone.pem")}
-	_, err := New(t.Context(), Options{Config: cfg})
+	_, err := newForTest(t.Context(), t, Options{Config: cfg})
 	require.ErrorContains(t, err, "cache init: cache.redis.tls.ca_file")
 }
 
@@ -1303,7 +1320,7 @@ func TestNew_NestedLooseFileRefusesBoot(t *testing.T) {
 	t.Parallel()
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": nil})
 	require.NoError(t, os.WriteFile(filepath.Join(root, "notes.txt"), []byte("scratch"), 0o600))
-	a, err := New(t.Context(), Options{Config: testConfig(t, root)})
+	a, err := newForTest(t.Context(), t, Options{Config: testConfig(t, root)})
 	require.Error(t, err)
 	assert.Nil(t, a)
 	assert.Contains(t, err.Error(), "settings directory")
@@ -1312,7 +1329,7 @@ func TestNew_NestedLooseFileRefusesBoot(t *testing.T) {
 func TestNew_RefusesInvalidSettingsDirectory(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig(t, t.TempDir()) // empty: every required file is missing
-	a, err := New(t.Context(), Options{Config: cfg})
+	a, err := newForTest(t.Context(), t, Options{Config: cfg})
 	require.Error(t, err)
 	assert.Nil(t, a)
 	assert.Contains(t, err.Error(), "settings directory")
@@ -1376,13 +1393,13 @@ func TestNew_LateBootFailureReleasesEverything(t *testing.T) {
 	cfg := testConfig(t, dir)
 	natsDir := filepath.Join(cfg.DataDir, "nats")
 	require.NoError(t, os.WriteFile(natsDir, []byte("not a directory"), 0o600))
-	a, err := New(t.Context(), Options{Config: cfg})
+	a, err := newForTest(t.Context(), t, Options{Config: cfg})
 	require.Error(t, err)
 	assert.Nil(t, a)
 	assert.Contains(t, err.Error(), "mq open")
 
 	require.NoError(t, os.Remove(natsDir))
-	a, err = New(t.Context(), Options{Config: cfg})
+	a, err = newForTest(t.Context(), t, Options{Config: cfg})
 	require.NoError(t, err, "the stores opened before the failure were released")
 	assert.True(t, a.dedup.For(tenant.Default).Open())
 	assert.NoError(t, a.Close(context.Background()))
@@ -1862,7 +1879,7 @@ func TestNew_RefusesAPoolAboveTheCeiling(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig(t, writeSettings(t, poolSettings(closedAddr(t), 10)))
 	cfg.ClickHouse.MaxTotalConns = 4
-	_, err := New(t.Context(), Options{Config: cfg})
+	_, err := newForTest(t.Context(), t, Options{Config: cfg})
 	require.ErrorContains(t, err, "clickhouse.max_open_conns 10")
 	require.ErrorContains(t, err, "clickhouse.max_total_conns 4")
 }
@@ -1953,7 +1970,7 @@ func TestNew_NestedRefusesPoolsAboveTheCeiling(t *testing.T) {
 	})
 	cfg := testConfig(t, root)
 	cfg.ClickHouse.MaxTotalConns = 15
-	_, err := New(t.Context(), Options{Config: cfg})
+	_, err := newForTest(t.Context(), t, Options{Config: cfg})
 	require.ErrorContains(t, err, "clickhouse.max_open_conns 10")
 	require.ErrorContains(t, err, "at 20, above clickhouse.max_total_conns 15")
 }
@@ -2302,7 +2319,11 @@ func TestReload_MovedTenantFailedDiscoveryIsRetried(t *testing.T) {
 	root := writeNestedSettings(t, map[string]map[string]any{"acme": databaseSettings(addr, "default")})
 	a := newApp(t, testConfig(t, root), Options{})
 	fake := newFakeClickHouse(t, a, map[string][]string{"default": {"events"}})
-	a.discoveries.backoff = 10 * time.Millisecond
+	// Retried within milliseconds, not the shipped 2s doubling to 60s with
+	// jitter, so the retry that finds the database does not wait on chance.
+	a.discoveries.mu.Lock()
+	a.discoveries.backoff, a.discoveries.maxBackoff = 10*time.Millisecond, 20*time.Millisecond
+	a.discoveries.mu.Unlock()
 
 	logs := logtest.Capture(t, slog.LevelWarn)
 	// No fake names moved_db: its discovery dials the closed port.
@@ -2396,7 +2417,7 @@ func TestClose_WaitsForALoopAReloadStopped(t *testing.T) {
 	// Released on every way out, so a failed assertion leaves no loop stuck.
 	release := sync.OnceFunc(func() { close(conn.release) })
 	defer release()
-	d := newDiscoveries(t.Context(), nil, func(tenant.ID, error) {}, func(tenant.ID) {})
+	d := newDiscoveries(t.Context(), nil, func(tenant.ID, error) {}, func(tenant.ID) {}, nil)
 	d.adopt("acme", discovery.NewSchemaRegistry(func() (driver.Conn, string) { return conn, "default" }, "acme",
 		func(tenant.ID) time.Duration { return time.Hour }))
 	loop := (*d.cur.Load())["acme"]

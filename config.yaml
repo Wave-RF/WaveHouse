@@ -57,11 +57,28 @@ profiling:
   enabled: false
   addr: 127.0.0.1:6060
 
-# Only the connection ceiling is boot config; addr, http_port, http_scheme,
-# database, username, password, query_timeout, tls, headers and the pool
-# sizes are the settings directory's clickhouse block.
+# Only the connection ceiling and the chtypes artifact keys are boot config;
+# addr, http_port, http_scheme, database, username, password, query_timeout,
+# tls, headers and the pool sizes are the settings directory's clickhouse
+# block.
 clickhouse:
   max_total_conns: 0 # ceiling on open native connections across pools; 0 = none
+  # chtypes cache root (CHTYPES_CACHE semantics; the 2.0.0-dev SDK uses it as
+  # <dir>/v2-dev, as `chtypes fetch --cache <dir>` does), read by api-role
+  # processes only.
+  # Empty (the default) is $CHTYPES_CACHE, else ${XDG_CACHE_HOME:-~/.cache}/chtypes/v2-dev; the
+  # read-only system directories /usr/local/share/chtypes/v2-dev and
+  # /opt/chtypes/v2-dev are searched after it, read as the layout itself.
+  chtypes_cache: ""
+  # Fetch a ClickHouse line no directory holds when its first tenant binds
+  # (the line's newest signed build, into chtypes_cache). false for an
+  # air-gapped deployment, which then needs the artifacts installed.
+  chtypes_autofetch: true
+  # No effect with the 2.0.0-dev SDK, which fetches only from chtypes' staging
+  # registry (one warning on stderr). With chtypes 2.0.0: the registries/
+  # mirrors a fetch tries in order, comma-separated; empty is
+  # $CHTYPES_ARTIFACTS_URL, else chtypes' own.
+  chtypes_artifacts_url: ""
 
 # Each layer's implementation, chosen at boot. Every layer defaults to its
 # in-process backend; mq and coord also take nats, cache redis, dedupe dynamodb.
