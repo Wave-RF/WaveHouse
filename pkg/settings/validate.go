@@ -537,7 +537,7 @@ func (v *validator) checkTableName(mapPath, table string) {
 }
 
 // maxSeconds, maxMillis and maxMinutes bound the integer duration keys: a
-// larger count overflows the time.Duration the store converts it to,
+// larger count overflows the time.Duration the server converts it to,
 // wrapping to a duration nothing asked for (a clickhouse.insert_timeout of
 // 36028797018963969 seconds would wrap to one second), so it is refused.
 const (
@@ -874,8 +874,8 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 		}
 		if q.TimestampBucketSeconds == nil {
 			v.required("query.timestamp_bucket_seconds")
-		} else if *q.TimestampBucketSeconds < 0 {
-			v.errorf(FileConfig, "query.timestamp_bucket_seconds", "must be >= 0 (0 disables bucketing), got %d", *q.TimestampBucketSeconds)
+		} else if *q.TimestampBucketSeconds < 0 || int64(*q.TimestampBucketSeconds) > maxSeconds {
+			v.errorf(FileConfig, "query.timestamp_bucket_seconds", "must be in 0-%d seconds (0 disables bucketing), got %d", maxSeconds, *q.TimestampBucketSeconds)
 		}
 	}
 	if s := c.Schema; s == nil {
