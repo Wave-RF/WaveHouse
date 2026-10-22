@@ -307,10 +307,12 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"missing stream.keepalive_interval", FileConfig, `{"stream": {"keepalive_buckets": 3, "gap_window_minutes": 15}}`, "stream.keepalive_interval: required"},
 		{"missing stream.keepalive_buckets", FileConfig, `{"stream": {"keepalive_interval": 30, "gap_window_minutes": 15}}`, "stream.keepalive_buckets: required"},
 		{"missing stream.gap_window_minutes", FileConfig, `{"stream": {"keepalive_interval": 30, "keepalive_buckets": 3}}`, "stream.gap_window_minutes: required"},
-		{"zero keepalive interval", FileConfig, `{"stream": {"keepalive_interval": 0}}`, "stream.keepalive_interval: must be >= 1"},
+		{"zero keepalive interval", FileConfig, `{"stream": {"keepalive_interval": 0}}`, "stream.keepalive_interval: must be in 1-9223372036 seconds, got 0"},
+		{"keepalive interval past a duration", FileConfig, `{"stream": {"keepalive_interval": 9223372037}}`, "stream.keepalive_interval: must be in 1-9223372036 seconds, got 9223372037"},
 		{"zero keepalive buckets", FileConfig, `{"stream": {"keepalive_buckets": 0}}`, "stream.keepalive_buckets: must be in 1-100"},
 		{"too many keepalive buckets", FileConfig, `{"stream": {"keepalive_buckets": 101}}`, "stream.keepalive_buckets: must be in 1-100, got 101"},
-		{"negative gap window", FileConfig, `{"stream": {"gap_window_minutes": -1}}`, "stream.gap_window_minutes: must be >= 0"},
+		{"negative gap window", FileConfig, `{"stream": {"gap_window_minutes": -1}}`, "stream.gap_window_minutes: must be in 0-153722867 minutes, got -1"},
+		{"gap window past a duration", FileConfig, `{"stream": {"gap_window_minutes": 153722868}}`, "stream.gap_window_minutes: must be in 0-153722867 minutes, got 153722868"},
 		{"missing stream.subscriber_queue", FileConfig, `{"stream": {"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": 15}}`, "stream.subscriber_queue: required"},
 		{"zero subscriber queue", FileConfig, `{"stream": {"subscriber_queue": 0}}`, "stream.subscriber_queue: must be in 1-10000, got 0"},
 		{"too deep a subscriber queue", FileConfig, `{"stream": {"subscriber_queue": 10001}}`, "stream.subscriber_queue: must be in 1-10000, got 10001"},
@@ -336,7 +338,8 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"clickhouse.http_scheme ftp", FileConfig, `{"clickhouse": {"http_scheme": "ftp"}}`, `must be "http" or "https"`},
 		{"clickhouse.database empty", FileConfig, `{"clickhouse": {"database": " "}}`, "clickhouse.database: must not be empty"},
 		{"clickhouse.username empty", FileConfig, `{"clickhouse": {"username": ""}}`, "clickhouse.username: must not be empty"},
-		{"clickhouse.query_timeout zero", FileConfig, `{"clickhouse": {"query_timeout": 0}}`, "clickhouse.query_timeout: must be >= 1"},
+		{"clickhouse.query_timeout zero", FileConfig, `{"clickhouse": {"query_timeout": 0}}`, "clickhouse.query_timeout: must be in 1-9223372036 seconds, got 0"},
+		{"clickhouse.query_timeout past a duration", FileConfig, `{"clickhouse": {"query_timeout": 9223372037}}`, "clickhouse.query_timeout: must be in 1-9223372036 seconds, got 9223372037"},
 		{"missing clickhouse.insert_timeout", FileConfig, `{"clickhouse": {"query_timeout": 30}}`, "clickhouse.insert_timeout: required"},
 		{"clickhouse.insert_timeout zero", FileConfig, `{"clickhouse": {"insert_timeout": 0}}`, "clickhouse.insert_timeout: must be in 1-9223372036 seconds, got 0"},
 		{"clickhouse.insert_timeout past a duration", FileConfig, `{"clickhouse": {"insert_timeout": 36028797018963969}}`, "clickhouse.insert_timeout: must be in 1-9223372036 seconds, got 36028797018963969"},
@@ -369,7 +372,8 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"auth.role_claim empty", FileConfig, `{"auth": {"role_claim": ""}}`, "auth.role_claim: must be a non-empty claim path"},
 		{"auth.role_claim padded", FileConfig, `{"auth": {"role_claim": " role"}}`, "auth.role_claim: must be a non-empty claim path"},
 
-		{"zero refresh interval", FileConfig, `{"schema": {"refresh_interval": 0}}`, "must be >= 1"},
+		{"zero refresh interval", FileConfig, `{"schema": {"refresh_interval": 0}}`, "schema.refresh_interval: must be in 1-9223372036 seconds, got 0"},
+		{"refresh interval past a duration", FileConfig, `{"schema": {"refresh_interval": 9223372037}}`, "schema.refresh_interval: must be in 1-9223372036 seconds, got 9223372037"},
 		{"missing mq.max_bytes_gb", FileConfig, `{"mq": {}}`, "mq.max_bytes_gb: required"},
 		{"zero mq.max_bytes_gb", FileConfig, `{"mq": {"max_bytes_gb": 0}}`, "mq.max_bytes_gb: must be >= 1 GB"},
 		{"empty cors origin", FileConfig, `{"cors": {"allowed_origins": [" "]}}`, "origin must not be empty"},
@@ -736,7 +740,7 @@ func TestValidate_ErrorAndWarningMix(t *testing.T) {
 	require.True(t, HasErrors(findings))
 	out := findingStrings(findings)
 	assert.Contains(t, out, "unconditional bypass")
-	assert.Contains(t, out, "must be >= 1")
+	assert.Contains(t, out, "schema.refresh_interval: must be in 1-")
 	assert.Len(t, findings, 2, "findings:\n%s", out)
 }
 

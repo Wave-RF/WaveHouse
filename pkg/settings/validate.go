@@ -536,13 +536,14 @@ func (v *validator) checkTableName(mapPath, table string) {
 	}
 }
 
-// maxSeconds and maxMillis bound the integer duration keys: a larger count
-// overflows the time.Duration the store converts it to, wrapping to a
-// duration nothing asked for (a clickhouse.insert_timeout of
+// maxSeconds, maxMillis and maxMinutes bound the integer duration keys: a
+// larger count overflows the time.Duration the store converts it to,
+// wrapping to a duration nothing asked for (a clickhouse.insert_timeout of
 // 36028797018963969 seconds would wrap to one second), so it is refused.
 const (
 	maxSeconds = math.MaxInt64 / int64(time.Second)
 	maxMillis  = math.MaxInt64 / int64(time.Millisecond)
+	maxMinutes = math.MaxInt64 / int64(time.Minute)
 )
 
 // checkClickHouse validates the connection wiring: every field required, the
@@ -583,8 +584,8 @@ func (v *validator) checkClickHouse(ch *ClickHouseConfig) {
 	}
 	if ch.QueryTimeout == nil {
 		v.required("clickhouse.query_timeout")
-	} else if *ch.QueryTimeout < 1 {
-		v.errorf(FileConfig, "clickhouse.query_timeout", "must be >= 1 second, got %d", *ch.QueryTimeout)
+	} else if *ch.QueryTimeout < 1 || int64(*ch.QueryTimeout) > maxSeconds {
+		v.errorf(FileConfig, "clickhouse.query_timeout", "must be in 1-%d seconds, got %d", maxSeconds, *ch.QueryTimeout)
 	}
 	if ch.InsertTimeout == nil {
 		v.required("clickhouse.insert_timeout")
@@ -881,16 +882,16 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 		v.required("schema")
 	} else if s.RefreshInterval == nil {
 		v.required("schema.refresh_interval")
-	} else if *s.RefreshInterval < 1 {
-		v.errorf(FileConfig, "schema.refresh_interval", "must be >= 1 second, got %d", *s.RefreshInterval)
+	} else if *s.RefreshInterval < 1 || int64(*s.RefreshInterval) > maxSeconds {
+		v.errorf(FileConfig, "schema.refresh_interval", "must be in 1-%d seconds, got %d", maxSeconds, *s.RefreshInterval)
 	}
 	if s := c.Stream; s == nil {
 		v.required("stream")
 	} else {
 		if s.KeepaliveInterval == nil {
 			v.required("stream.keepalive_interval")
-		} else if *s.KeepaliveInterval < 1 {
-			v.errorf(FileConfig, "stream.keepalive_interval", "must be >= 1 second, got %d", *s.KeepaliveInterval)
+		} else if *s.KeepaliveInterval < 1 || int64(*s.KeepaliveInterval) > maxSeconds {
+			v.errorf(FileConfig, "stream.keepalive_interval", "must be in 1-%d seconds, got %d", maxSeconds, *s.KeepaliveInterval)
 		}
 		if s.KeepaliveBuckets == nil {
 			v.required("stream.keepalive_buckets")
@@ -899,8 +900,8 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 		}
 		if s.GapWindowMinutes == nil {
 			v.required("stream.gap_window_minutes")
-		} else if *s.GapWindowMinutes < 0 {
-			v.errorf(FileConfig, "stream.gap_window_minutes", "must be >= 0, got %d", *s.GapWindowMinutes)
+		} else if *s.GapWindowMinutes < 0 || int64(*s.GapWindowMinutes) > maxMinutes {
+			v.errorf(FileConfig, "stream.gap_window_minutes", "must be in 0-%d minutes, got %d", maxMinutes, *s.GapWindowMinutes)
 		}
 		if s.SubscriberQueue == nil {
 			v.required("stream.subscriber_queue")
