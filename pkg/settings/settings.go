@@ -281,6 +281,14 @@ type SchemaConfig struct {
 // nothing a proxy or client can tell apart.
 const MaxKeepaliveBuckets = 100
 
+// MaxSubscriberQueue caps stream.subscriber_queue. Each GET /v1/stream
+// connection allocates its queue as it opens, about 40 bytes a slot, and a
+// client that falls behind holds up to that many event frames until it reads
+// them, so the cap bounds what one connection can make the process allocate.
+// A client that far behind is better served by a reconnect with ?since=,
+// which replays from the gap window, than by a deeper queue.
+const MaxSubscriberQueue = 10_000
+
 // StreamConfig tunes GET /v1/stream: the tenant's SSE keepalive wheel and how
 // much NATS history the Active Sweeper keeps for its gap-fill. Keepalives are
 // set to the proxy in front of the tenant's streams and the gap window is its
@@ -298,9 +306,10 @@ type StreamConfig struct {
 	// keeps in NATS for SSE gap-fill (Last-Event-ID replay). Must be >= 0;
 	// applies from the next sweep.
 	GapWindowMinutes *int `json:"gap_window_minutes"`
-	// SubscriberQueue is each connection's outbound queue, in frames (>= 1):
-	// how many event frames may wait for a slow client before the ones that
-	// do not fit are dropped. Applies to connections opened after a reload.
+	// SubscriberQueue is each connection's outbound queue, in frames: how
+	// many event frames may wait for a slow client before the ones that do
+	// not fit are dropped. Must be in 1-MaxSubscriberQueue. Applies to
+	// connections opened after a reload.
 	SubscriberQueue *int `json:"subscriber_queue"`
 }
 

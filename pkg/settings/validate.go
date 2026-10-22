@@ -894,8 +894,8 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 		}
 		if s.SubscriberQueue == nil {
 			v.required("stream.subscriber_queue")
-		} else if *s.SubscriberQueue < 1 {
-			v.errorf(FileConfig, "stream.subscriber_queue", "must be >= 1, got %d", *s.SubscriberQueue)
+		} else if *s.SubscriberQueue < 1 || *s.SubscriberQueue > MaxSubscriberQueue {
+			v.errorf(FileConfig, "stream.subscriber_queue", "must be in 1-%d, got %d", MaxSubscriberQueue, *s.SubscriberQueue)
 		}
 	}
 
