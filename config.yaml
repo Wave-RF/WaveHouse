@@ -71,7 +71,10 @@ mq:
   backend: embedded # NATS JetStream under <data_dir>/nats
   # The ingest worker's consumer, on either backend. ack_wait is the
   # redelivery timeout: it must cover a table's batch wait plus its insert,
-  # or a batch still inserting is redelivered and inserted twice.
+  # or a batch still inserting is redelivered and inserted twice. Check every
+  # tenant's max_batch_wait_ms + insert_timeout (35s at the seeds) before
+  # lowering it: one at or above it refuses boot over a flat settings
+  # directory and leaves that tenant with no limits over a nested one.
   # max_ack_pending caps the rows delivered and unacked per tenant queue
   # (per shard under nats, where the durables must agree: wavehouse mq
   # manifests --ack-wait --max-ack-pending), and with it the worker's

@@ -160,8 +160,11 @@ type Limits struct {
 	InsertTimeout time.Duration
 	// RetryBackoffMax caps the backoff a ClickHouse that cannot take the
 	// tenant's inserts is retried under (ingest.retry_backoff_max): the
-	// delay doubles from a second up to it. The backoff is per pool, so the
-	// cap applied is that of the tenant whose flush met the failure.
+	// delay doubles from a second up to it. The backoff is per pool, which
+	// the tenants on one ClickHouse tuple share: a window opens under the
+	// cap of the tenant whose flush met the failure, and any tenant whose
+	// rows meet it cuts it to its own, so none waits longer than its own
+	// cap (backoff.adopt).
 	RetryBackoffMax time.Duration
 }
 
@@ -533,7 +536,14 @@ func newTableBatcher(w *IngestWorker, table string) *tableBatcher {
 // would only pin it in memory until a flush that is certain to hand it back,
 // so the backlog of an outage stays in the queue, not in the worker.
 func (b *tableBatcher) add(ctx context.Context, pm parsedMsg) {
-	if wait, ok := b.w.backoffs.waiting(func() chconn.Target { return b.w.target(pm.tenant) }, b.table, b.w.clock()); ok {
+	ceiling := func() time.Duration { // the tenant's cap, for a backoff tenants share (backoff.adopt)
+		if len(b.batch) > 0 {
+			return b.limits.RetryBackoffMax
+		}
+		lim, _ := b.w.limits(pm.tenant)
+		return lim.RetryBackoffMax
+	}
+	if wait, ok := b.w.backoffs.waiting(func() chconn.Target { return b.w.target(pm.tenant) }, b.table, b.w.clock(), ceiling); ok {
 		b.w.retryLater(ctx, b.table, []parsedMsg{pm}, wait, "backoff")
 		return
 	}
@@ -778,9 +788,9 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 	// The table's own backoff first, so a table turned away never claims
 	// the pool's probe; a pool that turns it away returns the table's.
 	pool, table := w.backoffs.forTarget(t), w.backoffs.forTable(t, tableName)
-	wait, ok := table.allow(w.clock())
+	wait, ok := table.allow(w.clock(), lim.RetryBackoffMax)
 	if ok {
-		if wait, ok = pool.allow(w.clock()); !ok {
+		if wait, ok = pool.allow(w.clock(), lim.RetryBackoffMax); !ok {
 			table.release()
 		}
 	}

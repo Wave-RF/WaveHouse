@@ -2746,7 +2746,7 @@ func TestTableBatcher_Add_HandsRowsBackWhileTheProbeIsOut(t *testing.T) {
 	pool := w.backoffs.forTarget(w.target(tenant.Default))
 	wait, _, _ := pool.fail(clock, testCap)
 	clock = clock.Add(wait)
-	_, ok := pool.allow(clock)
+	_, ok := pool.allow(clock, testCap)
 	require.True(t, ok, "the probe is claimed")
 
 	m := newIngestMsg(t, "events", "", map[string]any{"id": 1})
@@ -2754,6 +2754,141 @@ func TestTableBatcher_Add_HandsRowsBackWhileTheProbeIsOut(t *testing.T) {
 	assert.Empty(t, b.batch)
 	assert.True(t, m.Naked.Load())
 	assert.GreaterOrEqual(t, time.Duration(m.NakDelay.Load()), retryBase/2)
+}
+
+// The worker folds each tenant's cap into the backoff of a pool tenants
+// share (backoff.adopt) at every path a row or flush meets it: a row
+// arriving under a window another tenant opened with a larger cap — into an
+// empty batch, or one in progress, whose own limits carry the cap — is
+// handed back for at most its own tenant's cap, and so is a batch whose
+// flush asks to try under that window, whether the pool's backoff or its
+// table's own holds it.
+func TestTableBatcher_HandsRowsBackUnderTheTenantsOwnCap(t *testing.T) {
+	t.Parallel()
+	b, w, _ := newTestBatcher(t, okRoundTripper())
+	clock := time.Unix(1_000, 0)
+	w.now = func() time.Time { return clock }
+	own := Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: time.Hour, RetryBackoffMax: 5 * time.Second}
+	w.limits = limitsOf(own)
+	ctx := context.Background()
+	tgt := w.target(tenant.Default)
+	pool, table := w.backoffs.forTarget(tgt), w.backoffs.forTable(tgt, "events")
+	openUnder2m := func(bo *backoff) { // another tenant's 2m cap: a window of a minute or more
+		for range 10 {
+			wait, _, _ := bo.fail(clock, 2*time.Minute)
+			clock = clock.Add(wait)
+		}
+		wait, _, _ := bo.fail(clock, 2*time.Minute)
+		require.GreaterOrEqual(t, wait, time.Minute)
+	}
+	row := func(id int) (*testutil.MockMessage, parsedMsg) {
+		m := newIngestMsg(t, "events", "", map[string]any{"id": id})
+		return m, parseAll(t, w, m)[0]
+	}
+	handedBackUnderOwnCap := func(m *testutil.MockMessage, what string) {
+		t.Helper()
+		require.True(t, m.Naked.Load(), what+": handed back")
+		delay := time.Duration(m.NakDelay.Load())
+		assert.GreaterOrEqual(t, delay, own.RetryBackoffMax, what)
+		assert.Less(t, delay, own.RetryBackoffMax+retryBase, what+": at most its own cap, plus the spread")
+	}
+
+	openUnder2m(pool)
+	m, pm := row(1)
+	b.add(ctx, pm)
+	assert.Empty(t, b.batch)
+	handedBackUnderOwnCap(m, "a row into an empty batch")
+	pool.succeed(clock)
+
+	_, pm = row(2)
+	b.add(ctx, pm)
+	require.Len(t, b.batch, 1)
+	openUnder2m(pool)
+	m, pm = row(3)
+	b.add(ctx, pm)
+	assert.Len(t, b.batch, 1)
+	handedBackUnderOwnCap(m, "a row into a batch in progress")
+	pool.succeed(clock)
+
+	openUnder2m(pool)
+	m, pm = row(4)
+	w.flushTable(ctx, "events", []parsedMsg{pm}, own, true)
+	handedBackUnderOwnCap(m, "a flush under the pool's window")
+	pool.succeed(clock)
+
+	openUnder2m(table)
+	m, pm = row(5)
+	w.flushTable(ctx, "events", []parsedMsg{pm}, own, true)
+	handedBackUnderOwnCap(m, "a flush under the table's own window")
+	table.succeed(clock)
+
+	openUnder2m(table)
+	m, pm = row(6)
+	b.add(ctx, pm)
+	assert.Len(t, b.batch, 1)
+	handedBackUnderOwnCap(m, "a row under the table's own window")
+}
+
+// A tenant's failing flushes escalate up to its own retry_backoff_max, and
+// never past it: each flush probes once its window has elapsed, and the
+// delays settle within half the cap and the cap.
+func TestFlushTable_EscalatesToTheTenantsCap(t *testing.T) {
+	t.Parallel()
+	rt := &testutil.MockRoundTripper{Fn: func(*http.Request) (*http.Response, error) {
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	}}
+	w, _, _, _ := newTestWorker(rt)
+	clock := time.Unix(1_000, 0)
+	w.now = func() time.Time { return clock }
+	own := Limits{RetryBackoffMax: 4 * time.Second}
+	w.limits = limitsOf(own)
+	var delays []time.Duration
+	for i := range 8 {
+		m := newIngestMsg(t, "events", "", map[string]any{"id": i})
+		w.flushTable(context.Background(), "events", parseAll(t, w, m), own, true)
+		require.True(t, m.Naked.Load())
+		d := time.Duration(m.NakDelay.Load())
+		delays = append(delays, d)
+		clock = clock.Add(d)
+	}
+	require.Equal(t, int32(8), rt.Hits(), "each flush probed once its window elapsed: %v", delays)
+	for _, d := range delays[4:] { // half of 1s, 2s, 4s, then the cap: 4s halved and spread
+		assert.GreaterOrEqual(t, d, own.RetryBackoffMax/2, "escalated to the cap: %v", delays)
+		assert.Less(t, d, own.RetryBackoffMax, "never past the tenant's cap: %v", delays)
+	}
+}
+
+// A served tenant with no limits adopted (its rows go back to the queue as
+// unconfigured) brings no cap to a backoff another tenant's flush opened on
+// the pool they share: its rows do not cut that window, so the other
+// tenant's next flush is still turned away.
+func TestTableBatcher_Add_AnUnconfiguredTenantDoesNotCutTheWindow(t *testing.T) {
+	t.Parallel()
+	b, w, _ := newTestBatcher(t, okRoundTripper())
+	clock := time.Unix(1_000, 0)
+	w.now = func() time.Time { return clock }
+	configured := Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: time.Hour, InsertTimeout: time.Second, RetryBackoffMax: 2 * time.Minute}
+	w.limits = func(id tenant.ID) (Limits, bool) {
+		if id == tenant.Default {
+			return Limits{}, false // served, on the shared target, no limits adopted
+		}
+		return configured, true
+	}
+	pool := w.backoffs.forTarget(w.target(tenant.Default))
+	for range 10 { // the configured tenant's 2m cap: a window of a minute or more
+		wait, _, _ := pool.fail(clock, configured.RetryBackoffMax)
+		clock = clock.Add(wait)
+	}
+	wait, _, _ := pool.fail(clock, configured.RetryBackoffMax)
+	require.GreaterOrEqual(t, wait, time.Minute)
+
+	m := newIngestMsg(t, "events", "", map[string]any{"id": 1}) // the unconfigured tenant's
+	b.add(context.Background(), parseAll(t, w, m)[0])
+	require.True(t, m.Naked.Load(), "handed back")
+
+	clock = clock.Add(2 * time.Second)
+	_, ok := pool.allow(clock, configured.RetryBackoffMax)
+	assert.False(t, ok, "the configured tenant's window was not cut to the floor")
 }
 
 // scriptedConsumer hands the worker's handler to the test and records, in

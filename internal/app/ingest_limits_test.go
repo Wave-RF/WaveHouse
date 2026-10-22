@@ -66,6 +66,22 @@ func TestNew_NestedIngestLimitsRefusedServeTheTenantWithNone(t *testing.T) {
 	assert.True(t, a.tenants.Stats().LastSuccessful)
 }
 
+// A nested directory whose every tenant fails the rule — mq.ack_wait lowered
+// under the seeds' sum — still boots, as it does for the queue budget and
+// schema discovery when no tenant is usable: each tenant is served with
+// none, and the next reload retries.
+func TestNew_NestedIngestLimitsAllRefusedStillBoot(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig(t, writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil}))
+	cfg.MQ.AckWait = 35 * time.Second // the seeds' 5s + 30s, not under
+	a := newApp(t, cfg, Options{})
+	_, ok := a.ingestLimits.For("acme")
+	assert.False(t, ok)
+	_, ok = a.ingestLimits.For("globex")
+	assert.False(t, ok)
+	assert.Equal(t, int64(1), a.tenants.Stats().ReconcileFailures["ingest"])
+}
+
 // On a reload, a tenant whose new values fail the rule keeps the ones it
 // had: the refusal is logged and counted (the reload is partial), and the
 // next reload with values that fit applies them.
