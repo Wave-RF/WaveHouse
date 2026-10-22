@@ -36,10 +36,12 @@ var mqBackends = []MQBackend{MQEmbedded, MQNATS}
 type MQ struct {
 	Backend MQBackend `yaml:"backend" env:"WH_MQ_BACKEND"`
 	// AckWait is the redelivery timeout: a row the worker has not acked
-	// within it is delivered again. It must cover a batch's wait and insert
-	// (each tenant's ingest.max_batch_wait_ms plus clickhouse.insert_timeout,
-	// checked when the tenant's settings are adopted), or a batch still
-	// inserting is redelivered and inserted twice.
+	// within it is delivered again. It must cover a batch's wait and its one
+	// INSERT (each tenant's ingest.max_batch_wait_ms plus
+	// clickhouse.insert_timeout, checked when the tenant's settings are
+	// adopted), with room to spare for a batch queued behind an in-flight
+	// flush or isolated row by row, or rows still being inserted are
+	// redelivered and inserted twice.
 	AckWait time.Duration `yaml:"ack_wait" env:"WH_MQ_ACK_WAIT"`
 	// MaxAckPending caps the rows delivered and not yet acked, per delivery
 	// unit — a tenant's embedded queue, or a shard of the operator's

@@ -134,7 +134,7 @@ func (b *backoff) release() {
 }
 
 // probeOut is how long rows stay away while a probe is out: floored, since a
-// probe to a server dropping packets can take the whole client timeout, and a
+// probe to a server dropping packets can take the whole insert timeout, and a
 // near-zero delay would cycle the backlog through the worker meanwhile.
 func (b *backoff) probeOut() time.Duration { return retryBase/2 + b.spread(retryBase/2) }
 

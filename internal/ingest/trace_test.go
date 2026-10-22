@@ -131,7 +131,7 @@ func TestInsertToClickHouse_SpanIsTheFlushSpansChild(t *testing.T) {
 	m1 := newIngestMsg(t, "events", "", map[string]any{"id": 1})
 	m2 := newIngestMsg(t, "events", "", map[string]any{"id": 2})
 
-	w.flushTable(context.Background(), "events", parseAll(t, w, m1, m2))
+	flush(context.Background(), w, "events", parseAll(t, w, m1, m2))
 	wait()
 
 	flush := spanNamed(t, rec, "IngestWorker.Flush")
@@ -160,7 +160,7 @@ func TestInsertToClickHouse_SpanRecordsTheFailure(t *testing.T) {
 	w, _, _, wait := newTestWorker(rt)
 	m1 := newIngestMsg(t, "events", "", map[string]any{"id": 1})
 
-	w.flushTable(context.Background(), "events", parseAll(t, w, m1))
+	flush(context.Background(), w, "events", parseAll(t, w, m1))
 	wait()
 
 	for _, name := range []string{"clickhouse.insert", "IngestWorker.Flush"} {

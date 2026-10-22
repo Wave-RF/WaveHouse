@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
@@ -26,7 +27,7 @@ func TestNew_IngestLimitsOverAckWaitRefuseBoot(t *testing.T) {
 	cfg := testConfig(t, writeSettings(t, nil))
 	cfg.MQ.AckWait = 35 * time.Second // the seed's 5s + 30s, not under
 	_, err := New(t.Context(), Options{Config: cfg})
-	require.ErrorContains(t, err, "ingest limits: tenant 0: ingest.max_batch_wait_ms 5000 plus clickhouse.insert_timeout 30 is 35s, not under mq.ack_wait 35s")
+	require.ErrorContains(t, err, "ingest limits: tenant 0: ingest.max_batch_wait_ms 5000 plus clickhouse.insert_timeout 30 is not under mq.ack_wait 35s")
 
 	cfg.MQ.AckWait = 36 * time.Second
 	a := newApp(t, cfg, Options{})
@@ -66,7 +67,7 @@ func TestReload_IngestLimitsRefusedKeepThePrevious(t *testing.T) {
 }
 
 // A tenant a reload adopts with values that fail the rule, and none to
-// keep, has no limits (the worker parks its batches), and a tenant no longer
+// keep, has no limits (the worker hands its rows back), and a tenant no longer
 // served has none either; the next reload that fixes the folder adopts it.
 func TestReload_IngestLimitsNewTenantRefusedHasNone(t *testing.T) {
 	t.Parallel()
@@ -93,13 +94,48 @@ func TestReload_IngestLimitsNewTenantRefusedHasNone(t *testing.T) {
 	assert.Equal(t, seedIngestLimits, got)
 }
 
-// The rule itself, at its boundary.
+// A served tenant looked up before this collection's hook has run — the
+// window between a reload adopting the tenant and its AfterAdopt hooks —
+// reconciles on the spot: it is never read as a tenant with none, which
+// would hand its first rows back to the queue, and one whose values fail the
+// rule is still read as none.
+func TestIngestLimits_ForReconcilesAServedTenantOnMiss(t *testing.T) {
+	t.Parallel()
+	reg, findings := settings.Open(writeSettings(t, nil))
+	require.NotNil(t, reg, "findings: %v", findings)
+	l := newIngestLimits(reg, time.Minute)
+	got, ok := l.For(tenant.Default)
+	require.True(t, ok, "reconciled on the miss")
+	assert.Equal(t, seedIngestLimits, got)
+	_, ok = l.For("globex")
+	assert.False(t, ok, "not served")
+
+	refused, findings := settings.Open(writeSettings(t, map[string]any{"ingest": map[string]any{"max_batch_bytes": 1024, "max_batch_wait_ms": 30_000, "retry_backoff_max": 30}}))
+	require.NotNil(t, refused, "findings: %v", findings)
+	_, ok = newIngestLimits(refused, time.Minute).For(tenant.Default)
+	assert.False(t, ok, "values that fail the rule, with none to keep")
+}
+
+// The rule itself, at its boundary, and against a value that wrapped on its
+// way from the file's integer to a duration: a negative wait, deadline or
+// sum must be refused, never pass as "under" the ack wait, since a negative
+// insert deadline would leave the INSERT unbounded.
 func TestCheckIngestLimits(t *testing.T) {
 	t.Parallel()
 	lim := ingest.Limits{MaxBatchWait: 5 * time.Second, InsertTimeout: 30 * time.Second}
 	require.NoError(t, checkIngestLimits(lim, 36*time.Second))
-	assert.ErrorContains(t, checkIngestLimits(lim, 35*time.Second), "is 35s, not under mq.ack_wait 35s")
+	assert.ErrorContains(t, checkIngestLimits(lim, 35*time.Second), "is not under mq.ack_wait 35s")
 	assert.ErrorContains(t, checkIngestLimits(lim, time.Minute/2), "not under mq.ack_wait 30s")
+
+	huge := int64(30_000_000_000) // 30s written in nanoseconds: the seconds-to-duration conversion wraps
+	wrapped := time.Duration(huge) * time.Second
+	require.Negative(t, wrapped, "the case under test")
+	assert.Error(t, checkIngestLimits(ingest.Limits{MaxBatchWait: 5 * time.Second, InsertTimeout: wrapped}, time.Minute), "a wrapped insert deadline")
+	assert.Error(t, checkIngestLimits(ingest.Limits{MaxBatchWait: wrapped, InsertTimeout: 30 * time.Second}, time.Minute), "a wrapped wait")
+	// Each in range, their sum wrapped.
+	big := time.Duration(1<<62) + time.Second
+	assert.Error(t, checkIngestLimits(ingest.Limits{MaxBatchWait: big, InsertTimeout: big}, time.Minute), "a wrapped sum")
+	assert.Error(t, checkIngestLimits(ingest.Limits{MaxBatchWait: 0, InsertTimeout: 30 * time.Second}, time.Minute), "a zero wait")
 }
 
 // addTenantFolder writes (or replaces) one tenant folder of a nested root,

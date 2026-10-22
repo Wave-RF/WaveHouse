@@ -219,7 +219,7 @@ flowchart TB
     NATS --> HUB["Hub broadcast"]:::wh
     HUB --> RT["SSE subscribers"]:::client
 
-    NATS --> BC["Buffer consumer<br/>5-second batches"]:::wh
+    NATS --> BC["Buffer consumer<br/>batches by bytes or every 5s"]:::wh
     BC --> CH[("ClickHouse")]:::store
     BC -. "rejected rows" .-> DLQ["dead-letter stream"]:::fail
 ```

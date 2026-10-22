@@ -29,7 +29,8 @@ import (
 // OTEL_EXPORTER_OTLP_* variables InitProvider delegates to, but an option
 // passed to it overrides the variable: so each fallback below is passed only
 // while its variable is unset. A value the SDK cannot read falls back to its
-// own default (5s for traces, 60s for metrics), which it logs. The runtime
+// own default (5s for traces, 60s for metrics): the metrics SDK prints a
+// line to stderr about it, the trace SDK nothing. The runtime
 // metrics' minimum read interval is left to the SDK, whose default is the
 // 15s WaveHouse always asked for.
 const (

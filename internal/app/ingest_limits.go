@@ -17,16 +17,18 @@ import (
 // them — its ingest block and clickhouse.insert_timeout — adopted only when
 // they fit boot config's mq.ack_wait: a batch must be flushed and inserted
 // before the queue redelivers its rows (max_batch_wait_ms plus
-// insert_timeout under ack_wait), or they insert twice. The two tiers meet
+// insert_timeout under ack_wait; what that rule leaves out is at
+// checkIngestLimits), or they insert twice. The two tiers meet
 // here because pkg/settings cannot see boot config, so `wavehouse validate`
 // cannot check the rule. Reconciled from the registry's AfterAdopt hook, as
 // the ClickHouse pools are, and with the same answer to a refusal: a tenant
 // whose adopted values fail the rule keeps the ones it had, logged at ERROR
 // and reported through Reconciled (the reload is partial), and the next
 // reload retries; a tenant newly served with none to keep has no limits, and
-// the worker parks its batches on its dead-letter queue, as it does a
-// tenant's on no pool, until a reload adopts valid ones. At boot a failure
-// refuses to start, naming both values.
+// the worker hands its rows back to the queue, one ack wait at a time, until
+// a reload adopts valid ones — nothing of its is parked, since its ingest
+// keeps accepting rows. At boot a failure refuses to start, naming both
+// values.
 type ingestLimits struct {
 	tenants *settings.Registry
 	ackWait time.Duration
@@ -92,7 +94,7 @@ func (l *ingestLimits) reconcile(boot bool) error {
 		if had && prev.ok {
 			slog.Error("ingest limits refused; keeping the previous values, the next reload retries", "tenant", id, "error", err)
 		} else {
-			slog.Error("ingest limits refused; the tenant has none, so its batches are parked on its dead-letter queue until a reload adopts valid ones", "tenant", id, "error", err)
+			slog.Error("ingest limits refused; the tenant has none, so its rows go back to the queue until a reload adopts valid ones", "tenant", id, "error", err)
 		}
 	}
 	l.cur.Store(&next)
@@ -105,14 +107,26 @@ func limitsOf(store *settings.Store) ingest.Limits {
 	return ingest.Limits{MaxBatchBytes: i.MaxBatchBytes, MaxBatchWait: i.MaxBatchWait, InsertTimeout: i.InsertTimeout, RetryBackoffMax: i.RetryBackoffMax}
 }
 
-// checkIngestLimits is the cross-tier rule: the longest a batch may take —
-// its wait for rows, then its insert — must stay under the queue's
-// redelivery timeout, or the queue redelivers the rows of a batch that is
-// still inserting, and they insert twice.
+// checkIngestLimits is the cross-tier rule: the longest a batch takes in the
+// common case — its wait for rows, then its one INSERT — must stay under the
+// queue's redelivery timeout, or the queue redelivers the rows of a batch
+// that is still inserting, and they insert twice. It bounds that case only:
+// a batch queued behind its table's in-flight flush, a flush of several
+// column lists, and the row-by-row isolation of a rejected batch each add
+// INSERT deadlines the rule does not count, so the seeds keep the sum well
+// under the ack wait; a flush-level bound is not built.
 func checkIngestLimits(lim ingest.Limits, ackWait time.Duration) error {
-	if sum := lim.MaxBatchWait + lim.InsertTimeout; sum >= ackWait {
-		return fmt.Errorf("ingest.max_batch_wait_ms %d plus clickhouse.insert_timeout %d is %s, not under mq.ack_wait %s: the queue would redeliver the rows of a batch still inserting, and they would insert twice",
-			lim.MaxBatchWait.Milliseconds(), int64(lim.InsertTimeout/time.Second), sum, ackWait)
+	// Compared without adding: the validated integers are converted to
+	// durations by multiplication, which wraps for a value off by orders of
+	// magnitude, and so could their sum; a wrapped value can land anywhere,
+	// negative included, and a negative insert deadline would leave the
+	// INSERT unbounded. So each must be positive on its own, and the insert
+	// must fit what the wait leaves of the ack wait: whatever a wrap
+	// produces, what passes lies inside (0, ackWait).
+	wait, insert := lim.MaxBatchWait, lim.InsertTimeout
+	if wait <= 0 || insert <= 0 || wait >= ackWait || insert >= ackWait-wait {
+		return fmt.Errorf("ingest.max_batch_wait_ms %d plus clickhouse.insert_timeout %d is not under mq.ack_wait %s: the queue would redeliver the rows of a batch still inserting, and they would insert twice",
+			wait.Milliseconds(), int64(insert/time.Second), ackWait)
 	}
 	return nil
 }

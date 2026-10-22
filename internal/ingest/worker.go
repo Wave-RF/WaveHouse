@@ -69,9 +69,11 @@ type IngestWorker struct {
 	target func(tenant.ID) chconn.Target
 	// limits resolves a tenant's batch limits (internal/app, from the
 	// tenant's config.json), read when a table's batch starts, so a settings
-	// reload applies to the next batch. false is a tenant with none — not
-	// served, or none adopted — whose batch is parked like that of a tenant
-	// on no pool (parkBatch).
+	// reload applies to the next batch. false is a tenant with none: one no
+	// longer served, whose rows are parked like a tenant's on no pool
+	// (parkBatch), or one served whose values were refused at adoption,
+	// whose rows go back to the queue until a reload adopts valid ones
+	// (tableBatcher.add).
 	limits func(tenant.ID) (Limits, bool)
 	// consumer is what the durable consumer was created with; its Prefetch
 	// also sizes the channels between delivery and the batches.
@@ -125,12 +127,14 @@ func newPoisonCounter(m metric.Meter) (metric.Int64Counter, error) {
 
 // retryCounter counts rows handed back to the MQ for a delayed retry because
 // ClickHouse could not take them, by reason: the chconn.Class of the failure
-// (unavailable, denied, unknown), or backoff for rows turned away without a
-// try while their pool was backing off. A sustained rate is an outage that
-// is holding rows in the queue — none of them reach the DLQ.
+// (unavailable, denied, unknown), backoff for rows turned away without a
+// try while their pool was backing off, or unconfigured for the rows of a
+// served tenant with no ingest limits adopted. A sustained rate is an outage
+// — or a refused config.json — that is holding rows in the queue; none of
+// them reach the DLQ.
 var retryCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
 	"wavehouse_ingest_retries_total",
-	metric.WithDescription("Rows handed back to the ingest queue for a delayed retry because ClickHouse could not take them, by reason"),
+	metric.WithDescription("Rows handed back to the ingest queue for a delayed retry — ClickHouse could not take them, or their tenant has no ingest limits adopted — by reason"),
 )
 
 // Limits is one tenant's batching, from its settings (ingest.* in its
@@ -141,9 +145,11 @@ type Limits struct {
 	// row, one JSONCompactEachRow line, so an estimate of the uncompressed
 	// INSERT body — reaches it. A "try to flush" threshold, not a hard cap:
 	// rows that arrive while a flush is in flight coalesce into the next
-	// batch, which can pass it. A batch never holds more rows than the
-	// consumer delivers unacked (ConsumerSettings.MaxAckPending), so a target
-	// above that many rows is reached by the timer alone.
+	// batch, which can pass it. The tenant's tables share what the consumer
+	// delivers unacked (ConsumerSettings.MaxAckPending; under nats the
+	// shard's share of it), so a target its busy tables' batches cannot reach
+	// together within that budget is reached by the timer alone, and the
+	// tenant is written at most the budget per MaxBatchWait meanwhile.
 	MaxBatchBytes int
 	// MaxBatchWait flushes a batch this long after its first row.
 	MaxBatchWait time.Duration
@@ -165,8 +171,12 @@ type Limits struct {
 // mq's default, which is what boot config defaults to. Invariants: Prefetch
 // ≤ MaxAckPending (config.Validate), and AckWait > a tenant's
 // Limits.MaxBatchWait + Limits.InsertTimeout, checked when the tenant's
-// settings are adopted (internal/app), else in-flight messages are
-// redelivered mid-processing → duplicate inserts.
+// settings are adopted (internal/app). That rule bounds a batch's own wait
+// plus one INSERT, the common case, not every path a row can take: a batch
+// queued behind its table's in-flight flush, a flush of several column
+// lists, and the row-by-row isolation of a rejected batch each add INSERT
+// deadlines, so a row the queue redelivers mid-flush can insert twice, as a
+// retried insert can. Keep the sum well under AckWait, as the seeds do.
 type ConsumerSettings struct {
 	// AckWait is the redelivery timeout.
 	AckWait time.Duration
@@ -493,7 +503,9 @@ type tableBatcher struct {
 	// bytes is the batch's rows' JSON so far, against limits.MaxBatchBytes.
 	bytes int
 	// limits is the batch's tenant's, read at its first row; ok is false
-	// for a tenant with none, whose rows are flushed at once to be parked.
+	// for a tenant that had none then — no longer served, so flushed at
+	// once to be parked — which the flush re-checks, since the tenant may be
+	// served again by the time a batch latched behind an in-flight flush runs.
 	limits Limits
 	ok     bool
 	timer  *time.Timer
@@ -530,14 +542,28 @@ func (b *tableBatcher) add(ctx context.Context, pm parsedMsg) {
 		// loops by tenant table), so the first row names whose limits size
 		// the batch; read once per batch, so a reload lands between
 		// batches, never inside one.
-		b.limits, b.ok = b.w.limits(pm.tenant)
-		if b.ok {
-			b.timer.Reset(b.limits.MaxBatchWait)
+		lim, ok := b.w.limits(pm.tenant)
+		if !ok && b.w.target(pm.tenant).URL != "" {
+			// Served and on a pool, but no limits adopted: its values were
+			// refused against the ack wait, with none to keep (internal/app).
+			// Nothing of its can be sized or timed, and its ingest keeps
+			// accepting rows, so each goes back to the queue for one ack
+			// wait — settled, so it holds no shard's share — to be written
+			// once a reload adopts valid limits. The reload's error and the
+			// retry counter say so; nothing is parked.
+			b.w.retryLater(ctx, b.table, []parsedMsg{pm}, b.w.consumer.AckWait, "unconfigured")
+			return
+		}
+		// A tenant with no limits and no pool is no longer served: its rows
+		// are flushed at once, zero limits, to be parked (flushTable).
+		b.limits, b.ok = lim, ok
+		if ok {
+			b.timer.Reset(lim.MaxBatchWait)
 		}
 	}
 	b.batch = append(b.batch, pm)
 	b.bytes += len(pm.row)
-	if !b.ok || b.bytes >= b.limits.MaxBatchBytes {
+	if b.bytes >= b.limits.MaxBatchBytes {
 		b.requestFlush(ctx)
 	}
 }
@@ -555,7 +581,7 @@ func (b *tableBatcher) requestFlush(ctx context.Context) {
 		b.flushQueued = true
 		return
 	}
-	rows := b.batch
+	rows, lim, ok := b.batch, b.limits, b.ok
 	b.batch, b.bytes = nil, 0
 	b.flushQueued = false
 	b.timer.Stop() // this batch is leaving, so drop its deadline
@@ -563,7 +589,7 @@ func (b *tableBatcher) requestFlush(ctx context.Context) {
 	b.flushing = done
 	go func() {
 		defer close(done)
-		b.w.flushTable(ctx, b.table, rows)
+		b.w.flushTable(ctx, b.table, rows, lim, ok)
 	}()
 }
 
@@ -587,7 +613,7 @@ func (b *tableBatcher) drainAndExit(ctx context.Context) {
 		<-b.flushing
 	}
 	if len(b.batch) > 0 {
-		b.w.flushTable(ctx, b.table, b.batch)
+		b.w.flushTable(ctx, b.table, b.batch, b.limits, b.ok)
 	}
 }
 
@@ -721,12 +747,15 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 //     together. The same applies to a failure that lands mid-isolation: the
 //     rows not yet settled go back, none to the DLQ.
 //
-// A batch whose tenant has no ClickHouse connection, or no batch limits, is
-// not tried at all: it meets its DLQ switch once, whole, whatever its column
-// lists (parkBatch). tableLoop guarantees at most one concurrent flushTable
-// per tenant table; different tables — two tenants' tables of one name
-// included — may flush concurrently.
-func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []parsedMsg) {
+// A batch whose tenant has no ClickHouse connection is not tried at all: it
+// meets its DLQ switch once, whole, whatever its column lists (parkBatch).
+// lim is the batch's tenant's limits as the batcher read them at the batch's
+// first row, so the insert deadline and the retry cap come from the document
+// that timed the batch, never from one a reload adopted meanwhile; ok false
+// is a batch begun with none, which is never inserted. tableLoop guarantees
+// at most one concurrent flushTable per tenant table; different tables — two
+// tenants' tables of one name included — may flush concurrently.
+func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []parsedMsg, lim Limits, ok bool) {
 	if len(msgs) == 0 {
 		return
 	}
@@ -736,9 +765,13 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 		w.parkBatch(ctx, tableName, msgs, noTargetError(id))
 		return
 	}
-	lim, ok := w.limits(id)
 	if !ok {
-		w.parkBatch(ctx, tableName, msgs, noLimitsError(id))
+		// The batch began while its tenant had no limits and no pool, and a
+		// reload gave it a pool before the batch flushed: nothing sized or
+		// timed it, so it goes back to the queue like the rows of a served
+		// tenant with no limits (tableBatcher.add), never inserted with no
+		// deadline.
+		w.retryLater(ctx, tableName, msgs, w.consumer.AckWait, "unconfigured")
 		return
 	}
 
@@ -988,19 +1021,12 @@ func noTargetError(id tenant.ID) error {
 	return fmt.Errorf("no ClickHouse connection is open for tenant %s", id)
 }
 
-// noLimitsError is the failure of tenant id's inserts while it has no batch
-// limits: no longer served, or its settings refused (internal/app). No
-// request is made.
-func noLimitsError(id tenant.ID) error {
-	return fmt.Errorf("no ingest limits are adopted for tenant %s", id)
-}
-
-// parkBatch disposes of a batch whose tenant has no ClickHouse connection,
-// or no batch limits, in one pass: row-by-row isolation would fail every row
-// the same way, logging two lines each. The tenant's DLQ switch is asked
-// once for the batch, which is parked under its own topic — a tenant no
-// longer served reads as on (dlqFor in internal/app) — or, switched off,
-// left unacked for redelivery until the tenant has what it lacks.
+// parkBatch disposes of a batch whose tenant has no ClickHouse connection in
+// one pass: row-by-row isolation would fail every row the same way, logging
+// two lines each. The tenant's DLQ switch is asked once for the batch, which
+// is parked under its own topic — a tenant no longer served reads as on
+// (dlqFor in internal/app) — or, switched off, left unacked for redelivery
+// until the tenant has a pool.
 func (w *IngestWorker) parkBatch(ctx context.Context, tableName string, msgs []parsedMsg, cause error) {
 	id := msgs[0].tenant
 	if w.dlqEnabled != nil && !w.dlqEnabled(id, tableName) {
