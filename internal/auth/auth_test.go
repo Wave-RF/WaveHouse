@@ -22,8 +22,6 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel"
-	noopmetric "go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -1075,16 +1073,21 @@ func TestAuthenticator_ReconfigureAppliesUnreachableJWKS(t *testing.T) {
 // wavehouse_auth_operator_key_requests_total, a wrong one adds one to
 // wavehouse_auth_operator_key_failures_total, and a request with no operator
 // credential touches neither (#890).
-// Not parallel: the counters are package-level instruments on the global meter
-// provider. Cleanup installs a no-op provider rather than restoring the saved
-// one, because the first SetMeterProvider binds the default delegating
-// provider to this test's provider for good.
+// Not parallel: it swaps the package-level counters for ones on a test meter
+// provider, rather than installing a global provider, since the global
+// delegate binds once and a repeat run (-count=2) would read nothing.
 func TestMiddleware_OperatorKey_Counters(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	otel.SetMeterProvider(mp)
+	meter := mp.Meter("wavehouse-auth")
+	prevRequests, prevFailures := operatorKeyRequests, operatorKeyFailures
+	var err error
+	operatorKeyRequests, err = meter.Int64Counter("wavehouse_auth_operator_key_requests_total")
+	require.NoError(t, err)
+	operatorKeyFailures, err = meter.Int64Counter("wavehouse_auth_operator_key_failures_total")
+	require.NoError(t, err)
 	t.Cleanup(func() {
-		otel.SetMeterProvider(noopmetric.NewMeterProvider())
+		operatorKeyRequests, operatorKeyFailures = prevRequests, prevFailures
 		_ = mp.Shutdown(context.Background())
 	})
 	count := func(name string) int64 {

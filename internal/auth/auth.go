@@ -466,7 +466,7 @@ var operatorKeyRequests, _ = otel.Meter("wavehouse-auth").Int64Counter(
 // tenant's policy per request — and operator authentications are counted by
 // wavehouse_auth_operator_key_requests_total and logged at debug. A presented
 // credential that does not match is logged at warn and counted by
-// wavehouse_auth_operator_key_failures_total (a probing signal), then falls
+// wavehouse_auth_operator_key_failures_total (probing, or a stale key), then falls
 // through to the Bearer-token path as if no operator key had been sent: a
 // valid Bearer token still authenticates the request, and without one it is
 // roleless. policies may be nil when no operator key is configured.
