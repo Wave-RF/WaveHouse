@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
@@ -1080,12 +1081,19 @@ func TestSchemaChanges(t *testing.T) {
 
 // TestRefresh_SpanCarriesTenant: the refresh span is per tenant, so it carries
 // the tenant attribute the request path's spans use (#888).
-// Not parallel: Refresh reads the global tracer provider.
+// Not parallel: Refresh reads the global tracer provider. Cleanup installs a
+// no-op provider rather than restoring the saved one: the first
+// SetTracerProvider binds the default delegating provider to this test's
+// provider for good, so restoring it would keep feeding later tests' spans
+// into the recorder.
 func TestRefresh_SpanCarriesTenant(t *testing.T) {
 	rec := tracetest.NewSpanRecorder()
-	saved := otel.GetTracerProvider()
-	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
-	t.Cleanup(func() { otel.SetTracerProvider(saved) })
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(noop.NewTracerProvider())
+		_ = tp.Shutdown(context.Background())
+	})
 
 	conn := &fakeConn{columns: []fakeColumn{{table: "clicks", name: "id", chType: "String", position: 1}}}
 	sr := NewSchemaRegistry(sourceOf(conn), tenant.ID("acme"), func(tenant.ID) time.Duration { return time.Hour })
