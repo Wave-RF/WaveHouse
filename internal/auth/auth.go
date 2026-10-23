@@ -466,8 +466,9 @@ var operatorKeyRequests, _ = otel.Meter("wavehouse-auth").Int64Counter(
 // wavehouse_auth_operator_key_requests_total and logged at debug. A presented
 // credential that does not match is logged at warn and counted by
 // wavehouse_auth_operator_key_failures_total (a probing signal), then falls
-// through like any unauthenticated request. policies may be nil when no
-// operator key is configured.
+// through to the Bearer-token path as if no operator key had been sent: a
+// valid Bearer token still authenticates the request, and without one it is
+// roleless. policies may be nil when no operator key is configured.
 func middleware(current func(context.Context) (tenant.ID, *verifier), operatorKeyCfg string, policies PolicySource) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
