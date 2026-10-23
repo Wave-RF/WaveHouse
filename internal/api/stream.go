@@ -34,7 +34,11 @@ type StreamHandler struct {
 	// longer served, whose streams are ending (Hub.Prune, Served). A nil func
 	// means no keepalive is wired (tests).
 	Heartbeater func(*settings.Store) *stream.Heartbeater
-	Metrics     *stream.Metrics
+	// SubscriberQueue yields the request tenant's outbound queue size, in
+	// frames (its stream.subscriber_queue), read as each stream opens. A nil
+	// func takes the stream package's default (tests).
+	SubscriberQueue func(*settings.Store) int
+	Metrics         *stream.Metrics
 	// Closing, when set, is closed as the server begins shutting down, and
 	// every open stream ends at once — mid-replay too: a stream is a
 	// connection to close, not in-flight work for the drain to wait on, and
@@ -119,7 +123,11 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// dropped together. A consumer that cares keys on timestamp plus its own row
 	// identity.
 	label := h.Hub.LabelTable(topic.Tenant, table)
-	sub := stream.NewTableSubscriber(label, claims, h.Metrics)
+	queue := 0
+	if h.SubscriberQueue != nil {
+		queue = h.SubscriberQueue(store)
+	}
+	sub := stream.NewTableSubscriber(label, claims, h.Metrics, queue)
 	// Deferred ahead of the Hub and wheel removals so it runs after them: by
 	// then no producer can queue a frame Close would miss.
 	end := endClientGone

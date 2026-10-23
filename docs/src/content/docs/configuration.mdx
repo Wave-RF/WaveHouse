@@ -16,7 +16,7 @@ WaveHouse is configured via a YAML file with environment variable overrides. All
 1. If a config file exists at the specified path (default: `config.yaml`), it is loaded first.
 2. Environment variables override any values from the YAML file. A key the file sets always wins over its default, including an explicit `false`, `0` or `""`: `otel.traces.enabled: false` turns traces off, and `otel.traces.sample_rate: 0` exports no traces. Only a key the file leaves out takes the default listed below.
 3. If no config file exists, all values are read from environment variables. Every key has a default except `settings.dir` (`WH_SETTINGS_DIR`), which must be set either way.
-4. Both sources are **strict**. A YAML key this page doesn't list — a typo, or a tunable that has moved to the settings directory (`dlq.enabled`, `clickhouse.addr`, `stream.*`, a leftover `policy:` or `pipes:` block, …) — refuses to boot and names every offending key, so nothing is read, ignored, and believed. A `WH_*` environment variable that binds to no key on this page (`WH_DEDUPE_ENABLED`, `WH_CH_ADDR`, a misspelling) refuses to boot the same way. Two variables have no YAML key and are exempt because they are not config keys at all but process-level settings `main` reads directly: `WH_CONFIG` (below), which locates the file, and `WH_LOG_LEVEL`. Only the `WH_` prefix is checked, since the environment always carries names that aren't WaveHouse's. One outside source does share the prefix. Kubernetes injects `{SERVICE}_SERVICE_HOST`, `{SERVICE}_PORT`, and similar link variables into every pod in a Service's own namespace, for each Service with a cluster IP that existed before the pod started (a headless Service injects nothing, and a Service in another namespace is harmless). The name is uppercased with `-` mapped to `_`, so a Service named `wh` produces `WH_SERVICE_HOST` and `WH_PORT`, one named `wh-foo` produces `WH_FOO_SERVICE_HOST` and `WH_FOO_PORT`, and either way the pod refuses to boot on its next restart. Set `enableServiceLinks: false` on the pod spec, or name the Service something else. The error says so.
+4. Both sources are **strict**. A YAML key this page doesn't list — a typo, or a tunable that has moved to the settings directory (`dlq.enabled`, `clickhouse.addr`, `stream.*`, `ingest.*`, a leftover `policy:` or `pipes:` block, …) — refuses to boot and names every offending key, so nothing is read, ignored, and believed. A `WH_*` environment variable that binds to no key on this page (`WH_DEDUPE_ENABLED`, `WH_CH_ADDR`, a misspelling) refuses to boot the same way. Two variables have no YAML key and are exempt because they are not config keys at all but process-level settings `main` reads directly: `WH_CONFIG` (below), which locates the file, and `WH_LOG_LEVEL`. Only the `WH_` prefix is checked, since the environment always carries names that aren't WaveHouse's. One outside source does share the prefix. Kubernetes injects `{SERVICE}_SERVICE_HOST`, `{SERVICE}_PORT`, and similar link variables into every pod in a Service's own namespace, for each Service with a cluster IP that existed before the pod started (a headless Service injects nothing, and a Service in another namespace is harmless). The name is uppercased with `-` mapped to `_`, so a Service named `wh` produces `WH_SERVICE_HOST` and `WH_PORT`, one named `wh-foo` produces `WH_FOO_SERVICE_HOST` and `WH_FOO_PORT`, and either way the pod refuses to boot on its next restart. Set `enableServiceLinks: false` on the pod spec, or name the Service something else. The error says so.
 5. Before anything dials out, `data_dir` is probed — when a selected [backend](#backends) keeps state there, as the in-process `mq` backend does, and the in-process `dedupe` backend does in a process running the `api` [role](#process-roles) — and boot refuses on any of these: the value is empty; the path exists but is not a directory; the path, or any component above it, is a dangling symlink (a mount that never came up); the directory exists but the process cannot write to it; the directory is absent and its nearest existing ancestor is not writable, so it could not be created. The probe runs before ClickHouse discovery, so the refusal lands at the top of the log, and a permission denial — on the write probe, or on reaching the path at all through a parent without search permission — carries the UID-65532 remediation, since a bind mount owned by root is the typical cause.
 
 Boot is the validator for this half of configuration: there is no dry run, and a refused boot with the offending key, variable, or path named in the error is the loud signal. The hot-reloadable half has a dry run — `wavehouse validate` — because it is edited under a running server; boot config only ever takes effect through a restart, so the restart is where it is checked.
@@ -165,7 +165,7 @@ The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate 
 
 ### ClickHouse
 
-Only the connection ceiling is boot config. The wiring — native address, HTTP port and scheme, database, username, password, query timeout, TLS, headers, pool sizes — is the settings directory's [`clickhouse` block](/settings-directory#clickhouse), where a change re-dials without a restart; the password lives there with the user it pairs with, so rotating it is a reload.
+Only the connection ceiling is boot config. The wiring — native address, HTTP port and scheme, database, username, password, query and insert timeouts, TLS, headers, pool sizes — is the settings directory's [`clickhouse` block](/settings-directory#clickhouse), where a change re-dials without a restart; the password lives there with the user it pairs with, so rotating it is a reload.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
@@ -215,7 +215,15 @@ WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so
 
 ### Message Queue (NATS)
 
-This section describes the `embedded` [backend](#backends). `mq.backend: nats` takes its settings from [`mq.nats`](#external-nats-mqnats) instead.
+Three keys tune the ingest worker's durable consumer of the queue, on either [backend](#backends): under `embedded` they shape the consumer on each tenant's queue; under `nats` they are what the operator's shard durables must agree with, checked at boot like the shard count ([Create the topology](/deployment#create-the-topology)), and `wavehouse mq manifests --ack-wait --max-ack-pending` generates durables that do. They are sized once per process, which is why they are boot config; the batch triggers, which a tenant's row width decides, are the [settings directory's](/settings-directory#ingest).
+
+| YAML Key | Env Var | Default | Description |
+| --- | --- | ------- | ----------- |
+| `mq.ack_wait` | `WH_MQ_ACK_WAIT` | `60s` | The redelivery timeout: a row the worker has not acked within it is delivered again. It must cover a table's batch wait plus its insert: each tenant's [`ingest.max_batch_wait_ms`](/settings-directory#ingest) plus [`clickhouse.insert_timeout`](/settings-directory#clickhouse) must stay under it, which the ingest processes check when a tenant's settings are adopted (boot refuses over a flat directory, and over a nested one serves the tenant with none, its rows handed back to the queue; a reload keeps the tenant's previous values, or hands its rows back when it has none), or a batch still inserting is redelivered and inserted twice. The rule bounds a batch's own wait plus one `INSERT`; a batch queued behind an in-flight flush, several column lists or row-by-row isolation add deadlines on top, so keep the sum well under this, as the seeds do (35 s). Before lowering it, check every tenant's sum: one at or above the new value refuses a flat directory's boot and leaves a nested directory's tenant with none. A Go duration (`60s`, `2m`); `0` refuses boot. Under `nats` every shard durable's `ack_wait` must be at least this, or boot refuses with a finding. |
+| `mq.max_ack_pending` | `WH_MQ_MAX_ACK_PENDING` | `10000` | How many rows a delivery unit may have delivered and not yet acked before the queue pauses delivery from it (backpressure), and no other unit's: a tenant's queue under `embedded`; under `nats` a shard durable's `max_ack_pending`, shared by the tenants in that shard, and the budget of unsettled rows an ingest process shares out over its shards ([Scaling ingest processes](/deployment#scaling-ingest-processes)). A tenant's tables share it, so the batches of several busy tables can hold it together before any reaches [`ingest.max_batch_bytes`](/settings-directory#ingest), and flush on the timer. The worker holds every delivered row until its batch is acked, so its memory grows with this, per unit. At least `mq.prefetch`. A durable with a lower value is a `recommended` finding at boot. |
+| `mq.prefetch` | `WH_MQ_PREFETCH` | `500` | How many rows the worker's consumer fetches ahead of its batches, split across the units it consumes (a tenant's queue, or a shard; at least one each). At least `1`. Twice this is also the floor under a shard's share of `mq.max_ack_pending` (or `mq.max_ack_pending` itself, if that is smaller). Each tenant table the worker has seen keeps a channel of this many parsed rows (about 120 bytes each) for the life of the process, so raising it costs memory per table served. Under `nats` a shard durable's `max_request_batch` must be unset (as generated) or at least this, or boot refuses. |
+
+The rest of this section describes the `embedded` backend. `mq.backend: nats` takes its other settings from [`mq.nats`](#external-nats-mqnats) instead.
 
 Each tenant's queue has its own disk budget, `mq.max_bytes_gb`, a hot-reloadable key in the [Settings Directory](/settings-directory#message-queue) — there is no boot-config knob for it.
 
@@ -292,6 +300,8 @@ The master switch is `otel.enabled`. When `true`, each signal (traces/metrics/lo
 
 **Direct-to-cloud OTLP.** The OTLP destination is configured through the standard [`OTEL_EXPORTER_OTLP_*` environment variables](https://opentelemetry.io/docs/specs/otel/protocol/exporter/) read by the OpenTelemetry SDK, not WaveHouse config: `OTEL_EXPORTER_OTLP_ENDPOINT` (always include a scheme — `https://` selects TLS via system root CAs, `http://` selects plaintext), `OTEL_EXPORTER_OTLP_HEADERS` for per-RPC auth, `OTEL_EXPORTER_OTLP_CERTIFICATE` to trust a custom/private CA, and `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` / `OTEL_EXPORTER_OTLP_CLIENT_KEY` for mutual TLS. Without a scheme the SDK misreads the endpoint and each signal handles it differently (the logs exporter, for one, can be left with no destination at all), so always write the scheme. An unset endpoint means **TLS** to `localhost:4317`, so a plaintext local collector needs `http://localhost:4317`, or `OTEL_EXPORTER_OTLP_INSECURE=true` with the endpoint left unset. The custom/private CA and mutual TLS variables apply to all three signals (traces, metrics and logs). With these set, WaveHouse ships telemetry straight to a TLS-protected cloud gateway (Grafana Cloud's OTLP gateway, Honeycomb, etc.) — no sidecar required (a sidecar is still useful for egress queuing, batching, and tail-based sampling; it's just no longer mandatory). A malformed entry in `OTEL_EXPORTER_OTLP_HEADERS` never fails startup, but the signals treat it differently: traces and metrics log and skip just that entry, while the logs exporter logs it and discards the whole variable, so logs are sent with no headers at all and an authenticating gateway rejects them. Datadog has no public direct-to-cloud OTLP endpoint — use the local DDOT Collector path in the [deployment guide](/deployment#observability). See [Deployment → Observability](/deployment#observability) for worked Honeycomb / Grafana Cloud examples.
 
+**Export cadence.** Traces are exported in batches every 5 s and metrics every 15 s: the fallbacks WaveHouse passes to the SDK only while the standard `OTEL_BSP_SCHEDULE_DELAY` and `OTEL_METRIC_EXPORT_INTERVAL` variables (whole milliseconds) are unset, since an option passed to the SDK would override the variable. Set either and the SDK's value applies; a value it cannot read falls back to its own default (5 s for traces, 60 s for metrics); the metrics SDK prints a line to stderr about it, the trace SDK nothing. The Go runtime metrics are read at most every 15 s, the SDK's default. Logs are batched by the SDK's `OTEL_BLRP_*` variables, which WaveHouse never overrode.
+
 **Which process sent it.** Every span, metric series and OTLP log record carries the process's identity as OpenTelemetry resource attributes: `service.name` (`wavehouse`), `service.version`, `service.instance.id` (the [`instance_id`](#process-roles)), `wavehouse.roles` (the [`roles`](#process-roles), sorted and comma-separated, such as `api,ingest`), `wavehouse.git_commit` and `wavehouse.build_time`. Set the standard `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` environment variables to override any of them or add your own (`OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod`); they win on a shared key. A malformed `OTEL_RESOURCE_ATTRIBUTES` never fails startup: the entries that can be read apply, and the error is logged. The Prometheus endpoint reports the resource as `target_info`, and every metrics pipeline exports `wavehouse_build_info` (see [Deployment → Telling processes apart](/deployment#telling-processes-apart)).
 
 | YAML Key | Env Var | Default | Description |
@@ -299,7 +309,7 @@ The master switch is `otel.enabled`. When `true`, each signal (traces/metrics/lo
 | `otel.enabled` | `WH_OTEL_ENABLED` | `false` | Master switch. When `false`, no signals are initialized regardless of the sub-toggles below. The OTLP endpoint, TLS, custom CA, mutual TLS, and auth headers are configured via the standard `OTEL_EXPORTER_OTLP_*` env vars (see the note above), not a WaveHouse key. |
 | `otel.traces.enabled` | `WH_OTEL_TRACES_ENABLED` | `true` | Export traces via OTLP gRPC. |
 | `otel.traces.sample_rate` | `WH_OTEL_TRACES_SAMPLE_RATE` | `1.0` | Head-based trace sampling rate in `[0.0, 1.0]`. `1.0` exports every trace; `0.0` exports none. Defaults to 100% (matches the OpenTelemetry SDK default); lower it for high-QPS production services where collector or backend cost is a concern. Best practice is "100% at the source, downsample at the collector" via tail-based sampling. Validated at config load. |
-| `otel.metrics.enabled` | `WH_OTEL_METRICS_ENABLED` | `true` | Export metrics + Go runtime metrics via OTLP gRPC. Periodic reader interval is fixed at 15s. Metrics are pre-aggregated so there is no sampling knob. Whether they carry a `table` label is [`prometheus.per_table_metrics`](#metric-labels), which applies here too. |
+| `otel.metrics.enabled` | `WH_OTEL_METRICS_ENABLED` | `true` | Export metrics + Go runtime metrics via OTLP gRPC, every 15 s unless `OTEL_METRIC_EXPORT_INTERVAL` says otherwise (see **Export cadence** above). Metrics are pre-aggregated so there is no sampling knob. Whether they carry a `table` label is [`prometheus.per_table_metrics`](#metric-labels), which applies here too. |
 | `otel.logs.enabled` | `WH_OTEL_LOGS_ENABLED` | `true` | Export logs via OTLP gRPC. Disabling it leaves stdout with 100% of records, but from the boot logger: lines keep `trace_id`/`span_id`, `request_id`, `tenant` and `instance_id`, and lose `component`, `source` and the build fields. |
 | `otel.logs.sample_rate` | `WH_OTEL_LOGS_SAMPLE_RATE` | `1.0` | OTLP export rate for the `DEBUG`/`INFO` records `WH_LOG_LEVEL` admits, in `[0.0, 1.0]`. Validated at config load. `WARN` and `ERROR` records always export at 100% — dropping them silently during incidents is too dangerous to expose as a knob. **Stdout always receives 100% of records regardless of this rate** (see the scraper note above). |
 
@@ -364,12 +374,15 @@ server:
   trusted_proxies: []    # CIDRs or addresses whose X-Forwarded-For and traceparent are believed; empty = none
 
 clickhouse:
-  # addr, ports, database, username, password, query_timeout, tls, headers
-  # and pool sizes are settings (config.json)
+  # addr, ports, database, username, password, query_timeout, insert_timeout,
+  # tls, headers and pool sizes are settings (config.json)
   max_total_conns: 0     # ceiling on open native connections; 0 = none
 
 mq:
   backend: embedded      # in-process NATS JetStream under <data_dir>/nats
+  ack_wait: 60s          # the worker's redelivery timeout, on either backend
+  max_ack_pending: 10000 # rows delivered and unacked per tenant queue, or per shard
+  prefetch: 500          # rows the worker fetches ahead of its batches
   # With backend: nats, the operator's cluster instead (read only then):
   # nats:
   #   urls: ["nats://nats.nats.svc:4222"]
@@ -430,14 +443,15 @@ settings:
                          # reloaded on file change, SIGHUP, or
                          # POST /v1/ops/settings/reload; create one with
                          # `wavehouse bootstrap ./settings` (the access-control
-                         # policy, the named pipes, and the dedupe, dlq, query,
-                         # schema, stream, cors keys live there)
+                         # policy, the named pipes, and the dedupe, dlq, ingest,
+                         # query, schema, stream, cors keys live there)
 
 otel:
   enabled: false         # master switch — set true to export via OTLP gRPC
   # Endpoint, TLS, custom CA, mTLS, and auth headers come from the standard
   # OTEL_EXPORTER_OTLP_* env vars (OTEL_EXPORTER_OTLP_ENDPOINT=https://host:port,
-  # OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=KEY), read by the OTel SDK.
+  # OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=KEY), read by the OTel SDK;
+  # so does the export cadence (OTEL_BSP_SCHEDULE_DELAY, OTEL_METRIC_EXPORT_INTERVAL).
   traces:
     enabled: true
     sample_rate: 1.0     # head-based, [0.0, 1.0]; tune down for high QPS
@@ -476,6 +490,9 @@ WH_SERVER_TRUSTED_PROXIES=
 WH_CH_MAX_TOTAL_CONNS=0
 
 WH_MQ_BACKEND=embedded
+WH_MQ_ACK_WAIT=60s
+WH_MQ_MAX_ACK_PENDING=10000
+WH_MQ_PREFETCH=500
 # With WH_MQ_BACKEND=nats (read only then):
 # WH_MQ_NATS_URLS=nats://nats.nats.svc:4222
 # WH_MQ_NATS_USER=wavehouse

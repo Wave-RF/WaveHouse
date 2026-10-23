@@ -92,7 +92,7 @@ func (s *stats) record(trigger, result string, removed int, now time.Time) {
 }
 
 // Reconciled reports how a consumer that follows the adopted settings
-// (component names it: "clickhouse", "dedupe", "mq") fared at reconciling
+// (component names it: "clickhouse", "dedupe", "mq", "ingest") fared at reconciling
 // with them, from its AfterAdopt hook or from the boot apply that follows
 // Open. A nil err records nothing. A failure is counted, and makes the
 // reload it follows partial: the one whose hooks are running, or, from the

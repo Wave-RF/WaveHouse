@@ -33,7 +33,9 @@ otel:
   enabled: false         # master switch — set true to export via OTLP gRPC
   # Endpoint, TLS, custom CA, mTLS, and auth headers come from the standard
   # OTEL_EXPORTER_OTLP_* env vars (OTEL_EXPORTER_OTLP_ENDPOINT=https://host:port,
-  # OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=KEY), read by the OTel SDK.
+  # OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=KEY), read by the OTel SDK; so
+  # does the export cadence (OTEL_BSP_SCHEDULE_DELAY, OTEL_METRIC_EXPORT_INTERVAL
+  # in milliseconds; unset, traces batch every 5s and metrics export every 15s).
   traces:
     enabled: true
     sample_rate: 1.0     # head-based, [0.0, 1.0]; tune down for high QPS
@@ -58,8 +60,8 @@ profiling:
   addr: 127.0.0.1:6060
 
 # Only the connection ceiling is boot config; addr, http_port, http_scheme,
-# database, username, password, query_timeout, tls, headers and the pool
-# sizes are the settings directory's clickhouse block.
+# database, username, password, query_timeout, insert_timeout, tls, headers
+# and the pool sizes are the settings directory's clickhouse block.
 clickhouse:
   max_total_conns: 0 # ceiling on open native connections across pools; 0 = none
 
@@ -67,6 +69,19 @@ clickhouse:
 # in-process backend; mq and coord also take nats, cache redis, dedupe dynamodb.
 mq:
   backend: embedded # NATS JetStream under <data_dir>/nats
+  # The ingest worker's consumer, on either backend. ack_wait is the
+  # redelivery timeout: it must cover a table's batch wait plus its insert,
+  # or a batch still inserting is redelivered and inserted twice. Check every
+  # tenant's max_batch_wait_ms + insert_timeout (35s at the seeds) before
+  # lowering it: one at or above it refuses boot over a flat settings
+  # directory and leaves that tenant with no limits over a nested one.
+  # max_ack_pending caps the rows delivered and unacked per tenant queue
+  # (per shard under nats, where the durables must agree: wavehouse mq
+  # manifests --ack-wait --max-ack-pending), and with it the worker's
+  # memory; prefetch is what the consumer fetches ahead, at most max_ack_pending.
+  ack_wait: 60s
+  max_ack_pending: 10000
+  prefetch: 500
   # backend: nats reads this block instead: the operator's NATS JetStream
   # (see the deployment guide's "External NATS" section).
   # nats:
@@ -120,12 +135,16 @@ auth:
 # Settings directory (REQUIRED): roles.json, policies.json, pipes.json,
 # config.json. The behavioral configuration lives in its config.json —
 # clickhouse wiring (addr, http_port, http_scheme, database, username,
-# query_timeout, tls, headers, max_open_conns, max_idle_conns), auth
+# query_timeout, insert_timeout, tls, headers, max_open_conns,
+# max_idle_conns), auth
 # (jwks_url, role_claim), dedupe (enabled/id_field/
 # require_id/retention + per-table overrides), dlq.enabled (+ per table),
+# ingest (max_batch_bytes / max_batch_wait_ms, the worker's batch triggers,
+# and retry_backoff_max),
 # query.default_max_rows / timestamp_bucket_seconds,
 # schema.refresh_interval, stream keepalive_interval / keepalive_buckets /
-# gap_window_minutes, mq.max_bytes_gb, cors.allowed_origins — and every key
+# gap_window_minutes / subscriber_queue, mq.max_bytes_gb,
+# cors.allowed_origins — and every key
 # is required except dedupe.retention (missing = "0", forever): the binary
 # has no other compiled default, so what's adopted is exactly what the
 # files say. The server validates the directory at boot (invalid or missing

@@ -59,7 +59,7 @@ func bootNATSProcess(t *testing.T, natsURL, root string, roles ...config.Role) *
 		DataDir: t.TempDir(),
 		Server:  config.Server{Port: ln.Addr().(*net.TCPAddr).Port, ShutdownTimeout: 10},
 		Auth:    config.Auth{OperatorKey: natsOperatorKey},
-		MQ: config.MQ{Backend: config.MQNATS, NATS: config.MQNATSConfig{
+		MQ: config.MQ{Backend: config.MQNATS, AckWait: mq.DefaultAckWait, MaxAckPending: mq.DefaultMaxAckPending, Prefetch: mq.DefaultPrefetch, NATS: config.MQNATSConfig{
 			URLs: []string{natsURL}, User: natstest.WaveHouseUser, PasswordFile: pw,
 			SubjectPrefix: "wh", Partitions: 4, Shards: 8, IngestConsumer: "wh-ingest",
 			ConnectTimeout: 5 * time.Second, PublishTimeout: 5 * time.Second, TopologyWait: 30 * time.Second,

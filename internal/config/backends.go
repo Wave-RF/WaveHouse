@@ -29,10 +29,29 @@ const MQNATS MQBackend = "nats"
 
 var mqBackends = []MQBackend{MQEmbedded, MQNATS}
 
-// MQ selects the message queue. The per-tenant byte budget, mq.max_bytes_gb,
-// is a settings-directory key, not this block's.
+// MQ selects the message queue and tunes the ingest worker's consumer of it,
+// the same on either backend. The per-tenant byte budget, mq.max_bytes_gb,
+// is a settings-directory key, not this block's; so are the worker's batch
+// triggers (ingest.*), which a tenant's row width decides.
 type MQ struct {
 	Backend MQBackend `yaml:"backend" env:"WH_MQ_BACKEND"`
+	// AckWait is the redelivery timeout: a row the worker has not acked
+	// within it is delivered again. It must cover a batch's wait and its one
+	// INSERT (each tenant's ingest.max_batch_wait_ms plus
+	// clickhouse.insert_timeout, checked when the tenant's settings are
+	// adopted), with room to spare for a batch queued behind an in-flight
+	// flush or isolated row by row, or rows still being inserted are
+	// redelivered and inserted twice.
+	AckWait time.Duration `yaml:"ack_wait" env:"WH_MQ_ACK_WAIT"`
+	// MaxAckPending caps the rows delivered and not yet acked, per delivery
+	// unit — a tenant's embedded queue, or a shard of the operator's
+	// partitions, shared by the tenants in it: delivery from the unit pauses
+	// at it. The worker holds every delivered row until its batch is acked,
+	// so this bounds its memory per unit.
+	MaxAckPending int `yaml:"max_ack_pending" env:"WH_MQ_MAX_ACK_PENDING"`
+	// Prefetch is how many rows the worker's consumer fetches ahead of the
+	// batches, split across the units it consumes; at most MaxAckPending.
+	Prefetch int `yaml:"prefetch" env:"WH_MQ_PREFETCH"`
 	// NATS is read only when Backend is nats.
 	NATS MQNATSConfig `yaml:"nats"`
 }
@@ -40,6 +59,15 @@ type MQ struct {
 func (m MQ) validate() error {
 	if err := checkBackend("mq.backend", "WH_MQ_BACKEND", m.Backend, mqBackends); err != nil {
 		return err
+	}
+	if m.AckWait <= 0 {
+		return fmt.Errorf("mq.ack_wait (WH_MQ_ACK_WAIT) must be > 0, got %s", m.AckWait)
+	}
+	if m.Prefetch < 1 {
+		return fmt.Errorf("mq.prefetch (WH_MQ_PREFETCH) must be at least 1, got %d", m.Prefetch)
+	}
+	if m.MaxAckPending < m.Prefetch {
+		return fmt.Errorf("mq.max_ack_pending (WH_MQ_MAX_ACK_PENDING) must be at least mq.prefetch (%d), got %d", m.Prefetch, m.MaxAckPending)
 	}
 	if m.Backend == MQNATS {
 		return m.NATS.validate()
@@ -205,6 +233,15 @@ func checkBackend[T ~string](key, env string, got T, valid []T) error {
 	}
 	return fmt.Errorf("%s (%s) %q is not a backend this build has; valid: %s", key, env, got, strings.Join(names, ", "))
 }
+
+// The ingest worker's consumer defaults, the mq part of defaults(). They
+// mirror mq.DefaultAckWait, mq.DefaultMaxAckPending and mq.DefaultPrefetch,
+// which config must not import; window_test.go pins the two.
+const (
+	defaultAckWait       = 60 * time.Second
+	defaultMaxAckPending = 10_000
+	defaultPrefetch      = 500
+)
 
 // embeddedDuplicateWindow is the embedded ingest stream's duplicate window,
 // counted from the stored publish. It mirrors mq.EmbeddedDuplicateWindow,

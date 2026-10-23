@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -22,6 +23,38 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/trace"
 )
+
+// The export cadences. The SDK reads OTEL_BSP_SCHEDULE_DELAY and
+// OTEL_METRIC_EXPORT_INTERVAL (milliseconds) itself, as it reads the
+// OTEL_EXPORTER_OTLP_* variables InitProvider delegates to, but an option
+// passed to it overrides the variable: so each fallback below is passed only
+// while its variable is unset. A value the SDK cannot read falls back to its
+// own default (5s for traces, 60s for metrics): the metrics SDK prints a
+// line to stderr about it, the trace SDK nothing. The runtime
+// metrics' minimum read interval is left to the SDK, whose default is the
+// 15s WaveHouse always asked for.
+const (
+	defaultTraceBatchTimeout    = 5 * time.Second
+	defaultMetricExportInterval = 15 * time.Second
+)
+
+// traceBatchOptions is the trace batcher's schedule delay: none when
+// OTEL_BSP_SCHEDULE_DELAY sets it, else the fallback.
+func traceBatchOptions() []trace.BatchSpanProcessorOption {
+	if os.Getenv("OTEL_BSP_SCHEDULE_DELAY") != "" {
+		return nil
+	}
+	return []trace.BatchSpanProcessorOption{trace.WithBatchTimeout(defaultTraceBatchTimeout)}
+}
+
+// metricReaderOptions is the periodic reader's export interval: none when
+// OTEL_METRIC_EXPORT_INTERVAL sets it, else the fallback.
+func metricReaderOptions() []metric.PeriodicReaderOption {
+	if os.Getenv("OTEL_METRIC_EXPORT_INTERVAL") != "" {
+		return nil
+	}
+	return []metric.PeriodicReaderOption{metric.WithInterval(defaultMetricExportInterval)}
+}
 
 // runtimeStartOnce gates the `runtime.Start` call in InitProvider so that
 // re-init (in tests, or any future hot-reload path) doesn't accumulate
@@ -155,7 +188,7 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 		}
 
 		tracerProvider := trace.NewTracerProvider(
-			trace.WithBatcher(traceExporter, trace.WithBatchTimeout(time.Second*5)),
+			trace.WithBatcher(traceExporter, traceBatchOptions()...),
 			trace.WithResource(res),
 			trace.WithSampler(trace.TraceIDRatioBased(cfg.TracesSampleRate)),
 		)
@@ -173,7 +206,7 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 				handleErr(err)
 				return shutdown, nil, err
 			}
-			readers = append(readers, metric.NewPeriodicReader(metricExporter, metric.WithInterval(15*time.Second)))
+			readers = append(readers, metric.NewPeriodicReader(metricExporter, metricReaderOptions()...))
 		}
 
 		if cfg.PrometheusEnabled {
@@ -218,7 +251,7 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 		// and continue with degraded host metrics rather than routing through
 		// handleErr (which would roll back the globals).
 		runtimeStartOnce.Do(func() {
-			if err := runtime.Start(runtime.WithMinimumReadMemStatsInterval(15 * time.Second)); err != nil {
+			if err := runtime.Start(); err != nil {
 				slog.Warn("OTel runtime instrumentation failed to start; continuing with degraded host metrics",
 					"err", err)
 			}

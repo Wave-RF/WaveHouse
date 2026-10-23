@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -62,6 +63,24 @@ func TestNATSFixture_ReservesAgainstTheShippedFileStore(t *testing.T) {
 	var apiErr *jetstream.APIError
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, jetstream.ErrorCode(10047), apiErr.ErrorCode, "insufficient storage resources: %v", err)
+}
+
+// The consumer settings render into every shard durable, and a value no
+// worker could run with is refused.
+func TestWriteNATSManifests_ConsumerSettings(t *testing.T) {
+	t.Parallel()
+	var b bytes.Buffer
+	require.NoError(t, WriteNATSManifests(&b, NATSManifestOptions{Topology: NATSTopology{Partitions: 1, Shards: 2, AckWait: 90 * time.Second, MaxAckPending: 2000}}))
+	assert.Equal(t, 2, strings.Count(b.String(), "ackWait: 1m30s\n"))
+	assert.Equal(t, 2, strings.Count(b.String(), "maxAckPending: 2000\n"))
+	assert.Contains(t, b.String(), "--ack-wait 1m30s --max-ack-pending 2000\n")
+	b.Reset()
+	require.NoError(t, WriteNATSManifests(&b, NATSManifestOptions{Topology: NATSTopology{Partitions: 1, Shards: 1}}))
+	assert.Contains(t, b.String(), "ackWait: 1m\n", "zero takes the default")
+	assert.NotContains(t, b.String(), "--ack-wait", "a default is not recorded")
+	for _, bad := range []NATSTopology{{AckWait: -time.Second}, {MaxAckPending: -1}, {Prefetch: -1}} {
+		assert.Error(t, WriteNATSManifests(&b, NATSManifestOptions{Topology: bad}), "%+v", bad)
+	}
 }
 
 func TestStoreSize(t *testing.T) {

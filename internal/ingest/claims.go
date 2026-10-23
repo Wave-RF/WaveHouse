@@ -63,19 +63,16 @@ import (
 //
 // Memory. Each unit may hold delivered and unsettled rows up to its share of
 // MaxHeld: an even share over the units this process is assigned, and never
-// less than minUnitHeld (or MaxHeld, if smaller), so one hot table still
-// fills whole batches. At its share a unit fetches only what keeps its pin
+// less than twice the worker's prefetch (or MaxHeld, if smaller), so one hot
+// table still fills whole batches. At its share a unit fetches only what keeps its pin
 // (the broker's: a row every few seconds, at most one ack_wait's worth past
 // the share), and the broker keeps the rest; a stuck unit
 // never takes another unit's share. The process holds about max(MaxHeld,
-// units × minUnitHeld) at most.
+// units × two prefetches) at most.
 const (
 	memberLeasePrefix = "ingest.m"
 
 	defaultUnownedEvery = 15 * time.Second
-	// minUnitHeld is two of the worker's batches: one being written while
-	// the next fills.
-	minUnitHeld = 2 * defaultMaxBatch
 	// settlePoll is how often a handover checks its rows have settled.
 	settlePoll = 50 * time.Millisecond
 	// bindEscalate is how long a configured unit may fail to bind, for a
@@ -104,19 +101,20 @@ type ClaimConfig struct {
 	// default coord.RetryPeriod.
 	Every time.Duration
 	// Handover bounds how long a unit given up waits for its delivered rows
-	// to settle before it is released; default the worker's ack_wait, after
-	// which the broker redelivers them anyway.
+	// to settle before it is released: the worker's ack wait (boot config's
+	// mq.ack_wait, which internal/app passes), after which the broker
+	// redelivers them anyway; default mq.DefaultAckWait.
 	Handover time.Duration
 	// MaxHeld is the process's budget of rows delivered and not yet settled,
-	// shared out per unit (see Memory above); default the worker's
-	// maxAckPending.
+	// shared out per unit (see Memory above): the worker's max ack pending
+	// (mq.max_ack_pending); default mq.DefaultMaxAckPending.
 	MaxHeld int
 	// UnownedEvery is how often the lowest live member reads every unit's
 	// backlog, and which have rows and no owner; default 15s.
 	UnownedEvery time.Duration
 	// SlotExpiry frees a delivered row's MaxHeld slot if the worker never
-	// settles it: by then the broker redelivers the row anyway. Default the
-	// worker's ack_wait.
+	// settles it: by then the broker redelivers the row anyway. The worker's
+	// ack wait, like Handover; default mq.DefaultAckWait.
 	SlotExpiry time.Duration
 }
 
@@ -142,16 +140,16 @@ func ClaimShards(q Queue, c coord.Coordinator, cfg ClaimConfig) (Queue, error) {
 		cfg.Every = coord.RetryPeriod
 	}
 	if cfg.Handover <= 0 {
-		cfg.Handover = ackWait
+		cfg.Handover = mq.DefaultAckWait
 	}
 	if cfg.MaxHeld <= 0 {
-		cfg.MaxHeld = maxAckPending
+		cfg.MaxHeld = mq.DefaultMaxAckPending
 	}
 	if cfg.UnownedEvery <= 0 {
 		cfg.UnownedEvery = defaultUnownedEvery
 	}
 	if cfg.SlotExpiry <= 0 {
-		cfg.SlotExpiry = ackWait
+		cfg.SlotExpiry = mq.DefaultAckWait
 	}
 	return &claimingQueue{Queue: q, sq: sq, c: c, obs: obs, cfg: cfg}, nil
 }
@@ -350,7 +348,7 @@ func (l *claimLoop) tick() {
 		}
 	}
 	if len(targets) > 0 {
-		l.share.Store(int64(unitShare(l.q.cfg.MaxHeld, len(targets))))
+		l.share.Store(int64(unitShare(l.q.cfg.MaxHeld, len(targets), l.prefetch)))
 	}
 	l.giveUp(targets)
 	l.take(ctx, targets, len(targets), live)
@@ -525,9 +523,12 @@ func (l *claimLoop) isReleasing(u string) bool {
 	return ok
 }
 
-// unitShare is each of count units' cap on rows delivered and unsettled.
-func unitShare(maxHeld, count int) int {
-	return max(min(maxHeld, minUnitHeld), maxHeld/max(1, count))
+// unitShare is each of count units' cap on rows delivered and unsettled:
+// an even share of maxHeld, and never under twice the prefetch, so a unit
+// at its cap still has a fetch-ahead in hand while as many rows are being
+// written.
+func unitShare(maxHeld, count, prefetch int) int {
+	return max(min(maxHeld, 2*prefetch), maxHeld/max(1, count))
 }
 
 // open binds unit u and starts delivering it, under the unit's share of

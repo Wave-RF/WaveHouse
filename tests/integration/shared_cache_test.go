@@ -77,7 +77,7 @@ func bootRedisApp(t *testing.T, redisAddr, prefix string, timeout time.Duration)
 	cfg := &config.Config{
 		DataDir: t.TempDir(),
 		Server:  config.Server{ShutdownTimeout: 10},
-		MQ:      config.MQ{Backend: config.MQEmbedded},
+		MQ:      embeddedMQ(),
 		Cache: config.Cache{Backend: config.CacheRedis, Redis: config.CacheRedisConfig{
 			Addrs: []string{redisAddr}, Mode: config.RedisStandalone, KeyPrefix: prefix,
 			Timeout: timeout, DialTimeout: time.Second,

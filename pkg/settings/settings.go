@@ -72,8 +72,10 @@ type PipesFile struct {
 // cannot change under a running process — the implementation each layer
 // runs on (`mq.backend`, `cache.backend`, `dedupe.backend`,
 // `coord.backend`), resource sizing (`data_dir`, `cache.l1_max_cost`,
-// `clickhouse.max_total_conns`), listeners, the observability exporters —
-// and the process-level secrets (`auth.operator_key`, `cache.redis.password`).
+// `clickhouse.max_total_conns`, the ingest worker's consumer: `mq.ack_wait`,
+// `mq.max_ack_pending`, `mq.prefetch`), listeners, the observability
+// exporters — and the process-level secrets (`auth.operator_key`,
+// `cache.redis.password`).
 // A tenant's own secrets — `clickhouse.password`, `auth.jwt_secret` — live
 // here with the wiring they belong to, so they reload with it (#529). Every
 // block and every top-level key inside it is REQUIRED, but dedupe.retention
@@ -87,6 +89,7 @@ type TenantConfig struct {
 	Auth       *AuthConfig       `json:"auth"`
 	Dedupe     *DedupeConfig     `json:"dedupe"`
 	DLQ        *DLQConfig        `json:"dlq"`
+	Ingest     *IngestConfig     `json:"ingest"`
 	Query      *QueryConfig      `json:"query"`
 	Schema     *SchemaConfig     `json:"schema"`
 	Stream     *StreamConfig     `json:"stream"`
@@ -114,6 +117,13 @@ type ClickHouseConfig struct {
 	// QueryTimeout is the deadline in seconds (>= 1) of a call on the query
 	// paths: structured queries, pipes (writes included) and the raw-SQL proxy.
 	QueryTimeout *int `json:"query_timeout"`
+	// InsertTimeout is the deadline in seconds (>= 1) of each INSERT the
+	// ingest worker sends for the tenant's batches, row-by-row isolation
+	// included; a timed-out insert is retried with backoff. With
+	// ingest.max_batch_wait_ms it must stay under the queue's redelivery
+	// timeout (boot config's `mq.ack_wait`), which only the server can
+	// check: see internal/app.
+	InsertTimeout *int `json:"insert_timeout"`
 	// TLS is the TLS wiring of both hops: `enabled` switches the native
 	// protocol to TLS, `http_scheme` stays the HTTP hop's switch, and the
 	// material applies to whichever hop uses TLS. Paths, checked for shape
@@ -213,6 +223,34 @@ type TableDLQ struct {
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
+// IngestConfig tunes how the ingest worker batches the tenant's tables: a
+// table's batch is written to ClickHouse once its rows' JSON reaches
+// max_batch_bytes, or max_batch_wait_ms after its first row, whichever comes
+// first, and a reload applies to the next batch. The right values depend on
+// the tenant's row width and rate, which is why they are the tenant's; the
+// consumer the batches come through — the redelivery timeout, the rows
+// delivered and unacked, the prefetch — is boot config (`mq.*`), sized once
+// per process.
+type IngestConfig struct {
+	// MaxBatchBytes is the size at which a table's batch is flushed: the
+	// sum of its rows' JSON (each envelope's `row`, one JSONCompactEachRow
+	// line), an estimate of the uncompressed INSERT body. Must be >= 1. A
+	// batch never holds more rows than the consumer has delivered and not
+	// yet acked (boot config's `mq.max_ack_pending`), so a target above
+	// that many rows is only ever reached by the timer.
+	MaxBatchBytes *int `json:"max_batch_bytes"`
+	// MaxBatchWaitMS is the longest a row waits in a batch before the batch
+	// is flushed, in milliseconds. Must be >= 1. With the insert's own
+	// deadline (clickhouse.insert_timeout) it must stay under the queue's
+	// redelivery timeout (boot config's `mq.ack_wait`), which only the
+	// server can check: see internal/app.
+	MaxBatchWaitMS *int `json:"max_batch_wait_ms"`
+	// RetryBackoffMax caps, in seconds (>= 1), the backoff a ClickHouse
+	// that cannot take the tenant's inserts is retried under: the delay
+	// doubles from a second up to it, jittered.
+	RetryBackoffMax *int `json:"retry_backoff_max"`
+}
+
 // QueryConfig holds query-shaping defaults. Server-wide *resource* limits
 // (memory, rows scanned, execution time) deliberately live in ClickHouse
 // itself — its settings profiles and quotas — so they apply uniformly to
@@ -243,6 +281,14 @@ type SchemaConfig struct {
 // nothing a proxy or client can tell apart.
 const MaxKeepaliveBuckets = 100
 
+// MaxSubscriberQueue caps stream.subscriber_queue. Each GET /v1/stream
+// connection allocates its queue as it opens, about 40 bytes a slot, and a
+// client that falls behind holds up to that many event frames until it reads
+// them, so the cap bounds what one connection can make the process allocate.
+// A client that far behind is better served by a reconnect with ?since=,
+// which replays from the gap window, than by a deeper queue.
+const MaxSubscriberQueue = 10_000
+
 // StreamConfig tunes GET /v1/stream: the tenant's SSE keepalive wheel and how
 // much NATS history the Active Sweeper keeps for its gap-fill. Keepalives are
 // set to the proxy in front of the tenant's streams and the gap window is its
@@ -260,6 +306,11 @@ type StreamConfig struct {
 	// keeps in NATS for SSE gap-fill (Last-Event-ID replay). Must be >= 0;
 	// applies from the next sweep.
 	GapWindowMinutes *int `json:"gap_window_minutes"`
+	// SubscriberQueue is each connection's outbound queue, in frames: how
+	// many event frames may wait for a slow client before the ones that do
+	// not fit are dropped. Must be in 1-MaxSubscriberQueue. Applies to
+	// connections opened after a reload.
+	SubscriberQueue *int `json:"subscriber_queue"`
 }
 
 // MQConfig sizes the tenant's message queue on disk.

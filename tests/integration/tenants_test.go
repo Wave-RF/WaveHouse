@@ -62,7 +62,7 @@ func TestNestedDirectory_PerTenantPoolsAndDiscovery(t *testing.T) {
 		DataDir:  storedir.New(t),
 		Server:   config.Server{ShutdownTimeout: 10},
 		Auth:     config.Auth{OperatorKey: operatorKey},
-		MQ:       config.MQ{Backend: config.MQEmbedded},
+		MQ:       embeddedMQ(),
 		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
 		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
 		Coord:    config.Coord{Backend: config.CoordLocal},

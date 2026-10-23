@@ -10,11 +10,14 @@ import (
 )
 
 // Retry backoff for a ClickHouse that cannot take inserts. The delay doubles
-// per consecutive failure from retryBase to retryCap; each is jittered down
-// to half so the tables and replicas of one outage do not return in step.
+// per consecutive failure from retryBase to the tenant's cap
+// (ingest.retry_backoff_max, Limits.RetryBackoffMax, read per flush) — on a
+// pool tenants share, each window opens under the cap of the tenant whose
+// flush met the failure and is cut to a smaller cap by any tenant whose rows
+// meet it meanwhile (adopt); each is jittered down to half so the tables and
+// replicas of one outage do not return in step.
 const (
 	retryBase = time.Second
-	retryCap  = 30 * time.Second
 	// outageLogEvery bounds the log lines one ongoing outage writes.
 	outageLogEvery = 30 * time.Second
 )
@@ -52,17 +55,18 @@ type backoffs struct {
 
 // waiting reports whether table's rows on its pool should stay away — the
 // pool or the table backing off — and for how long, without claiming the
-// probe that allow hands out once a window elapses. target is called only
-// when some backoff is open.
-func (b *backoffs) waiting(target func() chconn.Target, table string, now time.Time) (time.Duration, bool) {
+// probe that allow hands out once a window elapses. target and ceiling
+// (the rows' tenant's cap, backoff.adopt) are called only when some
+// backoff is open.
+func (b *backoffs) waiting(target func() chconn.Target, table string, now time.Time, ceiling func() time.Duration) (time.Duration, bool) {
 	if b.open.Load() == 0 {
 		return 0, false
 	}
-	t := target()
-	if wait, ok := b.forTarget(t).waiting(now); ok {
+	t, c := target(), ceiling()
+	if wait, ok := b.forTarget(t).waiting(now, c); ok {
 		return wait, true
 	}
-	return b.forTable(t, table).waiting(now)
+	return b.forTable(t, table).waiting(now, c)
 }
 
 func (b *backoffs) forTarget(t chconn.Target) *backoff { return b.get(keyOf(t, "")) }
@@ -103,18 +107,47 @@ type backoff struct {
 	probing  bool      // a probe is out
 	since    time.Time // when the outage began
 	logged   time.Time // last outage log line
-	jitter   func(int64) int64
-	open     *atomic.Int32 // the set's outage count; nil in tests of one backoff
+	// ceiling is the window's cap: the failing tenant's, lowered by any
+	// tenant that touches the window (adopt); 0 while closed.
+	ceiling time.Duration
+	jitter  func(int64) int64
+	open    *atomic.Int32 // the set's outage count; nil in tests of one backoff
+}
+
+// adopt folds a tenant's cap into an open backoff. Tenants on one ClickHouse
+// tuple share its pool's backoff: each window opens under the cap of the
+// tenant whose flush met the failure (fail), and any tenant that touches it
+// meanwhile — rows turned away, a flush asking to try, a failure that does
+// not escalate — lowers it to its own, cutting the window to now plus that
+// cap, so no tenant waits longer than its own cap and the one with the
+// larger cap retries sooner than it asked. The next window opens under its
+// prober's cap again, so a reload that raises a cap applies at the next
+// failure, and a tenant that left stops counting. A ceiling of 0 is none
+// known (a Limits the validator did not bound) and folds nothing. Called
+// with b.mu held.
+func (b *backoff) adopt(now time.Time, ceiling time.Duration) {
+	if ceiling <= 0 {
+		return
+	}
+	ceiling = max(ceiling, retryBase)
+	if b.ceiling == 0 || ceiling < b.ceiling {
+		b.ceiling = ceiling
+	}
+	if limit := now.Add(b.ceiling); b.until.After(limit) {
+		b.until = limit
+	}
 }
 
 // allow reports whether a flush may try ClickHouse now; when not, wait is
-// how long its rows should stay away.
-func (b *backoff) allow(now time.Time) (wait time.Duration, ok bool) {
+// how long its rows should stay away. ceiling is the flushing tenant's cap
+// (adopt).
+func (b *backoff) allow(now time.Time, ceiling time.Duration) (wait time.Duration, ok bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.failures == 0 {
 		return 0, true
 	}
+	b.adopt(now, ceiling)
 	if now.Before(b.until) {
 		return b.until.Sub(now) + b.spread(retryBase), false
 	}
@@ -133,18 +166,21 @@ func (b *backoff) release() {
 }
 
 // probeOut is how long rows stay away while a probe is out: floored, since a
-// probe to a server dropping packets can take the whole client timeout, and a
+// probe to a server dropping packets can take the whole insert timeout, and a
 // near-zero delay would cycle the backlog through the worker meanwhile.
 func (b *backoff) probeOut() time.Duration { return retryBase/2 + b.spread(retryBase/2) }
 
 // waiting reports whether the backoff window is still running, or its probe
-// is still out, and how long rows should stay away.
-func (b *backoff) waiting(now time.Time) (time.Duration, bool) {
+// is still out, and how long rows should stay away. ceiling is the rows'
+// tenant's cap (adopt).
+func (b *backoff) waiting(now time.Time, ceiling time.Duration) (time.Duration, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	switch {
-	case b.failures == 0:
+	if b.failures == 0 {
 		return 0, false
+	}
+	b.adopt(now, ceiling)
+	switch {
 	case now.Before(b.until):
 		return b.until.Sub(now) + b.spread(retryBase), true
 	case b.probing:
@@ -154,14 +190,17 @@ func (b *backoff) waiting(now time.Time) (time.Duration, bool) {
 }
 
 // fail records an availability failure and returns how long the failed rows
-// should stay away. Failures that land while the backoff is already running
-// (flushes that started before the first one reported) do not escalate it.
-// log is true when this failure should be logged: the first of an outage,
-// then at most once per outageLogEvery.
-func (b *backoff) fail(now time.Time) (wait time.Duration, first, log bool) {
+// should stay away: the doubling delay, no longer than the failing tenant's
+// cap (never under retryBase, the floor the doubling starts from), which
+// adopt may lower while the window runs. Failures that land while
+// the backoff is already running (flushes that started before the first one
+// reported) do not escalate it. log is true when this failure should be
+// logged: the first of an outage, then at most once per outageLogEvery.
+func (b *backoff) fail(now time.Time, ceiling time.Duration) (wait time.Duration, first, log bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.failures > 0 && now.Before(b.until) {
+		b.adopt(now, ceiling)
 		return b.until.Sub(now) + b.spread(retryBase), false, false
 	}
 	b.probing = false
@@ -173,9 +212,11 @@ func (b *backoff) fail(now time.Time) (wait time.Duration, first, log bool) {
 			b.open.Add(1)
 		}
 	}
-	d := retryCap
-	if shift := b.failures - 1; shift < 5 { // 1s·2^5 already passes the cap
-		d = min(retryBase<<shift, retryCap)
+	b.ceiling = 0 // each window opens under the failing tenant's cap
+	b.adopt(now, ceiling)
+	d := max(b.ceiling, retryBase)
+	if shift := b.failures - 1; shift < 30 { // past that the doubling passes any cap, and would overflow
+		d = min(retryBase<<shift, d)
 	}
 	d = d/2 + b.spread(d/2)
 	b.until = now.Add(d)
@@ -195,7 +236,7 @@ func (b *backoff) succeed(now time.Time) (recovered bool, lasted time.Duration) 
 		return false, 0
 	}
 	lasted = now.Sub(b.since)
-	b.failures, b.probing, b.until = 0, false, time.Time{}
+	b.failures, b.probing, b.until, b.ceiling = 0, false, time.Time{}, 0
 	if b.open != nil {
 		b.open.Add(-1)
 	}

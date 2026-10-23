@@ -53,8 +53,41 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockPublisher
 		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: "http://test-clickhouse:8123", Username: "test_user", Password: "test_pass", Database: "test_db"}
 		},
+		// No batching: every row flushes at once; a test that batches sets its
+		// own. The backoff cap is the seed's.
+		limits: limitsOf(Limits{RetryBackoffMax: testCap}),
 	}
 	return w, pub, cache, func() { w.ackWg.Wait() }
+}
+
+// flush is flushTable under the worker's own limits for the batch's tenant,
+// read as the batcher reads them at a batch's first row.
+func flush(ctx context.Context, w *IngestWorker, table string, msgs []parsedMsg) {
+	var id tenant.ID
+	if len(msgs) > 0 {
+		id = msgs[0].tenant
+	}
+	lim, ok := w.limits(id)
+	w.flushTable(ctx, table, msgs, lim, ok)
+}
+
+// limitsOf is a limits getter that answers lim for every tenant.
+func limitsOf(lim Limits) func(tenant.ID) (Limits, bool) {
+	return func(tenant.ID) (Limits, bool) { return lim, true }
+}
+
+// rowBytes is the size of the row makeEnvelope encodes for data: what a
+// batch's byte trigger counts, so a test can size the trigger in rows.
+func rowBytes(t *testing.T, data map[string]any) int {
+	t.Helper()
+	cols := slices.Sorted(maps.Keys(data))
+	schema := make([]discovery.Column, len(cols))
+	for i, c := range cols {
+		schema[i] = discovery.Column{Name: c, Position: uint64(i + 1)}
+	}
+	row, err := EncodeCompactRow(schema, data)
+	require.NoError(t, err)
+	return len(row)
 }
 
 // makeEnvelope returns the JSON wire format the worker reads off NATS. Column
@@ -113,11 +146,13 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 	tests := []struct {
 		name       string
 		setup      func(t *testing.T) (Queue, cache.Cache)
+		limits     func(tenant.ID) (Limits, bool)
 		wantErrSub string
 	}{
 		{
 			name:       "nil queue",
 			setup:      func(*testing.T) (Queue, cache.Cache) { return nil, &testutil.MockCache{} },
+			limits:     limitsOf(Limits{}),
 			wantErrSub: "message queue is nil",
 		},
 		{
@@ -126,7 +161,16 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 				emb := testutil.NewEmbeddedMQ(t, 1024*1024)
 				return emb, nil
 			},
+			limits:     limitsOf(Limits{}),
 			wantErrSub: "cache is nil",
+		},
+		{
+			name: "nil limits",
+			setup: func(t *testing.T) (Queue, cache.Cache) {
+				return testutil.NewEmbeddedMQ(t, 1024*1024), &testutil.MockCache{}
+			},
+			limits:     nil,
+			wantErrSub: "batch limits are nil",
 		},
 	}
 
@@ -135,9 +179,82 @@ func TestStartIngestWorker_Validation(t *testing.T) {
 			t.Parallel()
 			q, c := tt.setup(t)
 			_, _, err := StartIngestWorker(context.Background(), q, c,
-				func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
+				func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil, tt.limits, ConsumerSettings{})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErrSub)
+		})
+	}
+}
+
+// recordingQueue is a Queue that records what the worker asks of its durable
+// consumer: the ConsumerConfig it is created with, and the prefetch its
+// delivery is started with.
+type recordingQueue struct {
+	Queue
+	cfg      mq.ConsumerConfig
+	prefetch chan int
+}
+
+func (q *recordingQueue) CreateConsumer(ctx context.Context, cfg mq.ConsumerConfig) (mq.Consumer, error) {
+	q.cfg = cfg
+	cons, err := q.Queue.CreateConsumer(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &recordingConsumer{Consumer: cons, prefetch: q.prefetch}, nil
+}
+
+type recordingConsumer struct {
+	mq.Consumer
+	prefetch chan int
+}
+
+func (c *recordingConsumer) Consume(handler func(*mq.Message), prefetch int) (func(), <-chan error, error) {
+	c.prefetch <- prefetch
+	return c.Consumer.Consume(handler, prefetch)
+}
+
+// The worker asks the queue's durable consumer for the ConsumerSettings it is
+// started with — the ack wait the adoption-time rule is checked against, the
+// unacked cap and the prefetch — and for mq's defaults where it is started
+// with none, so the consumer the rows go through is the one boot config
+// describes.
+func TestStartIngestWorker_ConsumerSettingsReachTheConsumer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   ConsumerSettings
+		want ConsumerSettings
+	}{
+		{
+			name: "configured",
+			in:   ConsumerSettings{AckWait: 90 * time.Second, MaxAckPending: 2000, Prefetch: 50},
+			want: ConsumerSettings{AckWait: 90 * time.Second, MaxAckPending: 2000, Prefetch: 50},
+		},
+		{
+			name: "zero takes mq's defaults",
+			in:   ConsumerSettings{},
+			want: ConsumerSettings{AckWait: mq.DefaultAckWait, MaxAckPending: mq.DefaultMaxAckPending, Prefetch: mq.DefaultPrefetch},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			q := &recordingQueue{Queue: testutil.NewEmbeddedMQ(t, 1024*1024), prefetch: make(chan int, 1)}
+			stopFn, _, err := StartIngestWorker(context.Background(), q, &testutil.MockCache{},
+				func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil, limitsOf(Limits{}), tt.in)
+			require.NoError(t, err)
+			t.Cleanup(func() { assert.NoError(t, stopFn(context.Background())) })
+
+			assert.Equal(t, BufferConsumerName, q.cfg.Durable)
+			assert.Equal(t, tt.want.AckWait, q.cfg.AckWait)
+			assert.Equal(t, tt.want.MaxAckPending, q.cfg.MaxAckPending)
+			select {
+			case got := <-q.prefetch:
+				assert.Equal(t, tt.want.Prefetch, got)
+			case <-time.After(10 * time.Second):
+				t.Fatal("delivery was not started")
+			}
 		})
 	}
 }
@@ -186,9 +303,9 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Construct the worker directly so the flush timer can use a short maxWait —
-	// the single-event batch then flushes on the timer in ~200ms instead of the
-	// 5s default. StartIngestWorker's own setup is covered by
+	// Construct the worker directly so the flush timer can use a short batch
+	// wait — the single-event batch then flushes on the timer in ~200ms
+	// instead of the seed's 5s. StartIngestWorker's own setup is covered by
 	// TestStartIngestWorker_Validation + _StopFunc.
 	worker := &IngestWorker{
 		dlq:     emb,
@@ -197,8 +314,8 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
-		maxBatch: defaultMaxBatch,
-		maxWait:  200 * time.Millisecond,
+		limits:   limitsOf(Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: 200 * time.Millisecond}),
+		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	worker.wg.Add(1)
 	go worker.dispatchLoop(ctx, cons)
@@ -263,7 +380,7 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 	stopFn, _, err := StartIngestWorker(ctx, emb, &testutil.MockCache{},
 		func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
-		}, nil)
+		}, nil, limitsOf(Limits{}), ConsumerSettings{})
 	require.NoError(t, err)
 	// The deadline below abandons the worker, not its insert: finish the insert
 	// and join the worker before the broker closes under its ack.
@@ -301,7 +418,7 @@ func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 	// chURL is never dialed: with no messages there is no flush, so a dummy
 	// host/port is fine.
 	stopFn, _, err := StartIngestWorker(context.Background(), emb, &testutil.MockCache{},
-		func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil)
+		func(tenant.ID) chconn.Target { return chconn.Target{URL: "http://localhost:8123"} }, nil, limitsOf(Limits{}), ConsumerSettings{})
 	require.NoError(t, err)
 
 	// Nothing to flush, so shutdown drains immediately and returns nil before the
@@ -350,7 +467,7 @@ func TestInsertToClickHouse_BuildsCorrectRequest(t *testing.T) {
 
 	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
-	})
+	}, 0)
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), rt.Hits())
 }
@@ -372,7 +489,7 @@ func TestInsertToClickHouse_MultipleMessages_JSONCompactEachRow(t *testing.T) {
 		{row: []byte(`[1]`)},
 		{row: []byte(`[2]`)},
 		{row: []byte(`[3]`)},
-	})
+	}, 0)
 	require.NoError(t, err)
 }
 
@@ -394,7 +511,7 @@ func TestInsertToClickHouse_SafelyParameterizesTableName(t *testing.T) {
 
 	err := w.insertToClickHouse(context.Background(), malicious, []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
-	})
+	}, 0)
 	require.NoError(t, err)
 }
 
@@ -412,7 +529,7 @@ func TestInsertToClickHouse_HTTPError_ReturnsBody(t *testing.T) {
 
 	err := w.insertToClickHouse(context.Background(), "missing_table", []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
-	})
+	}, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HTTP 400")
 	assert.Contains(t, err.Error(), "Unknown table")
@@ -432,7 +549,7 @@ func TestInsertToClickHouse_500Error(t *testing.T) {
 
 	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
-	})
+	}, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HTTP 500")
 }
@@ -448,7 +565,7 @@ func TestInsertToClickHouse_NetworkError(t *testing.T) {
 
 	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
-	})
+	}, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "connection refused")
 }
@@ -633,7 +750,7 @@ func TestFlushTable_BumpsWhatTheReadFiles(t *testing.T) {
 			l1.Wait()
 
 			msgs := parseAll(t, w, newIngestMsg(t, tc.table, tc.scope, map[string]any{"id": 1}))
-			w.flushTable(ctx, msgs[0].tableName, msgs)
+			flush(ctx, w, msgs[0].tableName, msgs)
 			wait()
 
 			e, _, err := l1.Lookup(ctx, tenant.Default, "q", read)
@@ -797,8 +914,8 @@ func TestFlushTable_EmptyBatch_NoOp(t *testing.T) {
 	w, _, _, _ := newTestWorker(rt)
 
 	// Must not panic, must not call HTTP.
-	w.flushTable(context.Background(), "events", nil)
-	w.flushTable(context.Background(), "events", []parsedMsg{})
+	flush(context.Background(), w, "events", nil)
+	flush(context.Background(), w, "events", []parsedMsg{})
 	assert.Equal(t, int32(0), rt.Hits())
 }
 
@@ -814,7 +931,7 @@ func TestFlushTable_HappyPath(t *testing.T) {
 	m1 := newIngestMsg(t, "events", "org_1", map[string]any{"id": 1})
 	m2 := newIngestMsg(t, "events", "org_1", map[string]any{"id": 2})
 
-	w.flushTable(context.Background(), "events", parseAll(t, w, m1, m2))
+	flush(context.Background(), w, "events", parseAll(t, w, m1, m2))
 	wait()
 
 	// One HTTP request — both rows in a single bulk insert.
@@ -848,7 +965,7 @@ func TestFlushTable_MultiScope(t *testing.T) {
 		newIngestMsg(t, "events", "org_1", map[string]any{"id": 3}),
 	)
 
-	w.flushTable(context.Background(), "events", msgs)
+	flush(context.Background(), w, "events", msgs)
 	wait()
 
 	// One bulk HTTP request despite multiple scopes.
@@ -887,7 +1004,7 @@ func TestFlushTable_BulkFails_FallsBackToOneByOne(t *testing.T) {
 	m1 := newIngestMsg(t, "events", "", map[string]any{"id": 1})
 	m2 := newIngestMsg(t, "events", "", map[string]any{"id": 2})
 
-	w.flushTable(context.Background(), "events", parseAll(t, w, m1, m2))
+	flush(context.Background(), w, "events", parseAll(t, w, m1, m2))
 	wait()
 
 	// 1 bulk attempt (failed) + 2 single-row retries = 3 HTTP requests.
@@ -937,7 +1054,7 @@ func TestFlushTable_BadRow_Isolated_GoesToDLQ(t *testing.T) {
 	poison := newIngestMsg(t, "events", "", map[string]any{"id": 2, "poison": true})
 	goodB := newIngestMsg(t, "events", "", map[string]any{"id": 3, "poison": false})
 
-	w.flushTable(context.Background(), "events", parseAll(t, w, goodA, poison, goodB))
+	flush(context.Background(), w, "events", parseAll(t, w, goodA, poison, goodB))
 	wait()
 
 	// 1 bulk + 3 single-row retries = 4 HTTP requests.
@@ -982,7 +1099,7 @@ func TestFlushTable_BadRow_DLQDisabledForTable_LeftUnacked(t *testing.T) {
 	good := newIngestMsg(t, "events", "", map[string]any{"id": 1, "poison": false})
 	poison := newIngestMsg(t, "events", "", map[string]any{"id": 2, "poison": true})
 
-	w.flushTable(context.Background(), "events", parseAll(t, w, good, poison))
+	flush(context.Background(), w, "events", parseAll(t, w, good, poison))
 	wait()
 
 	assert.True(t, good.DoubleAcked.Load(), "good row must still be acked")
@@ -1016,14 +1133,16 @@ func closedChan() chan struct{} {
 	return ch
 }
 
-// newTestBatcher builds a tableBatcher backed by mocks. maxWait is long so the
-// deadline timer never fires during these tests; wait() drains background acks.
+// newTestBatcher builds a tableBatcher backed by mocks: a batch of three rows
+// of the shape these tests add, and a batch wait so long the deadline timer
+// never fires during them; wait() drains background acks.
 func newTestBatcher(t *testing.T, rt http.RoundTripper) (b *tableBatcher, w *IngestWorker, wait func()) {
 	t.Helper()
 	w, _, _, wait = newTestWorker(rt)
-	w.maxBatch = 3
-	w.maxWait = time.Hour
+	w.limits = limitsOf(Limits{MaxBatchBytes: 3 * rowBytes(t, map[string]any{"id": 1}), MaxBatchWait: time.Hour})
 	b = newTableBatcher(w, "events")
+	// As add would have read them for a batch a test sets up directly.
+	b.limits, b.ok = w.limits(tenant.Default)
 	t.Cleanup(func() { b.timer.Stop() })
 	return b, w, wait
 }
@@ -1129,17 +1248,21 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 	t.Parallel()
 
 	const (
-		// worker.go config values. maxWait is deliberately far longer than the
-		// assertion window below (production's defaultMaxWait), so a
-		// size-trigger flush and a batch stranded waiting out the timer (the
-		// regression pinned here) can't blur together on a slow CI runner.
-		maxBatch = 100
-		maxWait  = 30 * time.Second
+		// The batch wait is deliberately far longer than the assertion
+		// window below (the seed's 5s), so a size-trigger flush and a batch
+		// stranded waiting out the timer (the regression pinned here) can't
+		// blur together on a slow CI runner.
+		maxWait = 30 * time.Second
 
 		// test values
-		batchA = 5 // intentionally under maxBatch
-		batchB = maxBatch
+		batchA = 5 // intentionally under the byte trigger
+		batchB = 100
 	)
+	// The byte trigger is exactly table B's rows: A's five never reach it.
+	batchBytes := 0
+	for i := range batchB {
+		batchBytes += rowBytes(t, map[string]any{"id": i})
+	}
 
 	emb := testutil.NewEmbeddedMQ(t, 8*1024*1024)
 
@@ -1178,8 +1301,8 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
-		maxBatch: maxBatch,
-		maxWait:  maxWait,
+		limits:   limitsOf(Limits{MaxBatchBytes: batchBytes, MaxBatchWait: maxWait}),
+		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	worker.wg.Add(1)
 	go worker.dispatchLoop(ctx, cons)
@@ -1195,24 +1318,24 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// 2. Then publish exactly maxBatch events to table B — should hit B's
-	//    own size trigger and flush immediately, regardless of what A did.
+	// 2. Then publish exactly a batch's worth of events to table B — should
+	//    hit B's own size trigger and flush immediately, regardless of what A did.
 	for i := range batchB {
 		err = emb.Publish(ctx, mq.Topic{Tenant: tenant.Default, Table: "tableB"},
 			makeEnvelope(t, "tableB", "", map[string]any{"id": i}))
 		require.NoError(t, err)
 	}
 
-	// All B rows must reach ClickHouse within production's defaultMaxWait —
-	// proof they flushed on B's own size trigger faster than the real 5s
-	// timer bound, not on this test's (30s) timer.
+	// All B rows must reach ClickHouse within the seed's 5s batch wait —
+	// proof they flushed on B's own size trigger faster than that timer
+	// bound, not on this test's (30s) timer.
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return rowsByTable["tableB"] >= batchB
-	}, defaultMaxWait, 25*time.Millisecond,
-		"table B hit maxBatch and should flush on its own size trigger "+
-			"before production's defaultMaxWait timer bound "+
+	}, 5*time.Second, 25*time.Millisecond,
+		"table B hit the byte trigger and should flush on its own size trigger "+
+			"before the seed's 5s timer bound "+
 			"(table A's prior events must not strand B rows in a batch "+
 			"that waits for the maxWait timer)",
 	)
@@ -1227,10 +1350,11 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 	t.Parallel()
 
 	const (
-		maxBatch = 3
-		maxWait  = 30 * time.Second // long: the leftover row's timer never fires during this test
-		total    = 4                // 3 → one full batch on the size trigger; 1 leftover
+		full    = 3                // rows that reach the byte trigger
+		maxWait = 30 * time.Second // long: the leftover row's timer never fires during this test
+		total   = 4                // 3 → one full batch on the size trigger; 1 leftover
 	)
+	batchBytes := full * rowBytes(t, map[string]any{"id": 0}) // every row below is one digit
 
 	emb := testutil.NewEmbeddedMQ(t, 8*1024*1024)
 
@@ -1271,8 +1395,8 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
-		maxBatch: maxBatch,
-		maxWait:  maxWait,
+		limits:   limitsOf(Limits{MaxBatchBytes: batchBytes, MaxBatchWait: maxWait}),
+		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	worker.wg.Add(1)
 	go worker.dispatchLoop(ctx, cons)
@@ -1287,11 +1411,11 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// The first full batch (maxBatch rows) flushes on the size trigger.
+	// The first full batch flushes on the size trigger.
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return rows >= maxBatch
+		return rows >= full
 	}, 3*time.Second, 25*time.Millisecond, "first full batch should flush on the size trigger")
 
 	// The leftover row must NOT flush just because that flush completed — with a
@@ -1299,7 +1423,7 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 	assert.Never(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return rows > maxBatch
+		return rows > full
 	}, 750*time.Millisecond, 50*time.Millisecond,
 		"leftover row must wait for its own size/timer, not flush when the prior flush completes")
 }
@@ -1504,7 +1628,7 @@ func TestFlushTable_MixedColumnLists_TwoInserts(t *testing.T) {
 		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
 		MsgData:  makeEnvelopeCols(t, "events", "", []string{"id", "v"}, map[string]any{"id": 2, "v": "x"}),
 	}
-	w.flushTable(context.Background(), "events", parseAll(t, w, narrow, wide))
+	flush(context.Background(), w, "events", parseAll(t, w, narrow, wide))
 	wait()
 
 	mu.Lock()
@@ -1686,9 +1810,8 @@ func TestDispatchLoop_DeliveryEndedFailsLoud(t *testing.T) {
 
 	rt := &testutil.MockRoundTripper{}
 	w, _, _, _ := newTestWorker(rt)
-	w.maxBatch = 100
-	w.maxWait = time.Hour                                        // only the shutdown flush can write the row
-	w.dlqEnabled = func(tenant.ID, string) bool { return false } // the sentinel is acked-and-dropped, no publish
+	w.limits = limitsOf(Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: time.Hour}) // only the shutdown flush can write the row
+	w.dlqEnabled = func(tenant.ID, string) bool { return false }                 // the sentinel is acked-and-dropped, no publish
 
 	held := newIngestMsg(t, "events", "", map[string]any{"id": 1})
 	sentinel := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"}, MsgData: []byte("not json")}
@@ -1739,7 +1862,7 @@ func TestDispatchLoop_HandoffReturnsOnCancel(t *testing.T) {
 	t.Parallel()
 
 	w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-	w.maxBatch = 1                                               // msgChan holds 2
+	w.consumer.Prefetch = 1                                      // msgChan holds 2
 	w.dlqEnabled = func(tenant.ID, string) bool { return false } // any message parsed is acked-and-dropped, no publish
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1816,8 +1939,8 @@ func TestFlushTable_DLQSwitchIsTheRowsTenants(t *testing.T) {
 	globex := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: "globex", Table: "events"}, MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 1})}
 
 	// One flush per tenant table, as dispatchLoop batches them.
-	w.flushTable(context.Background(), "events", parseAll(t, w, acme))
-	w.flushTable(context.Background(), "events", parseAll(t, w, globex))
+	flush(context.Background(), w, "events", parseAll(t, w, acme))
+	flush(context.Background(), w, "events", parseAll(t, w, globex))
 	wait()
 
 	assert.Equal(t, []tenant.ID{"acme", "globex"}, asked)
@@ -1836,7 +1959,7 @@ func TestFlushTable_DLQSwitchIsTheRowsTenants(t *testing.T) {
 // in one INSERT.
 func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 	t.Parallel()
-	const maxBatch = 2
+	const batchRows = 2
 
 	emb := testutil.NewEmbeddedMQ(t, 8*1024*1024, "acme", "globex")
 
@@ -1870,8 +1993,10 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 		target: func(id tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db_" + string(id)}
 		},
-		maxBatch: maxBatch,
-		maxWait:  30 * time.Second, // the size trigger is the one under test
+		// Two of acme's rows reach the trigger; globex's are longer, so two
+		// of its do too, and one of either does not.
+		limits:   limitsOf(Limits{MaxBatchBytes: batchRows * rowBytes(t, map[string]any{"id": "acme-0"}), MaxBatchWait: 30 * time.Second}), // the size trigger is the one under test
+		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	worker.wg.Add(1)
 	go worker.dispatchLoop(ctx, cons)
@@ -1880,7 +2005,7 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 		worker.wg.Wait()
 	})
 
-	for i := range maxBatch {
+	for i := range batchRows {
 		for _, id := range []tenant.ID{"acme", "globex"} {
 			require.NoError(t, emb.Publish(ctx, mq.Topic{Tenant: id, Table: "events"},
 				makeEnvelope(t, "events", "", map[string]any{"id": fmt.Sprintf("%s-%d", id, i)})))
@@ -1891,9 +2016,9 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(bodies) == 2
-	}, defaultMaxWait, 25*time.Millisecond, "each tenant's table hits its own size trigger")
+	}, 5*time.Second, 25*time.Millisecond, "each tenant's table hits its own size trigger")
 	// Invalidation follows the INSERT's answer, on the worker's side.
-	require.Eventually(t, func() bool { return len(mc.GetNamespaces()) == 2 }, defaultMaxWait, 25*time.Millisecond)
+	require.Eventually(t, func() bool { return len(mc.GetNamespaces()) == 2 }, 5*time.Second, 25*time.Millisecond)
 	assert.ElementsMatch(t, []cache.Namespace{{Tenant: "acme", Table: "events"}, {Tenant: "globex", Table: "events"}}, mc.GetNamespaces(),
 		"each batch bumps its own tenant's namespaces")
 	mu.Lock()
@@ -1901,8 +2026,8 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 	for _, id := range []string{"acme", "globex"} {
 		body, ok := bodies["db_"+id]
 		require.True(t, ok, "tenant %s's batch reached its own target", id)
-		assert.Equal(t, maxBatch, strings.Count(body, "\n"), "a full batch: %q", body)
-		assert.Equal(t, maxBatch, strings.Count(body, id), "only tenant %s's rows: %q", id, body)
+		assert.Equal(t, batchRows, strings.Count(body, "\n"), "a full batch: %q", body)
+		assert.Equal(t, batchRows, strings.Count(body, id), "only tenant %s's rows: %q", id, body)
 	}
 }
 
@@ -1925,10 +2050,52 @@ func TestInsertToClickHouse_SetsConfiguredHeaders(t *testing.T) {
 			Headers: map[string]string{"X-Proxy-Token": "abc", "Content-Type": "text/plain", "X-ClickHouse-User": "someone-else"},
 		}
 	}
-	require.NoError(t, w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}}))
+	require.NoError(t, w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}}, 0))
 	assert.Equal(t, "abc", got.Get("X-Proxy-Token"))
 	assert.Equal(t, "application/json", got.Get("Content-Type"))
 	assert.Equal(t, "test_user", got.Get("X-ClickHouse-User"))
+}
+
+// TestInsertToClickHouse_AppliesTheTenantsDeadline: each INSERT carries the
+// tenant's insert timeout as its request deadline — the flush reads it with
+// the tenant's limits, and the shared client sets none of its own — and a
+// timed-out insert fails as unavailable, to be retried, never parked.
+func TestInsertToClickHouse_AppliesTheTenantsDeadline(t *testing.T) {
+	t.Parallel()
+	var (
+		deadline    time.Time
+		hasDeadline bool
+	)
+	rt := &testutil.MockRoundTripper{Fn: func(req *http.Request) (*http.Response, error) {
+		deadline, hasDeadline = req.Context().Deadline()
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
+	}}
+	w, _, _, wait := newTestWorker(rt)
+	require.NoError(t, w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}}, 0))
+	assert.False(t, hasDeadline, "no timeout, no deadline")
+
+	w.limits = limitsOf(Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: time.Hour, InsertTimeout: 7 * time.Second})
+	before := time.Now()
+	flush(context.Background(), w, "events", parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1})))
+	wait()
+	require.True(t, hasDeadline, "the flush applies the tenant's insert timeout")
+	assert.WithinDuration(t, before.Add(7*time.Second), deadline, time.Second)
+	assert.Zero(t, ingestHTTPClient(nil).Timeout, "the shared client sets no timeout of its own")
+
+	stop := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select { // answers only once the client has given up
+		case <-r.Context().Done():
+		case <-stop:
+		}
+	}))
+	t.Cleanup(slow.Close)
+	t.Cleanup(func() { close(stop) }) // runs first: lets the handler return before Close waits on it
+	w.clients = chconn.NewHTTPClients(ingestHTTPClient)
+	w.target = func(tenant.ID) chconn.Target { return chconn.Target{URL: slow.URL, Database: "db"} }
+	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}}, 50*time.Millisecond)
+	require.Error(t, err)
+	assert.Equal(t, chconn.Unavailable, chconn.Classify(err), "a timed-out insert is retried, never dead-lettered")
 }
 
 // TestInsertToClickHouse_UsesTargetTLS: an https target is dialed with the
@@ -1948,7 +2115,7 @@ func TestInsertToClickHouse_UsesTargetTLS(t *testing.T) {
 	w, _, _, _ := newTestWorker(nil)
 	w.clients = chconn.NewHTTPClients(ingestHTTPClient)
 	insert := func() error {
-		return w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}})
+		return w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}}, 0)
 	}
 
 	w.target = target(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12})
@@ -1974,10 +2141,124 @@ func TestInsertToClickHouse_NoTargetIsAnError(t *testing.T) {
 		asked = append(asked, id)
 		return chconn.Target{}
 	}
-	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`), tenant: "acme"}})
+	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`), tenant: "acme"}}, 0)
 	require.ErrorContains(t, err, "no ClickHouse connection is open for tenant acme")
 	assert.Equal(t, []tenant.ID{"acme"}, asked, "the target is the batch's own tenant's")
 	assert.Zero(t, rt.Hits())
+}
+
+// A served tenant with no batch limits — its values refused against the
+// ack wait with none to keep (internal/app) — keeps accepting rows at the
+// API, so the worker hands each one back to the queue for an ack wait rather
+// than parking good rows: no request, nothing on the DLQ, no batch and no
+// timer, counted under reason unconfigured. A tenant with no limits and no
+// pool is no longer served: its rows are flushed at once and parked, as a
+// tenant's on no pool always were.
+func TestTableBatcher_Add_HandsBackTheRowsOfATenantWithNoLimits(t *testing.T) {
+	t.Parallel()
+	rt := &testutil.MockRoundTripper{}
+	b, w, wait := newTestBatcher(t, rt)
+	w.consumer.AckWait = 45 * time.Second
+	w.limits = func(tenant.ID) (Limits, bool) { return Limits{}, false }
+	pub := w.dlq.(*testutil.MockPublisher)
+
+	held := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	b.add(context.Background(), parseAll(t, w, held)[0])
+	assert.Empty(t, b.batch, "nothing is buffered for a tenant with no limits")
+	assert.Nil(t, b.flushing, "and nothing flushed")
+	assert.False(t, b.timer.Stop(), "no timer is armed")
+	assert.True(t, held.Naked.Load(), "handed back")
+	assert.Equal(t, 45*time.Second, time.Duration(held.NakDelay.Load()), "for one ack wait")
+	assert.False(t, held.DoubleAcked.Load())
+	assert.Empty(t, rt.Captured(), "no request is made")
+	assert.Empty(t, pub.Published(), "nothing is parked")
+
+	// The same tenant, no longer served: its row is flushed at once and parked.
+	w.target = func(tenant.ID) chconn.Target { return chconn.Target{} }
+	w.dlqEnabled = func(tenant.ID, string) bool { return true }
+	gone := newIngestMsg(t, "events", "", map[string]any{"id": 2})
+	b.add(context.Background(), parseAll(t, w, gone)[0])
+	require.NotNil(t, b.flushing, "flushed at once")
+	<-b.flushing
+	b.onFlushDone(context.Background())
+	wait()
+	assert.False(t, gone.Naked.Load())
+	require.Len(t, pub.Published(), 1)
+	assert.Equal(t, "no ClickHouse connection is open for tenant 0", pub.Published()[0].Headers.Get("X-DLQ-Error"))
+	assert.True(t, gone.DoubleAcked.Load())
+}
+
+// A batch begun while its tenant had no limits and no pool — latched behind
+// an in-flight flush, so more rows joined it — is flushed after a reload gave
+// the tenant a pool: nothing sized or timed it, so it goes back to the queue
+// for an ack wait rather than being inserted with no deadline.
+func TestTableBatcher_BatchBegunWithoutLimitsIsHandedBackOnceThePoolReturns(t *testing.T) {
+	t.Parallel()
+	rt := okRoundTripper()
+	b, w, wait := newTestBatcher(t, rt)
+	w.consumer.AckWait = 45 * time.Second
+	w.limits = func(tenant.ID) (Limits, bool) { return Limits{}, false }
+	var onPool atomic.Bool
+	w.target = func(tenant.ID) chconn.Target {
+		if onPool.Load() {
+			return chconn.Target{URL: "http://test-clickhouse:8123", Database: "db"}
+		}
+		return chconn.Target{}
+	}
+	pub := w.dlq.(*testutil.MockPublisher)
+	inflight := make(chan struct{}) // the previous batch's park, still running
+	b.flushing = inflight
+
+	row := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	b.add(context.Background(), parseAll(t, w, row)[0])
+	require.Len(t, b.batch, 1, "latched behind the flush in flight")
+	require.True(t, b.flushQueued)
+
+	onPool.Store(true) // a reload serves the tenant again meanwhile
+	close(inflight)
+	b.onFlushDone(context.Background())
+	require.NotNil(t, b.flushing)
+	<-b.flushing
+	wait()
+	assert.Zero(t, rt.Hits(), "never inserted")
+	assert.True(t, row.Naked.Load(), "handed back")
+	assert.Equal(t, 45*time.Second, time.Duration(row.NakDelay.Load()))
+	assert.False(t, row.DoubleAcked.Load())
+	assert.Empty(t, pub.Published(), "nothing parked")
+}
+
+// A batch keeps the limits read at its first row: a reload between its rows
+// changes neither its byte target nor its insert deadline, which the flush
+// takes from the same read.
+func TestTableBatcher_KeepsTheLimitsReadAtItsFirstRow(t *testing.T) {
+	t.Parallel()
+	var deadline time.Time
+	rt := &testutil.MockRoundTripper{Fn: func(req *http.Request) (*http.Response, error) {
+		deadline, _ = req.Context().Deadline()
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
+	}}
+	b, w, wait := newTestBatcher(t, rt)
+	row := map[string]any{"id": 1}
+	first := Limits{MaxBatchBytes: 2 * rowBytes(t, row), MaxBatchWait: time.Hour, InsertTimeout: 7 * time.Second}
+	later := Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: time.Hour, InsertTimeout: 20 * time.Second}
+	var reads atomic.Int32
+	w.limits = func(tenant.ID) (Limits, bool) {
+		if reads.Add(1) == 1 {
+			return first, true
+		}
+		return later, true
+	}
+
+	before := time.Now()
+	b.add(context.Background(), parseAll(t, w, newIngestMsg(t, "events", "", row))[0])
+	require.Nil(t, b.flushing, "one row is under the first read's target")
+	b.add(context.Background(), parseAll(t, w, newIngestMsg(t, "events", "", row))[0])
+	require.NotNil(t, b.flushing, "the second row reaches the first read's target, whatever the getter says now")
+	assert.Equal(t, int32(1), reads.Load(), "read once, at the first row")
+	<-b.flushing
+	wait()
+	require.Equal(t, int32(1), rt.Hits())
+	assert.WithinDuration(t, before.Add(7*time.Second), deadline, time.Second, "the insert deadline is the first read's too")
 }
 
 // A tenant on no pool — no longer served, or refused one by the connection
@@ -2013,8 +2294,8 @@ func TestFlushTable_NoTargetParksTheBatchInOnePass(t *testing.T) {
 			acme := []*testutil.MockMessage{msg("acme", map[string]any{"id": "acme-1"}), msg("acme", map[string]any{"id": "acme-2", "page": "/"})}
 			globex := msg("globex", map[string]any{"id": "globex-1"})
 
-			w.flushTable(context.Background(), "events", parseAll(t, w, acme...))
-			w.flushTable(context.Background(), "events", parseAll(t, w, globex))
+			flush(context.Background(), w, "events", parseAll(t, w, acme...))
+			flush(context.Background(), w, "events", parseAll(t, w, globex))
 			wait()
 
 			assert.Equal(t, []tenant.ID{"acme"}, asked, "the switch is asked once for the batch")
@@ -2109,7 +2390,7 @@ func TestFlushTable_ClickHouseUnavailable_RetriedNeverDeadLettered(t *testing.T)
 				newIngestMsg(t, "events", "", map[string]any{"id": 2}),
 				newIngestMsg(t, "events", "", map[string]any{"id": 3}),
 			}
-			w.flushTable(context.Background(), "events", parseAll(t, w, msgs...))
+			flush(context.Background(), w, "events", parseAll(t, w, msgs...))
 			wait()
 
 			wantHits := int32(1)
@@ -2144,7 +2425,7 @@ func TestFlushTable_RejectedRow_StillDeadLettered(t *testing.T) {
 
 	good := newIngestMsg(t, "events", "", map[string]any{"n": 1})
 	bad := newIngestMsg(t, "events", "", map[string]any{"n": "bad"})
-	w.flushTable(context.Background(), "events", parseAll(t, w, good, bad))
+	flush(context.Background(), w, "events", parseAll(t, w, good, bad))
 	wait()
 
 	assert.Equal(t, int32(3), rt.Hits(), "bulk + one isolated try per row")
@@ -2187,7 +2468,7 @@ func TestFlushTable_SplittableBatch_InsertsRowByRow(t *testing.T) {
 				newIngestMsg(t, "events", "", map[string]any{"id": 2}),
 				newIngestMsg(t, "events", "", map[string]any{"id": 3}),
 			}
-			w.flushTable(context.Background(), "events", parseAll(t, w, msgs...))
+			flush(context.Background(), w, "events", parseAll(t, w, msgs...))
 			wait()
 
 			assert.Equal(t, int32(4), rt.Hits(), "bulk + one insert per row")
@@ -2211,7 +2492,7 @@ func TestFlushTable_SplittableLoneRow_Retried(t *testing.T) {
 	w, pub, _, wait := newTestWorker(rt)
 
 	m := newIngestMsg(t, "events", "", map[string]any{"id": 1})
-	w.flushTable(context.Background(), "events", parseAll(t, w, m))
+	flush(context.Background(), w, "events", parseAll(t, w, m))
 	wait()
 
 	assert.Equal(t, int32(1), rt.Hits(), "a lone row is not split again")
@@ -2248,7 +2529,7 @@ func TestFlushTable_ClickHouseDownMidIsolation_StopsAndRetries(t *testing.T) {
 	rejected := newIngestMsg(t, "events", "", map[string]any{"id": 2})
 	hitByOutage := newIngestMsg(t, "events", "", map[string]any{"id": 3})
 	neverTried := newIngestMsg(t, "events", "", map[string]any{"id": 4})
-	w.flushTable(context.Background(), "events", parseAll(t, w, inserted, rejected, hitByOutage, neverTried))
+	flush(context.Background(), w, "events", parseAll(t, w, inserted, rejected, hitByOutage, neverTried))
 	wait()
 
 	assert.Equal(t, int32(4), rt.Hits(), "bulk + three singles; isolation stops at the outage")
@@ -2279,7 +2560,7 @@ func TestFlushTable_OutageStopsLaterColumnGroups(t *testing.T) {
 		MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"},
 		MsgData:  makeEnvelopeCols(t, "events", "", []string{"id", "v"}, map[string]any{"id": 2, "v": "x"}),
 	}
-	w.flushTable(context.Background(), "events", parseAll(t, w, narrow, wide))
+	flush(context.Background(), w, "events", parseAll(t, w, narrow, wide))
 	wait()
 
 	assert.Equal(t, int32(1), rt.Hits(), "the second column group is not tried against a down ClickHouse")
@@ -2306,25 +2587,25 @@ func TestFlushTable_PoolBacksOffTogether(t *testing.T) {
 	w.now = func() time.Time { return clock }
 
 	a := newIngestMsg(t, "events", "", map[string]any{"id": 1})
-	w.flushTable(context.Background(), "events", parseAll(t, w, a))
+	flush(context.Background(), w, "events", parseAll(t, w, a))
 	require.Equal(t, int32(1), rt.Hits())
 	require.True(t, a.Naked.Load())
 
 	// Another table on the same pool, inside the backoff: no request at all.
 	b := newIngestMsg(t, "clicks", "", map[string]any{"id": 2})
-	w.flushTable(context.Background(), "clicks", parseAll(t, w, b))
+	flush(context.Background(), w, "clicks", parseAll(t, w, b))
 	assert.Equal(t, int32(1), rt.Hits(), "a backing-off pool is not asked again")
 	assert.True(t, b.Naked.Load())
 	assert.Positive(t, b.NakDelay.Load())
 
 	// The backoff elapses and ClickHouse is back: the next flush probes,
 	// succeeds, and the pool is open again for everyone.
-	clock = clock.Add(retryCap)
+	clock = clock.Add(testCap)
 	down.Store(false)
 	c := newIngestMsg(t, "clicks", "", map[string]any{"id": 3})
-	w.flushTable(context.Background(), "clicks", parseAll(t, w, c))
+	flush(context.Background(), w, "clicks", parseAll(t, w, c))
 	d := newIngestMsg(t, "events", "", map[string]any{"id": 4})
-	w.flushTable(context.Background(), "events", parseAll(t, w, d))
+	flush(context.Background(), w, "events", parseAll(t, w, d))
 	wait()
 
 	assert.Equal(t, int32(3), rt.Hits())
@@ -2353,8 +2634,8 @@ func TestFlushTable_OtherPoolUnaffected(t *testing.T) {
 	onDown := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: "down", Table: "events"}, MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 1})}
 	onUp := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: "up", Table: "events"}, MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 2})}
 
-	w.flushTable(context.Background(), "events", parseAll(t, w, onDown))
-	w.flushTable(context.Background(), "events", parseAll(t, w, onUp))
+	flush(context.Background(), w, "events", parseAll(t, w, onDown))
+	flush(context.Background(), w, "events", parseAll(t, w, onUp))
 	wait()
 
 	assert.True(t, onDown.Naked.Load())
@@ -2370,7 +2651,7 @@ func TestTableBatcher_Add_HandsRowsBackWhileThePoolBacksOff(t *testing.T) {
 	b, w, _ := newTestBatcher(t, okRoundTripper())
 	clock := time.Unix(1_000, 0)
 	w.now = func() time.Time { return clock }
-	wait, _, _ := w.backoffs.forTarget(w.target(tenant.Default)).fail(clock)
+	wait, _, _ := w.backoffs.forTarget(w.target(tenant.Default)).fail(clock, testCap)
 
 	early := newIngestMsg(t, "events", "", map[string]any{"id": 1})
 	b.add(context.Background(), parseAll(t, w, early)[0])
@@ -2398,7 +2679,7 @@ func TestTableBatcher_Add_ResolvesNoTargetWhileNothingBacksOff(t *testing.T) {
 	b.add(context.Background(), parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1}))[0])
 	assert.Zero(t, resolved.Load(), "no target is resolved while every backoff is closed")
 
-	w.backoffs.forTable(target(tenant.Default), "other").fail(w.clock())
+	w.backoffs.forTable(target(tenant.Default), "other").fail(w.clock(), testCap)
 	b.add(context.Background(), parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 2}))[0])
 	assert.Equal(t, int32(1), resolved.Load(), "an open backoff anywhere makes the check resolve the target")
 	assert.Len(t, b.batch, 2, "another table's backoff does not hold this one's rows")
@@ -2437,18 +2718,18 @@ func tableBacksOffAlone(t *testing.T, code int) {
 	w.now = func() time.Time { return clock }
 
 	ro := newIngestMsg(t, "ro", "", map[string]any{"id": 1})
-	w.flushTable(context.Background(), "ro", parseAll(t, w, ro))
+	flush(context.Background(), w, "ro", parseAll(t, w, ro))
 	require.True(t, ro.Naked.Load())
 	require.Equal(t, int32(1), rt.Hits())
 
 	healthy := newIngestMsg(t, "ok", "", map[string]any{"id": 2})
-	w.flushTable(context.Background(), "ok", parseAll(t, w, healthy))
+	flush(context.Background(), w, "ok", parseAll(t, w, healthy))
 	wait()
 	assert.True(t, healthy.DoubleAcked.Load(), "a read-only neighbour does not hold back the pool")
 	assert.Equal(t, int32(2), rt.Hits())
 
 	again := newIngestMsg(t, "ro", "", map[string]any{"id": 3})
-	w.flushTable(context.Background(), "ro", parseAll(t, w, again))
+	flush(context.Background(), w, "ro", parseAll(t, w, again))
 	assert.Equal(t, int32(2), rt.Hits(), "the healthy table's success did not reopen the read-only one")
 	assert.True(t, again.Naked.Load())
 	assert.Empty(t, pub.Published())
@@ -2463,9 +2744,9 @@ func TestTableBatcher_Add_HandsRowsBackWhileTheProbeIsOut(t *testing.T) {
 	clock := time.Unix(1_000, 0)
 	w.now = func() time.Time { return clock }
 	pool := w.backoffs.forTarget(w.target(tenant.Default))
-	wait, _, _ := pool.fail(clock)
+	wait, _, _ := pool.fail(clock, testCap)
 	clock = clock.Add(wait)
-	_, ok := pool.allow(clock)
+	_, ok := pool.allow(clock, testCap)
 	require.True(t, ok, "the probe is claimed")
 
 	m := newIngestMsg(t, "events", "", map[string]any{"id": 1})
@@ -2473,6 +2754,141 @@ func TestTableBatcher_Add_HandsRowsBackWhileTheProbeIsOut(t *testing.T) {
 	assert.Empty(t, b.batch)
 	assert.True(t, m.Naked.Load())
 	assert.GreaterOrEqual(t, time.Duration(m.NakDelay.Load()), retryBase/2)
+}
+
+// The worker folds each tenant's cap into the backoff of a pool tenants
+// share (backoff.adopt) at every path a row or flush meets it: a row
+// arriving under a window another tenant opened with a larger cap — into an
+// empty batch, or one in progress, whose own limits carry the cap — is
+// handed back for at most its own tenant's cap, and so is a batch whose
+// flush asks to try under that window, whether the pool's backoff or its
+// table's own holds it.
+func TestTableBatcher_HandsRowsBackUnderTheTenantsOwnCap(t *testing.T) {
+	t.Parallel()
+	b, w, _ := newTestBatcher(t, okRoundTripper())
+	clock := time.Unix(1_000, 0)
+	w.now = func() time.Time { return clock }
+	own := Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: time.Hour, RetryBackoffMax: 5 * time.Second}
+	w.limits = limitsOf(own)
+	ctx := context.Background()
+	tgt := w.target(tenant.Default)
+	pool, table := w.backoffs.forTarget(tgt), w.backoffs.forTable(tgt, "events")
+	openUnder2m := func(bo *backoff) { // another tenant's 2m cap: a window of a minute or more
+		for range 10 {
+			wait, _, _ := bo.fail(clock, 2*time.Minute)
+			clock = clock.Add(wait)
+		}
+		wait, _, _ := bo.fail(clock, 2*time.Minute)
+		require.GreaterOrEqual(t, wait, time.Minute)
+	}
+	row := func(id int) (*testutil.MockMessage, parsedMsg) {
+		m := newIngestMsg(t, "events", "", map[string]any{"id": id})
+		return m, parseAll(t, w, m)[0]
+	}
+	handedBackUnderOwnCap := func(m *testutil.MockMessage, what string) {
+		t.Helper()
+		require.True(t, m.Naked.Load(), what+": handed back")
+		delay := time.Duration(m.NakDelay.Load())
+		assert.GreaterOrEqual(t, delay, own.RetryBackoffMax, what)
+		assert.Less(t, delay, own.RetryBackoffMax+retryBase, what+": at most its own cap, plus the spread")
+	}
+
+	openUnder2m(pool)
+	m, pm := row(1)
+	b.add(ctx, pm)
+	assert.Empty(t, b.batch)
+	handedBackUnderOwnCap(m, "a row into an empty batch")
+	pool.succeed(clock)
+
+	_, pm = row(2)
+	b.add(ctx, pm)
+	require.Len(t, b.batch, 1)
+	openUnder2m(pool)
+	m, pm = row(3)
+	b.add(ctx, pm)
+	assert.Len(t, b.batch, 1)
+	handedBackUnderOwnCap(m, "a row into a batch in progress")
+	pool.succeed(clock)
+
+	openUnder2m(pool)
+	m, pm = row(4)
+	w.flushTable(ctx, "events", []parsedMsg{pm}, own, true)
+	handedBackUnderOwnCap(m, "a flush under the pool's window")
+	pool.succeed(clock)
+
+	openUnder2m(table)
+	m, pm = row(5)
+	w.flushTable(ctx, "events", []parsedMsg{pm}, own, true)
+	handedBackUnderOwnCap(m, "a flush under the table's own window")
+	table.succeed(clock)
+
+	openUnder2m(table)
+	m, pm = row(6)
+	b.add(ctx, pm)
+	assert.Len(t, b.batch, 1)
+	handedBackUnderOwnCap(m, "a row under the table's own window")
+}
+
+// A tenant's failing flushes escalate up to its own retry_backoff_max, and
+// never past it: each flush probes once its window has elapsed, and the
+// delays settle within half the cap and the cap.
+func TestFlushTable_EscalatesToTheTenantsCap(t *testing.T) {
+	t.Parallel()
+	rt := &testutil.MockRoundTripper{Fn: func(*http.Request) (*http.Response, error) {
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	}}
+	w, _, _, _ := newTestWorker(rt)
+	clock := time.Unix(1_000, 0)
+	w.now = func() time.Time { return clock }
+	own := Limits{RetryBackoffMax: 4 * time.Second}
+	w.limits = limitsOf(own)
+	var delays []time.Duration
+	for i := range 8 {
+		m := newIngestMsg(t, "events", "", map[string]any{"id": i})
+		w.flushTable(context.Background(), "events", parseAll(t, w, m), own, true)
+		require.True(t, m.Naked.Load())
+		d := time.Duration(m.NakDelay.Load())
+		delays = append(delays, d)
+		clock = clock.Add(d)
+	}
+	require.Equal(t, int32(8), rt.Hits(), "each flush probed once its window elapsed: %v", delays)
+	for _, d := range delays[4:] { // half of 1s, 2s, 4s, then the cap: 4s halved and spread
+		assert.GreaterOrEqual(t, d, own.RetryBackoffMax/2, "escalated to the cap: %v", delays)
+		assert.Less(t, d, own.RetryBackoffMax, "never past the tenant's cap: %v", delays)
+	}
+}
+
+// A served tenant with no limits adopted (its rows go back to the queue as
+// unconfigured) brings no cap to a backoff another tenant's flush opened on
+// the pool they share: its rows do not cut that window, so the other
+// tenant's next flush is still turned away.
+func TestTableBatcher_Add_AnUnconfiguredTenantDoesNotCutTheWindow(t *testing.T) {
+	t.Parallel()
+	b, w, _ := newTestBatcher(t, okRoundTripper())
+	clock := time.Unix(1_000, 0)
+	w.now = func() time.Time { return clock }
+	configured := Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: time.Hour, InsertTimeout: time.Second, RetryBackoffMax: 2 * time.Minute}
+	w.limits = func(id tenant.ID) (Limits, bool) {
+		if id == tenant.Default {
+			return Limits{}, false // served, on the shared target, no limits adopted
+		}
+		return configured, true
+	}
+	pool := w.backoffs.forTarget(w.target(tenant.Default))
+	for range 10 { // the configured tenant's 2m cap: a window of a minute or more
+		wait, _, _ := pool.fail(clock, configured.RetryBackoffMax)
+		clock = clock.Add(wait)
+	}
+	wait, _, _ := pool.fail(clock, configured.RetryBackoffMax)
+	require.GreaterOrEqual(t, wait, time.Minute)
+
+	m := newIngestMsg(t, "events", "", map[string]any{"id": 1}) // the unconfigured tenant's
+	b.add(context.Background(), parseAll(t, w, m)[0])
+	require.True(t, m.Naked.Load(), "handed back")
+
+	clock = clock.Add(2 * time.Second)
+	_, ok := pool.allow(clock, configured.RetryBackoffMax)
+	assert.False(t, ok, "the configured tenant's window was not cut to the floor")
 }
 
 // scriptedConsumer hands the worker's handler to the test and records, in
@@ -2545,8 +2961,8 @@ func scriptedWorker(t *testing.T, cons mq.Consumer, rec func(string), gate func(
 		cache:   &testutil.MockCache{},
 		target:  func(tenant.ID) chconn.Target { return chconn.Target{URL: ch.URL, Database: "db"} },
 		// Flushed only at the stop.
-		maxBatch: defaultMaxBatch,
-		maxWait:  time.Hour,
+		limits:   limitsOf(Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: time.Hour}),
+		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	finished := make(chan struct{})

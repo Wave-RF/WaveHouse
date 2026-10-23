@@ -268,7 +268,7 @@ func defaults() Config {
 		DataDir: "./data",
 		Roles:   AllRoles(),
 		Server:  Server{Port: 8080, ShutdownTimeout: 10},
-		MQ:      MQ{Backend: MQEmbedded, NATS: defaultMQNATS()},
+		MQ:      MQ{Backend: MQEmbedded, AckWait: defaultAckWait, MaxAckPending: defaultMaxAckPending, Prefetch: defaultPrefetch, NATS: defaultMQNATS()},
 		Cache: Cache{
 			Backend: CacheLocal, L1MaxCost: 64 << 20,
 			Redis: CacheRedisConfig{
