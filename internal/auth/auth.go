@@ -526,8 +526,9 @@ func middleware(current func(context.Context) (tenant.ID, *verifier), operatorKe
 					// Present but wrong: record a failed operator-key attempt and
 					// fall through to the normal Bearer/default path — this
 					// middleware never rejects (authentication is decoupled from
-					// authorization), so the request resolves roleless like any
-					// other unauthenticated caller. WARN + a counter because a
+					// authorization), so the request resolves as if no operator key
+					// were sent: a valid Bearer token still authenticates it, and
+					// without one it is roleless. WARN + a counter because a
 					// mismatch is a strong probing/brute-force signal: nobody
 					// sends a wrong operator key by accident. Same correlation-field
 					// handling as the success line above: request_id, client.address

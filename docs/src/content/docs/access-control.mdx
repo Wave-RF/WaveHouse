@@ -90,7 +90,7 @@ Set the result via `WH_AUTH_OPERATOR_KEY` (or `auth.operator_key`) and present i
 curl -X POST -H "Authorization: Operator $(cat operator.key)" https://wavehouse.example.com/v1/ops/settings/reload
 ```
 
-**Monitor failed attempts.** A successful operator authentication is counted by `wavehouse_auth_operator_key_requests_total` and logged at `DEBUG` (`operator key authenticated request`), since a control service polling `/v1/ops` would otherwise write a line per call; a request presenting a *wrong* operator key is logged at `WARN` (`operator key authentication failed`) and counted by the `wavehouse_auth_operator_key_failures_total` metric, then handled as an ordinary unauthenticated request (the middleware never rejects). A wrong operator key is never sent by accident, so a nonzero rate is a strong probing/brute-force signal against your most privileged credential — alert on it.
+**Monitor failed attempts.** A successful operator authentication is counted by `wavehouse_auth_operator_key_requests_total` and logged at `DEBUG` (`operator key authenticated request`), since a control service polling `/v1/ops` would otherwise write a line per call; a request presenting a *wrong* operator key is logged at `WARN` (`operator key authentication failed`) and counted by the `wavehouse_auth_operator_key_failures_total` metric, then falls through to the normal Bearer-token or `default_role` handling, so a valid Bearer token on the same request still authenticates it (the middleware never rejects). A wrong operator key is never sent by accident, so a nonzero rate is a strong probing/brute-force signal against your most privileged credential — alert on it.
 
 ## Anatomy of a policy
 
