@@ -184,7 +184,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// TODO: what should the order of these be to maximize speed + limit risk of data leakage or DoS/resource exhaustion?
 
 	if table == "" {
-		slog.ErrorContext(ctx, "missing table parameter in request")
+		slog.WarnContext(ctx, "missing table parameter in request")
 		writeJSONError(w, http.StatusBadRequest, "missing table")
 		return
 	}
@@ -291,7 +291,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// only error left is an empty body.
 	rr, batch, err := newRecordReader(format, body.Bytes())
 	if err != nil {
-		slog.ErrorContext(ctx, "empty ingest body", "table", table, "format", format.String())
+		slog.WarnContext(ctx, "empty ingest body", "table", table, "format", format.String())
 		writeJSONError(w, http.StatusBadRequest, emptyBodyMessage(format))
 		return
 	}
@@ -327,7 +327,7 @@ func (h *IngestHandler) handleSingle(
 		if writeMaxBytesError(w, err, reqCap) {
 			return
 		}
-		slog.ErrorContext(ctx, "invalid json payload", "error", err, "table", table)
+		slog.WarnContext(ctx, "invalid json payload", "error", err, "table", table)
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -352,7 +352,7 @@ func (h *IngestHandler) handleSingle(
 		return
 	}
 
-	slog.InfoContext(ctx, "event successfully ingested", "table", table)
+	slog.DebugContext(ctx, "event successfully ingested", "table", table)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
@@ -445,7 +445,7 @@ func (h *IngestHandler) handleBatch(
 		return
 	}
 
-	slog.InfoContext(ctx, "batch ingested", "table", table,
+	slog.DebugContext(ctx, "batch ingested", "table", table,
 		"total", result.Total, "succeeded", result.Succeeded,
 		"failed", result.Failed, "duplicates", result.Duplicates)
 	w.Header().Set("Content-Type", "application/json")
@@ -856,7 +856,7 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 		switch claims[j].Status {
 		case dedupe.Duplicate:
 			recs[i].duplicate = true
-			slog.InfoContext(ctx, "duplicate event skipped", "event_id", keys[j].ID, "table", table)
+			slog.DebugContext(ctx, "duplicate event skipped", "event_id", keys[j].ID, "table", table)
 		case dedupe.InFlight:
 			if held == nil {
 				held = &keys[j]
@@ -866,7 +866,7 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 	}
 	if held != nil {
 		releaseClaims(ctx, dd, claimedIn(recs))
-		slog.InfoContext(ctx, "event id in flight in another request", "event_id", held.ID, "table", table)
+		slog.DebugContext(ctx, "event id in flight in another request", "event_id", held.ID, "table", table)
 		return &requestAbort{
 			Status:     http.StatusServiceUnavailable,
 			Message:    "a request with the same dedupe id is in flight",

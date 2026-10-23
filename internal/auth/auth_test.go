@@ -895,12 +895,19 @@ func TestMiddleware_OperatorKey_FailedAttemptLogged(t *testing.T) {
 			"an absent operator credential is an ordinary request, not a failed attempt")
 	})
 
-	t.Run("successful operator auth logs the INFO audit, not the failure WARN", func(t *testing.T) {
+	t.Run("successful operator auth writes nothing at INFO", func(t *testing.T) {
 		buf := captureInfo(t)
 		c := runOp(t, cfg, Wiring{}, store, operatorHeader(testOperatorKey))
 		assert.True(t, c.isOperator)
+		assert.Empty(t, buf.String(), "a control service polling /v1/ops would write a line per call (#890)")
+	})
+
+	t.Run("successful operator auth logs at DEBUG, not the failure WARN", func(t *testing.T) {
+		buf := logtest.Capture(t, slog.LevelDebug)
+		c := runOp(t, cfg, Wiring{}, store, operatorHeader(testOperatorKey))
+		assert.True(t, c.isOperator)
 		out := buf.String()
-		assert.Contains(t, out, `"level":"INFO"`)
+		assert.Contains(t, out, `"level":"DEBUG"`)
 		assert.Contains(t, out, `"msg":"operator key authenticated request"`)
 		assert.NotContains(t, out, "authentication failed")
 	})
