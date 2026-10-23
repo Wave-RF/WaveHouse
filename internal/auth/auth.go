@@ -414,10 +414,11 @@ var (
 )
 
 // operatorKeyFailures counts requests that presented an operator credential
-// which did NOT match the configured key. A wrong operator key is never sent by
-// accident — legitimate callers present a Bearer JWT or nothing — so a mismatch
-// is a probing/brute-force signal against the most privileged credential in the
-// system, meant to be alerted on. Paired with the WARN in Middleware; a
+// which did NOT match the configured key. Legitimate callers present the
+// current key, a Bearer JWT or nothing, so a mismatch is either probing of the
+// most privileged credential in the system or a client holding a stale key
+// (say, after a rotation); both are meant to be alerted on. Paired with the
+// WARN in Middleware; a
 // package-level instrument mirroring wavehouse_ingest_dedupe_missing_id_total.
 var operatorKeyFailures, _ = otel.Meter("wavehouse-auth").Int64Counter(
 	"wavehouse_auth_operator_key_failures_total",
@@ -530,8 +531,9 @@ func middleware(current func(context.Context) (tenant.ID, *verifier), operatorKe
 					// authorization), so the request resolves as if no operator key
 					// were sent: a valid Bearer token still authenticates it, and
 					// without one it is roleless. WARN + a counter because a
-					// mismatch is a strong probing/brute-force signal: nobody
-					// sends a wrong operator key by accident. Same correlation-field
+					// mismatch is either probing of the most privileged credential
+					// or a client with a stale key, and both need an operator's
+					// attention. Same correlation-field
 					// handling as the success line above: request_id, client.address
 					// and tenant from TraceHandler.
 					operatorKeyFailures.Add(r.Context(), 1)
