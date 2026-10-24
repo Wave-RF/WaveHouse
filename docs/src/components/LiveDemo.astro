@@ -162,9 +162,9 @@ const DEMO_HOST = "stats.wavehouse.dev";
   // Event types the live tail keeps, derived from VERBS. The SSE leg streams
   // every gh_events row (nothing is filtered on the wire); the SDK applies
   // this filter in-browser, and the VERBS lookup in addRow stays the final
-  // arbiter. Type-only, deliberately: a live row's `action` is null when the
-  // producer omitted it, and an `action` IN-filter would drop that row
-  // before addRow's bare-type fallback could run. Backfill curation is
+  // arbiter. Type-only, deliberately: live rows are raw producer payloads,
+  // and an `action` IN-filter would drop a row whose action field is ever
+  // absent before addRow's bare-type fallback could run. Backfill curation is
   // server-side in the gh_activity_recent pipe (Wave-RF/WaveHouse-Stats#18) —
   // its (event_type, action) pair list and VERBS must stay in sync (the
   // pipe's YAML carries the mirror-image note).
@@ -178,11 +178,10 @@ const DEMO_HOST = "stats.wavehouse.dev";
   const posthog = () =>
     (window as { posthog?: { capture: (event: string, props?: object) => void } }).posthog;
 
-  // Backfill rows come back RFC3339 from ClickHouse, and the server rewrites a
-  // live row's event_ts to the same RFC3339 UTC form before streaming it. That
-  // rewrite is fail-open, so a zone-less ClickHouse-style
+  // Backfill rows come back RFC3339 from ClickHouse, but live SSE rows carry
+  // the producer's payload as ingested — a zone-less ClickHouse-style
   // "YYYY-MM-DD HH:MM:SS[.fff]" (UTC by the gh_events contract), which
-  // Date.parse would read as LOCAL time, is still normalized to ISO-8601 UTC.
+  // Date.parse would read as LOCAL time. Normalize to ISO-8601 UTC.
   function normTs(ts: string): string {
     return /^\d{4}-\d{2}-\d{2} \d{2}/.test(ts) ? ts.replace(" ", "T") + "Z" : ts;
   }
@@ -359,9 +358,9 @@ const DEMO_HOST = "stats.wavehouse.dev";
     // --- Feed.
     const seen = new Set<string>();
     // Normalize every key part across the two row sources: backfill rows are
-    // ClickHouse-materialized (""/0 defaults) while a live SSE row carries null
-    // for any field the producer omitted — raw interpolation would never dedup
-    // a row seen via both paths.
+    // ClickHouse-materialized (RFC3339 ts, ""/0 defaults) while live SSE rows
+    // are raw producer payloads (zone-less ts, fields possibly absent) — raw
+    // interpolation would never dedup a row seen via both paths.
     const rowKey = (r: GhRow) =>
       `${r.event_type}|${r.action || ""}|${r.actor_login}|${normTs(r.event_ts || "")}|${Number(r.number) || 0}`;
 
