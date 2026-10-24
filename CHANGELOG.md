@@ -16,6 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - `event successfully ingested`, `batch ingested`, `duplicate event skipped` and `event id in flight in another request` are `DEBUG`.
   - `missing table parameter in request`, `empty ingest body` and `invalid json payload` are `WARN`, like the other client-input refusals. `ERROR` is kept for faults in the engine or its dependencies.
 
+### Fixed
+
+- **Spans and OpenTelemetry HTTP metrics name the ops route a request matched, not `/v1/ops/*`** (`internal/api/correlation.go` (+ test), `docs/src/content/docs/architecture.md`): closes [#892](https://github.com/Wave-RF/WaveHouse/issues/892), part of [#908](https://github.com/Wave-RF/WaveHouse/issues/908). Every request under `/v1/ops/` was recorded under the sub-router's mount, so a raw-SQL `POST /v1/ops/query` and a `GET /v1/ops/dlq/stats` poll shared one span name (`POST /v1/ops/*`, `GET /v1/ops/*`) and one `http_route` series on `http_server_request_duration_seconds` and the body-size histograms. They now carry the full route pattern, such as `GET /v1/ops/dlq/stats`, and the server span also carries `http.route`. A request the ops gate refuses never reaches a route and keeps `/v1/ops/*`, as `wavehouse_http_request_duration_seconds` already did. Dashboards, alerts or trace queries that match `/v1/ops/*` need the per-route names.
+
 ## [0.2.1] - 2026-10-21
 
 Upgrading from 0.2.0 is a binary swap: no setting moves and nothing is migrated. Six changes can still need action ([Upgrading](https://wavehouse.dev/upgrading#from-020-to-021)):
