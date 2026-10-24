@@ -25,7 +25,7 @@
     "@wave-rf/astro-trademarks": "^0.1.0",
     "@wave-rf/cloudflare-md-router": "^0.3.0",
     "@wave-rf/starlight-llm-tools": "^0.3.2",
-    "@wavehouse/sdk": "^0.1.1",
+    "@wavehouse/sdk": "^0.2.0",
     "astro": "^7.3.8",
     "astro-vtbot": "^3.1.0",
     "katex": "^0.19.0",

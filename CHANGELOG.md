@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## Unreleased
 
+### Changed
+
+- **The docs site's live demo moves to `@wavehouse/sdk` 0.2** (`docs/package.json`, `pnpm-lock.yaml`, `docs/src/components/LiveDemo.astro`, `docs/src/content/docs/development.md`, [#828](https://github.com/Wave-RF/WaveHouse/issues/828)): the project the landing page's demo reads moves to a v0.2 engine, whose stream sends an `event: schema` frame and then positional rows that the 0.1 SDK cannot read, so its live tail would go silent while the counts and the backfill kept rendering. The calls the demo makes are unchanged in 0.2, and its comments no longer describe a live row as the producer's raw payload: an omitted field arrives as `null`, and `event_ts` in RFC 3339 UTC. The bump reads the v0.2 wire only, so it lands once the demo's project serves that wire, and `development.md` now says to raise the docs site's pin then, not at the tag.
+
 ## [0.2.1] - 2026-10-21
 
 Upgrading from 0.2.0 is a binary swap: no setting moves and nothing is migrated. Six changes can still need action ([Upgrading](https://wavehouse.dev/upgrading#from-020-to-021)):
