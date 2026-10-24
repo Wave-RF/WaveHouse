@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## Unreleased
 
+### Changed
+
+- **Routine success no longer logs at `INFO`, and client mistakes on ingest no longer log at `ERROR`** (`internal/discovery/discovery.go`, `internal/auth/auth.go`, `internal/api/ingest.go` (+ tests), `docs/src/content/docs/{access-control.mdx,architecture.md}`, `AGENTS.md`): closes [#888](https://github.com/Wave-RF/WaveHouse/issues/888), [#890](https://github.com/Wave-RF/WaveHouse/issues/890) and [#904](https://github.com/Wave-RF/WaveHouse/issues/904), part of [#908](https://github.com/Wave-RF/WaveHouse/issues/908). On an idle v0.2.1 deployment the schema refresh line alone was 64% of all log records. Log-based alerts or dashboards that key on these lines need updating:
+  - `schema registry refreshed` is `DEBUG` when nothing changed. It stays `INFO` on a tenant's first load and when a refresh changes the schema, and then names the change in `tables_added`, `tables_removed` and `tables_changed` (columns added, removed, retyped, reordered or with a new default, or a DDL change such as a TTL), `previous_server_version` after a ClickHouse upgrade, or `previous_server_tz` when the server's default time zone changed, which moves how zone-less timestamps are canonicalized. The `SchemaRegistry.Refresh` span now carries the `tenant` attribute.
+  - `operator key authenticated request` is `DEBUG`. Successful operator-key use is counted by the new `wavehouse_auth_operator_key_requests_total` instead. A wrong operator key still logs at `WARN` and counts in `wavehouse_auth_operator_key_failures_total`.
+  - `event successfully ingested`, `batch ingested`, `duplicate event skipped` and `event id in flight in another request` are `DEBUG`.
+  - `missing table parameter in request`, `empty ingest body` and `invalid json payload` are `WARN`, like the other client-input refusals. `ERROR` is kept for faults in the engine or its dependencies.
+
 ## [0.2.1] - 2026-10-21
 
 Upgrading from 0.2.0 is a binary swap: no setting moves and nothing is migrated. Six changes can still need action ([Upgrading](https://wavehouse.dev/upgrading#from-020-to-021)):

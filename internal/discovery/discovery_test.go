@@ -13,7 +13,13 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
@@ -971,4 +977,130 @@ func TestInsertableColumns_CachedAndUncachedAgree(t *testing.T) {
 	second := ts.InsertableColumns()
 	require.NotEmpty(t, first)
 	assert.Same(t, &first[0], &second[0], "callers share the memoized backing array")
+}
+
+// refreshLines decodes the "schema registry refreshed" records in buf.
+func refreshLines(t *testing.T, buf *logtest.Buffer) []map[string]any {
+	t.Helper()
+	var lines []map[string]any
+	for _, raw := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if raw == "" {
+			continue
+		}
+		var rec map[string]any
+		require.NoError(t, json.Unmarshal([]byte(raw), &rec))
+		if rec["msg"] == "schema registry refreshed" {
+			lines = append(lines, rec)
+		}
+	}
+	return lines
+}
+
+// TestRefresh_LogsAtInfoOnlyOnLoadOrChange: the refresh line runs once per
+// tenant per interval on every replica, so an unchanged refresh is DEBUG; the
+// first load and a change are INFO, and a change names the tables (#888).
+// Not parallel: it captures the default logger.
+func TestRefresh_LogsAtInfoOnlyOnLoadOrChange(t *testing.T) {
+	buf := logtest.Capture(t, slog.LevelDebug)
+	conn := &fakeConn{
+		version: "25.3.1.1",
+		columns: []fakeColumn{
+			{table: "clicks", name: "id", chType: "String", position: 1},
+			{table: "users", name: "id", chType: "UInt64", position: 1},
+			{table: "orders", name: "id", chType: "UInt64", position: 1},
+		},
+	}
+	sr := NewSchemaRegistry(sourceOf(conn), tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	ctx := context.Background()
+
+	require.NoError(t, sr.Refresh(ctx))
+	require.NoError(t, sr.Refresh(ctx))
+	conn.columns = []fakeColumn{
+		{table: "clicks", name: "id", chType: "String", position: 1},
+		{table: "clicks", name: "page", chType: "String", position: 2},
+		{table: "users", name: "id", chType: "UInt64", position: 1},
+		{table: "events", name: "id", chType: "UUID", position: 1},
+	}
+	require.NoError(t, sr.Refresh(ctx))
+	conn.version = "25.8.1.1"
+	require.NoError(t, sr.Refresh(ctx))
+	conn.tz = "Europe/Berlin"
+	require.NoError(t, sr.Refresh(ctx))
+
+	lines := refreshLines(t, buf)
+	require.Len(t, lines, 5)
+	assert.Equal(t, "INFO", lines[0]["level"], "first load")
+	assert.NotContains(t, lines[0], "tables_added", "a first load lists no tables")
+	assert.Equal(t, "DEBUG", lines[1]["level"], "nothing changed")
+
+	assert.Equal(t, "INFO", lines[2]["level"], "schema changed")
+	assert.Equal(t, []any{"events"}, lines[2]["tables_added"])
+	assert.Equal(t, []any{"orders"}, lines[2]["tables_removed"])
+	assert.Equal(t, []any{"clicks"}, lines[2]["tables_changed"])
+
+	assert.Equal(t, "INFO", lines[3]["level"], "server upgraded")
+	assert.Equal(t, "25.3.1.1", lines[3]["previous_server_version"])
+	assert.NotContains(t, lines[3], "tables_changed")
+
+	// The zone decides how zone-less timestamps are canonicalized (#372).
+	assert.Equal(t, "INFO", lines[4]["level"], "server time zone changed")
+	assert.Equal(t, "UTC", lines[4]["previous_server_tz"])
+	assert.Equal(t, "Europe/Berlin", lines[4]["server_tz"])
+}
+
+func TestSchemaChanges(t *testing.T) {
+	t.Parallel()
+	schema := func(cols ...Column) *TableSchema { return &TableSchema{Columns: cols} }
+	prev := map[string]*TableSchema{
+		"same":    schema(Column{Name: "id", Type: "String", Position: 1}),
+		"retyped": schema(Column{Name: "id", Type: "String", Position: 1}),
+		"default": schema(Column{Name: "id", Type: "String", Position: 1}),
+		"gone":    schema(Column{Name: "id", Type: "String", Position: 1}),
+	}
+	prev["ttl"] = &TableSchema{Columns: prev["same"].Columns, DDL: "CREATE TABLE t ENGINE = MergeTree"}
+	prev["raced"] = &TableSchema{Columns: prev["same"].Columns, DDL: "CREATE TABLE r ENGINE = MergeTree"}
+	next := map[string]*TableSchema{
+		"same":    schema(Column{Name: "id", Type: "String", Position: 1}),
+		"retyped": schema(Column{Name: "id", Type: "UInt64", Position: 1}),
+		"default": schema(Column{Name: "id", Type: "String", Position: 1, DefaultKind: "DEFAULT", DefaultExpression: "''"}),
+		"new":     schema(Column{Name: "id", Type: "String", Position: 1}),
+	}
+	next["ttl"] = &TableSchema{Columns: prev["same"].Columns, DDL: "CREATE TABLE t ENGINE = MergeTree TTL ts + INTERVAL 1 DAY"}
+	// Gone from system.tables between the two scans: no DDL, not a change.
+	next["raced"] = &TableSchema{Columns: prev["same"].Columns}
+	added, removed, changed := schemaChanges(prev, next)
+	assert.Equal(t, []string{"new"}, added)
+	assert.Equal(t, []string{"gone"}, removed)
+	assert.Equal(t, []string{"default", "retyped", "ttl"}, changed)
+
+	added, removed, changed = schemaChanges(next, next)
+	assert.Empty(t, added)
+	assert.Empty(t, removed)
+	assert.Empty(t, changed)
+}
+
+// TestRefresh_SpanCarriesTenant: the refresh span is per tenant, so it carries
+// the tenant attribute the request path's spans use (#888).
+// Not parallel: Refresh reads the global tracer provider. Cleanup installs a
+// no-op provider rather than restoring the saved one: the first
+// SetTracerProvider binds the default delegating provider to this test's
+// provider for good, so restoring it would keep feeding later tests' spans
+// into the recorder.
+func TestRefresh_SpanCarriesTenant(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(noop.NewTracerProvider())
+		_ = tp.Shutdown(context.Background())
+	})
+
+	conn := &fakeConn{columns: []fakeColumn{{table: "clicks", name: "id", chType: "String", position: 1}}}
+	sr := NewSchemaRegistry(sourceOf(conn), tenant.ID("acme"), func(tenant.ID) time.Duration { return time.Hour })
+	require.NoError(t, sr.Refresh(context.Background()))
+
+	spans := rec.Ended()
+	require.Len(t, spans, 1)
+	assert.Equal(t, "SchemaRegistry.Refresh", spans[0].Name())
+	assert.Contains(t, spans[0].Attributes(), attribute.String(observability.TenantKey, "acme"))
 }

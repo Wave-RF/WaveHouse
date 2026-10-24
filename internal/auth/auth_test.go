@@ -22,6 +22,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 const testOperatorKey = "op-secret-key"
@@ -857,10 +859,8 @@ func captureInfo(t *testing.T) *logtest.Buffer {
 // still falls through unauthenticated — no operator bit, roleless — because the
 // middleware never rejects. A request carrying no operator credential must NOT
 // emit that WARN, so ordinary traffic never drowns the signal. The counter
-// (wavehouse_auth_operator_key_failures_total) rides the same branch; like its
-// sibling wavehouse_ingest_dedupe_missing_id_total it isn't asserted here, but
-// the failed-attempt cases in TestMiddleware_OperatorKey already exercise the
-// Add call (proving it's safe under the default no-op meter).
+// (wavehouse_auth_operator_key_failures_total) rides the same branch and is
+// asserted in TestMiddleware_OperatorKey_Counters.
 func TestMiddleware_OperatorKey_FailedAttemptLogged(t *testing.T) {
 	cfg := Config{OperatorKey: testOperatorKey}
 	store := staticPolicies(&policy.Policy{AdminRole: "admin"})
@@ -895,12 +895,19 @@ func TestMiddleware_OperatorKey_FailedAttemptLogged(t *testing.T) {
 			"an absent operator credential is an ordinary request, not a failed attempt")
 	})
 
-	t.Run("successful operator auth logs the INFO audit, not the failure WARN", func(t *testing.T) {
+	t.Run("successful operator auth writes nothing at INFO", func(t *testing.T) {
 		buf := captureInfo(t)
 		c := runOp(t, cfg, Wiring{}, store, operatorHeader(testOperatorKey))
 		assert.True(t, c.isOperator)
+		assert.Empty(t, buf.String(), "a control service polling /v1/ops would write a line per call (#890)")
+	})
+
+	t.Run("successful operator auth logs at DEBUG, not the failure WARN", func(t *testing.T) {
+		buf := logtest.Capture(t, slog.LevelDebug)
+		c := runOp(t, cfg, Wiring{}, store, operatorHeader(testOperatorKey))
+		assert.True(t, c.isOperator)
 		out := buf.String()
-		assert.Contains(t, out, `"level":"INFO"`)
+		assert.Contains(t, out, `"level":"DEBUG"`)
 		assert.Contains(t, out, `"msg":"operator key authenticated request"`)
 		assert.NotContains(t, out, "authentication failed")
 	})
@@ -1060,4 +1067,67 @@ func TestAuthenticator_ReconfigureAppliesUnreachableJWKS(t *testing.T) {
 	got = ""
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	assert.Empty(t, got)
+}
+
+// TestMiddleware_OperatorKey_Counters: a matching key adds one to
+// wavehouse_auth_operator_key_requests_total, a wrong one adds one to
+// wavehouse_auth_operator_key_failures_total, and a request with no operator
+// credential touches neither (#890).
+// Not parallel: it swaps the package-level counters for ones on a test meter
+// provider, rather than installing a global provider, since the global
+// delegate binds once and a repeat run (-count=2) would read nothing.
+func TestMiddleware_OperatorKey_Counters(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	meter := mp.Meter("wavehouse-auth")
+	prevRequests, prevFailures := operatorKeyRequests, operatorKeyFailures
+	var err error
+	operatorKeyRequests, err = meter.Int64Counter("wavehouse_auth_operator_key_requests_total")
+	require.NoError(t, err)
+	operatorKeyFailures, err = meter.Int64Counter("wavehouse_auth_operator_key_failures_total")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		operatorKeyRequests, operatorKeyFailures = prevRequests, prevFailures
+		_ = mp.Shutdown(context.Background())
+	})
+	count := func(name string) int64 {
+		t.Helper()
+		var rm metricdata.ResourceMetrics
+		require.NoError(t, reader.Collect(context.Background(), &rm))
+		var n int64
+		for _, sm := range rm.ScopeMetrics {
+			for _, m := range sm.Metrics {
+				if sum, ok := m.Data.(metricdata.Sum[int64]); ok && m.Name == name {
+					for _, dp := range sum.DataPoints {
+						n += dp.Value
+					}
+				}
+			}
+		}
+		return n
+	}
+	const (
+		requests = "wavehouse_auth_operator_key_requests_total"
+		failures = "wavehouse_auth_operator_key_failures_total"
+	)
+	cfg := Config{OperatorKey: testOperatorKey}
+	store := staticPolicies(&policy.Policy{AdminRole: "admin"})
+
+	for _, tc := range []struct {
+		name                   string
+		setup                  func(*http.Request)
+		wantRequests, wantFail int64
+	}{
+		{name: "matching key", setup: operatorHeader(testOperatorKey), wantRequests: 1},
+		{name: "wrong key", setup: operatorHeader("wrong-key"), wantFail: 1},
+		{name: "no operator credential"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logtest.Capture(t, slog.LevelError) // keep the WARN out of test output
+			reqBefore, failBefore := count(requests), count(failures)
+			runOp(t, cfg, Wiring{}, store, tc.setup)
+			assert.Equal(t, tc.wantRequests, count(requests)-reqBefore, requests)
+			assert.Equal(t, tc.wantFail, count(failures)-failBefore, failures)
+		})
+	}
 }

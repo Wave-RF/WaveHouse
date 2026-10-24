@@ -414,14 +414,23 @@ var (
 )
 
 // operatorKeyFailures counts requests that presented an operator credential
-// which did NOT match the configured key. A wrong operator key is never sent by
-// accident — legitimate callers present a Bearer JWT or nothing — so a mismatch
-// is a probing/brute-force signal against the most privileged credential in the
-// system, meant to be alerted on. Paired with the WARN in Middleware; a
+// which did NOT match the configured key. Legitimate callers present the
+// current key, a Bearer JWT or nothing, so a mismatch is either probing of the
+// most privileged credential in the system or a client holding a stale key
+// (say, after a rotation); both are meant to be alerted on. Paired with the
+// WARN in Middleware; a
 // package-level instrument mirroring wavehouse_ingest_dedupe_missing_id_total.
 var operatorKeyFailures, _ = otel.Meter("wavehouse-auth").Int64Counter(
 	"wavehouse_auth_operator_key_failures_total",
 	metric.WithDescription("Requests presenting an operator key that did not match the configured value"),
+)
+
+// operatorKeyRequests counts requests authenticated with the operator key.
+// The per-request line is DEBUG, since a control service polling /v1/ops would
+// write one per call (#890); this keeps the key's use visible without one.
+var operatorKeyRequests, _ = otel.Meter("wavehouse-auth").Int64Counter(
+	"wavehouse_auth_operator_key_requests_total",
+	metric.WithDescription("Requests authenticated with the operator key"),
 )
 
 // Middleware authenticates Bearer tokens and records the caller's role, claims,
@@ -454,11 +463,13 @@ var operatorKeyFailures, _ = otel.Meter("wavehouse-auth").Int64Counter(
 // Bearer token (see operatorKey below): a constant-time match on the presented
 // credential authorizes a full-access platform operator independent of the JWT verifier.
 // policies backs that path — the live admin role is read from the request
-// tenant's policy per request — and operator authentications are logged at
-// info (audit). A presented credential that does not match is logged at warn
-// and counted by wavehouse_auth_operator_key_failures_total (a probing
-// signal), then falls through like any unauthenticated request. policies may
-// be nil when no operator key is configured.
+// tenant's policy per request — and operator authentications are counted by
+// wavehouse_auth_operator_key_requests_total and logged at debug. A presented
+// credential that does not match is logged at warn and counted by
+// wavehouse_auth_operator_key_failures_total (probing, or a stale key), then falls
+// through to the Bearer-token path as if no operator key had been sent: a
+// valid Bearer token still authenticates the request, and without one it is
+// roleless. policies may be nil when no operator key is configured.
 func middleware(current func(context.Context) (tenant.ID, *verifier), operatorKeyCfg string, policies PolicySource) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -493,16 +504,14 @@ func middleware(current func(context.Context) (tenant.ID, *verifier), operatorKe
 				match := presented != "" &&
 					subtle.ConstantTimeCompare([]byte(presented), []byte(operatorKeyCfg)) == 1
 				if match {
-					// Audit at Info (not Debug): the operator key is the most
-					// privileged credential in the system — full data-plane +
-					// admin, honored even when the policy is wiped — so its use
-					// must be visible in production logs (Info+), mirroring the
-					// WARN emitted on an authz denial. Correlation fields are
-					// deliberately NOT stamped per-call-site: the global
-					// TraceHandler (internal/observability) adds request_id,
-					// client.address, tenant and, when a span is active,
-					// trace_id/span_id to every line.
-					slog.LogAttrs(r.Context(), slog.LevelInfo, "operator key authenticated request",
+					// Counted rather than logged at INFO: a control service
+					// polling /v1/ops would write one line per call (#890).
+					// Correlation fields are deliberately NOT stamped
+					// per-call-site: the global TraceHandler
+					// (internal/observability) adds request_id, client.address,
+					// tenant and, when a span is active, trace_id/span_id.
+					operatorKeyRequests.Add(r.Context(), 1)
+					slog.LogAttrs(r.Context(), slog.LevelDebug, "operator key authenticated request",
 						slog.String("path", r.URL.Path),
 						slog.String("method", r.Method),
 					)
@@ -519,11 +528,13 @@ func middleware(current func(context.Context) (tenant.ID, *verifier), operatorKe
 					// Present but wrong: record a failed operator-key attempt and
 					// fall through to the normal Bearer/default path — this
 					// middleware never rejects (authentication is decoupled from
-					// authorization), so the request resolves roleless like any
-					// other unauthenticated caller. WARN + a counter because a
-					// mismatch is a strong probing/brute-force signal: nobody
-					// sends a wrong operator key by accident. Same correlation-field
-					// handling as the audit line above: request_id, client.address
+					// authorization), so the request resolves as if no operator key
+					// were sent: a valid Bearer token still authenticates it, and
+					// without one it is roleless. WARN + a counter because a
+					// mismatch is either probing of the most privileged credential
+					// or a client with a stale key, and both need an operator's
+					// attention. Same correlation-field
+					// handling as the success line above: request_id, client.address
 					// and tenant from TraceHandler.
 					operatorKeyFailures.Add(r.Context(), 1)
 					slog.LogAttrs(r.Context(), slog.LevelWarn, "operator key authentication failed",

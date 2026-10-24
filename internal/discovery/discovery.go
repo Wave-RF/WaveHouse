@@ -6,16 +6,19 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -223,6 +226,10 @@ type SchemaRegistry struct {
 	// serverVersion is the ClickHouse version string from the last successful
 	// Refresh, guarded by mu alongside tables.
 	serverVersion string
+	// serverTZ is the server's default time zone name from the last successful
+	// Refresh, guarded by mu; kept to report a change, which moves how
+	// zone-less timestamps are canonicalized.
+	serverTZ string
 }
 
 // Source yields a tenant's connection and the database it discovers from,
@@ -251,7 +258,8 @@ func NewSchemaRegistry(source Source, id tenant.ID, refreshInterval func(tenant.
 // system.tables, and precomputes timestamp column specs.
 func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
-	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")
+	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh",
+		trace.WithAttributes(attribute.String(observability.TenantKey, string(sr.tenant))))
 	defer span.End()
 
 	// One connection and one database per refresh, read together: a reload
@@ -348,13 +356,77 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	}
 
 	sr.mu.Lock()
+	prev, prevVersion, prevTZ := sr.tables, sr.serverVersion, sr.serverTZ
 	sr.tables = tables
 	sr.serverVersion = serverVersion
+	sr.serverTZ = tzName
 	sr.mu.Unlock()
-	sr.loaded.Store(true)
-	slog.InfoContext(ctx, "schema registry refreshed", "tenant", sr.tenant, "tables", len(tables), "server_tz", tzName, "server_version", serverVersion)
+	first := !sr.loaded.Swap(true)
+
+	// A refresh that found nothing new runs once per tenant per interval on
+	// every replica, so it logs at DEBUG; INFO is kept for the first load and
+	// for a change, naming what changed (#888).
+	attrs := []slog.Attr{
+		slog.Any("tenant", sr.tenant), slog.Int("tables", len(tables)),
+		slog.String("server_tz", tzName), slog.String("server_version", serverVersion),
+	}
+	level := slog.LevelDebug
+	if first {
+		level = slog.LevelInfo
+	} else if added, removed, changed := schemaChanges(prev, tables); len(added)+len(removed)+len(changed) > 0 || serverVersion != prevVersion || tzName != prevTZ {
+		level = slog.LevelInfo
+		for _, a := range []struct {
+			key   string
+			names []string
+		}{{"tables_added", added}, {"tables_removed", removed}, {"tables_changed", changed}} {
+			if len(a.names) > 0 {
+				attrs = append(attrs, slog.Any(a.key, a.names))
+			}
+		}
+		if serverVersion != prevVersion {
+			attrs = append(attrs, slog.String("previous_server_version", prevVersion))
+		}
+		if tzName != prevTZ {
+			attrs = append(attrs, slog.String("previous_server_tz", prevTZ))
+		}
+	}
+	slog.LogAttrs(ctx, level, "schema registry refreshed", attrs...)
 
 	return nil
+}
+
+// schemaChanges names, each sorted, the tables next has that prev lacks, the
+// tables prev had that next lacks, and the tables in both whose columns or DDL
+// (a TTL, engine setting or index) differ.
+func schemaChanges(prev, next map[string]*TableSchema) (added, removed, changed []string) {
+	for name, ts := range next {
+		old, ok := prev[name]
+		switch {
+		case !ok:
+			added = append(added, name)
+		case !slices.EqualFunc(old.Columns, ts.Columns, sameColumn),
+			// An empty DDL is a table gone from system.tables between the two
+			// scans (see TableSchema.DDL), not a change to it.
+			old.DDL != "" && ts.DDL != "" && old.DDL != ts.DDL:
+			changed = append(changed, name)
+		}
+	}
+	for name := range prev {
+		if _, ok := next[name]; !ok {
+			removed = append(removed, name)
+		}
+	}
+	slices.Sort(added)
+	slices.Sort(removed)
+	slices.Sort(changed)
+	return added, removed, changed
+}
+
+// sameColumn compares the discovered fields. The derived ones follow from them
+// and the server time zone, which Refresh compares on its own.
+func sameColumn(a, b Column) bool {
+	return a.Name == b.Name && a.Type == b.Type && a.DefaultKind == b.DefaultKind &&
+		a.DefaultExpression == b.DefaultExpression && a.Position == b.Position
 }
 
 // attachDDL fills each discovered table's DDL from system.tables. A table listed

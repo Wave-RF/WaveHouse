@@ -77,7 +77,7 @@ The invariant index — what must stay true. Full narrative and rationale live i
 ## Code Conventions
 
 - **Go 1.26**, strict formatting (`gofumpt`, enforced by CI)
-- **Structured logging** with `log/slog` (JSON handler), through the default logger: call `slog.InfoContext(ctx, …)` and its siblings (the context carries the trace ids the handler stamps) rather than taking a `*slog.Logger` parameter or field. `cmd/wavehouse` and `internal/app` install the default; tests silence or capture it with `internal/testutil/logtest` (a capturing test must not call `t.Parallel()`)
+- **Structured logging** with `log/slog` (JSON handler), through the default logger: call `slog.InfoContext(ctx, …)` and its siblings (the context carries the trace ids the handler stamps) rather than taking a `*slog.Logger` parameter or field. `cmd/wavehouse` and `internal/app` install the default; tests silence or capture it with `internal/testutil/logtest` (a capturing test must not call `t.Parallel()`). Levels describe the engine's health, not the request: routine success (an accepted request, an unchanged refresh, an authenticated call) is `DEBUG`, its rate carried by a counter where one exists (accepted ingest records have none until [#896](https://github.com/Wave-RF/WaveHouse/issues/896)); a client-caused refusal is `WARN` or below; `ERROR` is for faults in the engine or its dependencies, since WARN and ERROR always export to OTLP at 100% ([#904](https://github.com/Wave-RF/WaveHouse/issues/904))
 - **Chi v5** for HTTP routing
 - **Error handling**: Return errors, don't panic. Wrap with `fmt.Errorf("context: %w", err)`.
 - **No global state**: Dependencies are passed explicitly (constructor injection). The `slog` default logger is the one sanctioned exception.
