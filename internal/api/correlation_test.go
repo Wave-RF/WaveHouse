@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -11,10 +12,17 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -271,4 +279,108 @@ func TestNewRouter_OpsLogsCarryTheTenant(t *testing.T) {
 			}
 		})
 	}
+}
+
+// otelRouteOf returns, for each http.route the otelhttp request-duration
+// histogram recorded, how many requests it counted.
+func otelRouteOf(t *testing.T, reader *sdkmetric.ManualReader) map[string]uint64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	out := map[string]uint64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, md := range sm.Metrics {
+			if md.Name != "http.server.request.duration" {
+				continue
+			}
+			hist, ok := md.Data.(metricdata.Histogram[float64])
+			require.True(t, ok)
+			for _, dp := range hist.DataPoints {
+				route, _ := dp.Attributes.Value(semconv.HTTPRouteKey)
+				out[route.AsString()] += dp.Count
+			}
+		}
+	}
+	return out
+}
+
+// A request to a route under a mounted sub-router whose middleware derives
+// the request (the /v1/ops gates) names its span, and the http.route of the
+// span and of otelhttp's metrics, by the route it matched, not by the mount
+// (#892). One the ops gate refuses never reaches a route and keeps the
+// mount's pattern, as wavehouse_http_request_duration_seconds does.
+// Not parallel: otelhttp reads the global tracer and meter providers.
+func TestNewRouter_SpanNamesTheMatchedRoute(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	otel.SetTracerProvider(tp)
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		// Not the saved providers: the global delegate binds to the first one
+		// set, so restoring would leave this test's recorder behind.
+		otel.SetTracerProvider(tracenoop.NewTracerProvider())
+		otel.SetMeterProvider(metricnoop.NewMeterProvider())
+		_ = tp.Shutdown(context.Background())
+		_ = mp.Shutdown(context.Background())
+	})
+
+	// The operator key admits the request, through a derived request as
+	// the real middleware's.
+	operator := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("X-Test-Operator") != "" {
+				r = r.WithContext(auth.WithOperator(r.Context()))
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	reg := testRegistry(t)
+	h := NewRouter(Dependencies{
+		Tenants:      testTenants(),
+		Ingest:       NewIngestHandler(fixedRegistry(reg), &testutil.MockPublisher{}),
+		Query:        &QueryHandler{},
+		SSE:          NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
+		Health:       &HealthHandler{},
+		Version:      NewVersionHandler("test", "test", "test"),
+		Schema:       schemaHandlerOver(reg, testTenants()),
+		DLQ:          NewDLQHandler(&testutil.MockDeadLetterStats{}),
+		AuthMW:       operator,
+		PolicySource: policy.Static(&policy.Policy{}),
+	})
+
+	tests := []struct {
+		name      string
+		method    string
+		path      string
+		operator  bool
+		wantRoute string
+	}{
+		{name: "ops route", method: http.MethodGet, path: "/v1/ops/dlq/stats", operator: true, wantRoute: "/v1/ops/dlq/stats"},
+		{name: "another ops route", method: http.MethodGet, path: "/v1/ops/schema", operator: true, wantRoute: "/v1/ops/schema"},
+		{name: "top-level route", method: http.MethodGet, path: "/version", wantRoute: "/version"},
+		{name: "refused by the ops gate", method: http.MethodGet, path: "/v1/ops/dlq/stats", wantRoute: "/v1/ops/*"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec.Reset()
+			req := httptest.NewRequestWithContext(t.Context(), tt.method, tt.path, nil)
+			if tt.operator {
+				req.Header.Set("X-Test-Operator", "1")
+			}
+			h.ServeHTTP(httptest.NewRecorder(), req)
+
+			ended := rec.Ended()
+			require.Len(t, ended, 1)
+			assert.Equal(t, tt.method+" "+tt.wantRoute, ended[0].Name())
+			assert.Contains(t, ended[0].Attributes(), semconv.HTTPRoute(tt.wantRoute))
+		})
+	}
+	assert.Equal(t, map[string]uint64{
+		"/v1/ops/dlq/stats": 1,
+		"/v1/ops/schema":    1,
+		"/version":          1,
+		"/v1/ops/*":         1,
+	}, otelRouteOf(t, reader))
 }
