@@ -1216,3 +1216,51 @@ func TestStartAutoRefresh_FailureLineCarriesTheSpan(t *testing.T) {
 	assert.Equal(t, spans[0].SpanContext().TraceID().String(), line["trace_id"])
 	assert.Equal(t, spans[0].SpanContext().SpanID().String(), line["span_id"])
 }
+
+// A refresh that fails because ctx was canceled mid-query is a shutdown, not a
+// failure: the auto-refresh loop neither logs nor counts it, and the span
+// stays unset.
+func TestStartAutoRefresh_CanceledRefreshIsNotAFailure(t *testing.T) {
+	rec := recordSpans(t)
+	buf := &logtest.Buffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	// stop cancels the context of the refresh under way, as a shutdown would.
+	var stop context.CancelFunc
+	source := func() (driver.Conn, string) {
+		stop()
+		return nil, "test"
+	}
+	sr := NewSchemaRegistry(source, tenant.ID("acme"), func(tenant.ID) time.Duration { return time.Hour })
+	sr.firstTick = func(time.Duration) time.Duration { return 0 }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop = cancel
+	var failed atomic.Int32
+	err := sr.refreshThen(ctx, func(context.Context, error) { failed.Add(1) })
+	require.ErrorIs(t, err, ErrNoConnection)
+	assert.Zero(t, failed.Load(), "a canceled refresh is not handed to onFail")
+
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	defer loopCancel()
+	stop = loopCancel
+	done := make(chan struct{})
+	go func() {
+		sr.StartAutoRefresh(loopCtx)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("auto-refresh did not exit after its context was canceled")
+	}
+
+	assert.NotContains(t, buf.String(), "schema auto-refresh failed")
+	spans := rec.Ended()
+	require.Len(t, spans, 2)
+	for _, span := range spans {
+		assert.Equal(t, codes.Unset, span.Status().Code)
+	}
+}
