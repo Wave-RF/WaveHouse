@@ -24,6 +24,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -168,8 +169,10 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	table := r.URL.Query().Get("table")
 
-	// Force the use of the GLOBAL provider
-	tracer := otel.GetTracerProvider().Tracer("internal/api")
+	// Force the use of the GLOBAL provider. The scope is wavehouse-api, as
+	// the package's meter and the other components' wavehouse-<component>
+	// tracers are named (#899).
+	tracer := otel.GetTracerProvider().Tracer("wavehouse-api")
 
 	ctx, span := tracer.Start(r.Context(), "IngestHandler.Handle",
 		trace.WithAttributes(attribute.String("table", table)),
@@ -192,8 +195,11 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// TODO: prevent table-enumeration...
 	schema, err := lookupSchema(w, h.Registry, store, table, "unknown table: "+table)
 	if err != nil {
-		if errors.Is(err, discovery.ErrUnknownTable) {
+		switch {
+		case errors.Is(err, discovery.ErrUnknownTable):
 			slog.WarnContext(ctx, "unknown table requested", "table", table)
+		case errors.Is(err, discovery.ErrNotLoaded):
+			failSpan(ctx, schemaNotLoadedMessage)
 		}
 		return
 	}
@@ -339,7 +345,7 @@ func (h *IngestHandler) handleSingle(
 		rec = window[0]
 	}
 	if abort != nil {
-		writeAbort(w, abort)
+		writeAbort(ctx, w, abort)
 		return
 	}
 	if rec.reject != nil {
@@ -387,7 +393,7 @@ func (h *IngestHandler) handleBatch(
 	// reports them in order; false when it aborted the request.
 	flush := func() bool {
 		if abort := h.ingestWindow(ctx, store, table, scope, window); abort != nil {
-			writeAbort(w, abort)
+			writeAbort(ctx, w, abort)
 			return false
 		}
 		for i := range window {
@@ -432,7 +438,7 @@ func (h *IngestHandler) handleBatch(
 			// Whole-request failure: surface the status rather than recording a
 			// request-scoped condition as per-record loss (see requestAbort).
 			// Nothing in the open window has been published.
-			writeAbort(w, abort)
+			writeAbort(ctx, w, abort)
 			return
 		}
 		rec.index = result.Total
@@ -475,12 +481,23 @@ func (r *batchResult) add(rec *pendingRecord) {
 
 // writeAbort emits a whole-request failure response: the status and message,
 // plus a Retry-After header when one is set (503 backpressure). Shared by the
-// single-object and batch paths.
-func writeAbort(w http.ResponseWriter, abort *requestAbort) {
+// single-object and batch paths. A 5xx is the engine's failure, so it marks
+// the handler's span, the one whose context rides into the queue headers, as
+// failed; a 4xx is the client's, and the span stays unset, as the server
+// span's does (#899).
+func writeAbort(ctx context.Context, w http.ResponseWriter, abort *requestAbort) {
+	if abort.Status >= http.StatusInternalServerError {
+		failSpan(ctx, abort.Message)
+	}
 	if abort.RetryAfter != "" {
 		w.Header().Set("Retry-After", abort.RetryAfter)
 	}
 	writeJSONError(w, abort.Status, abort.Message)
+}
+
+// failSpan marks the span in ctx as failed, described by msg.
+func failSpan(ctx context.Context, msg string) {
+	trace.SpanFromContext(ctx).SetStatus(codes.Error, msg)
 }
 
 // writeMaxBytesError writes a 413 if err is the inbound body-cap overflow and

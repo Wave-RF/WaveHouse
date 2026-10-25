@@ -2055,7 +2055,7 @@ func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 
 	// Adopted in part from here on: globex's folder stays rejected. No
 	// tenant has completed a first discovery, and the diagnostic names acme.
-	a.discoveries.onAttempt("acme", errors.New("connection refused"))
+	a.discoveries.onAttempt(t.Context(), "acme", errors.New("connection refused"))
 	require.Contains(t, get(t, a.Handler(), "/livez").Body.String(), "tenant acme")
 	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
 	a.tenants.Reload("test")
@@ -2064,7 +2064,7 @@ func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 	assert.True(t, stopped("acme"))
 	// A stopped loop's last attempt can land after the reload: its line must
 	// not come back.
-	a.discoveries.onAttempt("acme", errors.New("connection refused"))
+	a.discoveries.onAttempt(t.Context(), "acme", errors.New("connection refused"))
 	assert.False(t, acmeDedup.Open(), "its dedupe store is closed")
 	assert.Contains(t, pipe("acme"), "404 {\"error\":\"unknown tenant: acme\"}")
 	assert.Empty(t, a.pools.Target("acme").URL, "the worker has no ClickHouse to insert its queued rows into")
@@ -2111,7 +2111,7 @@ func TestNew_NestedProbesFollowTheFirstTenantToLoad(t *testing.T) {
 	// The first success anywhere, as the loops report it.
 	a.discoveries.onLoaded("acme")
 	assert.Equal(t, http.StatusOK, get(t, a.Handler(), "/livez").Code)
-	a.discoveries.onAttempt("globex", errors.New("connection refused"))
+	a.discoveries.onAttempt(t.Context(), "globex", errors.New("connection refused"))
 	assert.Equal(t, http.StatusOK, get(t, a.Handler(), "/livez").Code, "sticky: another tenant's outage is not a probe failure")
 	online := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/health", nil)
 	online.Header.Set(tenant.Header, "globex")
@@ -2396,7 +2396,7 @@ func TestClose_WaitsForALoopAReloadStopped(t *testing.T) {
 	// Released on every way out, so a failed assertion leaves no loop stuck.
 	release := sync.OnceFunc(func() { close(conn.release) })
 	defer release()
-	d := newDiscoveries(t.Context(), nil, func(tenant.ID, error) {}, func(tenant.ID) {})
+	d := newDiscoveries(t.Context(), nil, func(context.Context, tenant.ID, error) {}, func(tenant.ID) {})
 	d.adopt("acme", discovery.NewSchemaRegistry(func() (driver.Conn, string) { return conn, "default" }, "acme",
 		func(tenant.ID) time.Duration { return time.Hour }))
 	loop := (*d.cur.Load())["acme"]

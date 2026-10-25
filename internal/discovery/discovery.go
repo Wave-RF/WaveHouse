@@ -17,6 +17,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -257,11 +258,36 @@ func NewSchemaRegistry(source Source, id tenant.ID, refreshInterval func(tenant.
 // time zone and version, queries system.columns, attaches each table's DDL from
 // system.tables, and precomputes timestamp column specs.
 func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
+	return sr.refreshThen(ctx, nil)
+}
+
+// refreshThen runs one refresh in its SchemaRegistry.Refresh span. A failure
+// is recorded on the span, unless ctx was cancelled, which is a shutdown
+// rather than a failure, and is handed to onFail, when set, under the span's
+// context before the span ends, so a line it logs carries the span's trace_id
+// (#899).
+func (sr *SchemaRegistry) refreshThen(ctx context.Context, onFail func(context.Context, error)) error {
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
-	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh",
+	spanCtx, span := tracer.Start(ctx, "SchemaRegistry.Refresh",
 		trace.WithAttributes(attribute.String(observability.TenantKey, string(sr.tenant))))
 	defer span.End()
 
+	err := sr.refresh(spanCtx)
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() == nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	if onFail != nil {
+		onFail(spanCtx, err)
+	}
+	return err
+}
+
+// refresh is Refresh's work, run in the span refreshThen opened.
+func (sr *SchemaRegistry) refresh(ctx context.Context) error {
 	// One connection and one database per refresh, read together: a reload
 	// that moves the tenant to another pool or database applies to the NEXT
 	// refresh, so every query of this one runs against the same server and
@@ -529,7 +555,9 @@ func clampBackoff(initialBackoff, maxBackoff time.Duration) (time.Duration, time
 // RetryRefresh repeatedly calls Refresh with exponential backoff until it
 // succeeds or ctx is cancelled. onAttempt is invoked after each failed
 // attempt with the resulting error, letting callers surface the latest
-// diagnostic (e.g. via /livez) while the registry is still degraded.
+// diagnostic (e.g. via /livez) while the registry is still degraded. It runs
+// under the failed attempt's span context, so a line it logs carries that
+// attempt's trace_id.
 //
 // The first attempt fires immediately. After a failure the loop sleeps a
 // uniformly random time below the backoff ("full jitter"), which starts at
@@ -537,25 +565,29 @@ func clampBackoff(initialBackoff, maxBackoff time.Duration) (time.Duration, time
 // one recovering ClickHouse spread over the whole window rather than firing
 // in lockstep (#141). Returns nil on success or ctx.Err() on cancellation.
 // Zero/negative bounds are clamped via clampBackoff rather than busy-looping.
-func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxBackoff time.Duration, onAttempt func(err error)) error {
+func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxBackoff time.Duration, onAttempt func(ctx context.Context, err error)) error {
 	initialBackoff, maxBackoff = clampBackoff(initialBackoff, maxBackoff)
 	backoff := initialBackoff
 	for {
-		if err := sr.Refresh(ctx); err == nil {
-			return nil
-		} else if ctx.Err() == nil {
-			// Skip the callback when Refresh's error is just a downstream
-			// reflection of ctx cancellation — that's a shutdown signal,
-			// not a real diagnostic. Without this guard, a clean shutdown
-			// fires onAttempt with `context.Canceled`, which the wavehouse
-			// boot path then writes into BootState as
-			//   "schema discovery: context canceled"
-			// — visible to anyone curl'ing /livez during the shutdown
-			// window. Not wrong, just noise.
-			sr.countFailure(ctx)
-			if onAttempt != nil {
-				onAttempt(err)
+		err := sr.refreshThen(ctx, func(spanCtx context.Context, err error) {
+			if ctx.Err() != nil {
+				// Skip the callback when Refresh's error is just a downstream
+				// reflection of ctx cancellation — that's a shutdown signal,
+				// not a real diagnostic. Without this guard, a clean shutdown
+				// fires onAttempt with `context.Canceled`, which the wavehouse
+				// boot path then writes into BootState as
+				//   "schema discovery: context canceled"
+				// — visible to anyone curl'ing /livez during the shutdown
+				// window. Not wrong, just noise.
+				return
 			}
+			sr.countFailure(spanCtx)
+			if onAttempt != nil {
+				onAttempt(spanCtx, err)
+			}
+		})
+		if err == nil {
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -605,10 +637,10 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 			ticker.Reset(interval)
 		case <-ticker.C:
 		}
-		if err := sr.Refresh(ctx); err != nil {
+		_ = sr.refreshThen(ctx, func(ctx context.Context, err error) {
 			sr.countFailure(ctx)
 			slog.ErrorContext(ctx, "schema auto-refresh failed", "tenant", sr.tenant, "error", err)
-		}
+		})
 		if next := sr.refreshInterval(sr.tenant); next > 0 && next != interval {
 			interval = next
 			ticker.Reset(interval)

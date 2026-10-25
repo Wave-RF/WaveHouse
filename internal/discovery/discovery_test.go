@@ -15,8 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/Wave-RF/WaveHouse/internal/observability"
@@ -484,7 +486,7 @@ func TestRetryRefresh_SucceedsOnFirstAttempt(t *testing.T) {
 
 	var attempts int32
 	start := time.Now()
-	err := sr.RetryRefresh(ctx, time.Hour, time.Hour, func(error) {
+	err := sr.RetryRefresh(ctx, time.Hour, time.Hour, func(context.Context, error) {
 		atomic.AddInt32(&attempts, 1)
 	})
 	require.NoError(t, err)
@@ -508,7 +510,7 @@ func TestRetryRefresh_RetriesUntilSuccess(t *testing.T) {
 	sr, conn := newFakeRegistry(t, []error{errFirst, errSecond})
 
 	var captured []error
-	err := sr.RetryRefresh(context.Background(), time.Millisecond, 10*time.Millisecond, func(e error) {
+	err := sr.RetryRefresh(context.Background(), time.Millisecond, 10*time.Millisecond, func(_ context.Context, e error) {
 		captured = append(captured, e)
 	})
 	require.NoError(t, err)
@@ -575,7 +577,7 @@ func TestRetryRefresh_DoesNotFireOnAttemptDuringCancel(t *testing.T) {
 	cancel() // already cancelled before RetryRefresh starts
 
 	var attempts atomic.Int32
-	err := sr.RetryRefresh(ctx, time.Second, time.Second, func(_ error) {
+	err := sr.RetryRefresh(ctx, time.Second, time.Second, func(context.Context, error) {
 		attempts.Add(1)
 	})
 
@@ -1103,4 +1105,114 @@ func TestRefresh_SpanCarriesTenant(t *testing.T) {
 	require.Len(t, spans, 1)
 	assert.Equal(t, "SchemaRegistry.Refresh", spans[0].Name())
 	assert.Contains(t, spans[0].Attributes(), attribute.String(observability.TenantKey, "acme"))
+}
+
+// recordSpans installs a span recorder as the global tracer provider until the
+// test ends. Like every test that calls it, the caller must not run in
+// parallel.
+func recordSpans(t *testing.T) *tracetest.SpanRecorder {
+	t.Helper()
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(noop.NewTracerProvider())
+		_ = tp.Shutdown(context.Background())
+	})
+	return rec
+}
+
+// A failed refresh marks its span failed and records the error on it, so a
+// trace search for errors finds it; one failing because its context was
+// cancelled is a shutdown and leaves the span unset (#899).
+func TestRefresh_SpanRecordsFailure(t *testing.T) {
+	rec := recordSpans(t)
+	sr := NewSchemaRegistry(sourceOf(nil), tenant.ID("acme"), func(tenant.ID) time.Duration { return time.Hour })
+
+	err := sr.Refresh(context.Background())
+	require.ErrorIs(t, err, ErrNoConnection)
+	spans := rec.Ended()
+	require.Len(t, spans, 1)
+	assert.Equal(t, codes.Error, spans[0].Status().Code)
+	assert.Equal(t, err.Error(), spans[0].Status().Description)
+	require.Len(t, spans[0].Events(), 1)
+	assert.Equal(t, "exception", spans[0].Events()[0].Name)
+
+	rec.Reset()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.Error(t, sr.Refresh(ctx))
+	spans = rec.Ended()
+	require.Len(t, spans, 1)
+	assert.Equal(t, codes.Unset, spans[0].Status().Code, "a cancelled refresh is not a failure")
+	assert.Empty(t, spans[0].Events())
+}
+
+// RetryRefresh hands a failed attempt to onAttempt under that attempt's span,
+// still open, so the boot loop's line carries the failed span's trace_id.
+func TestRetryRefresh_AttemptRunsInTheFailedSpan(t *testing.T) {
+	rec := recordSpans(t)
+	conn := &fakeConn{columns: []fakeColumn{{table: "clicks", name: "id", chType: "String", position: 1}}}
+	var calls atomic.Int32
+	source := func() (driver.Conn, string) {
+		if calls.Add(1) == 1 {
+			return nil, "test"
+		}
+		return conn, "test"
+	}
+	sr := NewSchemaRegistry(source, tenant.ID("acme"), func(tenant.ID) time.Duration { return time.Hour })
+
+	var seen []trace.SpanContext
+	require.NoError(t, sr.RetryRefresh(context.Background(), time.Millisecond, time.Millisecond, func(ctx context.Context, err error) {
+		require.ErrorIs(t, err, ErrNoConnection)
+		span := trace.SpanFromContext(ctx)
+		assert.True(t, span.IsRecording(), "the attempt's span is still open")
+		seen = append(seen, span.SpanContext())
+	}))
+
+	spans := rec.Ended()
+	require.Len(t, spans, 2)
+	require.Len(t, seen, 1)
+	assert.Equal(t, spans[0].SpanContext(), seen[0])
+	assert.Equal(t, codes.Error, spans[0].Status().Code)
+	assert.Equal(t, codes.Unset, spans[1].Status().Code)
+}
+
+// The auto-refresh failure line is written inside the failed refresh's span,
+// so it carries that span's trace_id.
+func TestStartAutoRefresh_FailureLineCarriesTheSpan(t *testing.T) {
+	rec := recordSpans(t)
+	buf := &logtest.Buffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(&observability.TraceHandler{Handler: slog.NewJSONHandler(buf, nil)}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	sr := NewSchemaRegistry(sourceOf(nil), tenant.ID("acme"), func(tenant.ID) time.Duration { return time.Hour })
+	sr.firstTick = func(time.Duration) time.Duration { return 0 }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		sr.StartAutoRefresh(ctx)
+		close(done)
+	}()
+	require.Eventually(t, func() bool {
+		return strings.Contains(buf.String(), "schema auto-refresh failed")
+	}, 2*time.Second, 5*time.Millisecond)
+	cancel()
+	<-done
+
+	var line map[string]any
+	for raw := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		var entry map[string]any
+		require.NoError(t, json.Unmarshal([]byte(raw), &entry))
+		if entry["msg"] == "schema auto-refresh failed" {
+			line = entry
+			break
+		}
+	}
+	require.NotNil(t, line)
+	spans := rec.Ended()
+	require.NotEmpty(t, spans)
+	assert.Equal(t, spans[0].SpanContext().TraceID().String(), line["trace_id"])
+	assert.Equal(t, spans[0].SpanContext().SpanID().String(), line["span_id"])
 }
