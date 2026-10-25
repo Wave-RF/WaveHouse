@@ -262,10 +262,10 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 }
 
 // refreshThen runs one refresh in its SchemaRegistry.Refresh span. A failure
-// is recorded on the span, unless ctx was cancelled, which is a shutdown
-// rather than a failure, and is handed to onFail, when set, under the span's
-// context before the span ends, so a line it logs carries the span's trace_id
-// (#899).
+// is recorded on the span, unless ctx was canceled (shutdown, a tenant no
+// longer served, or an on-demand caller gone), which is not a failure, and is
+// handed to onFail, when set, under the span's context before the span ends,
+// so a line it logs carries the span's trace_id (#899).
 func (sr *SchemaRegistry) refreshThen(ctx context.Context, onFail func(context.Context, error)) error {
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
 	spanCtx, span := tracer.Start(ctx, "SchemaRegistry.Refresh",

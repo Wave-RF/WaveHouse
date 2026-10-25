@@ -1124,7 +1124,7 @@ func recordSpans(t *testing.T) *tracetest.SpanRecorder {
 
 // A failed refresh marks its span failed and records the error on it, so a
 // trace search for errors finds it; one failing because its context was
-// cancelled is a shutdown and leaves the span unset (#899).
+// canceled is not a failure and leaves the span unset (#899).
 func TestRefresh_SpanRecordsFailure(t *testing.T) {
 	rec := recordSpans(t)
 	sr := NewSchemaRegistry(sourceOf(nil), tenant.ID("acme"), func(tenant.ID) time.Duration { return time.Hour })
@@ -1144,7 +1144,7 @@ func TestRefresh_SpanRecordsFailure(t *testing.T) {
 	require.Error(t, sr.Refresh(ctx))
 	spans = rec.Ended()
 	require.Len(t, spans, 1)
-	assert.Equal(t, codes.Unset, spans[0].Status().Code, "a cancelled refresh is not a failure")
+	assert.Equal(t, codes.Unset, spans[0].Status().Code, "a canceled refresh is not a failure")
 	assert.Empty(t, spans[0].Events())
 }
 

@@ -50,16 +50,26 @@ func TestIngest_SpanStatus(t *testing.T) {
 		wantCode codes.Code
 		wantDesc string
 	}{
-		{name: "queue full", registry: loaded, pubErr: fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull), table: "clicks", body: one,
-			status: http.StatusServiceUnavailable, wantCode: codes.Error, wantDesc: "service unavailable"},
-		{name: "queue full, batch", registry: loaded, pubErr: fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull), table: "clicks", body: batch,
-			status: http.StatusServiceUnavailable, wantCode: codes.Error, wantDesc: "service unavailable"},
-		{name: "queue unavailable", registry: loaded, pubErr: fmt.Errorf("%w: nats: timeout", mq.ErrUnavailable), table: "clicks", body: one,
-			status: http.StatusServiceUnavailable, wantCode: codes.Error, wantDesc: "service unavailable"},
-		{name: "publish failed", registry: loaded, pubErr: errors.New("some other error"), table: "clicks", body: one,
-			status: http.StatusInternalServerError, wantCode: codes.Error, wantDesc: "publish failed"},
-		{name: "schema not loaded", registry: notLoaded, table: "clicks", body: one,
-			status: http.StatusServiceUnavailable, wantCode: codes.Error, wantDesc: schemaNotLoadedMessage},
+		{
+			name: "queue full", registry: loaded, pubErr: fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull), table: "clicks", body: one,
+			status: http.StatusServiceUnavailable, wantCode: codes.Error, wantDesc: "service unavailable",
+		},
+		{
+			name: "queue full, batch", registry: loaded, pubErr: fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull), table: "clicks", body: batch,
+			status: http.StatusServiceUnavailable, wantCode: codes.Error, wantDesc: "service unavailable",
+		},
+		{
+			name: "queue unavailable", registry: loaded, pubErr: fmt.Errorf("%w: nats: timeout", mq.ErrUnavailable), table: "clicks", body: one,
+			status: http.StatusServiceUnavailable, wantCode: codes.Error, wantDesc: "service unavailable",
+		},
+		{
+			name: "publish failed", registry: loaded, pubErr: errors.New("some other error"), table: "clicks", body: one,
+			status: http.StatusInternalServerError, wantCode: codes.Error, wantDesc: "publish failed",
+		},
+		{
+			name: "schema not loaded", registry: notLoaded, table: "clicks", body: one,
+			status: http.StatusServiceUnavailable, wantCode: codes.Error, wantDesc: schemaNotLoadedMessage,
+		},
 		{name: "accepted", registry: loaded, table: "clicks", body: one, status: http.StatusOK, wantCode: codes.Unset},
 		{name: "missing table", registry: loaded, body: one, status: http.StatusBadRequest, wantCode: codes.Unset},
 		{name: "unknown table", registry: loaded, table: "nope", body: one, status: http.StatusNotFound, wantCode: codes.Unset},
