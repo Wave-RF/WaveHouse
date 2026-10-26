@@ -20,14 +20,14 @@ Read `.github/prompts/docs-review.md` first; it is the canonical docs-review rub
 
 ## What counts as docs prose (scope)
 
-The canonical set is resolved by `scripts/docs-prose.sh` — a **denylist**: every tracked `*.md`/`*.mdx` file EXCEPT `.claude/**`, `.github/**`, `CHANGELOG.md`, `AGENTS.md`, `CLAUDE.md`, `*.draft.md`, `*.old.md`. That is the Astro Starlight site under `docs/src/content/` **plus** the user-facing governance docs (`README.md`, `clients/ts/README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `SUPPORT.md`) — and any doc added later, automatically.
+The canonical set is resolved by `scripts/docs-prose.sh` — a **denylist**: every tracked `*.md`/`*.mdx` file EXCEPT `.claude/**`, `.github/**`, `CHANGELOG.md`, `AGENTS.md`, `CLAUDE.md`, `*.draft.md`, `*.old.md`. That is the Astro Starlight site under `docs/src/content/` **plus** the user-facing governance docs (`README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `SUPPORT.md`) — and any doc added later, automatically.
 
 - `scripts/docs-prose.sh all` — every docs-prose file (the full reading list).
 - `scripts/docs-prose.sh changed` — the docs-prose files changed on this branch (`main...HEAD`).
 
 ## Reading strategy
 
-1. **Always read in full** — prose goes stale without being edited, so review whole files, not diffs: the docs site (`docs/src/content/**`), `README.md`, `clients/ts/README.md`, `CONTRIBUTING.md`, `SECURITY.md`.
+1. **Always read in full** — prose goes stale without being edited, so review whole files, not diffs: the docs site (`docs/src/content/**`), `README.md`, `CONTRIBUTING.md`, `SECURITY.md`.
 2. **`CODE_OF_CONDUCT.md` / `SUPPORT.md`** are mostly static boilerplate — only deep-review them when they **changed on this branch** (`scripts/docs-prose.sh changed`) or when a material change elsewhere plausibly affects them (e.g. a new reporting contact, a moved support channel). Otherwise skip them.
 3. In **advisory mode**, read only the path(s) in scope.
 
@@ -35,7 +35,7 @@ The canonical set is resolved by `scripts/docs-prose.sh` — a **denylist**: eve
 
 1. *(Gating mode)* Pin the commit you review before reading anything else: `git -C <path> rev-parse HEAD`, where `<path>` is the worktree you were asked to review (your current directory unless the prompt names another path). Diff against that sha (`main...<sha>`) and report exactly it on the `REVIEWED:` line; don't re-run `git rev-parse HEAD` at the end, because if the worktree moved while you reviewed, the hook must see the sha you actually read.
 2. Read the rubric + `AGENTS.md` §Documentation Sync / §SDK Sync; resolve scope and read the docs per the Reading strategy.
-3. **Accuracy vs. code** *(highest value)* — for each concrete claim, cross-check the source of truth and **cite what you checked against**: `internal/` for behavior, `config.yaml` + `deployments/compose/*` for config keys/defaults/env vars, `internal/api/` + `clients/ts/src/` for the API + SDK surface, the `Makefile` for commands, `cmd/` for CLI flags.
+3. **Accuracy vs. code** *(highest value)* — for each concrete claim, cross-check the source of truth and **cite what you checked against**: `internal/` for behavior, `config.yaml` + `deployments/compose/*` for config keys/defaults/env vars, `internal/api/` for the API surface (the SDKs live in their own repos), the `Makefile` for commands, `cmd/` for CLI flags.
 4. **Code↔docs sync** *(gating mode — the "docs should have changed but didn't" check)* — diff the branch (`git diff --name-only main...<sha>`) and walk the changed **code/config** against AGENTS.md §Documentation Sync + §SDK Sync. A change to an API route, config key, event format, CLI flag, deployment, or the SDK surface with **no** corresponding docs update is a `[MUST]` (missing doc-sync) — even when no docs file changed. Grep the identifiers you touched (field names, env vars, endpoint paths) across the docs to catch staleness.
 5. **Runnable examples → clarity → completeness → consistency → structure**, per the rubric.
 6. Apply the noise filter; tag each surviving finding `[MUST]` / `[SHOULD]` / `[MAY]`.

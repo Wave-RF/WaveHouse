@@ -17,11 +17,9 @@ updates:
   # TWO directories, not one. `directory: /` only reaches .github/workflows/ —
   # it does NOT descend into .github/actions/*/action.yml. The setup-env
   # composite action therefore went untracked, and its pins went stale against
-  # upstream and diverged from publish-npm.yml — a workflow Dependabot DOES
-  # track, and which doesn't call setup-env (actions/setup-node v7.0.0 there
-  # vs v6.4.0 here; pnpm/action-setup v6.0.9 vs v6.0.8). Adding a composite
-  # action under .github/actions/ means adding its directory below; nothing
-  # else catches the drift.
+  # upstream, since Dependabot tracked the workflows but not the action.
+  # Adding a composite action under .github/actions/ means adding its
+  # directory below; nothing else catches the drift.
   - package-ecosystem: github-actions
     directories:
       - /
@@ -42,17 +40,17 @@ updates:
   #
   # ONE entry at the workspace ROOT — deliberately NOT one per member
   # directory. The repo has a single root pnpm-lock.yaml (the #190
-  # consolidation) covering docs, clients/ts, and tests/e2e/sdk. Dependabot
+  # consolidation) covering docs and tests/e2e/sdk. Dependabot
   # only updates a lockfile co-located with the manifest it is pointed at,
-  # so the old per-member configs (directory: /docs, /clients/ts,
+  # so the old per-member configs (directory: /docs,
   # /tests/e2e/sdk) edited the member package.json but left the root
   # lockfile untouched. Every such PR then failed CI's `pnpm install
   # --frozen-lockfile` with ERR_PNPM_OUTDATED_LOCKFILE (e.g. #211, #337),
   # and no rebase could fix it because a rebase never regenerates the
   # lockfile. Pointing at / lets Dependabot read pnpm-workspace.yaml, walk
   # every workspace member, and update the single root lockfile. As a bonus
-  # it also brings the root package.json's own devDeps (biome, markdownlint,
-  # nyc) under Dependabot — the per-member configs never covered them.
+  # it also brings the root package.json's own devDeps (biome, markdownlint)
+  # under Dependabot — the per-member configs never covered them.
   #
   # One combined npm PR per Monday (grouped, like go-deps / actions-deps).
   - package-ecosystem: npm
@@ -64,34 +62,20 @@ updates:
       npm-deps:
         patterns: ["*"]
     ignore:
-      # TypeScript 7 (the native port) is held back by tsup: tsup 8.5.1 — the
-      # current release — vendors rollup-plugin-dts 6.1.1, which reaches for
-      # TS 5-era internals and dies with "Cannot read properties of undefined
-      # (reading 'useCaseSensitiveFileNames')" the moment `dts: true` runs.
-      # That is clients/ts's `prepare` script, so the crash lands inside
-      # `pnpm install` and takes every Node job down with it (#482).
-      # rollup-plugin-dts >= 6.5.0 declares TS 7 support; drop this ignore once
-      # tsup ships a release that vendors it. Tracked in #487.
+      # TypeScript 7 (the native port) stays held back: it broke the SDK's build
+      # tooling (since moved to wavehouse-sdk-js), and docs + e2e have not been
+      # checked on it. Drop this ignore once they have.
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
-      # eventsource-parser 4.0.0 drops its CJS build (exports["."] loses the
-      # `require` condition) and raises engines.node to >=22.12 — the release
-      # where Node's require(esm) went unflagged. @wavehouse/sdk ships CJS and
-      # externalises this dep (dist/index.cjs literally `require`s it), while
-      # advertising engines.node ">=22", so v4 breaks the CJS entry point for
-      # consumers on Node 22.0-22.11. It is the SDK's ONLY runtime dependency.
-      # Unblock is a decision, not an upstream wait: either raise the SDK's
-      # floor to >=22.12 or stop shipping CJS. Tracked in #492.
-      - dependency-name: "eventsource-parser"
-        update-types: ["version-update:semver-major"]
-      # The docs site pins the PUBLISHED @wavehouse/sdk (docs/package.json) so an
-      # in-tree wire change cannot reach the deployed landing page before the
+      # The docs site pins the PUBLISHED @wavehouse/sdk (docs/package.json) so a
+      # server wire change cannot reach the deployed landing page before the
       # demo backend speaks it (#568). Raising that range is a release decision
       # that belongs with the backend upgrade and the `latest` tag — not a Monday
       # dependency sweep, whose reviewer is not thinking about which wire the
       # demo backend serves. Patch updates inside the pinned 0.x line already
       # satisfy the caret, so nothing routine is lost; for a 0.x package it is
-      # the MINOR bump that crosses the wire boundary.
+      # the MINOR bump that crosses the wire boundary. The e2e suite's exact pin
+      # (tests/e2e/sdk) follows the same rule: a patch bump may be proposed there.
       - dependency-name: "@wavehouse/sdk"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
     # Dependabot knows nothing of pnpm's minimumReleaseAge (7 days, see

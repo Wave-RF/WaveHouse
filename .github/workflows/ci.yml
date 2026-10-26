@@ -220,8 +220,9 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           go-cache-suffix: "-unit"
-      - name: Run Go unit tests + SDK vitest tests
-        run: make test-unit test-ts COV_DEFER=1
+          node: "false" # pure Go
+      - name: Run Go unit tests
+        run: make test-unit COV_DEFER=1
       - name: Upload coverage fragment
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -294,7 +295,7 @@ jobs:
           overwrite: true
 
   # A long pole of the run, with the integration suite's app part. Builds
-  # its own inputs (SDK dist + cover binary, in parallel, on a warm cache)
+  # its own input (the cover binary, on a warm cache)
   # instead of waiting on a builder job, runs the suite exactly like local
   # `make test-e2e` (one orchestrator, sequential files), and uploads its
   # coverage fragment for the `coverage` job to merge + gate — symmetric
@@ -327,11 +328,10 @@ jobs:
         with:
           go-cache-suffix: "-e2e-cov"
           go-cache-pr-save: ${{ needs.changes.outputs.go-deps == 'true' }} # the other long pole
-          smoke-node: "true" # make build-ts runs smoke-ts-dist, which downloads the oldest Node
-      # `-j` builds the prereqs (build-ts ∥ build-cover) concurrently,
-      # then runs the orchestrator: ClickHouse and Redis testcontainers +
-      # the cover binary + the SDK vitest suite.
-      - name: Build SDK dist + cover binary, run E2E suite
+      # Builds the cover binary, then runs the orchestrator: ClickHouse and
+      # Redis testcontainers + the cover binary + the vitest suite (which
+      # runs the published SDK).
+      - name: Build cover binary, run E2E suite
         run: make -j "$(nproc)" test-e2e COV_DEFER=1
       - name: Prefetch results
         if: always()
@@ -389,11 +389,7 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           go-cache-suffix: "-cov"
-      # `go run ./scripts/cov report` (make cov) shells `pnpm exec nyc`
-      # for the TS coverage merge, so node_modules must be present. This
-      # (and the checkout + cache restores above) overlaps the suites.
-      - name: Install workspace deps
-        run: make pnpm-install
+          node: "false" # pure Go: the merge reads Go coverage only
       # Block here — and only here — until the data the merge needs exists.
       # Fails fast if a producer concluded without producing (its own
       # failure already reds the aggregator). Producer names must match the

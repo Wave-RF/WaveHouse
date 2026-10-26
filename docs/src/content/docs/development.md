@@ -5,7 +5,7 @@ sidebar:
   order: 11
 ---
 
-Everything you need to build, test, lint, and contribute to WaveHouse — from first-clone to hot-reload dev server to full end-to-end SDK tests. If you're only trying the product, start with the [Getting Started](/getting-started) guide instead.
+Everything you need to build, test, lint, and contribute to WaveHouse — from first-clone to hot-reload dev server to full end-to-end tests. If you're only trying the product, start with the [Getting Started](/getting-started) guide instead.
 
 ## Prerequisites
 
@@ -17,9 +17,9 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with GNU Make 3.81, which is **not supported**: it silently ignores `--output-sync`, so the parallel output of `make verify` / `make ci` interleaves line by line and a failure can scroll away behind other jobs' output | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse and a Redis via testcontainers (no compose file), the integration suite also dynamodb-local, and the integration suite also runs the shared cache backend against Redis, Valkey, Dragonfly (pulled from `docker.dragonflydb.io`) and a one-node Redis Cluster | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
-| **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
-| **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make tools`, `make verify`, `make lint`, `make fmt`, `make fix`, `make ci`, `make build-ts`, `make dev-ts`, `make test-ts`, `make test-e2e`, `make test-all`, `make check-docs`, `make build-docs`, `make build-all`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` (`make tools` itself runs `pnpm install`, and `make verify` is what the pre-commit hook runs, so a Go-only contributor needs pnpm too) | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
-| **git** + **curl** + **jq** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` and `shellcheck` binaries into `.bin/` and, for `make build-ts`, the oldest Node that `engines.node` admits; `jq` is needed by `make verify` (the hook tests) and by the Claude Code hooks | usually preinstalled (`jq` ships with macOS 15+); otherwise `apt install jq` / `brew install jq` |
+| **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the E2E Vitest suite. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
+| **pnpm** | 11.21+ (pinned via `packageManager` in the root `package.json`) | Package manager for the E2E test harness and docs site (managed as a single pnpm workspace from the repo root); `make tools`, `make verify`, `make lint`, `make fmt`, `make fix`, `make ci`, `make test-e2e`, `make test-all`, `make check-docs`, `make build-docs`, `make build-all`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` (`make tools` itself runs `pnpm install`, and `make verify` is what the pre-commit hook runs, so a Go-only contributor needs pnpm too) | `corepack enable && corepack prepare pnpm@11.21.0 --activate` (recommended), or `npm i -g pnpm` |
+| **git** + **curl** + **jq** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` and `shellcheck` binaries into `.bin/`; `jq` is needed by `make verify` (the hook tests) and by the Claude Code hooks | usually preinstalled (`jq` ships with macOS 15+); otherwise `apt install jq` / `brew install jq` |
 
 ### Auto-installed by `make tools`
 
@@ -29,7 +29,7 @@ Run `make tools` once after cloning to populate everything that doesn't have to 
 - **`misspell` v0.8.0, `shellcheck` v0.11.0, `actionlint` v1.7.12** → installed to `.bin/<os>_<arch>/`; they back `make lint-prose`, `make lint-sh`, and `make lint-gha`. `make tools` also points `core.hooksPath` at `.githooks/`, which is what installs the pre-commit and pre-push gates (`git config --unset core.hooksPath` turns them off for every worktree of the clone, and the next `make tools` turns them back on; use `--no-verify` for a one-off).
 - **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
 - **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
-- **pnpm deps** for the repo root plus `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). The root workspace is where the repo-wide linters live — **Biome** (JS/TS/JSON) and **markdownlint-cli2** (Markdown/MDX, including the repo-local `WH001`/`WH002` rules). Neither is ever run from a global install: `make lint` / `make fix` shell out to `pnpm -w run`, and every target that needs them declares the `pnpm-install` prerequisite, so a clean clone is linting correctly after `make tools` with nothing else on your PATH. `make tools` runs only the pnpm install; `make build-ts` also downloads the oldest Node that `engines.node` admits (a 45–51 MB tarball, about 175 MB unpacked, once, into `.bin/`, verified against a pinned sha256) to smoke-load the built SDK entry points with `make smoke-ts-dist`; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by two parts of the docs *build*: `rehype-mermaid` (SVG diagram rendering) and the `diagramPng` integration from `@wave-rf/astro-themed-mermaid/png` (wired in `docs/astro.config.mjs`), which rasterizes each diagram to light/dark PNGs (a solid surface-card variant plus a transparent-background variant for slide decks) at `astro:build:done` for the Copy/Download buttons in the `diagramZoom` lightbox. Both reuse the same Playwright Chromium, as does the manual `docs/scripts/screenshot.mjs` QA helper. `starlight-links-validator` runs under `build-docs` / CI only — the `dev-docs` watch loop skips it so a mid-edit dangling link doesn't fail every rebuild (CI still enforces link validity before merge; run `MD_ROUTER_DEV_STRICT=1 make dev-docs` to keep the validator on locally). The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm --filter wavehouse-docs exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`. It is also a real `@wavehouse/sdk` consumer, but of the **published** package: the landing page's live demo takes the SDK from the registry, pinned in `docs/package.json`, not from `clients/ts/`. That is deliberate — the demo streams against a separately-deployed backend, so binding it to the workspace would ship an unreleased wire format to the live site the moment a change merged ([#568](https://github.com/Wave-RF/WaveHouse/issues/568)). The pin is raised on purpose when a new SDK release is tagged. Nothing in the docs build needs `build-ts`, including when you drive Astro directly through pnpm (e.g. `pnpm --filter wavehouse-docs run start`). pnpm's hoisted fallback is off; see [Updating Dependencies](#updating-dependencies).
+- **pnpm deps** for the repo root plus `tests/e2e/sdk/` and `docs/` (via `pnpm install --frozen-lockfile`). The root workspace is where the repo-wide linters live — **Biome** (JS/TS/JSON) and **markdownlint-cli2** (Markdown/MDX, including the repo-local `WH001`/`WH002` rules). Neither is ever run from a global install: `make lint` / `make fix` shell out to `pnpm -w run`, and every target that needs them declares the `pnpm-install` prerequisite, so a clean clone is linting correctly after `make tools` with nothing else on your PATH. `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by two parts of the docs *build*: `rehype-mermaid` (SVG diagram rendering) and the `diagramPng` integration from `@wave-rf/astro-themed-mermaid/png` (wired in `docs/astro.config.mjs`), which rasterizes each diagram to light/dark PNGs (a solid surface-card variant plus a transparent-background variant for slide decks) at `astro:build:done` for the Copy/Download buttons in the `diagramZoom` lightbox. Both reuse the same Playwright Chromium, as does the manual `docs/scripts/screenshot.mjs` QA helper. `starlight-links-validator` runs under `build-docs` / CI only — the `dev-docs` watch loop skips it so a mid-edit dangling link doesn't fail every rebuild (CI still enforces link validity before merge; run `MD_ROUTER_DEV_STRICT=1 make dev-docs` to keep the validator on locally). The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm --filter wavehouse-docs exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`. It is also a real `@wavehouse/sdk` consumer, of the **published** package: the landing page's live demo takes the SDK from the registry, pinned in `docs/package.json`. That is deliberate — the demo streams against a separately-deployed backend, so tracking unreleased SDK source would ship an unreleased wire format to the live site the moment a change merged ([#568](https://github.com/Wave-RF/WaveHouse/issues/568)). The pin is raised on purpose when a new SDK release is tagged. Nothing in the docs build needs an SDK build, including when you drive Astro directly through pnpm (e.g. `pnpm --filter wavehouse-docs run start`). pnpm's hoisted fallback is off; see [Updating Dependencies](#updating-dependencies).
 
 ### Verify your setup
 
@@ -187,7 +187,7 @@ They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear
 There's no bundled playground — point an `@wavehouse/sdk` client at your local server (`baseURL: "http://localhost:8080"`); the trial policy `make dev` seeds into `./settings` authorizes the demo-table requests:
 
 :::caution[For **streaming**, use `@wavehouse/sdk` 0.2.0 or later against a local server]
-A `make dev` server speaks the v2 SSE wire — an `event: schema` frame plus positional rows — which `@wavehouse/sdk` speaks from 0.2.0; the 0.1.x line speaks the pre-v2 one. Point a 0.1.x client at `/v1/stream` and every event arrives with `data: undefined`, with no `error` callback and nothing to catch, while REST and structured queries keep working — which makes it easy to misread as a server bug. Use 0.2.0 or later, the in-tree SDK (`make build-ts`) or `@wavehouse/sdk@dev` for streaming work. See [Transport Behavior](/sdk/streaming#transport-behavior), which carries the full danger note on upgrading the SDK and the server together.
+A `make dev` server speaks the v2 SSE wire — an `event: schema` frame plus positional rows — which `@wavehouse/sdk` speaks from 0.2.0; the 0.1.x line speaks the pre-v2 one. Point a 0.1.x client at `/v1/stream` and every event arrives with `data: undefined`, with no `error` callback and nothing to catch, while REST and structured queries keep working — which makes it easy to misread as a server bug. Use 0.2.0 or later for streaming work. See [Transport Behavior](/sdk/streaming#transport-behavior), which carries the full danger note on upgrading the SDK and the server together.
 :::
 
 ```bash
@@ -311,17 +311,13 @@ make test ARGS="-run TestValidate"
 # Go integration tests (requires Docker)
 make test-integration
 
-# SDK vitest unit tests + coverage + gate against suites.ts-unit
-# (`make cov` auto-merges ts-unit + ts-e2e — no separate command)
-make test-ts
-
-# E2E SDK suite against bin/wavehouse-cov
+# E2E suite (the published SDK) against bin/wavehouse-cov
 make test-e2e
 
-# All four suites sequentially + merged coverage
+# All three suites sequentially + merged coverage
 make test-all
 
-# Full CI: parallel verify + builds (Go + SDK + docs) + test + test-ts,
+# Full CI: parallel verify + builds (Go + docs) + test,
 # then test-integration + test-e2e + cov
 make ci
 
@@ -362,7 +358,6 @@ The host needs what a local `make ci` needs: bash, git, curl, jq, GNU Make 4+, G
 | Category | Location | Docker? | Command |
 | -------- | -------- | ------- | ------- |
 | Unit tests | `internal/**/*_test.go`, `pkg/**/*_test.go` | No | `make test` |
-| SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-ts` (always includes coverage + gate) |
 | Integration tests (Go) | `tests/integration/*_test.go`, `internal/cache/*_integration_test.go`, plus `internal/mq/natsspike` and `internal/mq`'s integration-tagged tests | Yes | `make test-integration` |
 | E2E tests (SDK) | `tests/e2e/sdk/*.test.ts` | Yes | `make test-e2e` |
 
@@ -381,7 +376,7 @@ Shared test utilities live in `internal/testutil/`. The packages log through `sl
 
 ### E2E Tests via SDK
 
-The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the TypeScript SDK as the test harness — every ingest→query test simultaneously validates the full Go backend pipeline and confirms SDK compatibility.
+The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the published TypeScript SDK as the test harness — every ingest→query test simultaneously validates the full Go backend pipeline and confirms SDK compatibility. The suite pins `@wavehouse/sdk` to an exact version in `tests/e2e/sdk/package.json`, bumped deliberately: a server change that needs a newer SDK lands after that SDK is released, and bumps the pin in the same PR. The SDK's own source and unit tests live in [`Wave-RF/wavehouse-sdk-js`](https://github.com/Wave-RF/wavehouse-sdk-js).
 
 **Architecture**:
 
@@ -419,7 +414,6 @@ If a previous run was killed (harness timeout, stop button, `SIGKILL`), it can l
 |----------|--------|
 | `V=1` | Stream the WaveHouse subprocess log live *in addition to* capturing it to `tmp/wavehouse-cov.log`. The on-failure log excerpt is then skipped — you have already seen it |
 | `E2E_CH_QUERY_TIMEOUT_MS` | Per-request ceiling for the suite's direct ClickHouse queries (default `10000`) |
-| `E2E_NO_COVERAGE=1` | Drop `--coverage` from the vitest run (skips v8 instrumentation and report generation) while chasing a flake. **Local debugging only** — no report is written. Ignored (with a log line) under `make ci` / `make test-all`, so an exported-and-forgotten var can't produce a green coverage gate with the TS e2e report missing |
 
 **Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers` — a stack-free unit test of the harness's own `waitForCondition` poll helper rather than a pipeline test.
 
@@ -506,8 +500,6 @@ WaveHouse/
 │   └── e2e/                # E2E suite (SDK specs; `scripts/orchestrator` starts ClickHouse and Redis testcontainers)
 │       ├── fixtures/       # E2E server config + settings-directory fixtures
 │       └── sdk/            # E2E specs driven through the TypeScript SDK (Vitest)
-├── clients/                # Client SDKs
-│   └── ts/                 # TypeScript SDK (@wavehouse/sdk, pnpm workspace)
 ├── deployments/
 │   ├── compose/            # Docker Compose files (standalone.yaml, dependencies.yaml)
 │   ├── nats/               # Helm values and JetStream manifests for an external NATS (`mq.backend: nats`)
@@ -560,21 +552,17 @@ Run `make help` to see all targets. Key ones:
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
 | `make build-release` | Stripped release-style build → `bin/wavehouse-release` |
 | `make build-cover` | Coverage-instrumented build → `bin/wavehouse-cov` (used by E2E) |
-| `make build-ts` | Build TypeScript SDK → `clients/ts/dist/`, then smoke-load its ESM, CJS and IIFE entry points at the oldest Node `engines.node` admits, and type-check a CommonJS and an ESM consumer against the built declarations with `tsc --module node16` |
 | **Test** | |
 | `make test` | Alias for `test-unit` |
 | `make test-unit` | Go unit tests + render coverage + gate suite threshold |
 | `make test-integration` | Go integration tests (requires Docker) + coverage gate: the parts `test-integration-app` and `test-integration-backends`, at once |
-| `make test-ts` | SDK vitest unit tests + v8 coverage + gate against `suites.ts-unit` (matches Go's "always coverage" pattern) |
-| `make cov` | Merge Go + TS coverage and gate against thresholds. Auto-runs after `make test-all` and `make ci`; standalone `make cov` is "show me the merged numbers without re-running." Each side skips silently if its data is missing, but `make cov` fails if *both* are empty (you ran it before any test target). |
-| `make test-e2e` | E2E SDK suite against `bin/wavehouse-cov` + coverage gate |
-| `make test-all` | All four suites sequentially + merged coverage gate |
-| `make ci` | Full pipeline: parallel `verify` + builds + unit/SDK tests, then integration + E2E + cov |
+| `make cov` | Merge Go coverage and gate against thresholds. Auto-runs after `make test-all` and `make ci`; standalone `make cov` is "show me the merged numbers without re-running." `make cov` fails if no suite has data (you ran it before any test target). |
+| `make test-e2e` | E2E suite (published SDK) against `bin/wavehouse-cov` + coverage gate |
+| `make test-all` | All three suites sequentially + merged coverage gate |
+| `make ci` | Full pipeline: parallel `verify` + builds + unit tests, then integration + E2E + cov |
 | `make ci-remote HOST=<host>` | `make ci` for `HEAD` on an ssh host or `docker:<container>`; writes the same marker if it passes there for this exact tree ([details](#running-make-ci-on-another-machine)) |
 | **Release** (see [Cutting a release](#cutting-a-release)) | |
 | `make release-server VERSION=X.Y.Z` | Tag a server release — binaries + container image |
-| `make release-sdk-ts VERSION=X.Y.Z` | Tag a TypeScript SDK release — npm |
-| `make release-sdk-go VERSION=X.Y.Z` | Tag a Go SDK release — `go get` (pending [#434](https://github.com/Wave-RF/WaveHouse/pull/434)) |
 | **Analysis** (informational, not in CI) | |
 | `make size` | Binary size analysis → `tmp/analysis/` (text + SVG + interactive HTML) |
 | `make audit-cgo` | Audit dependency tree for C files (builds use `CGO_ENABLED=0`) |
@@ -582,7 +570,7 @@ Run `make help` to see all targets. Key ones:
 | `make dep-cut` | Top cuttable deps by transitive weight (`LIMIT=N` to override) |
 | `make binary-analysis` | Combined: `size` + `audit-cgo` + `deadcode` |
 | **Cleanup** (tiered — compose explicitly for partial resets) | |
-| `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`, `docs/.dev-dist/`) |
+| `make clean` | Build outputs only (`bin/`, `dist/`, `docs/dist/`, `docs/.dev-dist/`) |
 | `make clean-test` | Test outputs only (`tmp/` — coverage data, logs, NATS state) |
 | `make clean-tools` | Installed tools and pnpm deps (`.bin/`, `node_modules/`) |
 | `make clean-all` | Full reset: above + `data/` + Docker volumes |
@@ -619,17 +607,17 @@ Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs 
 
 - **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`.
 - **GitHub Actions** (root **and** `/.github/actions/setup-env`) — outdated action versions tracked against the SHA pins across `.github/workflows/*` and the `setup-env` composite action, commit prefix `ci:`
-- **npm — pnpm workspace** (root) — covers all three TypeScript packages (the docs site, the SDK, and the E2E tests) in one grouped PR, commit prefix `deps:`
+- **npm — pnpm workspace** (root) — covers both TypeScript packages (the docs site and the E2E tests) in one grouped PR, commit prefix `deps:`
 
 PRs are grouped per config to reduce noise. The npm config is pointed at the workspace **root** (`directory: /`), not the individual member directories. The repo has a single root `pnpm-lock.yaml`, and Dependabot only updates a lockfile co-located with the manifest it targets — so a per-member config (the previous setup) bumped a member's `package.json` without regenerating the root lockfile, and every such PR then failed CI's `pnpm install --frozen-lockfile` with `ERR_PNPM_OUTDATED_LOCKFILE`. Pointing at the root lets Dependabot read `pnpm-workspace.yaml`, walk every member, and update the one lockfile.
 
-The GitHub Actions config names **two** directories. `directory: /` reaches `.github/workflows/` but does not descend into `.github/actions/*/action.yml`, so the `setup-env` composite action — which owns every cache in `ci.yml` — was invisible to Dependabot, and its pins went stale against upstream and diverged from `publish-npm.yml`, which Dependabot *does* track and which doesn't call `setup-env`. Listing its directory under `directories:` brings it into the same weekly group; **adding a composite action means adding its directory there**, because nothing else catches the drift.
+The GitHub Actions config names **two** directories. `directory: /` reaches `.github/workflows/` but does not descend into `.github/actions/*/action.yml`, so the `setup-env` composite action — which owns every cache in `ci.yml` — was invisible to Dependabot, and its pins went stale against upstream. Listing its directory under `directories:` brings it into the same weekly group; **adding a composite action means adding its directory there**, because nothing else catches the drift.
 
 The npm config sets a 7-day `cooldown` to match pnpm's `minimumReleaseAge`, with the same `@wave-rf/*` and `@wavehouse/*` exclusions as `minimumReleaseAgeExclude`. It covers only the package Dependabot bumps, so transitive packages can still fail pnpm's check ([#441](https://github.com/Wave-RF/WaveHouse/issues/441)), and security updates bypass it.
 
 That remainder fails loudly rather than silently: pnpm 11.21 checks every lockfile entry against `minimumReleaseAge` even under `--frozen-lockfile`, so a Dependabot lockfile that pulled in a too-young transitive package fails the `pnpm install` inside `make verify` with `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` and nothing merges. Dependabot cannot repair it itself, so a human does. Commit the fix to the Dependabot PR's own `dependabot/npm_and_yarn/**` branch, the same branch an automated write-back would target. Set the manifest range of the bumped package to a release that resolves under the policy, typically the newest release at least 7 days old, which may be newer or older than the version the PR proposed (the PR's own version can keep the young transitive pins). Then run plain `pnpm install` so pnpm resolves only the new subtree under the policy and leaves every untouched pin alone, and run `pnpm install --frozen-lockfile` to confirm the result is policy-clean. On PR #571 the working fix moved `astro` from `^7.1.1` to `^7.2.10`, not to the PR's 7.2.8. `pnpm clean --lockfile && pnpm install` also works but re-resolves the whole tree and sweeps in unrelated bumps. Automating this with a workflow that regenerates the lockfile and pushes it back to the `dependabot/npm_and_yarn/**` branch needs a token that can push and trigger CI, which is not set up; that remains the open part of [#441](https://github.com/Wave-RF/WaveHouse/issues/441).
 
-`typescript` majors are held back (`ignore: version-update:semver-major`) because `tsup` vendors a `rollup-plugin-dts` that crashes on TypeScript 7 during `clients/ts`'s `prepare` script — i.e. inside `pnpm install`, which takes every Node job down at once. See the comment in `.github/dependabot.yml` for the condition that lets it be removed.
+`typescript` majors are held back (`ignore: version-update:semver-major`) until docs and the e2e suite have been checked on TypeScript 7. See the comment in `.github/dependabot.yml`.
 
 **No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
 
@@ -638,52 +626,35 @@ That remainder fails loudly rather than silently: pnpm 11.21 checks every lockfi
 Cutting a release is **one tag** — no version bump in code, no release branch:
 
 ```bash
-make release-server VERSION=0.1.0   # tag v0.1.0            → binaries + container image
-make release-sdk-ts VERSION=0.1.0   # tag clients/ts/v0.1.0 → @wavehouse/sdk on npm
+make release-server VERSION=0.1.0   # tag v0.1.0 → binaries + container image
 ```
 
-`make release-sdk-go` exists too, wired ahead of the Go SDK landing ([#434](https://github.com/Wave-RF/WaveHouse/pull/434)); it refuses to run until `clients/go/` is in the repo.
+The SDKs release from their own repositories, [`Wave-RF/wavehouse-sdk-js`](https://github.com/Wave-RF/wavehouse-sdk-js) and [`Wave-RF/wavehouse-sdk-go`](https://github.com/Wave-RF/wavehouse-sdk-go), not from here.
 
 The one thing to do *before* tagging is promote the changelog: `AGENTS.md` requires every PR to add its entry under `## Unreleased`, so open a PR renaming that heading to `## [X.Y.Z] - YYYY-MM-DD` and adding the matching link reference at the foot of the file. When the release needs upgrade steps, add a `## From X to Y` section to [Upgrading](/upgrading) in the same PR. Nothing in the release pipeline reads `CHANGELOG.md` — this is for the file's own readers.
 
-**After** tagging an SDK release, raise `docs/package.json`'s `@wavehouse/sdk` range to the new line. A caret range on a `0.x` version floats only within that minor (`^0.1.1` stops at `0.2.0`), so a new **minor** does not reach the docs site — including its live hero demo — until someone bumps it, which is the point: the bump is where you decide that the deployed demo backend and the site's SDK move together. `minimumReleaseAgeExclude` already exempts `@wavehouse/*` from pnpm's 7-day `minimumReleaseAge` (and the Dependabot `cooldown` excludes it too), so the freshly published version installs immediately. Dependabot will **not** propose this one for you — `@wavehouse/sdk` is in the npm `ignore` list in `.github/dependabot.yml` for exactly this reason, since a grouped Monday `deps:` PR is reviewed by someone thinking about dependency hygiene, not about which wire the demo backend speaks.
+**After** an SDK release is published, raise `docs/package.json`'s `@wavehouse/sdk` range to the new line. A caret range on a `0.x` version floats only within that minor (`^0.1.1` stops at `0.2.0`), so a new **minor** does not reach the docs site — including its live hero demo — until someone bumps it, which is the point: the bump is where you decide that the deployed demo backend and the site's SDK move together. `minimumReleaseAgeExclude` already exempts `@wavehouse/*` from pnpm's 7-day `minimumReleaseAge` (and the Dependabot `cooldown` excludes it too), so the freshly published version installs immediately. The e2e suite's exact pin in `tests/e2e/sdk/package.json` is raised the same way, deliberately. Dependabot will **not** propose a minor or major bump of either — those `@wavehouse/sdk` updates are in the npm `ignore` list in `.github/dependabot.yml` for exactly this reason, since a grouped Monday `deps:` PR is reviewed by someone thinking about dependency hygiene, not about which wire the demo backend speaks. It may propose a patch bump of the e2e suite's pin, which stays on the same wire.
 
-Each runs [`scripts/release.sh`](https://github.com/Wave-RF/WaveHouse/blob/main/scripts/release.sh), which preflights (on `main`, clean tree, in sync with `origin/main`, the tag free both locally and on the remote, the required `CI` check green on *this exact commit*), prints exactly what will be published, and asks before pushing. `DRY_RUN=1 make release-…` stops after the plan. Tag creation is admin-only via the `release tag protection` ruleset.
+`make release-server` runs [`scripts/release.sh`](https://github.com/Wave-RF/WaveHouse/blob/main/scripts/release.sh), which preflights (on `main`, clean tree, in sync with `origin/main`, the tag free both locally and on the remote, the required `CI` check green on *this exact commit*), prints exactly what will be published, and asks before pushing. `DRY_RUN=1 make release-…` stops after the plan. Tag creation is admin-only via the `release tag protection` ruleset.
 
-The components are independent — releasing the server does not publish the SDK, and their version numbers need not match.
+Releasing the server publishes no SDK, and the server's and the SDKs' version numbers need not match.
 
 ### Why there is no version to bump
 
-The **tag is the version**, everywhere:
+The **tag is the version**: GoReleaser stamps it into the server's binaries through `-ldflags` at build time.
 
-| Component | Where the version comes from |
-| --- | --- |
-| Server | GoReleaser's `-ldflags` at build time, from the tag |
-| Go SDK | The tag itself — a Go module has no version file |
-| TypeScript SDK | `publish-npm.yml` stamps `clients/ts/package.json` from the tag before publishing |
-
-The npm case is the one that usually forces a bump commit, and it is deliberately not the source of truth here: the `main` ruleset forbids pushing to `main` directly, so bumping `package.json` would mean a reviewed PR merged before *every* release. The committed value is documentation — if it drifts from the tag, the workflow logs a notice and the tag wins.
+The `main` ruleset forbids pushing to `main` directly, so a version bump committed to a file would mean a reviewed PR merged before *every* release.
 
 ### Tag naming
 
-```text
-v0.1.0              server (root Go module)
-clients/ts/v0.1.0   @wavehouse/sdk
-clients/go/v0.1.0   Go SDK
-```
-
-The `clients/<lang>/` prefix isn't a style choice. Go resolves a module in a subdirectory only against a tag carrying that subdirectory as a prefix ([the module reference](https://go.dev/ref/mod) is explicit), so `go get github.com/Wave-RF/WaveHouse/clients/go@v0.1.0` requires precisely `clients/go/v0.1.0`. Every client follows that shape rather than leaving Go as the exception, and a new language is one more `clients/<lang>/v*` family.
-
-Tag globs are anchored at the start of the ref name, so `v*` never matches a `clients/...` tag — which is what keeps a client release from triggering a server release.
+Server tags are `vX.Y.Z`. The history also holds `clients/ts/v*` tags from when the TypeScript SDK released from here. Tag globs are anchored at the start of the ref name, so `v*` never matches them, and GoReleaser ignores them (`ignore_tags` in `.goreleaser.yaml`).
 
 ### What a release publishes
 
 - **Server —** a **GitHub Release** with the Linux archives (amd64 and arm64, `.tar.gz`) and `checksums.txt`. A tag carrying a prerelease suffix (`v0.1.0-alpha.1`) is marked as a GitHub pre-release, so it never takes the "Latest release" badge from a shipped stable version.
-- **Both —** **release notes generated by GitHub** from the PRs merged since the previous tag *in the same family* — one line per PR, since `main` is squash-merged, grouped into the categories defined in [`.github/release.yml`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/release.yml). Grouping is by **PR label**: `github_actions` / `documentation` are applied automatically by `actions/labeler`, but `breaking-change`, `security`, `bug`, and `enhancement` are applied by hand — an unlabelled PR lands in "Other changes". Dependabot is split out by **author** rather than by label, because the labels `actions/labeler` applies by path — `github_actions`, `documentation` — mark our own PRs too; our CI work gets its own "CI & build" section — ordered above Documentation, since a CI PR here nearly always updates docs too — and Dependencies is pure Dependabot residue. **Any category keyed on a label a Dependabot PR can carry needs that author exclude** — labeler's path labels *and* the ecosystem labels Dependabot applies itself (`dependencies`, `javascript`, `go`, `github_actions`; `javascript` is in neither `labeler.yml` nor our categories) — or that category intercepts bumps before they reach the `📦 Dependencies` catch-all. `CHANGELOG.md` is *not* the source of the release body; it is the longer-form record of why each change was made.
-- **Server —** a **GHCR image** at `ghcr.io/wave-rf/wavehouse`, with two tags: the immutable `:vX.Y.Z`, and one moving *channel* pointer. A stable release moves `:latest`; a prerelease moves `:alpha` / `:beta` / `:rc` / `:next` instead, matching the npm dist-tag it would get. The channel comes from the **first** prerelease identifier, matched **exactly**: `v0.2.0-rc.1` → `:rc`, while `-alpha1`, `-preview.1`, or any other form → `:next`. `scripts/ci/release-channel.sh` is the single rule every publisher uses, so `ghcr.io/wave-rf/wavehouse:rc` and `@wavehouse/sdk@rc` can't drift apart. **A prerelease-only project therefore has no `:latest` tag** — that is deliberate; `:latest` starts existing when the first stable release ships.
-- **TypeScript SDK —** an **npm publish** of `@wavehouse/sdk` under `latest` (stable) or `alpha`/`beta`/`rc`/`next` (prerelease), plus its own GitHub Release.
+- **Server —** **release notes generated by GitHub** from the PRs merged since the previous `v*` tag — one line per PR, since `main` is squash-merged, grouped into the categories defined in [`.github/release.yml`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/release.yml). Grouping is by **PR label**: `github_actions` / `documentation` are applied automatically by `actions/labeler`, but `breaking-change`, `security`, `bug`, and `enhancement` are applied by hand — an unlabelled PR lands in "Other changes". Dependabot is split out by **author** rather than by label, because the labels `actions/labeler` applies by path — `github_actions`, `documentation` — mark our own PRs too; our CI work gets its own "CI & build" section — ordered above Documentation, since a CI PR here nearly always updates docs too — and Dependencies is pure Dependabot residue. **Any category keyed on a label a Dependabot PR can carry needs that author exclude** — labeler's path labels *and* the ecosystem labels Dependabot applies itself (`dependencies`, `javascript`, `go`, `github_actions`; `javascript` is in neither `labeler.yml` nor our categories) — or that category intercepts bumps before they reach the `📦 Dependencies` catch-all. `CHANGELOG.md` is *not* the source of the release body; it is the longer-form record of why each change was made.
+- **Server —** a **GHCR image** at `ghcr.io/wave-rf/wavehouse`, with two tags: the immutable `:vX.Y.Z`, and one moving *channel* pointer. A stable release moves `:latest`; a prerelease moves `:alpha` / `:beta` / `:rc` / `:next` instead. The channel comes from the **first** prerelease identifier, matched **exactly**: `v0.2.0-rc.1` → `:rc`, while `-alpha1`, `-preview.1`, or any other form → `:next`. `scripts/ci/release-channel.sh` is that rule: `release.yml` moves the image's channel tag with it, and `make release-server` prints the same channel in its preview. **A prerelease-only project therefore has no `:latest` tag** — that is deliberate; `:latest` starts existing when the first stable release ships.
 - **Server —** **build-provenance attestations** (Sigstore, free for public repos) over every archive and over the image's multi-arch manifest digest; the image attestation is stored alongside the image in GHCR. The release job verifies its own attestations before finishing, so a release that publishes unverifiable provenance goes red.
-- **TypeScript SDK —** an **npm provenance attestation** via `npm publish --provenance`, surfaced as the provenance badge on the package page and checkable with `npm audit signatures`. The npm job does not re-verify it the way the server job does.
 
 Binaries installed with `go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@vX.Y.Z` get no `-ldflags`, so they read their version from the module metadata the Go toolchain embeds; `/version` reports the tag without its leading `v` (`0.1.0`, not `v0.1.0`), with `git_commit`/`build_time` as `unknown`. Release archives and container images carry all three.
 
@@ -707,14 +678,11 @@ Publishing a release from **Releases → Draft a new release** creates the tag, 
 
 ## The `dev` channel
 
-Between releases, every push to `main` republishes both artifacts so `@dev` always means "current `main`":
+Between releases, every push to `main` republishes the image so `:dev` always means "current `main`":
 
 - **`ghcr.io/wave-rf/wavehouse:dev`** — a rolling pointer, plus an immutable `:dev-<sha>` (pruned after 30 days by `cleanup-ghcr.yml`, newest 5 always kept). Built by the same GoReleaser pipeline with `WAVEHOUSE_DEV=1`, which suppresses the GitHub Release. Note a Docker tag is only a pointer: `docker run …:dev` reuses a stale local image unless you `docker pull` first or pass `--pull=always`.
-- **`@wavehouse/sdk@dev`** — `0.0.1-dev.<utc-stamp>.h<build-hash>`, published only when the published package actually changes. The trailing hash covers every file `npm pack` would ship — the built `dist/`, `package.json` minus its `version`, and the bundled `README`/`LICENSE` — so a push whose package would be byte-identical to the current `dev` publish is skipped, while a change to `exports`, `files`, `bin`, or `engines` republishes even though `dist/` is untouched.
 
-  The `<utc-stamp>` is load-bearing, not decoration. `npm install …@dev` records a *range* in your `package.json`, not the dist-tag, so what you get on the next install is the highest version matching that range. Under the old `0.0.0-dev.h<hash>` scheme, semver's lexical ordering of alphanumeric prerelease identifiers meant the newest publish routinely wasn't the highest one, and a range could resolve *backwards* — an `@dev` install landed on a two-month-old build ([#475](https://github.com/Wave-RF/WaveHouse/issues/475)). A numeric identifier compares numerically, so the channel now orders by publish time. The `0.0.1` base keeps the channel below every real release (so a dev build can never satisfy `^0.1.0`) and above the legacy `0.0.0-dev.*` publishes, which npm's 72-hour unpublish window makes permanent.
-
-Docker needs no equivalent fix: a tag is a mutable pointer resolved fresh on every pull, with no version ranges and no ordering, so the failure mode #475 describes cannot arise there.
+The TypeScript SDK's dev builds come from [its own repository](https://github.com/Wave-RF/wavehouse-sdk-js) once npm publishing is switched on there ([wavehouse-sdk-js#2](https://github.com/Wave-RF/wavehouse-sdk-js/issues/2)).
 
 ## CI & review automation
 
@@ -738,7 +706,7 @@ If the title doesn't match, a sticky comment posts on the PR explaining the form
 
 The `main branch protection` ruleset requires one status check to pass before any PR can merge:
 
-- `CI` — the aggregator job of `.github/workflows/ci.yml`. The workflow is a job DAG over the same Makefile targets local `make ci` runs: `lint` (`make verify`), `unit` (`make test-unit test-ts`), `integration` (one job per part of `make test-integration`: `make test-integration-app`, `make test-integration-backends`), `e2e` (`make -j test-e2e` — builds its own SDK dist + cover binary on a warm cache, runs the suite exactly like a local run), `coverage` (`make cov` over every suite's uploaded coverage fragment + threshold gates, like local `make ci`'s final step), `docs-build` (`make build-docs` when docs-affecting files changed, uploading the docs dist artifact), `PR title` (Conventional Commits), and the docs preview/deploy jobs. The aggregator fails if any job failed or was canceled and treats skipped jobs as passing — docs-only PRs skip the Go test suites by design, and fork PRs run everything except the (secret-bearing) docs deploys. Every run's Summary page gets a per-job wall-clock table from the non-gating `Timing summary` job. The full architecture — DAG diagram, design invariants, cache policy, how to add a job — lives in [`.github/workflows/README.md`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/workflows/README.md).
+- `CI` — the aggregator job of `.github/workflows/ci.yml`. The workflow is a job DAG over the same Makefile targets local `make ci` runs: `lint` (`make verify`), `unit` (`make test-unit`), `integration` (one job per part of `make test-integration`: `make test-integration-app`, `make test-integration-backends`), `e2e` (`make -j test-e2e` — builds its own cover binary on a warm cache, runs the suite exactly like a local run), `coverage` (`make cov` over every suite's uploaded coverage fragment + threshold gates, like local `make ci`'s final step), `docs-build` (`make build-docs` when docs-affecting files changed, uploading the docs dist artifact), `PR title` (Conventional Commits), and the docs preview/deploy jobs. The aggregator fails if any job failed or was canceled and treats skipped jobs as passing — docs-only PRs skip the Go test suites by design, and fork PRs run everything except the (secret-bearing) docs deploys. Every run's Summary page gets a per-job wall-clock table from the non-gating `Timing summary` job. The full architecture — DAG diagram, design invariants, cache policy, how to add a job — lives in [`.github/workflows/README.md`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/workflows/README.md).
 
 The `PR housekeeping` workflow still runs on every PR (labels + the title explainer comment) but is no longer a required check. A separate `Cache cleanup` workflow deletes a closed PR's Actions caches, after each PR run deletes the Go build cache entries no run will read, and after each `main` run deletes `main`'s superseded cache generations.
 

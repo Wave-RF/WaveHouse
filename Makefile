@@ -120,11 +120,8 @@ JOBS ?= $(DEFAULT_JOBS)
 # Version metadata is always embedded in the binary. Names match the package
 # vars in cmd/wavehouse/main.go (Version / GitCommit / BuildTime), which the
 # goreleaser config injects the same way for release artifacts.
-# `--match 'v[0-9]*'` keeps this on the SERVER's tag family. Without it,
-# `git describe` returns whichever tag is nearest in history — so once
-# `clients/ts/v0.1.0` exists, `make build` stamps the SDK's version into the
-# server binary and out through /version, and goreleaser-validate.yml logs
-# "current tag is not semver". `--always` still covers the no-match case.
+# `--match 'v[0-9]*'` keeps this on the SERVER's tag family, so a tag of any
+# other shape never lands in /version. `--always` covers the no-match case.
 VERSION    ?= $(shell git describe --tags --match 'v[0-9]*' --dirty --always 2>/dev/null || echo dev)
 COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -293,10 +290,6 @@ dev: deps-up $(AIR) $(CONFIG_FILES) settings/config.json ## Hot-reload dev serve
 	@echo "    pprof:      $(GREEN)http://localhost:6060/debug/pprof/$(RESET)  (WH_PROFILING_ENABLED=false to turn off)"
 	WH_CONFIG=.config.local.yaml WH_PROFILING_ENABLED=$${WH_PROFILING_ENABLED:-true} $(AIR) -c .air.toml
 
-.PHONY: dev-ts
-dev-ts: pnpm-install ## Watch-build SDK (tsup --watch)
-	@$(PNPM) --filter $(SDK_NAME) run dev
-
 # dev-docs runs `cloudflare-md-router dev` (@wave-rf/cloudflare-md-router): a
 # full `astro build` on every save into docs/.dev-dist/, synced into docs/dist/
 # only when it succeeds and served through `wrangler dev --live-reload` — so
@@ -368,7 +361,7 @@ obs-front: ## Start local OTel Front UI
 GO_DIRS := $(shell GOTOOLCHAIN=$(GOTOOLCHAIN) go list -f '{{.Dir}}' ./...)
 
 # fmt / lint / fix: one Biome binary (biome.json) scans the whole workspace
-# (SDK + e2e + docs); Markdown is owned separately by markdownlint-cli2 (rules in
+# (e2e + docs); Markdown is owned separately by markdownlint-cli2 (rules in
 # .markdownlint.json, globs in .markdownlint-cli2.jsonc) — Biome only does
 # JS/TS/JSON. gofumpt + golangci-lint own the Go side.
 #
@@ -466,7 +459,7 @@ test-classify-paths:
 
 # test-release-channel: assert scripts/ci/release-channel.sh — the single rule
 # mapping a release tag to its moving channel (`:latest` / `@latest` vs
-# `:rc` / `@rc` …), shared by release.yml, publish-npm.yml and release.sh.
+# `:rc` / `@rc` …), shared by release.yml and release.sh.
 # Covers the fail-closed cases too: an unclassifiable tag must never resolve to
 # `latest`. A verify leaf, same as test-classify-paths.
 .PHONY: test-release-channel
@@ -661,7 +654,7 @@ fix-prose: $(MISSPELL)
 # test-integration-parts, test-prune-pr-build-cache, test-prune-main-cache, test-prefetch-test-images, test-review-gate,
 # test-remote-ci, test-githooks and test-hook-commands for the tooling;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
-# nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
+# nothing else touches it) and typecheck-ts (tsc --noEmit on the e2e suite). It runs lint-ts
 # (`biome check`) but NOT fmt-ts (`biome format`) — check already covers
 # formatting. ci-parallel depends on verify-parallel (not verify), so phase 1
 # shares one jobserver instead of nesting `make -j` inside `make -j`.
@@ -675,11 +668,11 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 .PHONY: verify-parallel
 verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths test-md-rules test-release-channel test-go-toolchain check-dockerfile-go check-nats-versions test-tagged-tests test-integration-parts test-prune-pr-build-cache test-prune-main-cache test-prefetch-test-images test-review-gate test-remote-ci test-githooks test-hook-commands vulncheck check-docs typecheck-ts
 
-# typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
+# typecheck-ts: tsc --noEmit on the e2e suite. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.
 .PHONY: typecheck-ts
 typecheck-ts: pnpm-install
-	$(call run,typecheck-ts (tsc --noEmit),$(PNPM) -s --filter $(SDK_NAME) run typecheck,)
+	$(call run,typecheck-ts (tsc --noEmit),$(PNPM) -s --filter $(E2E_NAME) run typecheck,)
 
 
 ##@ Build
@@ -735,35 +728,10 @@ build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumenta
 # parallelism on `ci-parallel` — typing `make build-all` gets parallel builds
 # without requiring the user to remember `-j`.
 .PHONY: build-all
-build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
+build-all: ## Build all artifacts in parallel — Go binaries + docs site
 	@echo "$(CYAN)==> Building all artifacts...$(RESET)"
-	@$(MAKE) -j $(JOBS) build build-ts build-docs
+	@$(MAKE) -j $(JOBS) build build-docs
 	@echo "$(GREEN)$(BOLD)✔ All artifacts built$(RESET)"
-
-# build-ts: pnpm-driven SDK build → clients/ts/dist/ (ESM + CJS + .d.ts + the
-# IIFE bundle), then smoke-loads each entry point and type-checks a CommonJS and an ESM
-# consumer against the built declarations (smoke-ts-dist). Required by
-# test-e2e (e2e tests import the built artifact) and by build-all. Standalone
-# via `make build-ts`.
-.PHONY: build-ts
-build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/, smoke-load each entry point and type-check CJS and ESM consumers
-	@$(PNPM) --filter $(SDK_NAME) run build
-	@$(MAKE) --no-print-directory smoke-ts-dist
-
-# smoke-ts-dist: load the built ESM, CJS and IIFE entry points like a consumer
-# and compare their export surfaces, then type-check a CommonJS and an ESM
-# consumer of the built package with `tsc --module node16`. Runs at the OLDEST Node `engines.node`
-# admits, because an ESM-only dependency only breaks `require()` before 22.12
-# and the floating .nvmrc Node hides it. That Node is fetched once from
-# nodejs.org into .bin/ against a pinned sha256 (fetch-node.sh, like
-# shellcheck) rather than through pnpm, which on pnpm 11 asks nodejs.org on
-# every run. No pnpm-install prereq of its own: build-ts has already installed
-# the SDK's runtime deps, which dist/ loads from node_modules.
-.PHONY: smoke-ts-dist
-smoke-ts-dist: ## Smoke-load the built SDK entry points and type-check CJS and ESM consumers, at the oldest Node engines.node admits
-	@v=$$(node clients/ts/scripts/smoke-dist.mjs --min-node) && \
-		n=$$(clients/ts/scripts/fetch-node.sh $$v $(LOCAL_BIN)) && \
-		"$$n" clients/ts/scripts/smoke-dist.mjs --expect-node $$v
 
 # check-docs: astro check — type-checks .astro/.mdx, content-collection frontmatter
 # schemas, and config TS. Catches what `astro build` does NOT (the build strips
@@ -773,9 +741,9 @@ smoke-ts-dist: ## Smoke-load the built SDK entry points and type-check CJS and E
 # `build-docs`, so make runs it once and serializes it before the build — Astro's
 # content-sync writes docs/.astro/, so check and build must not run concurrently.
 # (Link validation is separate: owned by starlight-links-validator at build.)
-# No build-ts prereq: the landing page imports the PUBLISHED @wavehouse/sdk,
+# No SDK build prereq: the landing page imports the PUBLISHED @wavehouse/sdk,
 # pinned in docs/package.json and resolved from the registry (tarball ships its
-# own dist/*.d.ts), so the docs build no longer depends on clients/ts/dist/.
+# own dist/*.d.ts).
 .PHONY: check-docs
 check-docs: pnpm-install ## Type-check the docs (astro check — types + content schemas)
 	$(call run,check-docs (astro check),WH_DOCS_CHECK=1 NODE_OPTIONS=--no-deprecation $(PNPM) -s --filter $(DOCS_FILTER) run check,)
@@ -799,27 +767,26 @@ build-docs: check-docs install-playwright-docs ## Build docs site → docs/dist/
 branding-docs: ## Regenerate docs logo/favicon/OG assets from docs/src/assets/branding/mark.svg
 	@docs/scripts/branding/generate.sh
 
-# --- Node workspace: SDK + docs ----------------------------------------------
+# --- Node workspace: e2e + docs ----------------------------------------------
 # pnpm is the canonical package manager (migrated from npm). Locally available
-# via PATH; CI installs/caches it via actions/cache + setup-node. Three pnpm
-# packages share one workspace + store: the SDK (clients/ts/, @wavehouse/sdk),
-# the E2E harness (tests/e2e/sdk/, wavehouse-e2e), and the docs site
-# (docs/, wavehouse-docs). One root `pnpm install` installs all three.
+# via PATH; CI installs/caches it via actions/cache + setup-node. Two pnpm
+# packages share one workspace + store: the E2E harness (tests/e2e/sdk/,
+# wavehouse-e2e) and the docs site (docs/, wavehouse-docs). One root
+# `pnpm install` installs both.
 #
 # Everything is driven directly via `pnpm --filter <pkg>` — no per-subproject
 # Makefiles. The user-facing Node targets live inline in their natural verb
-# sections (build-ts/dev-ts/test-ts/clean-ts; build-docs/dev-docs/preview-docs/
+# sections (build-docs/dev-docs/preview-docs/
 # branding-docs/clean-docs) and declare pnpm-install as a prereq so a fresh
 # clone or a changed lockfile is handled lazily. `make tools` does the full
 # bootstrap.
 #
 # Not exposed as targets: ts fmt/lint/fix/verify (Biome is workspace-wide — see
 # Code Quality); ts typecheck (runs inline inside `verify` via `tsc --noEmit`,
-# the way Go's golangci-lint implicitly type-checks); ts codegen (the SDK's own
-# published CLI, clients/ts/src/cli/codegen.ts — not a dev build step).
+# the way Go's golangci-lint implicitly type-checks).
 PNPM        ?= pnpm
 DOCS_DIR    := docs
-SDK_NAME    := @wavehouse/sdk
+E2E_NAME    := wavehouse-e2e
 DOCS_FILTER := wavehouse-docs
 
 # The canonical docs-prose set, from the one script that defines it (AGENTS.md
@@ -827,7 +794,7 @@ DOCS_FILTER := wavehouse-docs
 # than a directory, so it never reads a .ts content-config as text — the
 # script's extension filter enforces that now, where a local `find -name` used
 # to. That `find` covered only docs/src/content, so README, CONTRIBUTING,
-# SECURITY, SUPPORT, CODE_OF_CONDUCT and the SDK readme were being rewritten by
+# SECURITY, SUPPORT, CODE_OF_CONDUCT were being rewritten by
 # the on-save hook's misspell pass but never checked by this gate.
 #
 # Recursively expanded (`=`, not `:=`), so the git call fires only inside the
@@ -986,43 +953,24 @@ test-integration-backends: go-mod-download check-integration-parts ## Integratio
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
 
 # test-e2e starts ClickHouse + bin/wavehouse-cov via the orchestrator under
-# scripts/, then runs the SDK vitest harness against the live stack so both
-# halves are exercised. Coverage is collected on both sides (Go covdata
-# from the cover binary → tmp/coverage/e2e/data/; vitest v8 coverage of
-# the SDK source → tmp/coverage/ts-e2e/) — same "always coverage" pattern
-# as the Go test targets. `make cov` merges ts-unit + ts-e2e after.
+# scripts/, then runs the vitest harness (against the published @wavehouse/sdk
+# it pins) against the live stack. Coverage is the server's: Go covdata from
+# the cover binary → tmp/coverage/e2e/data/.
 #
 .PHONY: test-e2e
-test-e2e: build-ts build-cover ## Run E2E SDK suite against cover binary + render coverage + gate
+test-e2e: pnpm-install build-cover ## Run E2E SDK suite against cover binary + render coverage + gate
 	@printf "$(CYAN)==> Running E2E Tests...$(RESET)\n"
-	@rm -rf $(COV_E2E)/data tmp/coverage/ts-e2e
-	@mkdir -p $(COV_E2E)/data tmp/coverage/ts-e2e tmp
-	@TS_E2E_COVERAGE_DIR="$(CURDIR)/tmp/coverage/ts-e2e" \
-		go run ./scripts/orchestrator
+	@rm -rf $(COV_E2E)/data
+	@mkdir -p $(COV_E2E)/data tmp
+	@go run ./scripts/orchestrator
 	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render e2e; fi
-
-# test-ts: vitest unit tests for the SDK, always with v8 coverage. Standalone
-# it also gates against suites.ts-unit (via vitest's --coverage.thresholds);
-# under COV_DEFER it only collects, leaving the gate to `make cov` (cov report)
-# so CI emits one consolidated coverage block. THRESHOLD is read live from
-# .testcoverage.yml via scripts/cov; override with
-# `make test-ts ARGS='--coverage.thresholds.statements=70'`.
-.PHONY: test-ts
-test-ts: pnpm-install ## Run SDK vitest unit tests + coverage + gate against suites.ts-unit
-	@printf "$(CYAN)==> Running SDK unit tests...$(RESET)\n"
-	@rm -rf tmp/coverage/ts-unit && mkdir -p tmp/coverage/ts-unit
-	@TS_UNIT_COVERAGE_DIR="$(CURDIR)/tmp/coverage/ts-unit" \
-		$(PNPM) --filter $(SDK_NAME) exec vitest run --coverage \
-		$(if $(COV_DEFER),,--coverage.thresholds.statements=$$(go run ./scripts/cov threshold ts-unit)) $(ARGS)
-	@if [ -z "$(COV_DEFER)" ]; then printf "$(GREEN)==> ts-unit gate passed$(RESET)  HTML: tmp/coverage/ts-unit/index.html\n"; fi
 
 # Aggregator: recipe-based with $(MAKE) calls so suites run sequentially even
 # under `make -j N`. The suites bind ports / spin testcontainers / start the
 # release binary, so concurrent execution is unsafe.
 .PHONY: test-all
-test-all: ## Run all suites sequentially + one consolidated Go + TS coverage report + gates
+test-all: ## Run all suites sequentially + one consolidated Go coverage report + gates
 	@$(MAKE) test-unit COV_DEFER=1
-	@$(MAKE) test-ts COV_DEFER=1
 	@$(MAKE) test-integration COV_DEFER=1
 	@$(MAKE) test-e2e COV_DEFER=1
 	@$(MAKE) cov
@@ -1030,7 +978,7 @@ test-all: ## Run all suites sequentially + one consolidated Go + TS coverage rep
 ##@ Coverage
 
 # cov: renders ONE consolidated coverage report (scripts/cov report) — every
-# suite that has data plus the merged Go-total and ts-total, each with its
+# suite that has data plus the merged Go-total, each with its
 # gate status + a clickable HTML report path, then a single aggregate
 # pass/fail. Generates whatever artifacts it needs, so it stands alone at the
 # end of `make ci` / `make test-all` even when the suites ran under COV_DEFER
@@ -1046,7 +994,7 @@ test-all: ## Run all suites sequentially + one consolidated Go + TS coverage rep
 # the shared key — which then exact-hits for every other job, forever,
 # until the next rotation. Downloading the full graph first keeps the
 # shared entry complete whoever wins. See #443.
-cov: go-mod-download ## Consolidated coverage report (Go + TS) + gate against thresholds (auto-runs after test-all / ci)
+cov: go-mod-download ## Consolidated coverage report + gate against thresholds (auto-runs after test-all / ci)
 	@go run ./scripts/cov report
 
 ##@ CI
@@ -1061,7 +1009,7 @@ cov: go-mod-download ## Consolidated coverage report (Go + TS) + gate against th
 # marker that standalone `make verify` writes is instead written by ci's own
 # `ci-marker.sh write` below — it touches both the ci and verify markers.
 .PHONY: ci-parallel
-ci-parallel: verify-parallel build build-cover build-ts build-docs test test-ts
+ci-parallel: verify-parallel build build-cover build-docs test
 
 .PHONY: ci
 ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
@@ -1087,10 +1035,9 @@ ci-remote: ## Run `make ci` for HEAD on HOST=<ssh destination> or HOST=docker:<c
 ##@ Release
 
 # Releases are cut by pushing ONE tag — no version bump, no commit, no release
-# PR. Every component derives its version from the tag it was built at (the
-# server via GoReleaser's ldflags, the Go SDK because a module's version simply
-# IS its tag, @wavehouse/sdk because publish-npm.yml stamps package.json from
-# the tag before publishing). The `main` ruleset forbids direct pushes anyway,
+# PR. The server derives its version from the tag it was built at, through
+# GoReleaser's ldflags. The SDKs release from their own repositories. The
+# `main` ruleset forbids direct pushes anyway,
 # so a bump commit would need its own reviewed PR before every release.
 #
 # scripts/release.sh holds the preflight checks — on main, clean tree, synced
@@ -1112,16 +1059,6 @@ endef
 release-server: ## Tag a server release — binaries + container image (VERSION=X.Y.Z)
 	$(require_release_version)
 	@scripts/release.sh server "$(VERSION)"
-
-.PHONY: release-sdk-ts
-release-sdk-ts: ## Tag a TypeScript SDK release — npm (VERSION=X.Y.Z)
-	$(require_release_version)
-	@scripts/release.sh ts "$(VERSION)"
-
-.PHONY: release-sdk-go
-release-sdk-go: ## Tag a Go SDK release — go get (VERSION=X.Y.Z)
-	$(require_release_version)
-	@scripts/release.sh go "$(VERSION)"
 
 ##@ Analysis
 
@@ -1183,20 +1120,15 @@ binary-analysis: size audit-cgo deadcode ## Combined: size + audit-cgo + deadcod
 # explicitly (e.g. `make clean clean-test`) when you want a partial reset
 # without nuking installed tools or pnpm deps. `clean-all` chains them.
 #
-#   clean        build outputs only       (bin/, dist/, clients/ts/dist/)
+#   clean        build outputs only       (bin/, dist/)
 #   clean-test   test outputs only        (tmp/ — coverage, logs, NATS state)
 #   clean-tools  installed deps           (.bin/, node_modules/ everywhere)
 #   clean-all    everything above + data/ + docker volumes (full reset)
 
 .PHONY: clean
-clean: ## Remove build artifacts (bin/, dist/, clients/ts/dist/, docs/dist/, docs/.dev-dist/)
+clean: ## Remove build artifacts (bin/, dist/, docs/dist/, docs/.dev-dist/)
 	@echo "$(YELLOW)==> Cleaning build artifacts...$(RESET)"
-	@rm -rf bin/ dist/ clients/ts/dist/ docs/dist/ docs/.dev-dist/
-
-.PHONY: clean-ts
-clean-ts: ## Remove SDK build artifacts only (clients/ts/dist/)
-	@echo "$(YELLOW)==> Cleaning SDK build artifacts...$(RESET)"
-	@rm -rf clients/ts/dist/
+	@rm -rf bin/ dist/ docs/dist/ docs/.dev-dist/
 
 .PHONY: clean-docs
 clean-docs: ## Remove docs build artifacts only (docs/dist/, docs/.dev-dist/)
@@ -1211,7 +1143,7 @@ clean-test: ## Remove test artifacts (tmp/ — coverage data, logs, NATS state)
 .PHONY: clean-tools
 clean-tools: ## Remove installed tools and pnpm deps (.bin/, node_modules/)
 	@echo "$(YELLOW)==> Cleaning installed tools and pnpm deps...$(RESET)"
-	@rm -rf .bin/ node_modules/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/ docs/node_modules/
+	@rm -rf .bin/ node_modules/ tests/e2e/sdk/node_modules/ docs/node_modules/
 
 .PHONY: clean-all
 clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + clean-tools + dev data + docker volumes
@@ -1227,7 +1159,7 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # tools: bootstrap a fresh clone.
 #   - Installs pinned external binaries to .bin/ (golangci-lint, air, misspell).
 #   - Downloads Go modules so go.mod tool deps are available offline.
-#   - Installs SDK + E2E pnpm deps so test-ts / test-e2e are runnable
+#   - Installs E2E + docs pnpm deps so test-e2e is runnable
 #     without a separate manual setup step.
 #
 # Note: go.mod tool deps (gotestsum, gofumpt, etc.) are *downloaded* by

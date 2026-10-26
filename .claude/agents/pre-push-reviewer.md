@@ -47,7 +47,7 @@ The diff source here is the local working state, computed as `git diff main...<s
    - **Performance** — hot-path allocations, unbounded goroutines, unbatched DB work, locks across I/O, N+1, singleflight misuse.
    - **Testing** — new code on critical paths without tests, missing edge cases, mocks where integration would catch more.
    - **Documentation sync** — per AGENTS.md §Documentation Sync table.
-   - **SDK sync** — per AGENTS.md §SDK Sync table. Did `internal/api/` change without `clients/ts/src/` consideration?
+   - **SDK sync** — per AGENTS.md §SDK Sync table. Did `internal/api/` change the public API without an SDK issue or PR in `Wave-RF/wavehouse-sdk-js` / `Wave-RF/wavehouse-sdk-go` (or a stated reason none is needed)?
    - **Docs prose** — prose *quality* (accuracy-vs-code, runnable examples, clarity, completeness) and the docs↔code sync check are the **`docs-reviewer`** subagent's job. It runs **in parallel with you as a mandatory pre-push gate**, with its own `tmp/docs-reviewer-passed-<sha>` marker, so the push is already blocked until it reaches `ship_it`. Do **not** review prose or raise a "run `/docs-review`" `[SHOULD]` here — that gate fires on its own. (This supersedes the docs soft-gate in `.github/prompts/pr-review.md`: locally, docs review is a hard gate, not a nudge.) Don't line-edit prose yourself. You still keep the **Documentation sync** and **SDK sync** checks above as a code-completeness backstop.
 
 6. Apply the noise filter from `pr-review.md` before finalizing: drop findings you wouldn't personally ask the author to change in-person.

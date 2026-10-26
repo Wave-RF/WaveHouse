@@ -36,10 +36,7 @@ data/
 # Coverage outputs
 coverage.txt
 coverage.out
-# vitest's default coverage dir, used when `pnpm test:coverage` runs
-# without SDK_COVERAGE_DIR set (i.e. directly inside clients/ts/).
 coverage/
-clients/ts/coverage/
 
 # Local Tooling directory
 tools/

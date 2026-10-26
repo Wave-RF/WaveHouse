@@ -279,36 +279,11 @@ func run() error {
 	log.Println("✓ WaveHouse healthy")
 
 	log.Println("→ running vitest harness...")
-	// Always run with --coverage — same pattern as `make test` / `make
-	// test-integration` (which always use Go's -cover). TS_E2E_COVERAGE_DIR
-	// is forwarded from the calling environment so reports land at
-	// tmp/coverage/ts-e2e/ for `cov ts-merge` to pick up.
-	//
-	// Call the vitest binary directly via `pnpm exec` rather than `pnpm run
-	// test -- --coverage`. The npm-style `--` separator does NOT survive pnpm
-	// 11: it forwards the literal `--` to the script, so vitest receives
-	// `vitest run -- --coverage` and parses --coverage as a trailing operand
-	// (coverage stays OFF, tests pass, no report is written — silently). Going
-	// straight to `pnpm exec vitest run --coverage` skips the script-arg
-	// forwarding layer entirely, matching how scripts/cov invokes `pnpm exec
-	// nyc`.
-	//
-	// E2E_NO_COVERAGE=1 drops it for local debugging only, and is ignored under
-	// the gating targets. Left unconditional, an exported-and-forgotten var
-	// would let `make ci` write a green push marker with the TS e2e report
-	// missing: test-e2e wipes tmp/coverage/ts-e2e first, ts-e2e's own threshold
-	// is informational, and ts-total then gates on ts-unit alone — an `n/a` row
-	// in the table, but a pass. COV_DEFER is exported by exactly the targets
-	// that gate (ci / test-all), so it is the right thing to key off.
-	args := []string{"exec", "vitest", "run", "--coverage"}
-	if os.Getenv("E2E_NO_COVERAGE") == "1" {
-		if os.Getenv("COV_DEFER") != "" {
-			log.Println("  (E2E_NO_COVERAGE=1 ignored — this run feeds a coverage gate)")
-		} else {
-			args = args[:len(args)-1]
-			log.Println("  (E2E_NO_COVERAGE=1 — running without coverage; no report will be written)")
-		}
-	}
+	// `pnpm exec vitest run` directly: pnpm 11 forwards a `--` separator
+	// literally, so `pnpm run test -- <flag>` would hand vitest a stray operand.
+	// No vitest coverage: the suite runs the published SDK, so the coverage
+	// that matters is the server's, which the cover binary writes.
+	args := []string{"exec", "vitest", "run"}
 	// #nosec G204 — args are a fixed string slice, not user input.
 	vitest := exec.CommandContext(ctx, "pnpm", args...)
 	vitest.Dir = filepath.Join(repoRoot, "tests", "e2e", "sdk")

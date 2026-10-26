@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pure path classifier — the single source of truth for which file changes
-# count as `code` (Go/SDK test work) vs `docs` (docs-site build inputs), and
+# count as `code` (Go/e2e test work) vs `docs` (docs-site build inputs), and
 # whether they touch the Go dependencies (`go-deps`).
 #
 # Reads a newline-delimited file list on stdin, writes three key=value lines:
@@ -8,12 +8,8 @@
 #   code=true|false   false only when EVERY path is prose/repo-meta
 #                     (docs/, *.md, license/attribution, labels, issue +
 #                     PR templates, editor + agent config) — then the
-#                     Go/SDK suites can skip.
+#                     Go/e2e suites can skip.
 #   docs=true|false   true when any path feeds the docs-site build: docs/,
-#                     clients/ts/ (kept deliberately over-inclusive: the docs
-#                     site now pins the PUBLISHED @wavehouse/sdk, so a clients/ts
-#                     change no longer feeds the docs build — failing safe here
-#                     is cheaper than missing a coupling that comes back),
 #                     the workspace lockfile, or the CI build plumbing
 #                     itself (ci.yml / setup-env).
 #   go-deps=true|false true when any path is a go.mod or go.sum, in any
@@ -78,7 +74,7 @@ else
 fi
 
 # docs=true when ANY changed path is a docs-site build input.
-if matches '^(docs/|clients/ts/|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.github/workflows/ci\.yml|\.github/actions/setup-env/)'; then
+if matches '^(docs/|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.github/workflows/ci\.yml|\.github/actions/setup-env/)'; then
   echo "docs=true"
 else
   echo "docs=false"

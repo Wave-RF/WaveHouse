@@ -2,33 +2,25 @@
 # Map a release tag to its distribution channel — the MOVING pointer that
 # should follow this release. One rule, every publisher:
 #
-#   release.yml     -> WAVEHOUSE_CHANNEL, the second GHCR tag in
-#                      .goreleaser.yaml's dockers_v2 block
-#   publish-npm.yml -> the `npm publish --tag` dist-tag
+#   release.yml -> WAVEHOUSE_CHANNEL, the second GHCR tag in
+#                  .goreleaser.yaml's dockers_v2 block
+#   release.sh  -> the channel its preflight prints
 #
-# so `ghcr.io/wave-rf/wavehouse:alpha` and `@wavehouse/sdk@alpha` can never
-# mean different things. Every release also gets its immutable `vX.Y.Z` /
-# exact-version reference; this is only the pointer on top of it.
+# Every release also gets its immutable `vX.Y.Z` reference; this is only the
+# pointer on top of it.
 #
 # The rule: a stable release owns `latest`; a prerelease owns the channel
 # named by its prerelease identifier. That is what keeps `v1.3.0-rc.1` from
 # taking `:latest` away from the shipped `v1.2.0` — the failure mode this
 # script exists to prevent.
 #
-# Tag shapes, one per releasable component (see scripts/release.sh):
+# Tag shapes: `v1.2.3`, the server's (see scripts/release.sh). A
+# `<prefix>/v1.2.3` tag maps the same way: the shape of the `clients/<lang>/v*`
+# tags the SDKs left in this repository's history before they moved out.
 #
-#   v1.2.3               the server (root Go module)
-#   clients/ts/v1.2.3    @wavehouse/sdk
-#   clients/go/v1.2.3    the Go SDK
-#
-# The `clients/<lang>/` prefix is not a style choice: Go requires a module in
-# a subdirectory to be tagged with that subdirectory as a prefix, or
-# `go get .../clients/go@v1.2.3` cannot resolve (https://go.dev/ref/mod).
-# Every other client follows the same shape so one rule covers all of them.
-#
-# Usage:  scripts/ci/release-channel.sh v1.2.3               -> latest
-#         scripts/ci/release-channel.sh clients/ts/v1.2.3-rc.1 -> rc
-#         scripts/ci/release-channel.sh 0.1.0-alpha.1        -> alpha
+# Usage:  scripts/ci/release-channel.sh v1.2.3                -> latest
+#         scripts/ci/release-channel.sh clients/go/v1.2.3-rc.1 -> rc
+#         scripts/ci/release-channel.sh 0.1.0-alpha.1         -> alpha
 # Exit:   0 with the channel on stdout; 1 on a tag that isn't semver-shaped
 #         (fail loud — a typo'd tag must not silently publish as `latest`).
 
@@ -41,7 +33,7 @@ if [ -z "$tag" ]; then
 fi
 
 # Drop any component prefix, then the `v`. `${tag##*/}` takes everything after
-# the last slash, so it handles `clients/ts/v1.2.3` and a bare `v1.2.3` alike
+# the last slash, so it handles `clients/go/v1.2.3` and a bare `v1.2.3` alike
 # and needs no per-component list.
 version="${tag##*/}"
 version="${version#v}"
@@ -72,7 +64,7 @@ esac
 # (`*-alpha*`) reads `v1.2.3-alphafoo` as alpha and `v1.2.3-preview-rc.1` as rc,
 # which would point a channel other people consume at an unrelated release.
 # Anything that isn't exactly alpha/beta/rc is some other prerelease and belongs
-# on `next`. Mirrors publish-npm.yml's dist-tag map.
+# on `next`.
 prerelease="${version#*-}"
 case "${prerelease%%.*}" in
   alpha) echo alpha ;;
