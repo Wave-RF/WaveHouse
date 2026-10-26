@@ -85,10 +85,13 @@ func tracedMsg(sc trace.SpanContext) parsedMsg {
 	return parsedMsg{msg: msg, tenant: tenant.Default, tableName: "events", columns: []string{"id"}, row: []byte(`[1]`)}
 }
 
-func TestStartFlushSpan_LinksEachProducerOnce(t *testing.T) {
+// Each row's publish has a span of its own, so a request of many rows hands
+// the flush many producer spans of one trace; the first stands for them.
+func TestStartFlushSpan_LinksEachTraceOnce(t *testing.T) {
 	rec := recordSpans(t)
 	a, b := producerContext(1), producerContext(2)
-	group := []parsedMsg{tracedMsg(a), tracedMsg(a), tracedMsg(b), tracedMsg(trace.SpanContext{}), {tenant: tenant.Default}}
+	aAgain := a.WithSpanID(trace.SpanID{0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x01, 0x03})
+	group := []parsedMsg{tracedMsg(a), tracedMsg(aAgain), tracedMsg(b), tracedMsg(trace.SpanContext{}), {tenant: tenant.Default}}
 
 	_, span := otel.Tracer(tracerName).Start(context.Background(), flushSpanName, flushSpanOptions("events", group)...)
 	span.End()
@@ -96,7 +99,7 @@ func TestStartFlushSpan_LinksEachProducerOnce(t *testing.T) {
 	got := spanNamed(t, rec, "IngestWorker.Flush")
 	assert.Equal(t, trace.SpanKindConsumer, got.SpanKind())
 	assert.False(t, got.Parent().IsValid(), "a flush is a root: its rows came from many requests")
-	require.Len(t, got.Links(), 2, "one link per distinct producer span, none for a row published outside a span")
+	require.Len(t, got.Links(), 2, "one link per trace, none for a row published outside a span")
 	assert.Equal(t, a.SpanID(), got.Links()[0].SpanContext.SpanID())
 	assert.Equal(t, b.SpanID(), got.Links()[1].SpanContext.SpanID())
 	assert.Equal(t, string(tenant.Default), attr(got, "tenant").AsString())
@@ -174,7 +177,8 @@ func TestInsertToClickHouse_SpanRecordsTheFailure(t *testing.T) {
 
 // TestIngestTraceContinuity_EndToEnd drives a row through the real queue: a
 // publish under a request's span, the worker's consumer, its flush and its
-// INSERT. The flush span links to the request's span, as the queue headers
+// INSERT. Each publish is an mq.publish child of its request's span, the
+// flush span links to a publish span of each request, as the queue headers
 // carried it, and the INSERT span is the flush span's child — the trace of
 // an ingest request no longer ends at the publish.
 func TestIngestTraceContinuity_EndToEnd(t *testing.T) {
@@ -230,15 +234,17 @@ func TestIngestTraceContinuity_EndToEnd(t *testing.T) {
 	req2.End()
 
 	require.Eventually(t, func() bool { return inserts.Load() >= 1 }, 6*time.Second, 25*time.Millisecond, "the worker never inserted")
+	// A flush span ends after the INSERT span under it, so wait for the
+	// flush spans of all three rows.
 	require.Eventually(t, func() bool {
-		n := 0
+		var rows int64
 		for _, s := range rec.Ended() {
-			if s.Name() == "clickhouse.insert" {
-				n++
+			if s.Name() == "IngestWorker.Flush" {
+				rows += attr(s, "rows").AsInt64()
 			}
 		}
-		return n >= 1
-	}, 4*time.Second, 25*time.Millisecond, "the insert span never ended")
+		return rows >= 3
+	}, 4*time.Second, 25*time.Millisecond, "the flush spans of the rows never ended")
 
 	// One batch, since all three rows arrived inside the flush window; a
 	// loaded host may split them, so collect every flush span.
@@ -257,9 +263,24 @@ func TestIngestTraceContinuity_EndToEnd(t *testing.T) {
 			linked[l.SpanContext.SpanID()] = true
 		}
 	}
-	assert.True(t, linked[req1.SpanContext().SpanID()], "the flush links to the first request's span")
-	assert.True(t, linked[req2.SpanContext().SpanID()], "the flush links to the second request's span")
-	assert.Len(t, linked, 2, "each request's span is linked once, however many rows it published")
+	// Each publish is a producer span under its request's span.
+	publishedUnder := map[trace.SpanID]trace.SpanID{}
+	for _, s := range rec.Ended() {
+		if s.Name() == "mq.publish" {
+			assert.Equal(t, trace.SpanKindProducer, s.SpanKind())
+			publishedUnder[s.SpanContext().SpanID()] = s.Parent().SpanID()
+		}
+	}
+	require.Len(t, publishedUnder, 3, "one publish span per row")
+	linkedRequests := map[trace.SpanID]bool{}
+	for id := range linked {
+		parent, ok := publishedUnder[id]
+		assert.True(t, ok, "the flush links to a publish span")
+		linkedRequests[parent] = true
+	}
+	assert.True(t, linkedRequests[req1.SpanContext().SpanID()], "the flush links to a publish of the first request")
+	assert.True(t, linkedRequests[req2.SpanContext().SpanID()], "the flush links to a publish of the second request")
+	assert.Len(t, linkedRequests, 2)
 
 	flushIDs := map[trace.SpanID]bool{}
 	for _, f := range flushes {

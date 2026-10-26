@@ -997,6 +997,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 
 	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.chConnFor, a.cache, queryTimeout)
 	pipesHandler.Tenants = a.tenants
+	pipesHandler.CHTarget = a.chTargetFor
 
 	schemaHandler := api.NewSchemaHandler(a.registryFor)
 	schemaHandler.Tenants = a.tenants
@@ -1007,6 +1008,9 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	queryHandler := api.NewQueryHandler(a.chTargetFor, queryTimeout)
 	queryHandler.Tenants = a.tenants
 
+	structuredQueryHandler := api.NewStructuredQueryHandler(a.chConnFor, a.cache, a.registryFor, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, queryTimeout, (*settings.Store).DefaultMaxRows)
+	structuredQueryHandler.CHTarget = a.chTargetFor
+
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,
 		Query:           queryHandler,
@@ -1016,7 +1020,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		Schema:          schemaHandler,
 		DLQ:             api.NewDLQHandler(a.mq),
 		Pipes:           pipesHandler,
-		StructuredQuery: api.NewStructuredQueryHandler(a.chConnFor, a.cache, a.registryFor, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, queryTimeout, (*settings.Store).DefaultMaxRows),
+		StructuredQuery: structuredQueryHandler,
 
 		AuthMW:       authMW,
 		Tenants:      a.tenants,

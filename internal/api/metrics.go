@@ -147,8 +147,9 @@ func queryMetricsOn(meter metric.Meter) *queryMetrics {
 // classed as the response classes it (chFailureOf, under caps); reqCtx is the
 // request's own context. A call cut short because the client went away is
 // resultCanceled, not the unavailable its response would read as: nobody
-// reads that response, and ClickHouse was not the one that failed.
-func (m *queryMetrics) observe(reqCtx context.Context, operation string, d time.Duration, err error, caps queryCaps) {
+// reads that response, and ClickHouse was not the one that failed. It returns
+// the result recorded, for the call's span.
+func (m *queryMetrics) observe(reqCtx context.Context, operation string, d time.Duration, err error, caps queryCaps) string {
 	result := resultOK
 	switch {
 	case err == nil:
@@ -158,6 +159,7 @@ func (m *queryMetrics) observe(reqCtx context.Context, operation string, d time.
 		result = chResult(chFailureOf(err, http.StatusInternalServerError, caps).code)
 	}
 	m.record(operation, d, result)
+	return result
 }
 
 // record records one call of operation that took d, with result as given.

@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/google/uuid"
 )
@@ -21,6 +22,15 @@ func connOf(conn func(*settings.Store) driver.Conn, store *settings.Store) drive
 		return nil
 	}
 	return conn(store)
+}
+
+// targetOf is target's answer for store, the zero Target for an unwired
+// source.
+func targetOf(target func(*settings.Store) chconn.Target, store *settings.Store) chconn.Target {
+	if target == nil {
+		return chconn.Target{}
+	}
+	return target(store)
 }
 
 // timeoutOf is timeout's answer for store, zero for an unwired source.

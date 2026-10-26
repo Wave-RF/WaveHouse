@@ -179,9 +179,6 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	)
 	defer span.End()
 
-	// Add a standard log to prove we are inside the span logic
-	slog.DebugContext(ctx, "debug: span started for ingest", "table", table)
-
 	r = r.WithContext(ctx)
 
 	// TODO: what should the order of these be to maximize speed + limit risk of data leakage or DoS/resource exhaustion?
@@ -783,6 +780,7 @@ func (h *IngestHandler) prepareRecord(
 // duplicate records are skipped. It sets each record's outcome and returns an
 // abort when the request must stop; what the window published before a failure
 // is committed first, so the retry reports it as duplicates (see publishFailed).
+// The window's publishes are one mq.publish span.
 func (h *IngestHandler) ingestWindow(ctx context.Context, store *settings.Store, table, scope string, recs []pendingRecord) *requestAbort {
 	var dd dedupe.Deduplicator
 	var keyed []int
@@ -799,6 +797,18 @@ func (h *IngestHandler) ingestWindow(ctx context.Context, store *settings.Store,
 	}
 
 	topic := mq.Topic{Tenant: store.Tenant(), Table: table, Scope: scope}
+	publishing := 0
+	for i := range recs {
+		if recs[i].reject == nil && !recs[i].duplicate {
+			publishing++
+		}
+	}
+	// One span for the window's publishes, not one per row.
+	pubCtx, endPublish := ctx, func(int, error) {}
+	if publishing > 0 {
+		pubCtx, endPublish = mq.StartPublishBatch(ctx)
+	}
+	sent := 0
 	for i := range recs {
 		rec := &recs[i]
 		if rec.reject != nil || rec.duplicate {
@@ -810,10 +820,13 @@ func (h *IngestHandler) ingestWindow(ctx context.Context, store *settings.Store,
 			// queue drops its copy if the first one landed.
 			opts = append(opts, mq.WithIdempotencyKey(dedupe.IdempotencyKey(store.Tenant(), rec.claim.Key)))
 		}
-		if err := h.Publisher.Publish(ctx, topic, rec.payload, opts...); err != nil {
+		sent++
+		if err := h.Publisher.Publish(pubCtx, topic, rec.payload, opts...); err != nil {
+			endPublish(sent, err)
 			return h.publishFailed(ctx, dd, topic, recs, i, err)
 		}
 	}
+	endPublish(sent, nil)
 	commitClaims(ctx, dd, recs, table)
 	return nil
 }

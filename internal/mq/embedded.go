@@ -594,22 +594,27 @@ func (e *EmbeddedNATS) reopen(ctx context.Context, id tenant.ID) error {
 // could not join it — and a queue at its byte budget (DiscardNew) are
 // reported as ErrQueueFull: either way the tenant's queue takes nothing now,
 // and a retry is the caller's answer.
-func (e *EmbeddedNATS) Publish(ctx context.Context, topic Topic, data []byte, opts ...PublishOpt) error {
+func (e *EmbeddedNATS) Publish(ctx context.Context, topic Topic, data []byte, opts ...PublishOpt) (err error) {
 	subj, err := subject(ingestPrefix, topic)
 	if err != nil {
 		return err
 	}
+	spanCtx, end := beginPublish(ctx, publishKindIngest)
+	attempts := 0
+	defer func() { end(attempts, err) }()
 	if _, ok := e.opened.Load(topic.Tenant); !ok {
-		if openErr := e.reopenPaced(ctx, topic.Tenant); openErr != nil {
+		if openErr := e.reopenPaced(spanCtx, topic.Tenant); openErr != nil {
 			return fmt.Errorf("%w: %w", ErrQueueFull, openErr)
 		}
 	}
-	err = e.publish(ctx, subj, data, opts)
+	attempts++
+	err = e.publish(spanCtx, subj, data, opts)
 	if errors.Is(err, jetstream.ErrNoStreamResponse) {
-		if openErr := e.reopenPaced(ctx, topic.Tenant); openErr != nil {
+		if openErr := e.reopenPaced(spanCtx, topic.Tenant); openErr != nil {
 			return fmt.Errorf("%w: %w", ErrQueueFull, openErr)
 		}
-		err = e.publish(ctx, subj, data, opts)
+		attempts++
+		err = e.publish(spanCtx, subj, data, opts)
 	}
 	if err != nil && strings.Contains(err.Error(), "maximum bytes exceeded") {
 		// The server reports a full store as a generic store failure whose
@@ -650,13 +655,17 @@ func (e *EmbeddedNATS) reopenPaced(ctx context.Context, id tenant.ID) error {
 // refusing. A dead-letter stream found missing is opened again with its
 // tenant's queue, paced as Publish's is (reopenPaced); a park refused leaves
 // its row unacked, to be redelivered.
-func (e *EmbeddedNATS) DeadLetter(ctx context.Context, msg *Message, opts ...PublishOpt) error {
+func (e *EmbeddedNATS) DeadLetter(ctx context.Context, msg *Message, opts ...PublishOpt) (err error) {
+	spanCtx, end := beginPublish(ctx, publishKindDLQ)
+	attempts := 1
+	defer func() { end(attempts, err) }()
 	subj := dlqPrefix + msg.topicKey
-	err := e.publish(ctx, subj, msg.Data, opts)
+	err = e.publish(spanCtx, subj, msg.Data, opts)
 	if errors.Is(err, jetstream.ErrNoStreamResponse) {
 		if id, ok := keyTenant(msg.topicKey); ok {
-			if err = e.reopenPaced(ctx, id); err == nil {
-				err = e.publish(ctx, subj, msg.Data, opts)
+			if err = e.reopenPaced(spanCtx, id); err == nil {
+				attempts++
+				err = e.publish(spanCtx, subj, msg.Data, opts)
 			}
 		}
 	}

@@ -12,9 +12,12 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
+	"go.opentelemetry.io/otel"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -22,7 +25,10 @@ import (
 type StructuredQueryHandler struct {
 	// CHConn yields the request tenant's connection (chconn.Pools.For in
 	// production); nil is a tenant on no pool, a 503.
-	CHConn       func(*settings.Store) driver.Conn
+	CHConn func(*settings.Store) driver.Conn
+	// CHTarget names the tenant's ClickHouse on the clickhouse.query span
+	// (chconn.Pools.Target in production); nil leaves the server off it.
+	CHTarget     func(*settings.Store) chconn.Target
 	Cache        cache.Cache
 	Registry     RegistrySource
 	PolicySource PolicySource
@@ -253,11 +259,14 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 			queryCtx = clickhouse.Context(queryCtx, clickhouse.WithSettings(settings))
 		}
 
+		spanCtx, span := otel.Tracer(chTracerName).Start(queryCtx, chQuerySpanName,
+			chQuerySpanOptions(targetOf(h.CHTarget, store), false, opStructuredQuery, result.SQL, semconv.DBSQLTable(table))...)
 		start := time.Now()
 
-		rows, err := executeCHQuery(queryCtx, conn, result.SQL, result.Params)
+		rows, err := executeCHQuery(spanCtx, conn, result.SQL, result.Params)
 		queryDuration := time.Since(start)
-		h.metrics.observe(r.Context(), opStructuredQuery, queryDuration, err, caps)
+		setCHQueryResult(span, h.metrics.observe(r.Context(), opStructuredQuery, queryDuration, err, caps))
+		span.End()
 		if err != nil {
 			// TODO: depending on the error, we may actually want to cache it
 			return nil, err
