@@ -5,11 +5,16 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/contrib/bridges/otelslog"
+	"go.opentelemetry.io/otel/attribute"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -276,4 +281,52 @@ func exportedLevels(out string) []string {
 		}
 	}
 	return levels
+}
+
+// recordingProcessor keeps every log record the SDK emits, so a test can read
+// the attributes as they would reach the OTLP exporter.
+type recordingProcessor struct {
+	mu      sync.Mutex
+	records []sdklog.Record
+}
+
+func (p *recordingProcessor) OnEmit(_ context.Context, r *sdklog.Record) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.records = append(p.records, r.Clone())
+	return nil
+}
+
+func (p *recordingProcessor) Enabled(context.Context, sdklog.EnabledParameters) bool { return true }
+func (p *recordingProcessor) Shutdown(context.Context) error                         { return nil }
+func (p *recordingProcessor) ForceFlush(context.Context) error                       { return nil }
+
+// A tenant id logged with slog.Any reaches OTLP as a plain string attribute,
+// not the bridge's "unhandled: (tenant.ID) <id>" fallback (#887).
+func TestOTLPBridge_TenantIDIsAPlainString(t *testing.T) {
+	t.Parallel()
+
+	proc := &recordingProcessor{}
+	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
+	t.Cleanup(func() { _ = lp.Shutdown(context.Background()) })
+
+	log := slog.New(otelslog.NewHandler("test", otelslog.WithLoggerProvider(lp)))
+	log.Info("schema registry refreshed", slog.Any("tenant", tenant.ID("acme")))
+	log.With("tenant", tenant.ID("globex")).Info("with attrs")
+
+	proc.mu.Lock()
+	defer proc.mu.Unlock()
+	require.Len(t, proc.records, 2)
+	for i, want := range []string{"acme", "globex"} {
+		var got attribute.Value
+		proc.records[i].WalkAttributes(func(kv attribute.KeyValue) bool {
+			if kv.Key == "tenant" {
+				got = kv.Value
+				return false
+			}
+			return true
+		})
+		assert.Equal(t, attribute.STRING, got.Type(), "record %d", i)
+		assert.Equal(t, want, got.AsString(), "record %d", i)
+	}
 }
