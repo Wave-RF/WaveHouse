@@ -377,9 +377,9 @@ func (a *App) readConns(s *settings.Store) int {
 // ingest judges every record with and the stream hub evaluates row filters
 // with. Both are API work, so only an API process opens it — an ingest-only
 // or sweeper-only process boots with no artifact installed, the worker
-// needing only the static typelayer.InsertSettings. With autofetch off, no
-// artifact installed for this host refuses boot: an API process could judge
-// nothing. Opening reads the fetch layer's install records only; a ClickHouse
+// needing only the static typelayer.InsertSettings. With autofetch off, a host
+// with no build for its platform made for this chtypes SDK refuses boot: an
+// API process could judge nothing. Opening reads the fetch layer's install records only; a ClickHouse
 // line's library is opened (and, with autofetch, fetched) by the first tenant
 // bound to it, from that tenant's discovery (wireDiscovery), and a tenant or
 // table this process cannot serve is unavailable on its own
