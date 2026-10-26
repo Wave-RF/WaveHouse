@@ -154,12 +154,13 @@ type tenantSet struct {
 // line holding no build for this SDK takes about 12 s to refuse offline
 // (measured, darwin-arm64), so the distinct lines are checked at once and the
 // first that resolves answers: a boot with a usable line waits for that line,
-// one being refused for the slowest miss.
-func opensAny(opts chtypes.FetchOptions, versions []string) bool {
+// one being refused for the slowest miss. It returns nil when a line
+// resolves, else each line's error, chtypes' own.
+func opensAny(opts chtypes.FetchOptions, versions []string) []error {
 	opts.Offline = true
 	offline, err := chtypes.NewRegistry(chtypes.WithAutoFetch(false), chtypes.WithFetchOptions(opts))
 	if err != nil {
-		return false
+		return []error{err}
 	}
 	lines := make([]string, 0, len(versions))
 	for _, v := range versions {
@@ -169,19 +170,41 @@ func opensAny(opts chtypes.FetchOptions, versions []string) bool {
 	lines = slices.Compact(lines)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resolved := make(chan bool, len(lines))
+	resolved := make(chan error, len(lines))
 	for _, line := range lines {
 		go func() {
 			_, err := offline.Fetch(ctx, line)
-			resolved <- err == nil
+			resolved <- err
 		}()
 	}
+	errs := make([]error, 0, len(lines))
 	for range lines {
-		if <-resolved {
-			return true
+		err := <-resolved
+		if err == nil {
+			return nil
 		}
+		errs = append(errs, err)
 	}
-	return false
+	return errs
+}
+
+// bootRefusal is NewEngine's error when autofetch is off and no installed
+// build opens: versions are the installed ones for platform, errs opensAny's.
+// "Builds for another SDK" is said only when chtypes answered every line as
+// missing for this SDK; any other answer (a revoked build, a cache it cannot
+// use) is passed on in chtypes' words.
+func bootRefusal(platform string, versions []string, errs []error, searched []string) error {
+	looked := strings.Join(searched, ", ")
+	if len(versions) == 0 {
+		return fmt.Errorf("chtypes: no artifact installed for %s, and autofetch is off (looked in: %s)", platform, looked)
+	}
+	installed := strings.Join(slices.Compact(slices.Sorted(slices.Values(versions))), ", ")
+	if !slices.ContainsFunc(errs, func(err error) bool { return !errors.Is(err, chtypes.ErrArtifactMissing) }) {
+		return fmt.Errorf("chtypes: no artifact installed for %s that this chtypes SDK opens (the installed %s are builds for another SDK), and autofetch is off (looked in: %s)",
+			platform, installed, looked)
+	}
+	return fmt.Errorf("chtypes: no installed artifact for %s opens (installed: %s), and autofetch is off (looked in: %s): %w",
+		platform, installed, looked, errors.Join(errs...))
 }
 
 // NewEngine opens the registry in chtypes' strict cache mode, which reads the
@@ -195,9 +218,9 @@ func opensAny(opts chtypes.FetchOptions, versions []string) bool {
 // named CacheDir does not exist (strict mode reads a missing directory as an
 // empty cache, which is right for the default path but a typo here), when a
 // base is not a URL, or, with AutoFetch off, when no layout searched holds a
-// build made for this SDK for this host (opensAny), naming the layouts it
-// looked in. With AutoFetch on,
-// a cache this process cannot write is a warning: a line it holds still binds,
+// build made for this SDK for this host (opensAny, bootRefusal), naming the
+// layouts it looked in. With AutoFetch on, a cache this process cannot write
+// is a warning: a line it holds still binds,
 // and a fetch into it fails at that line's first Bind, as that tenant's
 // Unavailable (chtypes reports a failed write under the cache as
 // CHTYPES_CACHE_UNUSABLE, reason unwritable, in every mode). Anything an
@@ -238,13 +261,13 @@ func NewEngine(cfg Config) (*Engine, error) {
 			lines = append(lines, r.Version)
 		}
 	}
-	if !cfg.AutoFetch && !opensAny(fetchOpts, lines) {
-		if len(lines) > 0 {
-			return nil, fmt.Errorf("chtypes: no artifact installed for %s that this chtypes SDK opens (the installed %s are builds for another SDK), and autofetch is off (looked in: %s)",
-				platform, strings.Join(slices.Compact(slices.Sorted(slices.Values(lines))), ", "), strings.Join(searched, ", "))
+	if !cfg.AutoFetch {
+		if len(lines) == 0 {
+			return nil, bootRefusal(platform, nil, nil, searched)
 		}
-		return nil, fmt.Errorf("chtypes: no artifact installed for %s, and autofetch is off (looked in: %s)",
-			platform, strings.Join(searched, ", "))
+		if errs := opensAny(fetchOpts, lines); errs != nil {
+			return nil, bootRefusal(platform, lines, errs, searched)
+		}
 	}
 	if cfg.AutoFetch {
 		if err := probeWritable(root); err != nil {

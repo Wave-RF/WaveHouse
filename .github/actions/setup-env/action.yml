@@ -297,14 +297,14 @@ runs:
         echo "GOTOOLCHAIN=$GOTOOLCHAIN" >> "$GITHUB_ENV"
         GOTOOLCHAIN="$GOTOOLCHAIN" go version
 
-    # chtypes artifact cache. There is no lock: the key is
-    # the test ClickHouse line (from internal/chversion) plus the digest of
-    # that line's newest build for this platform, from `chtypes resolve` (the
-    # SDK's own channel, verified, installs nothing). A new
-    # upstream build is a new key, which `main` saves in its own step right
-    # after a fetch that succeeded; the restore-keys bring back the previous
-    # build, the fetch below installs the new one on top, and --prune drops the
-    # old before the save, so an entry holds one build. runner.arch is in the key: an arm64 runner must never
+    # chtypes artifact cache. There is no lock: the key is the test ClickHouse
+    # line (from internal/chversion) plus the digest of that line's newest build
+    # for this platform, from `chtypes resolve` (the SDK's own channel,
+    # verified, installs nothing). A new upstream build is a new key, which
+    # `main` saves in its own step right after a fetch that succeeded; the
+    # restore-keys bring back the previous build, the fetch below installs the
+    # new one on top, and --prune drops the old before the save, so an entry
+    # holds one build. runner.arch is in the key: an arm64 runner must never
     # restore amd64 .so files. The path is `chtypes where`, so the SDK's layout
     # version is not named here; the key's `v2` is this cache's shape (v1 was
     # keyed on the retired lock).

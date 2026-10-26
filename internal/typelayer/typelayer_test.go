@@ -1,6 +1,7 @@
 package typelayer
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -584,6 +585,27 @@ func TestNewEngine_ExplicitMissingDirectoryFailsAtConstruction(t *testing.T) {
 	assert.Contains(t, err.Error(), "nosuch")
 	assert.Contains(t, err.Error(), "does not exist")
 	assert.NotErrorIs(t, err, chtypes.ErrCacheUnusable)
+}
+
+// TestBootRefusal: with autofetch off and no installed build opening, boot
+// names the case. "Builds for another SDK" only when chtypes answered every
+// line as missing for this SDK; any other answer, such as a revoked build,
+// is carried in chtypes' own words rather than blamed on another SDK.
+func TestBootRefusal(t *testing.T) {
+	looked := []string{"/c/v2-dev"}
+	missing := fmt.Errorf("chtypes: no installed artifact for 26.3: %w", chtypes.ErrArtifactMissing)
+	revoked := errors.New("chtypes: build revoked [CHTYPES_ARTIFACT_REVOKED]")
+
+	err := bootRefusal("linux-arm64", nil, nil, looked)
+	assert.EqualError(t, err, "chtypes: no artifact installed for linux-arm64, and autofetch is off (looked in: /c/v2-dev)")
+
+	err = bootRefusal("linux-arm64", []string{"26.3.38.2", "26.3.38.2"}, []error{missing}, looked)
+	assert.Contains(t, err.Error(), "that this chtypes SDK opens (the installed 26.3.38.2 are builds for another SDK)")
+
+	err = bootRefusal("linux-arm64", []string{"26.3.38.2", "26.8.15.10"}, []error{missing, revoked}, looked)
+	assert.NotContains(t, err.Error(), "another SDK")
+	assert.Contains(t, err.Error(), "CHTYPES_ARTIFACT_REVOKED")
+	assert.ErrorIs(t, err, revoked)
 }
 
 // TestNewEngine_NoArtifactFailsAtConstruction: with autofetch off, an API
