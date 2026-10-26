@@ -71,7 +71,7 @@ type Config struct {
 	CacheDir string
 	// AutoFetch fetches a line no layout holds, at its first Bind, into the
 	// cache. Off, that line is its tenants' Unavailable, and NewEngine refuses
-	// a host with no artifact at all.
+	// a host with no build made for this SDK (opensAny).
 	AutoFetch bool
 	// Bases are the registries and mirrors a fetch tries, in order; nil means
 	// $CHTYPES_ARTIFACTS_URL, else chtypes' own registry. The 2.0.0-dev SDK
@@ -145,6 +145,45 @@ type tenantSet struct {
 	tables map[string]*Table
 }
 
+// opensAny reports whether any installed version's line resolves, from the
+// cache alone, to a build made for this SDK. Installed lists every build there,
+// another SDK's included; an offline Fetch answers with the SDK's own build
+// filter and no network (measured with the chtypes maintainers: another
+// fingerprint's build is ARTIFACT_MISSING). It checks a record only, not that
+// the library loads: a truncated library still surfaces at its first Bind. A
+// line holding no build for this SDK takes about 12 s to refuse offline
+// (measured, darwin-arm64), so the distinct lines are checked at once and the
+// first that resolves answers: a boot with a usable line waits for that line,
+// one being refused for the slowest miss.
+func opensAny(opts chtypes.FetchOptions, versions []string) bool {
+	opts.Offline = true
+	offline, err := chtypes.NewRegistry(chtypes.WithAutoFetch(false), chtypes.WithFetchOptions(opts))
+	if err != nil {
+		return false
+	}
+	lines := make([]string, 0, len(versions))
+	for _, v := range versions {
+		lines = append(lines, versionLine(v))
+	}
+	slices.Sort(lines)
+	lines = slices.Compact(lines)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resolved := make(chan bool, len(lines))
+	for _, line := range lines {
+		go func() {
+			_, err := offline.Fetch(ctx, line)
+			resolved <- err == nil
+		}()
+	}
+	for range lines {
+		if <-resolved {
+			return true
+		}
+	}
+	return false
+}
+
 // NewEngine opens the registry in chtypes' strict cache mode, which reads the
 // fetch layer's install records and opens no library. Strict mode makes every
 // fault of the cache or of an existing system layout (a directory or install
@@ -155,8 +194,9 @@ type tenantSet struct {
 // does not boot on a cache it cannot trust. It also fails when an explicitly
 // named CacheDir does not exist (strict mode reads a missing directory as an
 // empty cache, which is right for the default path but a typo here), when a
-// base is not a URL, or, with AutoFetch off, when no layout searched holds an
-// artifact for this host, naming the layouts it looked in. With AutoFetch on,
+// base is not a URL, or, with AutoFetch off, when no layout searched holds a
+// build made for this SDK for this host (opensAny), naming the layouts it
+// looked in. With AutoFetch on,
 // a cache this process cannot write is a warning: a line it holds still binds,
 // and a fetch into it fails at that line's first Bind, as that tenant's
 // Unavailable (chtypes reports a failed write under the cache as
@@ -198,7 +238,7 @@ func NewEngine(cfg Config) (*Engine, error) {
 			lines = append(lines, r.Version)
 		}
 	}
-	if len(lines) == 0 && !cfg.AutoFetch {
+	if !cfg.AutoFetch && !opensAny(fetchOpts, lines) {
 		return nil, fmt.Errorf("chtypes: no artifact installed for %s, and autofetch is off (looked in: %s)",
 			platform, strings.Join(searched, ", "))
 	}
