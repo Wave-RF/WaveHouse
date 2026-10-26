@@ -16,6 +16,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
+	"go.opentelemetry.io/otel"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"golang.org/x/sync/singleflight"
 )
@@ -258,12 +259,14 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 			queryCtx = clickhouse.Context(queryCtx, clickhouse.WithSettings(settings))
 		}
 
-		spanCtx, span := startCHQuerySpan(queryCtx, targetOf(h.CHTarget, store), false, opStructuredQuery, result.SQL, semconv.DBSQLTable(table))
+		spanCtx, span := otel.Tracer(chTracerName).Start(queryCtx, chQuerySpanName,
+			chQuerySpanOptions(targetOf(h.CHTarget, store), false, opStructuredQuery, result.SQL, semconv.DBSQLTable(table))...)
 		start := time.Now()
 
 		rows, err := executeCHQuery(spanCtx, conn, result.SQL, result.Params)
 		queryDuration := time.Since(start)
-		endCHQuerySpan(span, h.metrics.observe(r.Context(), opStructuredQuery, queryDuration, err, caps))
+		setCHQueryResult(span, h.metrics.observe(r.Context(), opStructuredQuery, queryDuration, err, caps))
+		span.End()
 		if err != nil {
 			// TODO: depending on the error, we may actually want to cache it
 			return nil, err

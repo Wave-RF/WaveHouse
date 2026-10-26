@@ -32,9 +32,10 @@ type publishBatch struct{ attempts atomic.Int64 }
 // batch stopped at, if any.
 func StartPublishBatch(ctx context.Context, messages int) (context.Context, func(err error)) {
 	batch := &publishBatch{}
-	spanCtx, span := startPublishSpan(ctx, publishKindIngest, semconv.MessagingBatchMessageCount(messages))
+	spanCtx, span := otel.Tracer(tracerName).Start(ctx, publishSpanName, publishSpanOptions(publishKindIngest, semconv.MessagingBatchMessageCount(messages))...)
 	return context.WithValue(spanCtx, publishBatchKey{}, batch), func(err error) {
-		endPublishSpan(ctx, span, int(batch.attempts.Load()), err)
+		setPublishResult(ctx, span, int(batch.attempts.Load()), err)
+		span.End()
 	}
 }
 
@@ -47,29 +48,37 @@ func beginPublish(ctx context.Context, kind string) (context.Context, func(attem
 	if batch, ok := ctx.Value(publishBatchKey{}).(*publishBatch); ok && kind == publishKindIngest {
 		return ctx, func(attempts int, _ error) { batch.attempts.Add(int64(attempts)) }
 	}
-	spanCtx, span := startPublishSpan(ctx, kind)
-	return spanCtx, func(attempts int, err error) { endPublishSpan(ctx, span, attempts, err) }
+	spanCtx, span := otel.Tracer(tracerName).Start(ctx, publishSpanName, publishSpanOptions(kind)...)
+	return spanCtx, func(attempts int, err error) {
+		setPublishResult(ctx, span, attempts, err)
+		span.End()
+	}
 }
 
-// startPublishSpan opens an mq.publish span of kind. The embedded broker is
-// NATS too.
-func startPublishSpan(ctx context.Context, kind string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+// The name and tracer of a publish's span, described by publishSpanOptions.
+const (
+	publishSpanName = "mq.publish"
+	tracerName      = "wavehouse-mq"
+)
+
+// publishSpanOptions describes an mq.publish span of kind. The embedded
+// broker is NATS too.
+func publishSpanOptions(kind string, attrs ...attribute.KeyValue) []trace.SpanStartOption {
 	attrs = append(attrs,
 		semconv.MessagingSystemKey.String("nats"),
 		semconv.MessagingOperationPublish,
 		attribute.String("kind", kind),
 	)
-	return otel.GetTracerProvider().Tracer("wavehouse-mq").Start(ctx, "mq.publish",
-		trace.WithSpanKind(trace.SpanKindProducer), trace.WithAttributes(attrs...))
+	return []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindProducer), trace.WithAttributes(attrs...)}
 }
 
-// endPublishSpan ends span with the attempts the publish made and its failure,
-// if any. One whose ctx was canceled, the caller gone, is not a failure.
-func endPublishSpan(ctx context.Context, span trace.Span, attempts int, err error) {
+// setPublishResult sets on span the attempts the publish made and its
+// failure, if any. One whose ctx was canceled, the caller gone, is not a
+// failure.
+func setPublishResult(ctx context.Context, span trace.Span, attempts int, err error) {
 	span.SetAttributes(attribute.Int("attempts", attempts))
 	if err != nil && ctx.Err() == nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 	}
-	span.End()
 }

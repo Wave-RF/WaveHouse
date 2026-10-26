@@ -31,9 +31,8 @@ import (
 )
 
 // recordCHSpans installs a span recorder as the global tracer provider until
-// the test ends, and returns it with a context holding the server span the
-// query spans must be children of. The caller must not run in parallel.
-func recordCHSpans(t *testing.T) (*tracetest.SpanRecorder, context.Context, trace.Span) {
+// the test ends. The caller must not run in parallel.
+func recordCHSpans(t *testing.T) *tracetest.SpanRecorder {
 	t.Helper()
 	rec := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
@@ -42,8 +41,7 @@ func recordCHSpans(t *testing.T) (*tracetest.SpanRecorder, context.Context, trac
 		otel.SetTracerProvider(tracenoop.NewTracerProvider())
 		_ = tp.Shutdown(context.Background())
 	})
-	ctx, server := tp.Tracer("test").Start(context.Background(), "server")
-	return rec, ctx, server
+	return rec
 }
 
 // chSpan is the one ended clickhouse.query span rec holds, checked to be a
@@ -62,14 +60,14 @@ func chSpan(t *testing.T, rec *tracetest.SpanRecorder, server trace.Span, sql st
 	assert.Equal(t, server.SpanContext().SpanID(), s.Parent().SpanID(), "a child of the server span")
 	for _, kv := range s.Attributes() {
 		assert.NotEqual(t, "db.statement", string(kv.Key))
-		assert.NotContains(t, kv.Value.Emit(), "hunter2", "%s carries a parameter", kv.Key)
+		assert.NotContains(t, kv.Value.String(), "hunter2", "%s carries a parameter", kv.Key)
 		if sql != "" {
-			assert.NotContains(t, kv.Value.Emit(), sql, "%s carries the statement", kv.Key)
+			assert.NotContains(t, kv.Value.String(), sql, "%s carries the statement", kv.Key)
 		}
 	}
 	for _, e := range s.Events() {
 		for _, kv := range e.Attributes {
-			assert.NotContains(t, kv.Value.Emit(), "hunter2", "event %s carries a parameter", e.Name)
+			assert.NotContains(t, kv.Value.String(), "hunter2", "event %s carries a parameter", e.Name)
 		}
 	}
 	return s
@@ -79,7 +77,9 @@ func chSpan(t *testing.T, rec *tracetest.SpanRecorder, server trace.Span, sql st
 // failed and named by its result alone when ClickHouse refuses it: the
 // exception's message, which can quote the statement, stays off the span.
 func TestStructuredQuery_CHSpan(t *testing.T) {
-	rec, _, server := recordCHSpans(t)
+	rec := recordCHSpans(t)
+	_, server := otel.Tracer("test").Start(context.Background(), "server")
+	defer server.End()
 	h := newCapturingHandler(t, &failingConn{err: chException(62, "DB::Exception", "Syntax error near 'hunter2'")},
 		policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
 	h.CHTarget = staticTarget("http://ch.internal:8123", "default", "secret", "events")
@@ -107,7 +107,9 @@ func TestStructuredQuery_CHSpan(t *testing.T) {
 // A pipe's call is a span naming the pipe; a read that fails is failed, a
 // write that succeeds is not.
 func TestPipes_CHSpan(t *testing.T) {
-	rec, _, server := recordCHSpans(t)
+	rec := recordCHSpans(t)
+	_, server := otel.Tracer("test").Start(context.Background(), "server")
+	defer server.End()
 
 	store := staticPipes(&pipes.NamedQuery{Name: "p", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}})
 	p := NewPipesHandler(store, staticPolicy(&policy.Policy{}), fixedConn(&failingConn{err: chException(159, "DB::Exception", "Timeout exceeded")}), nil,
@@ -138,7 +140,9 @@ func TestPipes_CHSpan(t *testing.T) {
 // The raw-SQL proxy's call is a span with the server's address and port,
 // failed when ClickHouse refuses the statement or its answer is over the cap.
 func TestOpsQuery_CHSpan(t *testing.T) {
-	rec, ctx, server := recordCHSpans(t)
+	rec := recordCHSpans(t)
+	ctx, server := otel.Tracer("test").Start(context.Background(), "server")
+	defer server.End()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sql, _ := io.ReadAll(r.Body)
 		switch {
@@ -161,44 +165,51 @@ func TestOpsQuery_CHSpan(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, tc := range []struct {
-		sql, result string
-		code        codes.Code
+		name, sql, result string
+		code              codes.Code
 	}{
-		{"SELECT 'hunter2'", resultOK, codes.Unset},
-		{"SELEC 'hunter2'", chResult(codeCHRejected), codes.Error},
-		{"SELECT big", chResult(codeCHResponseTooLarge), codes.Error},
+		{"select", "SELECT 'hunter2'", resultOK, codes.Unset},
+		{"syntax error", "SELEC 'hunter2'", chResult(codeCHRejected), codes.Error},
+		{"response too large", "SELECT big", chResult(codeCHResponseTooLarge), codes.Error},
 	} {
-		rec.Reset()
-		body, err := json.Marshal(queryRequest{SQL: tc.sql})
-		require.NoError(t, err)
-		r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/ops/query", bytes.NewReader(body))
-		h.Handle(httptest.NewRecorder(), r)
+		t.Run(tc.name, func(t *testing.T) {
+			rec.Reset()
+			body, err := json.Marshal(queryRequest{SQL: tc.sql})
+			require.NoError(t, err)
+			r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/ops/query", bytes.NewReader(body))
+			h.Handle(httptest.NewRecorder(), r)
 
-		s := chSpan(t, rec, server, tc.sql)
-		attrs := s.Attributes()
-		assert.Contains(t, attrs, attribute.String("operation", opOpsQuery), tc.sql)
-		assert.Contains(t, attrs, attribute.String("db.name", "default"), tc.sql)
-		assert.Contains(t, attrs, attribute.String("server.address", u.Hostname()), tc.sql)
-		assert.Contains(t, attrs, attribute.Int("server.port", port), tc.sql)
-		assert.Contains(t, attrs, attribute.String("result", tc.result), tc.sql)
-		assert.Equal(t, tc.code, s.Status().Code, tc.sql)
+			s := chSpan(t, rec, server, tc.sql)
+			attrs := s.Attributes()
+			assert.Contains(t, attrs, attribute.String("operation", opOpsQuery))
+			assert.Contains(t, attrs, attribute.String("db.name", "default"))
+			assert.Contains(t, attrs, attribute.String("server.address", u.Hostname()))
+			assert.Contains(t, attrs, attribute.Int("server.port", port))
+			assert.Contains(t, attrs, attribute.String("result", tc.result))
+			assert.Equal(t, tc.code, s.Status().Code)
+		})
 	}
 }
 
 func TestSQLVerb(t *testing.T) {
 	t.Parallel()
-	for sql, want := range map[string]string{
-		"SELECT 1":                                           "SELECT",
-		"  select 1":                                         "SELECT",
-		"-- note\n/* more */ insert INTO t":                  "INSERT",
-		"EXECUTE AS bob SELECT 1":                            "SELECT",
-		"WITH a AS (SELECT 1) SELECT * FROM a":               "SELECT",
-		"WITH a AS (SELECT 1) INSERT INTO t SELECT * FROM a": "INSERT",
-		"ALTER TABLE t DELETE WHERE 1":                       "ALTER",
-		"":                                                   "OTHER",
-		"hunter2":                                            "OTHER",
-		"(SELECT 1)":                                         "OTHER",
+	for _, tc := range []struct {
+		name, sql, want string
+	}{
+		{"plain select", "SELECT 1", "SELECT"},
+		{"leading whitespace", "  select 1", "SELECT"},
+		{"comments before insert", "-- note\n/* more */ insert INTO t", "INSERT"},
+		{"execute as prefix", "EXECUTE AS bob SELECT 1", "SELECT"},
+		{"cte select", "WITH a AS (SELECT 1) SELECT * FROM a", "SELECT"},
+		{"cte insert", "WITH a AS (SELECT 1) INSERT INTO t SELECT * FROM a", "INSERT"},
+		{"alter", "ALTER TABLE t DELETE WHERE 1", "ALTER"},
+		{"empty", "", "OTHER"},
+		{"not a keyword", "hunter2", "OTHER"},
+		{"parenthesized", "(SELECT 1)", "OTHER"},
 	} {
-		assert.Equal(t, want, sqlVerb(sql), "%q", sql)
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, sqlVerb(tc.sql))
+		})
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/pkg/pipes"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
 	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/singleflight"
 )
@@ -246,11 +247,13 @@ func (h *PipesHandler) executeWrite(w http.ResponseWriter, r *http.Request, stor
 func (h *PipesHandler) run(ctx context.Context, store *settings.Store, conn driver.Conn, operation, name, sql string, params []any) ([]byte, time.Duration, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, timeoutOf(h.queryTimeout, store))
 	defer cancel()
-	queryCtx, span := startCHQuerySpan(queryCtx, targetOf(h.CHTarget, store), false, operation, sql, attribute.String("pipe", name))
+	queryCtx, span := otel.Tracer(chTracerName).Start(queryCtx, chQuerySpanName,
+		chQuerySpanOptions(targetOf(h.CHTarget, store), false, operation, sql, attribute.String("pipe", name))...)
 	start := time.Now()
 	rows, err := executeCHQuery(queryCtx, conn, sql, params)
 	queryDuration := time.Since(start)
-	endCHQuerySpan(span, h.metrics.observe(ctx, operation, queryDuration, err, queryCaps{}))
+	setCHQueryResult(span, h.metrics.observe(ctx, operation, queryDuration, err, queryCaps{}))
+	span.End()
 	if err != nil {
 		return nil, 0, err
 	}

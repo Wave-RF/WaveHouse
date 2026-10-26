@@ -107,17 +107,17 @@ func TestEmbeddedNATS_PublishSpan(t *testing.T) {
 
 // A failed publish sets error status and records the error; one whose caller
 // went away is not a failure.
-func TestEndPublishSpan_Status(t *testing.T) {
+func TestBeginPublish_Status(t *testing.T) {
 	rec := recordSpans(t)
 	boom := errors.New("boom")
 
-	_, span := startPublishSpan(t.Context(), publishKindIngest)
-	endPublishSpan(t.Context(), span, 2, boom)
+	_, end := beginPublish(t.Context(), publishKindIngest)
+	end(2, boom)
 
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, span = startPublishSpan(canceled, publishKindIngest)
-	endPublishSpan(canceled, span, 1, context.Canceled)
+	_, end = beginPublish(canceled, publishKindIngest)
+	end(1, context.Canceled)
 
 	spans := rec.Ended()
 	require.Len(t, spans, 2)

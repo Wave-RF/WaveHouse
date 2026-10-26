@@ -15,6 +15,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"go.opentelemetry.io/otel"
 )
 
 // QueryHandler handles POST /v1/ops/query.
@@ -269,11 +270,12 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// The call is timed, and spanned, from the request to the end of the
 	// response body: ClickHouse streams the result, so the body is most of
 	// the query.
-	_, span := startCHQuerySpan(ctx, target, true, opOpsQuery, req.SQL)
+	_, span := otel.Tracer(chTracerName).Start(ctx, chQuerySpanName, chQuerySpanOptions(target, true, opOpsQuery, req.SQL)...)
 	start := time.Now()
 	resp, err := h.clients.For(target).Do(httpReq)
 	if err != nil {
-		endCHQuerySpan(span, h.metrics.observe(r.Context(), opOpsQuery, time.Since(start), err, queryCaps{}))
+		setCHQueryResult(span, h.metrics.observe(r.Context(), opOpsQuery, time.Since(start), err, queryCaps{}))
+		span.End()
 		writeCHError(w, r, err, "clickhouse request failed: "+err.Error(), http.StatusBadGateway, queryCaps{})
 		return
 	}
@@ -288,13 +290,15 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, respCap+1))
 	elapsed := time.Since(start)
 	if err != nil {
-		endCHQuerySpan(span, h.metrics.observe(r.Context(), opOpsQuery, elapsed, err, queryCaps{}))
+		setCHQueryResult(span, h.metrics.observe(r.Context(), opOpsQuery, elapsed, err, queryCaps{}))
+		span.End()
 		writeCHError(w, r, err, "read clickhouse response: "+err.Error(), http.StatusBadGateway, queryCaps{})
 		return
 	}
 	if int64(len(body)) > respCap {
 		h.metrics.record(opOpsQuery, elapsed, chResult(codeCHResponseTooLarge))
-		endCHQuerySpan(span, chResult(codeCHResponseTooLarge))
+		setCHQueryResult(span, chResult(codeCHResponseTooLarge))
+		span.End()
 		// The same query overflows again, so not retryable.
 		retryable := false
 		writeJSONErrorBody(w, http.StatusBadGateway, errorBody{
@@ -311,7 +315,8 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		// exception code it sends with it does (#403). The message is
 		// ClickHouse's own text, verbatim.
 		chErr := chconn.NewHTTPError(&http.Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: io.NopCloser(bytes.NewReader(body))})
-		endCHQuerySpan(span, h.metrics.observe(r.Context(), opOpsQuery, elapsed, chErr, queryCaps{}))
+		setCHQueryResult(span, h.metrics.observe(r.Context(), opOpsQuery, elapsed, chErr, queryCaps{}))
+		span.End()
 		msg := strings.TrimSpace(string(body))
 		if msg == "" {
 			msg = fmt.Sprintf("clickhouse returned status %d", resp.StatusCode)
@@ -320,7 +325,8 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.metrics.record(opOpsQuery, elapsed, resultOK)
-	endCHQuerySpan(span, resultOK)
+	setCHQueryResult(span, resultOK)
+	span.End()
 
 	// ClickHouse returns an empty body for mutations (TRUNCATE/INSERT/
 	// DELETE/etc. with no result set). Marshal those to `[]` so clients
