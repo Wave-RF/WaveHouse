@@ -102,6 +102,10 @@ func TestIntegerType(t *testing.T) {
 		{"LowCardinality(UInt32)", "UInt32", true},
 		{"LowCardinality(Nullable(Int64))", "Int64", true},
 		{"Nullable(Int256)", "Int256", true},
+		// A claim of 2^64+5 against SimpleAggregateFunction(any, UInt64)
+		// matched org 5 before the strict cast saw through the wrapper.
+		{"SimpleAggregateFunction(any, UInt64)", "UInt64", true},
+		{"SimpleAggregateFunction(anyLast, Nullable(Int32))", "Int32", true},
 
 		{"String", "", false},
 		{"LowCardinality(String)", "", false},
@@ -147,5 +151,23 @@ func TestStrictInt(t *testing.T) {
 	want := "if(toString(accurateCastOrNull({p3:String}, 'UInt64')) = {p3:String}, accurateCastOrNull({p3:String}, 'UInt64'), NULL)"
 	if got != want {
 		t.Errorf("StrictInt = %q\nwant        %q", got, want)
+	}
+}
+
+func TestBaseType(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct{ in, want string }{
+		{"UInt64", "UInt64"},
+		{"Nullable(UInt64)", "UInt64"},
+		{"LowCardinality(Nullable(String))", "String"},
+		{"SimpleAggregateFunction(any, UInt64)", "UInt64"},
+		{"SimpleAggregateFunction(max, DateTime64(3, 'UTC'))", "DateTime64(3, 'UTC')"},
+		{"SimpleAggregateFunction(sumMap, Map(String, UInt64))", "Map(String, UInt64)"},
+		{"Nullable(Tuple(a UInt8))", "Tuple(a UInt8)"},
+		{"SimpleAggregateFunction(any)", "SimpleAggregateFunction(any)"},
+	} {
+		if got := BaseType(c.in); got != c.want {
+			t.Errorf("BaseType(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

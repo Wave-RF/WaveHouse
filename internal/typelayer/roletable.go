@@ -9,6 +9,7 @@ import (
 
 	"github.com/wave-rf/chtypes/go/v2/chtypes"
 
+	"github.com/Wave-RF/WaveHouse/pkg/chsql"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
@@ -249,16 +250,8 @@ func jsonString(value string) string {
 	return b.String()
 }
 
-// boolType reports whether typ is Bool, through Nullable and LowCardinality.
+// boolType reports whether typ is Bool, through the wrappers chsql.BaseType
+// strips.
 func boolType(typ string) bool {
-	for {
-		inner, ok := strings.CutPrefix(typ, "Nullable(")
-		if !ok {
-			inner, ok = strings.CutPrefix(typ, "LowCardinality(")
-		}
-		if !ok {
-			return typ == "Bool"
-		}
-		typ = strings.TrimSuffix(inner, ")")
-	}
+	return chsql.BaseType(typ) == "Bool"
 }

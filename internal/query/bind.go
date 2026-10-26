@@ -35,6 +35,18 @@ type Param struct {
 type Table struct {
 	Name string
 	Data []byte
+	// Rows is the list's element count. ClickHouse counts an external
+	// table's rows as rows read, against max_rows_to_read.
+	Rows int
+}
+
+// TableRows is the rows the `in` lists add to what ClickHouse counts as read.
+func (out *Bound) TableRows() int64 {
+	var n int64
+	for _, t := range out.Tables {
+		n += int64(t.Rows)
+	}
+	return n
 }
 
 // The shape of every Table, which the SQL reads as `SELECT … v FROM <Name>`.
@@ -108,17 +120,7 @@ const (
 // leaves ClickHouse to refuse what it cannot compare rather than guess a
 // zone.
 func conversionFor(colType string) conversion {
-	t := colType
-	for {
-		inner, ok := unwrapType(t, "Nullable(")
-		if !ok {
-			inner, ok = unwrapType(t, "LowCardinality(")
-		}
-		if !ok {
-			break
-		}
-		t = inner
-	}
+	t := chsql.BaseType(colType)
 	switch {
 	case t == "Date":
 		return conversion{kind: parseDate}
@@ -176,13 +178,6 @@ func dateTimeConversion(t string) (conversion, bool) {
 		c.zone = z[1 : len(z)-1]
 	}
 	return c, true
-}
-
-func unwrapType(t, prefix string) (string, bool) {
-	if strings.HasPrefix(t, prefix) && strings.HasSuffix(t, ")") {
-		return t[len(prefix) : len(t)-1], true
-	}
-	return "", false
 }
 
 // scalar is v as Build binds it for this column: wrapped when ClickHouse must
@@ -304,7 +299,7 @@ func (out *Bound) bind(name string, v any) (string, error) {
 			return "", err
 		}
 		table := "_" + name
-		out.Tables = append(out.Tables, Table{Name: table, Data: data})
+		out.Tables = append(out.Tables, Table{Name: table, Data: data, Rows: len(val.Values)})
 		return "(SELECT " + val.Conv.element("v") + " FROM " + table + ")", nil
 	case chsql.IntParam:
 		out.Params = append(out.Params, Param{Name: name, Value: chsql.EscapeStringParam(val.Value)})

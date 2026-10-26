@@ -627,6 +627,23 @@ func TestStructuredQuery_FilterValuesKeepTheirDigits(t *testing.T) {
 	assert.Equal(t, []query.Table{{Name: "_p1", Data: append([]byte{16}, "9007199254740993"...)}}, ch.tables())
 }
 
+// TestStructuredQuery_InListRowsGoOnTopOfTheScanCap: an `in` list travels as
+// an external table, whose rows ClickHouse counts against max_rows_to_read, so
+// the role's cap on the table is raised by the list's length. Without it 1000
+// ids against a 3-row table under a cap of 10 were refused as limit_exceeded.
+func TestStructuredQuery_InListRowsGoOnTopOfTheScanCap(t *testing.T) {
+	t.Parallel()
+	ch := &fakeCH{}
+	h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}, MaxRowsToRead: 10}))
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/query?table=clicks",
+		strings.NewReader(`{"columns":["page"],"filters":[{"column":"page","op":"in","value":["/a","/b","/c"]},{"column":"user_id","op":"in","value":[1,2]}]}`))
+	r = r.WithContext(auth.WithClaims(auth.WithRole(r.Context(), "viewer"), jwt.MapClaims{}))
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(r))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "15", ch.setting("max_rows_to_read"))
+}
+
 // TestStructuredQuery_UnbindableFilterValueIs400: a filter value with no
 // honest binding — a JSON null, or a scalar too large for ClickHouse's HTTP
 // interface to take — is the caller's malformed query, a 400 before anything

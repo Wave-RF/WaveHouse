@@ -92,7 +92,7 @@ var intTypes = map[string]IntType{
 
 // IntegerType reports whether colType — a ClickHouse type as system.columns
 // and the chtypes library spell it — is an integer type, possibly wrapped in
-// Nullable(...) and/or LowCardinality(...), and returns the bare integer type.
+// the wrappers BaseType strips, and returns the bare integer type.
 //
 // It only picks which expression form a policy claim is compared through
 // (StrictInt for an integer column, a plain {p:String} for everything else);
@@ -102,19 +102,53 @@ var intTypes = map[string]IntType{
 // on 26.6.3.62 and the 26.6 chtypes artifact). A type it does not recognise
 // keeps the {p:String} form.
 func IntegerType(colType string) (IntType, bool) {
+	it, ok := intTypes[BaseType(colType)]
+	return it, ok
+}
+
+// BaseType is colType, as system.columns spells it, without the wrappers that
+// leave a value's type as it is: Nullable(T), LowCardinality(T) and
+// SimpleAggregateFunction(f, T), in any nesting. A SimpleAggregateFunction
+// column holds plain T values, so a claim compared against
+// SimpleAggregateFunction(any, UInt64) needs UInt64's strict cast as much as a
+// UInt64 column does. A spelling it cannot split is returned as it stands.
+func BaseType(colType string) string {
 	t := colType
 	for {
-		inner, ok := unwrap(t, "Nullable(")
-		if !ok {
-			inner, ok = unwrap(t, "LowCardinality(")
+		if inner, ok := unwrap(t, "Nullable("); ok {
+			t = inner
+			continue
 		}
-		if !ok {
-			break
+		if inner, ok := unwrap(t, "LowCardinality("); ok {
+			t = inner
+			continue
 		}
-		t = inner
+		if inner, ok := unwrap(t, "SimpleAggregateFunction("); ok {
+			if i := topLevelComma(inner); i >= 0 {
+				t = strings.TrimSpace(inner[i+1:])
+				continue
+			}
+		}
+		return t
 	}
-	it, ok := intTypes[t]
-	return it, ok
+}
+
+// topLevelComma is the index of s's first comma outside parentheses, or -1.
+func topLevelComma(s string) int {
+	depth := 0
+	for i, r := range s {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 func unwrap(t, prefix string) (string, bool) {

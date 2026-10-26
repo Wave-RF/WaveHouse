@@ -254,10 +254,16 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// the role's cap and query_timeout — so ClickHouse stops a query nobody
 	// is waiting for and says which limit stopped it; the role's other caps
 	// only when it set them.
+	// The role's scan cap is on the table: an `in` list's elements, which
+	// ClickHouse counts as rows read from its external table, go on top.
+	maxRowsToRead := perms.Select.MaxRowsToRead
+	if maxRowsToRead > 0 {
+		maxRowsToRead += bound.TableRows()
+	}
 	chSettings := chReadSettings(chQueryLimits{
 		ExecutionTime:  timeout,
 		MaxResultRows:  perms.Select.MaxRows,
-		MaxRowsToRead:  perms.Select.MaxRowsToRead,
+		MaxRowsToRead:  maxRowsToRead,
 		MaxMemoryBytes: perms.Select.MaxMemoryUsage.Bytes(),
 	})
 	conns := connsOf(h.MaxConns, store)

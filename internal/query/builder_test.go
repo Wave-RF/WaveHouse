@@ -147,7 +147,7 @@ func TestBuild_InFilter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, b.SQL, "`page` IN (SELECT v FROM _p0)")
 	assert.Empty(t, b.Params)
-	assert.Equal(t, []Table{{Name: "_p0", Data: rowBinary("/home", "/about")}}, b.Tables)
+	assert.Equal(t, []Table{{Name: "_p0", Data: rowBinary("/home", "/about"), Rows: 2}}, b.Tables)
 }
 
 // rowBinary is the RowBinary a Table carries for vals.
@@ -445,7 +445,7 @@ func TestBuild_PolicyPredicate_CallerFiltersKeepThePlainForm(t *testing.T) {
 	assert.Equal(t, "SELECT `page` FROM `clicks` WHERE (`count` = "+chsql.StrictInt("p0", "UInt64")+
 		") AND `count` > {p1:String} AND `count` IN (SELECT accurateCastOrNull(v, 'UInt64') FROM _p2) LIMIT 10000", b.SQL)
 	assert.Equal(t, []string{"5", "1"}, paramValues(b))
-	assert.Equal(t, []Table{{Name: "_p2", Data: rowBinary("1", "2")}}, b.Tables)
+	assert.Equal(t, []Table{{Name: "_p2", Data: rowBinary("1", "2"), Rows: 2}}, b.Tables)
 }
 
 // TestBuild_PolicyMaxRows pins the role's max_rows cap folded into Build's LIMIT
@@ -808,7 +808,9 @@ func TestBuild_TimestampValuesParseInClickHouse(t *testing.T) {
 			if tt.wantTable == nil {
 				assert.Empty(t, b.Tables)
 			} else {
-				assert.Equal(t, []Table{{Name: "_p0", Data: tt.wantTable}}, b.Tables)
+				require.Len(t, b.Tables, 1)
+				assert.Equal(t, "_p0", b.Tables[0].Name)
+				assert.Equal(t, tt.wantTable, b.Tables[0].Data)
 			}
 		})
 	}
@@ -1307,14 +1309,14 @@ func TestBind(t *testing.T) {
 			params:     []any{"x", listParam{Values: []any{"/a", "/b"}}, "y"},
 			wantSQL:    "SELECT * FROM `t` WHERE `a` = {p0:String} AND `page` IN (SELECT v FROM _p1) AND `b` = {p2:String} LIMIT 10",
 			wantParams: []Param{{"p0", "x"}, {"p2", "y"}},
-			wantTables: []Table{{Name: "_p1", Data: rowBinary("/a", "/b")}},
+			wantTables: []Table{{Name: "_p1", Data: rowBinary("/a", "/b"), Rows: 2}},
 		},
 		{
 			name:       "a list on a typed column is cast element by element",
 			sql:        "SELECT * FROM `t` WHERE `e` IN ? LIMIT 10",
 			params:     []any{listParam{Values: []any{"it's"}, Conv: conversionFor("Enum8('it\\'s' = 1)")}},
 			wantSQL:    "SELECT * FROM `t` WHERE `e` IN (SELECT accurateCastOrNull(v, 'Enum8(\\'it\\\\\\'s\\' = 1)') FROM _p0) LIMIT 10",
-			wantTables: []Table{{Name: "_p0", Data: rowBinary("it's")}},
+			wantTables: []Table{{Name: "_p0", Data: rowBinary("it's"), Rows: 1}},
 		},
 		{
 			name:       "a timestamp parses in ClickHouse",
