@@ -85,3 +85,43 @@ func TestStructuredQuery_ResourceCapsEnforcedServerSide(t *testing.T) {
 		})
 	}
 }
+
+// TestStructuredQuery_InListRowsGoOnTopOfTheScanCap: an `in` list travels as
+// an external table, whose rows ClickHouse counts against max_rows_to_read, so
+// the role's cap is raised by the list's length. Against the real server: 1000
+// ids on the primary key of a 25-row table pass a cap of 30 (refused as 158
+// before the list was added on top, and again if ClickHouse ever counted the
+// list twice), and the same list under a cap of 1 is still refused, so the
+// list's allowance cannot be spent on the table.
+func TestStructuredQuery_InListRowsGoOnTopOfTheScanCap(t *testing.T) {
+	e := env(t)
+	table := createTable(t, "id String, page String", "ORDER BY id")
+	seedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for i := 0; i < 25; i++ {
+		require.NoError(t, e.chConn.Exec(seedCtx,
+			fmt.Sprintf("INSERT INTO `%s` (id, page) VALUES (?, ?)", table), fmt.Sprintf("row-%04d", i), "/p"), "seed row")
+	}
+	withPolicy(t, policy.Policy{Tables: map[string]policy.TablePolicy{table: {
+		"list_room":  {Select: &policy.SelectPermissions{AllowColumns: []string{"*"}, MaxRowsToRead: 30}},
+		"list_tight": {Select: &policy.SelectPermissions{AllowColumns: []string{"*"}, MaxRowsToRead: 1}},
+	}}})
+
+	ids := make([]string, 1000)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("%q", fmt.Sprintf("row-%04d", i))
+	}
+	query := func(role string) queryError {
+		body := fmt.Sprintf(`{"select_all":true,"filters":[{"column":"id","op":"in","value":[%s]},{"column":"page","op":"neq","value":%q}]}`,
+			strings.Join(ids, ","), role)
+		return postJSONAs(t, e.baseURL+"/v1/query?table="+table, body, bearer(t, role, nil))
+	}
+
+	got := query("list_room")
+	require.Equal(t, 200, got.status, got.Error)
+	assert.Contains(t, got.raw, `"row-0024"`)
+
+	got = query("list_tight")
+	assertQueryError(t, got, 400, "clickhouse.limit_exceeded", false)
+	assert.Contains(t, strings.ToLower(got.Error), "code: 158")
+}
