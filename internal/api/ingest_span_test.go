@@ -104,8 +104,9 @@ func spansNamed(rec *tracetest.SpanRecorder, name string) []sdktrace.ReadOnlySpa
 }
 
 // A window's publishes are one mq.publish span under the handler's, sized by
-// the rows it publishes, so a request of many rows costs a span per window
-// rather than per row (#897); one whose publish fails is marked failed.
+// the rows handed to its publishes, so a request of many rows costs a span
+// per window rather than per row (#897); one whose publish fails is marked
+// failed and counts only the rows it reached.
 // Not parallel: the handler reads the global tracer provider.
 func TestIngest_PublishSpanPerWindow(t *testing.T) {
 	rec := tracetest.NewSpanRecorder()
@@ -138,4 +139,5 @@ func TestIngest_PublishSpanPerWindow(t *testing.T) {
 	pubs = spansNamed(rec, "mq.publish")
 	require.Len(t, pubs, 1)
 	assert.Equal(t, codes.Error, pubs[0].Status().Code)
+	assert.Contains(t, pubs[0].Attributes(), attribute.Int("messaging.batch.message_count", 1), "the window stopped at its first row")
 }

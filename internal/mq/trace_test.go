@@ -175,13 +175,13 @@ func TestStartPublishBatch(t *testing.T) {
 	}))
 
 	pctx, parent := otel.Tracer("test").Start(ctx, "request")
-	bctx, end := StartPublishBatch(pctx, 3)
+	bctx, end := StartPublishBatch(pctx)
 	topic := Topic{Tenant: tenant.Default, Table: "default.events"}
 	for _, data := range []string{"a", "b", "c"} {
 		require.NoError(t, e.Publish(bctx, topic, []byte(data)))
 	}
 	require.NoError(t, e.DeadLetter(bctx, NewMessage(bctx, topic, []byte("d"), time.Now(), nil, nil, nil)))
-	end(nil)
+	end(3, nil)
 	parent.End()
 
 	spans := publishSpans(rec)

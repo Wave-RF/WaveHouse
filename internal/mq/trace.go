@@ -26,14 +26,16 @@ type publishBatchKey struct{}
 type publishBatch struct{ attempts atomic.Int64 }
 
 // StartPublishBatch opens one mq.publish span for every Publish made under the
-// returned context, messages of them, so a request of many rows is one span
-// in its trace rather than one per row, which could crowd the request's own
-// spans out of the exporter's queue (#897). end ends it with the error the
-// batch stopped at, if any.
-func StartPublishBatch(ctx context.Context, messages int) (context.Context, func(err error)) {
+// returned context, so a request of many rows is one span in its trace rather
+// than one per row, which could crowd the request's own spans out of the
+// exporter's queue (#897). end ends it with the messages handed to Publish,
+// the one the batch stopped at included, and that error, if any: a batch cut
+// short by a failure counts only the messages it reached.
+func StartPublishBatch(ctx context.Context) (context.Context, func(messages int, err error)) {
 	batch := &publishBatch{}
-	spanCtx, span := otel.Tracer(tracerName).Start(ctx, publishSpanName, publishSpanOptions(publishKindIngest, semconv.MessagingBatchMessageCount(messages))...)
-	return context.WithValue(spanCtx, publishBatchKey{}, batch), func(err error) {
+	spanCtx, span := otel.Tracer(tracerName).Start(ctx, publishSpanName, publishSpanOptions(publishKindIngest)...)
+	return context.WithValue(spanCtx, publishBatchKey{}, batch), func(messages int, err error) {
+		span.SetAttributes(semconv.MessagingBatchMessageCount(messages))
 		setPublishResult(ctx, span, int(batch.attempts.Load()), err)
 		span.End()
 	}

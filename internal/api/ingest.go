@@ -804,10 +804,11 @@ func (h *IngestHandler) ingestWindow(ctx context.Context, store *settings.Store,
 		}
 	}
 	// One span for the window's publishes, not one per row.
-	pubCtx, endPublish := ctx, func(error) {}
+	pubCtx, endPublish := ctx, func(int, error) {}
 	if publishing > 0 {
-		pubCtx, endPublish = mq.StartPublishBatch(ctx, publishing)
+		pubCtx, endPublish = mq.StartPublishBatch(ctx)
 	}
+	sent := 0
 	for i := range recs {
 		rec := &recs[i]
 		if rec.reject != nil || rec.duplicate {
@@ -819,12 +820,13 @@ func (h *IngestHandler) ingestWindow(ctx context.Context, store *settings.Store,
 			// queue drops its copy if the first one landed.
 			opts = append(opts, mq.WithIdempotencyKey(dedupe.IdempotencyKey(store.Tenant(), rec.claim.Key)))
 		}
+		sent++
 		if err := h.Publisher.Publish(pubCtx, topic, rec.payload, opts...); err != nil {
-			endPublish(err)
+			endPublish(sent, err)
 			return h.publishFailed(ctx, dd, topic, recs, i, err)
 		}
 	}
-	endPublish(nil)
+	endPublish(sent, nil)
 	commitClaims(ctx, dd, recs, table)
 	return nil
 }
