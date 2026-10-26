@@ -45,6 +45,17 @@ const (
 type Row struct {
 	table *Table
 	block *chtypes.Block
+	// verdicts memoizes each distinct filter's answer on this row, so
+	// subscribers whose claims render the same filter share one Eval. mu
+	// guards it, never an Eval: subscribers may be judged concurrently, and a
+	// hit must not wait behind one.
+	mu       sync.Mutex
+	verdicts map[string]filterVerdict
+}
+
+type filterVerdict struct {
+	visible bool
+	reason  string
 }
 
 // ParseRow parses one JSONCompactEachRow line, with or without its trailing
@@ -141,6 +152,24 @@ func (r *Row) VisibleWithReason(preds []Predicate) (bool, string) {
 		return false, ReasonFilter
 	}
 
+	key := cacheKey(r.table.Generation, expr, params)
+	r.mu.Lock()
+	v, ok := r.verdicts[key]
+	r.mu.Unlock()
+	if ok {
+		return v.visible, v.reason
+	}
+	visible, reason := r.eval(expr, params)
+	r.mu.Lock()
+	if r.verdicts == nil {
+		r.verdicts = make(map[string]filterVerdict)
+	}
+	r.verdicts[key] = filterVerdict{visible, reason}
+	r.mu.Unlock()
+	return visible, reason
+}
+
+func (r *Row) eval(expr string, params map[string]string) (bool, string) {
 	filter := r.table.filterFor(expr, params)
 	if filter == nil {
 		return false, ReasonDecline

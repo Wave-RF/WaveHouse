@@ -1,9 +1,11 @@
 package stream
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"sync"
 
 	"github.com/Wave-RF/WaveHouse/internal/typelayer"
@@ -44,10 +46,11 @@ const (
 	// engine is wired at all. Nothing about the row; every row-filtered
 	// subscriber of the table is affected until it is fixed.
 	ReasonUnavailable = "unavailable"
-	// ReasonDrift: the event's column list names a column the table's current
-	// generation does not export (dropped or renamed since), or names one twice,
-	// so its positional row cannot be read at all. Expected briefly after a
-	// schema change, alarming if it persists.
+	// ReasonDrift: the event's column list names no column the table's current
+	// generation exports, or names one twice, so its positional row cannot be
+	// read at all. (A row naming some columns dropped or renamed since is read
+	// on the rest; a predicate over a dropped one declines.) Expected briefly
+	// after a schema change, alarming if it persists.
 	ReasonDrift = "drift"
 )
 
@@ -122,6 +125,15 @@ func (e *engineEvaluator) Prepare(id tenant.ID, table string, columns []string, 
 		return nil, classifyPrepare(err)
 	}
 	parsed, err := tbl.ParseRow(columns, row)
+	if errors.Is(err, typelayer.ErrColumnsDrift) {
+		// A column dropped since the row was published: the rest of the row
+		// still answers, and a predicate over the dropped one is not carried,
+		// so it declines (Visible).
+		if kept, keptRow, ok := exportedOnly(tbl.WireColumns, columns, row); ok {
+			columns = kept
+			parsed, err = tbl.ParseRow(columns, keptRow)
+		}
+	}
 	if err != nil {
 		tbl.Release()
 		return nil, classifyPrepare(err)
@@ -131,6 +143,28 @@ func (e *engineEvaluator) Prepare(id tenant.ID, table string, columns []string, 
 		carried[c] = struct{}{}
 	}
 	return &engineRowView{tbl: tbl, row: parsed, carried: carried}, nil
+}
+
+// exportedOnly cuts from a JSONCompactEachRow row the cells whose columns wire
+// does not hold. ok is false when there is nothing to cut, or the row does not
+// pair with columns: then the drift stands.
+func exportedOnly(wire, columns []string, row json.RawMessage) ([]string, json.RawMessage, bool) {
+	var cells []json.RawMessage
+	if err := json.Unmarshal(row, &cells); err != nil || len(cells) != len(columns) {
+		return nil, nil, false
+	}
+	keptCols := make([]string, 0, len(columns))
+	keptCells := make([][]byte, 0, len(columns))
+	for i, c := range columns {
+		if slices.Contains(wire, c) {
+			keptCols = append(keptCols, c)
+			keptCells = append(keptCells, cells[i])
+		}
+	}
+	if len(keptCols) == 0 || len(keptCols) == len(columns) {
+		return nil, nil, false
+	}
+	return keptCols, append(append([]byte{'['}, bytes.Join(keptCells, []byte{','})...), ']'), true
 }
 
 // engineRowView holds the table handle for as long as the parsed row lives: the

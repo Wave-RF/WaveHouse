@@ -1182,10 +1182,11 @@ func TestHub_RowFilterWithheldIncrementsMetric(t *testing.T) {
 	frames := hub.ReplayProjector(tenant.Default, "viewer", NewSubscriber(map[string]any{"tenant": "globex"}, nil))(raw)
 	require.Empty(t, frames) // replay withhold → 2
 
-	// A column the table does not have: a FAULT, not a filter verdict, and the
-	// label is the only thing that says so. It withholds from BOTH subscribers
-	// — nothing about this row is readable — → 4.
-	hub.Broadcast(topic, rawEvent(t, "clicks", "t", map[string]any{"page": "/a", "tenant_id": "acme", "dropped": "x"}))
+	// Only columns the table does not have, so nothing is left once they are
+	// cut: a FAULT, not a filter verdict, and the label is the only thing that
+	// says so. It withholds from BOTH subscribers — nothing about this row is
+	// readable — → 4.
+	hub.Broadcast(topic, rawEvent(t, "clicks", "t", map[string]any{"dropped": "x"}))
 
 	// An envelope without the filtered column (a subset envelope, as an older
 	// build published): no verdict for either subscriber → 6.

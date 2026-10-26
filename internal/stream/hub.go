@@ -505,11 +505,15 @@ func (h *Hub) ReplayProjector(id tenant.ID, role string, sub *Subscriber) func(r
 			// Replay is per connection, so one prepared row serves exactly one
 			// visibility question — and it is closed immediately, because the
 			// gap-fill loop can run for thousands of events.
-			view, err := h.rowEvaluator().Prepare(id, ev.evt.TableName, ev.evt.Columns, ev.evt.Row)
-			admitted := h.rowAdmitted(p, role, ev, sub.claims, view, err)
-			if view != nil {
-				view.Close()
-			}
+			admitted := func() bool {
+				view, err := h.rowEvaluator().Prepare(id, ev.evt.TableName, ev.evt.Columns, ev.evt.Row)
+				if view != nil {
+					// Deferred: the view holds the table's read lock, which a
+					// panic in rowAdmitted must not leave held.
+					defer view.Close()
+				}
+				return h.rowAdmitted(p, role, ev, sub.claims, view, err)
+			}()
 			if !admitted {
 				return nil // this row is filtered out for these claims
 			}

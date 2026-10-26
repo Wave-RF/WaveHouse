@@ -360,6 +360,30 @@ func TestVisible_PredicatesAreANDed(t *testing.T) {
 	}))
 }
 
+// TestVisible_OneEvalPerDistinctFilter: subscribers whose claims render the
+// same filter share one answer on a row; a different filter is its own.
+func TestVisible_OneEvalPerDistinctFilter(t *testing.T) {
+	_, row := parsedRow(t)
+	acme := []Predicate{{Column: "tenant", Op: "=", Values: []string{"acme"}}}
+	globex := []Predicate{{Column: "tenant", Op: "=", Values: []string{"globex"}}}
+
+	for range 3 {
+		assert.True(t, row.Visible(acme))
+	}
+	assert.Len(t, row.verdicts, 1, "three subscribers with one filter: one Eval")
+	assert.False(t, row.Visible(globex))
+	assert.Len(t, row.verdicts, 2)
+	assert.True(t, row.Visible(acme), "the memoized answer is the evaluated one")
+
+	// The memo is read, not just written: a planted answer comes back.
+	expr, params, ok := row.table.render(acme)
+	require.True(t, ok)
+	row.verdicts[cacheKey(row.table.Generation, expr, params)] = filterVerdict{false, "planted"}
+	visible, reason := row.VisibleWithReason(acme)
+	assert.False(t, visible)
+	assert.Equal(t, "planted", reason)
+}
+
 func TestVisible_NoPredicatesIsVisible(t *testing.T) {
 	_, row := parsedRow(t)
 	assert.True(t, row.Visible(nil))

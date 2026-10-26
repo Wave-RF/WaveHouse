@@ -21,6 +21,7 @@ import (
 // the seam — and that each path parses once and closes what it parsed.
 type recordingEvaluator struct {
 	visible  bool
+	panics   bool
 	prepErr  error
 	prepares int
 	calls    int
@@ -41,6 +42,9 @@ type recordingView struct{ e *recordingEvaluator }
 
 func (v *recordingView) Visible(*policy.ResolvedPermissions) (bool, string) {
 	v.e.calls++
+	if v.e.panics {
+		panic("visible")
+	}
 	if v.e.visible {
 		return true, ""
 	}
@@ -137,6 +141,22 @@ func TestHub_RowEvaluatorSeam_PreparesOncePerEvent(t *testing.T) {
 	assert.Equal(t, 1, eval.prepares, "one parse serves every role and subscriber")
 	assert.Equal(t, 4, eval.calls, "visibility is still decided per subscriber")
 	assert.Equal(t, 1, eval.closes)
+}
+
+// TestHub_Replay_ClosesTheViewOnPanic: the replay path's view holds the table's
+// read lock, so a panic while judging the row (recovered further up) must
+// still close it, or the table's next rebind waits forever.
+func TestHub_Replay_ClosesTheViewOnPanic(t *testing.T) {
+	t.Parallel()
+	eval := &recordingEvaluator{panics: true}
+	hub := NewHub(staticPolicy(filteredPolicy()), nil, nil)
+	hub.RowEvaluator = eval
+	replay := hub.ReplayProjector(tenant.Default, "viewer", NewSubscriber(map[string]any{"tenant": "t1"}, nil))
+	raw := rawEvent(t, "clicks", "2026-06-26T00:00:00Z", map[string]any{"tenant_id": "t1", "page": "/a"})
+
+	assert.Panics(t, func() { replay(raw) })
+	assert.Equal(t, 1, eval.prepares)
+	assert.Equal(t, 1, eval.closes, "the view is closed even though judging it panicked")
 }
 
 // TestHub_RowEvaluatorSeam_PreparesForTheTopicsTenant: the row is prepared
@@ -431,11 +451,13 @@ func TestHub_RowFilter_FilterOnAbsentColumnWithholds(t *testing.T) {
 	assert.Equal(t, "/b", row["page"])
 }
 
-// TestHub_RowFilter_UnknownColumnIsDrift: an envelope naming a column the
-// table does not have (dropped or renamed since it was published) cannot be
-// read at all, so it is withheld from every row-filtered subscriber as drift.
-// A role without a row filter never asks the type layer and still gets it.
-func TestHub_RowFilter_UnknownColumnIsDrift(t *testing.T) {
+// TestHub_RowFilter_DroppedColumnIsCut: an envelope naming a column the table
+// no longer has (dropped since the row was published, or never there) is
+// evaluated on the columns the table still exports, as 0.2.1's stream did, so
+// a column drop does not hide every earlier row from row-filtered subscribers.
+// A predicate over the dropped column is not carried and declines; a list no
+// INSERT could name (a repeated column) is still drift.
+func TestHub_RowFilter_DroppedColumnIsCut(t *testing.T) {
 	t.Parallel()
 	p := rowFilterPolicy()
 	p.Tables["clicks"]["public"] = policy.RolePermissions{Select: &policy.SelectPermissions{}}
@@ -443,18 +465,34 @@ func TestHub_RowFilter_UnknownColumnIsDrift(t *testing.T) {
 	hub := NewHub(staticPolicy(p), nil, nil)
 	hub.RowEvaluator = NewRowEvaluator(eng)
 	acme := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
+	globex := NewSubscriber(map[string]any{"tenant": "globex"}, nil)
 	public := NewSubscriber(nil, nil)
 	hub.Add(topicOf("clicks"), "viewer", acme)
+	hub.Add(topicOf("clicks"), "viewer", globex)
 	hub.Add(topicOf("clicks"), "public", public)
 
 	cols := []string{"page", "tenant_id", "bogus"}
 	hub.Broadcast(topicOf("clicks"), rawEventCols(t, "clicks", "t1", cols,
 		map[string]any{"page": "/a", "tenant_id": "acme", "bogus": "x"}))
-	assertNoFrame(t, acme)
+	_, _, row := recvEvent(t, acme)
+	assert.Equal(t, "/a", row["page"])
+	assertNoFrame(t, globex)
 	_, announced, _ := recvEvent(t, public)
 	assert.Equal(t, cols, announced)
 
-	_, err := NewRowEvaluator(eng).Prepare(tenant.Default, "clicks", cols, json.RawMessage(`["/a","acme","x"]`))
+	onDropped := &policy.Policy{Tables: map[string]policy.TablePolicy{
+		"clicks": {"viewer": {Select: &policy.SelectPermissions{
+			Filter: map[string]policy.Filter{"bogus": {Eq: new("x")}},
+		}}},
+	}}
+	view, err := NewRowEvaluator(eng).Prepare(tenant.Default, "clicks", cols, json.RawMessage(`["/a","acme","x"]`))
+	require.NoError(t, err)
+	visible, reason := view.Visible(policy.Evaluate(onDropped, "viewer", "clicks", "select", nil))
+	view.Close()
+	assert.False(t, visible)
+	assert.Equal(t, ReasonDecline, reason)
+
+	_, err = NewRowEvaluator(eng).Prepare(tenant.Default, "clicks", []string{"page", "page"}, json.RawMessage(`["/a","/b"]`))
 	require.Error(t, err)
 	assert.Equal(t, ReasonDrift, WithheldReason(err))
 }
