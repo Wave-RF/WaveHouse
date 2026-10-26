@@ -268,6 +268,9 @@ func TestCHReader_Request(t *testing.T) {
 		"date_time_output_format":                      "iso",
 		"output_format_json_named_tuples_as_objects":   "1",
 		"output_format_json_array_of_rows":             "0",
+		"timeout_overflow_mode":                        "throw",
+		"transform_null_in":                            "0",
+		"output_format_json_validate_utf8":             "1",
 	}
 	assert.Equal(t, wantFixed, chReadSettingsFixed)
 	for name, want := range wantFixed {
@@ -384,6 +387,26 @@ func TestCHReader_Errors(t *testing.T) {
 		assert.False(t, hasCode)
 		assert.NotContains(t, err.Error(), "secret-row")
 		assert.Equal(t, chFailure{http.StatusBadGateway, codeCHMisconfigured, false}, chFailureOf(err, http.StatusInternalServerError, queryCaps{readonly: true}))
+	})
+
+	t.Run("a format header other than JSONEachRow is misconfigured, whatever the lines look like", func(t *testing.T) {
+		t.Parallel()
+		// FORMAT TSV of a String column holding JSON: every line starts with
+		// `{`, and TSV's escaping has altered the backslashes.
+		tsv := func(w http.ResponseWriter, _ *chSeen) {
+			w.Header().Set("X-ClickHouse-Format", "TSV")
+			_, _ = io.WriteString(w, "{\"p\":\"a\\\\b\"}\n")
+		}
+		_, err := read(t, (&fakeCH{answer: tsv}).reader(), "SELECT j FROM t FORMAT TSV")
+		require.ErrorIs(t, err, errNotJSONEachRow)
+
+		alias := func(w http.ResponseWriter, _ *chSeen) {
+			w.Header().Set("X-ClickHouse-Format", "jsoneachrow")
+			_, _ = io.WriteString(w, "{\"a\":1}\n")
+		}
+		got, err := read(t, (&fakeCH{answer: alias}).reader(), "SELECT 1 AS a FORMAT jsoneachrow")
+		require.NoError(t, err)
+		assert.JSONEq(t, `[{"a":1}]`, string(got))
 	})
 
 	t.Run("an oversized response is refused, not buffered", func(t *testing.T) {
@@ -595,4 +618,15 @@ func TestCHReader_HandlersShareOnlyWhenGiven(t *testing.T) {
 	if sq.ch != r || ph.ch != r {
 		t.Fatal("SetReader did not install the shared reader")
 	}
+}
+
+// TestReaderHTTPClient_IdleUnderKeepAlive: an idle connection is dropped
+// before ClickHouse's keep_alive_timeout (10 s on 24.8) could close it under a
+// request, which for a write pipe's POST would not be replayed.
+func TestReaderHTTPClient_IdleUnderKeepAlive(t *testing.T) {
+	t.Parallel()
+	tr, ok := readerHTTPClient(nil, 2).Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.Positive(t, tr.IdleConnTimeout)
+	assert.Less(t, tr.IdleConnTimeout, 10*time.Second)
 }

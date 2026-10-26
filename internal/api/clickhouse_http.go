@@ -23,7 +23,7 @@ import (
 // every cached read's key (queryCacheKey), so two builds that render rows
 // differently never serve each other's entries from a shared cache during a
 // rolling deploy. Change it with any change to the rendering settings below.
-const chRendering = "JSONEachRow/5"
+const chRendering = "JSONEachRow/6"
 
 // chReadSettingsFixed go on every request the cached read paths send, ahead
 // of the role's caps.
@@ -61,8 +61,18 @@ const chRendering = "JSONEachRow/5"
 // cancel_http_readonly_queries_on_client_close stops the query on the server
 // rather than letting it run on after nobody waits for it.
 //
+// Semantics a profile must not change: timeout_overflow_mode=throw, so a
+// query past max_execution_time fails rather than answering (and caching) the
+// rows it had so far; transform_null_in=0, so a row filter's claim that
+// resolves to NULL (StrictInt on a Nullable column) matches no row, the NULL
+// tenant's included; output_format_json_validate_utf8=1, so an invalid UTF-8
+// value is written with U+FFFD rather than as raw bytes that leave the body
+// invalid JSON (ClickHouse's default is 0). Measured on 24.8.14.39 and
+// 26.8.15.10.
+//
 // Every one of these is known to ClickHouse 24.8 and later (measured on
-// 24.8.14.39 and 26.8.15.10).
+// 24.8.14.39 and 26.8.15.10). output_format_json_map_as_array_of_tuples is
+// not pinned: 24.8 does not know it, and sending it would fail every read.
 var chReadSettingsFixed = map[string]string{
 	"default_format":                               "JSONEachRow",
 	"wait_end_of_query":                            "1",
@@ -75,6 +85,9 @@ var chReadSettingsFixed = map[string]string{
 	"date_time_output_format":                      "iso",
 	"output_format_json_named_tuples_as_objects":   "1",
 	"output_format_json_array_of_rows":             "0",
+	"timeout_overflow_mode":                        "throw",
+	"transform_null_in":                            "0",
+	"output_format_json_validate_utf8":             "1",
 }
 
 // ClickHouse's own limits on the HTTP interface's fields, at their defaults:
@@ -171,6 +184,11 @@ func readerHTTPClient(tlsCfg *tls.Config, conns int) *http.Client {
 	transport.TLSClientConfig = tlsCfg
 	transport.MaxConnsPerHost = conns
 	transport.MaxIdleConnsPerHost = conns
+	// Under ClickHouse's keep_alive_timeout (10 s on 24.8.14.39, 30 s on
+	// 26.8.15.10), so the server never closes a connection the client is about
+	// to reuse: a POST that loses that race is not replayed, and a write
+	// pipe's would fail.
+	transport.IdleConnTimeout = 5 * time.Second
 	return &http.Client{
 		Transport: transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -287,6 +305,9 @@ func (c *chReader) do(ctx context.Context, target chconn.Target, conns int, req 
 	if resp.StatusCode != http.StatusOK {
 		return nil, chconn.NewHTTPError(&http.Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: io.NopCloser(bytes.NewReader(body))})
 	}
+	if !jsonEachRowFormat(resp.Header.Get("X-ClickHouse-Format")) {
+		return nil, errNotJSONEachRow
+	}
 	rows, tail := jsonEachRowArray(body)
 	if tail != nil {
 		// Text after the rows is an exception ClickHouse appended once it
@@ -303,6 +324,23 @@ func (c *chReader) do(ctx context.Context, target chconn.Target, conns int, req 
 		return nil, herr
 	}
 	return rows, nil
+}
+
+// jsonEachRowFormat reports whether X-ClickHouse-Format names JSONEachRow or
+// an alias of it. ClickHouse names the format it wrote, a statement's own
+// FORMAT included and spelled as written (`jsoneachrow`), and sends no header
+// for an INSERT or DDL (measured on 24.8.14.39 and 26.8.15.10). An absent
+// header leaves the body check to decide: a TSV line can start with `{` too.
+func jsonEachRowFormat(name string) bool {
+	if name == "" {
+		return true
+	}
+	for _, f := range []string{"JSONEachRow", "JSONLines", "NDJSON"} {
+		if strings.EqualFold(name, f) {
+			return true
+		}
+	}
+	return false
 }
 
 // errNotJSONEachRow is a 200 whose body is neither JSONEachRow rows nor rows
