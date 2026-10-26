@@ -165,7 +165,8 @@ type ClickHouse struct {
 	ChtypesCache string `yaml:"chtypes_cache" env:"WH_CHTYPES_CACHE"`
 	// ChtypesAutofetch fetches a ClickHouse line no layout holds when its
 	// first tenant binds. On by default; off (air-gapped), such a tenant is
-	// unavailable and a host with no artifact at all refuses boot.
+	// unavailable and a host with no build made for this chtypes SDK refuses
+	// boot.
 	ChtypesAutofetch bool `yaml:"chtypes_autofetch" env:"WH_CHTYPES_AUTOFETCH"`
 	// ChtypesArtifactsURL is the registries and mirrors a fetch tries, in
 	// order, comma-separated (CHTYPES_ARTIFACTS_URL semantics). The 2.0.0-dev

@@ -239,6 +239,10 @@ func NewEngine(cfg Config) (*Engine, error) {
 		}
 	}
 	if !cfg.AutoFetch && !opensAny(fetchOpts, lines) {
+		if len(lines) > 0 {
+			return nil, fmt.Errorf("chtypes: no artifact installed for %s that this chtypes SDK opens (the installed %s are builds for another SDK), and autofetch is off (looked in: %s)",
+				platform, strings.Join(slices.Compact(slices.Sorted(slices.Values(lines))), ", "), strings.Join(searched, ", "))
+		}
 		return nil, fmt.Errorf("chtypes: no artifact installed for %s, and autofetch is off (looked in: %s)",
 			platform, strings.Join(searched, ", "))
 	}
