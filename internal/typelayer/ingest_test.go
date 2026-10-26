@@ -103,11 +103,11 @@ func TestIngest_OverflowIsStoredTruth(t *testing.T) {
 	assert.True(t, strings.HasPrefix(string(batch.Rows[0].Line), "[0,"), string(batch.Rows[0].Line))
 }
 
-// TestIngest_NoErrorRecovery: the compile profile leaves error recovery off,
-// and if it were ever turned on, an accepted batch whose reader skipped bytes
-// is declined whole rather than answered with verdicts that may not be the
-// body's records. The bodies are two on which recovery published a fragment
-// of a record as a row.
+// TestIngest_NoErrorRecovery: error recovery stays off even when a lower
+// settings layer turns it on (here the compile profile), because every call
+// pins it at the highest layer: the first record the reader cannot read
+// refuses the body. The bodies are two on which recovery published a
+// fragment of a record as a row. skippedDecline is the guard behind the pin.
 func TestIngest_NoErrorRecovery(t *testing.T) {
 	for _, k := range []string{"input_format_allow_errors_ratio", "input_format_allow_errors_num"} {
 		assert.NotContains(t, compileSettings, k)
@@ -139,10 +139,28 @@ func TestIngest_NoErrorRecovery(t *testing.T) {
 	} {
 		batch, err := tbl.Ingest(FormatCSV, []byte(body))
 		require.NoError(t, err)
-		assert.Nil(t, batch.Refused, "with recovery on, the reader answers instead of refusing")
-		assert.Contains(t, batch.Declined, "recovering from an error")
-		assert.Empty(t, batch.Rows, "no verdict, so nothing to publish")
+		require.NotNil(t, batch.Refused, "the call's pin wins over the compile profile's recovery")
+		assert.Empty(t, batch.Rows, "a refused body publishes nothing")
 	}
+
+	assert.Empty(t, skippedDecline(chtypes.BatchResult{}))
+	assert.Contains(t, skippedDecline(chtypes.BatchResult{RowsSkipped: 1}), "recovering from an error",
+		"a skipped row declines the body even with nothing unconsumed: its span can cover several records")
+	assert.Contains(t, skippedDecline(chtypes.BatchResult{Unconsumed: []chtypes.Span{{}}}), "recovering from an error")
+}
+
+// TestBatchCause: a batch that was not accepted is described by its own
+// cause, never by ExportDeclined, which for it only says nothing was exported.
+func TestBatchCause(t *testing.T) {
+	row := uint64(2)
+	assert.Equal(t, "server-dependent function hostName (reason server-dependent-function, code -2, at record 3)",
+		batchCause(chtypes.BatchResult{
+			Outcome: chtypes.Unsupported, ErrCode: -2, ErrMsg: "server-dependent function hostName",
+			Reason: "server-dependent-function", RefusedAt: chtypes.RefusedAtRow, RefusedRow: &row,
+			ExportDeclined: "only a fully accepted batch exports bytes",
+		}))
+	assert.Equal(t, "batch unsupported (at call)",
+		batchCause(chtypes.BatchResult{Outcome: chtypes.Unsupported, RefusedAt: chtypes.RefusedAtCall}))
 }
 
 // TestIngest_ComputedColumnsAreRefused: a record naming a MATERIALIZED or

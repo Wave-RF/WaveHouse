@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/wave-rf/chtypes/go/v2/chtypes"
 )
@@ -47,6 +48,10 @@ type IngestOptions struct {
 // column's default. Measured on 26.8.15.10.
 func parseSettings(format Format, opts IngestOptions) (settings map[string]string, ok bool) {
 	settings = InsertSettings()
+	// Error recovery off at the call, the highest settings layer: a reader
+	// that skips a bad record can resume inside the next one (see Ingest).
+	settings["input_format_allow_errors_num"] = "0"
+	settings["input_format_allow_errors_ratio"] = "0"
 	settings["date_time_output_format"] = "iso"
 	settings["output_format_json_escape_forward_slashes"] = "0"
 	settings["output_format_json_quote_denormals"] = "1"
@@ -186,9 +191,11 @@ func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, check
 	insert := t.insertOptions(format)
 	filter, uniform := t.checkFilter(checks)
 	res, err := t.export(format, body, settings, insert, filter)
-	if err != nil && filter != nil {
-		// The cached filter was evicted and closed between lookup and use. Fail
-		// the checks closed, as an evaluation error would, not the request.
+	if _, misuse := errors.AsType[*chtypes.UsageError](err); misuse && filter != nil {
+		// The cached filter was evicted and closed between lookup and use,
+		// which chtypes refuses before reading the body. Fail the checks
+		// closed, as an evaluation error would, not the request. Any other
+		// error would come back the same from a second parse of the body.
 		filter, uniform = nil, ReasonDecline
 		res, err = t.export(format, body, settings, insert, nil)
 	}
@@ -218,7 +225,7 @@ func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, check
 		}
 		// The reader stops at the first record it cannot answer for, so the
 		// rows it returned are not the body's: decline the body, not them.
-		return Batch{Declined: firstNonEmpty(res.ExportDeclined, res.ErrMsg, string(res.Outcome))}, nil
+		return Batch{Declined: batchCause(res)}, nil
 	}
 	// Accepted but withheld (the full-arity guard, a serialization failure):
 	// nothing can be forwarded, whatever the per-row detail says.
@@ -230,10 +237,8 @@ func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, check
 	if msg := batchSettingsDecline(res); msg != "" {
 		return Batch{Declined: msg}, nil
 	}
-	// The compile profile turns error recovery off, so an accepted batch never
-	// skips bytes. If one does, its verdicts may not be the body's records.
-	if len(res.Unconsumed) > 0 {
-		return Batch{Declined: "chtypes skipped part of the body recovering from an error, so its verdicts may not match the records"}, nil
+	if msg := skippedDecline(res); msg != "" {
+		return Batch{Declined: msg}, nil
 	}
 	// Every exported line carries the export's one column list, which the
 	// envelope names: the table's wire columns, on a role's view too, where a
@@ -251,6 +256,45 @@ func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, check
 		out.Rows[i] = v
 	}
 	return out, nil
+}
+
+// batchCause is a batch's own cause when it was not accepted: its message, the
+// reason's catalog id for a decline, its code and where it was refused.
+// ExportDeclined is no cause here: for such a batch it only says that nothing
+// was exported.
+func batchCause(res chtypes.BatchResult) string {
+	msg := res.ErrMsg
+	if msg == "" {
+		msg = "batch " + string(res.Outcome)
+	}
+	var detail []string
+	if res.Reason != "" {
+		detail = append(detail, "reason "+res.Reason)
+	}
+	if res.ErrCode != 0 {
+		detail = append(detail, fmt.Sprintf("code %d", res.ErrCode))
+	}
+	switch {
+	case res.RefusedAt == chtypes.RefusedAtRow && res.RefusedRow != nil:
+		detail = append(detail, fmt.Sprintf("at record %d", *res.RefusedRow+1))
+	case res.RefusedAt != "":
+		detail = append(detail, "at "+string(res.RefusedAt))
+	}
+	if len(detail) > 0 {
+		msg += " (" + strings.Join(detail, ", ") + ")"
+	}
+	return msg
+}
+
+// skippedDecline declines a batch whose reader skipped any row or byte while
+// recovering from an error: its verdicts may then not be the body's records,
+// and a skipped row's span can cover several of them. parseSettings pins
+// recovery off on every call, so it is a guard, not a path.
+func skippedDecline(res chtypes.BatchResult) string {
+	if res.RowsSkipped > 0 || len(res.Unconsumed) > 0 {
+		return "chtypes skipped part of the body recovering from an error, so its verdicts may not match the records"
+	}
+	return ""
 }
 
 // checkFilter resolves the check clauses to the filter attached to the parse,
@@ -343,15 +387,6 @@ func refusal(res chtypes.BatchResult) *Refusal {
 		}
 	}
 	return r
-}
-
-func firstNonEmpty(s ...string) string {
-	for _, v := range s {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 // declinedVerdict reports an outcome that is not a verdict about the data,

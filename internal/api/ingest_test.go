@@ -79,6 +79,24 @@ func ingestRequest(t *testing.T, table string, body any) *http.Request {
 	return req
 }
 
+// TestIngest_SingleObjectWithNoRecordIsNoVerdict: ClickHouse's JSON reader
+// takes a lone `;` as the end of the data, so such a body parses to no record
+// at all. The single-object answer reads record 0's verdict, and a missing one
+// is a decline (422), never a panic.
+func TestIngest_SingleObjectWithNoRecordIsNoVerdict(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{";", " ;", ";\n"} {
+		pub := &testutil.MockPublisher{}
+		h := newTestIngestHandler(t, testRegistry(t), pub)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/ingest?table=clicks", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.Handle(w, withTenant(req))
+		assert.Equal(t, http.StatusUnprocessableEntity, w.Code, "%q: %s", body, w.Body.String())
+		assert.Empty(t, pub.Published())
+	}
+}
+
 func TestIngest_ValidPayload(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
