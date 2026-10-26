@@ -909,32 +909,6 @@ wavehouse_settings_last_reload_successful == 0
 max by (instance) (wavehouse_settings_tenants{state="rejected"}) > 0
 ```
 
-### ClickHouse storage
-
-How much data each table holds in ClickHouse, before and after compression: the capacity signal for disk sizing, retention decisions and growth alerts. A collection runs one metadata-only aggregate over `system.parts` (active parts only) in each served tenant's database, over that tenant's own pool, at most 8 databases at once. Each result is reused for 15 seconds, a failure included, so OTLP export and `/metrics` scrapes inside that window send no further queries, and a hung ClickHouse costs at most one 5-second wait per 15 seconds (a collection arriving during it waits on the same scrape):
-
-| Metric | Meaning |
-| --- | --- |
-| `wavehouse_clickhouse_uncompressed_bytes{table}` | Live data before compression: the closest `system.parts` has to bytes ingested. |
-| `wavehouse_clickhouse_bytes_on_disk{table}` | What that data occupies: compressed data plus marks and index files. |
-
-Sum over `table` for the totals and divide for the compression ratio, which counts marks and index files since `bytes_on_disk` does. Tenants on one address and database read the same tables, so that database is read once. The metrics carry no tenant label (see [Metric labels](/configuration#metric-labels)): a table name that several tenants' databases share reports their sum. With `prometheus.per_table_metrics: false` each reports one series, the total over every table. Every process that holds ClickHouse pools (the `api` and `ingest` roles) reports the same figures, so take the `max` across instances rather than the sum.
-
-What they measure, for an alert built on them:
-
-- **Currently stored**, not a lifetime ingest count: they can fall without WaveHouse deleting anything (TTL expiry, deletes and other mutations, and merges that collapse rows), as well as rise.
-- **Only served tenants.** A tenant a reload rejects or removes drops out of the sums until it is served again, so a table's figure can fall without any data being deleted (see `wavehouse_settings_tenants{state="rejected"}` under [Settings reloads](#settings-reloads)). A served tenant on no ClickHouse pool (one whose pool could not be opened, counted in `wavehouse_settings_reconcile_failures_total{component="clickhouse"}`) is skipped the same way, not treated as a failed scrape.
-- **Only the tenants' databases.** Growth in ClickHouse's own `system` tables (query and part logs, for example) is not covered; watch the server's disk directly for that.
-- **A series exists only once a table has active parts.** An empty table has no series, not a `0`.
-- **A failed scrape leaves them absent.** The scrape is bounded at 5 seconds, and if any database fails to answer within it, both metrics are left out rather than reported stale or short, until a scrape 15 seconds or more later succeeds. While ClickHouse does not answer, one collection in each 15 seconds waits up to 5 seconds for it, and a collection arriving meanwhile, such as a `/metrics` scrape during an OTLP export, waits for that one rather than starting its own, so keep Prometheus' `scrape_timeout` above 5 seconds (its default is 10). A gap means the scrape failed, not that a table shrank, so alert on growth or a threshold over a window rather than on `absent()`. The first failure is logged at `WARN`, and the next success at `INFO`.
-
-A collection more than 15 seconds after the last scrape queries ClickHouse, and `/metrics` takes no credential, so keep it off a public listener (see [Separating the `/metrics` listener](#separating-the-metrics-listener)).
-
-```promql
-max by (table) (wavehouse_clickhouse_bytes_on_disk)
-sum(max by (table) (wavehouse_clickhouse_uncompressed_bytes)) / sum(max by (table) (wavehouse_clickhouse_bytes_on_disk))
-```
-
 ### Dropped SSE frames
 
 Each SSE stream has an outbound queue of 64 frames. When a client reads slower than its table's events arrive, the queue fills and the frames that do not fit are dropped. The drop is silent to the client: the stream carries on with later frames, so its `Last-Event-ID` moves past the gap, and a reconnect with it replays from after the gap, not across it. A client that notices a gap in its own rows can reconnect with `?since=` set to a time before it. A frame can also go unwritten because the stream ended with it queued. `wavehouse_sse_dropped_frames_total{table, kind, reason}` counts both, and `reason` tells them apart:
@@ -963,7 +937,7 @@ For production posture where metrics should not be exposed on the public API lis
 
 ### Many tables
 
-Ten metrics carry a `table` label, so each grows by one series per table that sees traffic (the [storage metrics](#clickhouse-storage) by one per table with data), multiplied by its other labels. At a few dozen tables that is noise; with table-per-tenant schemas or thousands of tables it shows up in your time-series database's memory and bill. Set `prometheus.per_table_metrics: false` (`WH_METRICS_PER_TABLE=false`) to drop the label and report each metric summed over every table, on the Prometheus endpoint and OTLP push alike. WaveHouse logs one `WARN` naming the setting once its metrics have carried more than 500 distinct tables. See [Configuration → Metric labels](/configuration#metric-labels).
+Eight metrics carry a `table` label, so each grows by one series per table that sees traffic, multiplied by its other labels. At a few dozen tables that is noise; with table-per-tenant schemas or thousands of tables it shows up in your time-series database's memory and bill. Set `prometheus.per_table_metrics: false` (`WH_METRICS_PER_TABLE=false`) to drop the label and report each metric summed over every table, on the Prometheus endpoint and OTLP push alike. WaveHouse logs one `WARN` naming the setting once its metrics have carried more than 500 distinct tables. See [Configuration → Metric labels](/configuration#metric-labels).
 
 ### Profiling
 
