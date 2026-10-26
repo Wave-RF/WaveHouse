@@ -261,12 +261,10 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	return sr.refreshThen(ctx, nil)
 }
 
-// refreshThen runs one refresh in its SchemaRegistry.Refresh span. A failure
-// is recorded on the span and handed to onFail, when set, under the span's
-// context before the span ends, so a line it logs carries the span's trace_id
-// (#899). A failure after ctx was canceled (shutdown, a tenant no longer
-// served, or an on-demand caller gone) is not a failure: it is returned but
-// neither recorded nor handed to onFail, so no caller counts or logs it.
+// refreshThen hands a failure to onFail inside the still-open span, so its log
+// line carries the span's trace_id (#899). A canceled ctx (shutdown, tenant
+// dropped, caller gone) is not a failure: it is returned but neither recorded
+// nor handed to onFail.
 func (sr *SchemaRegistry) refreshThen(ctx context.Context, onFail func(context.Context, error)) error {
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
 	spanCtx, span := tracer.Start(ctx, "SchemaRegistry.Refresh",
@@ -571,12 +569,8 @@ func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxB
 	initialBackoff, maxBackoff = clampBackoff(initialBackoff, maxBackoff)
 	backoff := initialBackoff
 	for {
-		// refreshThen skips this callback when the error just reflects ctx
-		// cancellation, a shutdown signal rather than a diagnostic. Without
-		// that, a clean shutdown would fire onAttempt with context.Canceled,
-		// which the boot path writes into BootState as
-		//   "schema discovery: context canceled"
-		// for anyone curl'ing /livez during the shutdown window.
+		// refreshThen skips canceled attempts, so a shutdown does not write
+		// "schema discovery: context canceled" into BootState (/livez).
 		err := sr.refreshThen(ctx, func(spanCtx context.Context, err error) {
 			sr.countFailure(spanCtx)
 			if onAttempt != nil {
