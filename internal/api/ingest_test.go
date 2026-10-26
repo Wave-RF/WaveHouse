@@ -3014,10 +3014,9 @@ func TestIngest_Dedup_ReserveError(t *testing.T) {
 // operator paging on ERROR logs would otherwise be woken by clients that
 // simply went away. Not t.Parallel: it captures the process-wide default
 // logger (logtest.Capture). Matched on the exact "level":"…","msg":"…" pair
-// slog's JSON handler emits adjacently, not on the level alone — the package
-// also logs an unrelated "debug: span started for ingest" line per request,
-// which satisfies a bare `"level":"DEBUG"` check whether or not the Reserve
-// line itself is DEBUG.
+// slog's JSON handler emits adjacently, not on the level alone, so an
+// unrelated DEBUG line from the same request cannot satisfy the check whether
+// or not the Reserve line itself is DEBUG.
 func TestIngest_Dedup_ReserveError_LogLevel(t *testing.T) {
 	tests := []struct {
 		name          string

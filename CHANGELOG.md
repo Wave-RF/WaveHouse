@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - `operator key authenticated request` is `DEBUG`. Successful operator-key use is counted by the new `wavehouse_auth_operator_key_requests_total` instead. A wrong operator key still logs at `WARN` and counts in `wavehouse_auth_operator_key_failures_total`.
   - `event successfully ingested`, `batch ingested`, `duplicate event skipped` and `event id in flight in another request` are `DEBUG`.
   - `missing table parameter in request`, `empty ingest body` and `invalid json payload` are `WARN`, like the other client-input refusals. `ERROR` is kept for faults in the engine or its dependencies.
+  - The `debug: span started for ingest` line every ingest request wrote is gone. It said nothing the `IngestHandler.Handle` span does not.
 
 ### Fixed
 

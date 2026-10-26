@@ -179,9 +179,6 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	)
 	defer span.End()
 
-	// Add a standard log to prove we are inside the span logic
-	slog.DebugContext(ctx, "debug: span started for ingest", "table", table)
-
 	r = r.WithContext(ctx)
 
 	// TODO: what should the order of these be to maximize speed + limit risk of data leakage or DoS/resource exhaustion?
