@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -82,12 +83,59 @@ func TestIngest_SpanStatus(t *testing.T) {
 			h.Handle(w, withTenant(ingestRequest(t, tt.table, tt.body)))
 			require.Equal(t, tt.status, w.Code)
 
-			spans := rec.Ended()
+			spans := spansNamed(rec, "IngestHandler.Handle")
 			require.Len(t, spans, 1)
-			assert.Equal(t, "IngestHandler.Handle", spans[0].Name())
 			assert.Equal(t, "wavehouse-api", spans[0].InstrumentationScope().Name)
 			assert.Equal(t, tt.wantCode, spans[0].Status().Code)
 			assert.Equal(t, tt.wantDesc, spans[0].Status().Description)
 		})
 	}
+}
+
+// spansNamed are the ended spans rec holds named name.
+func spansNamed(rec *tracetest.SpanRecorder, name string) []sdktrace.ReadOnlySpan {
+	var out []sdktrace.ReadOnlySpan
+	for _, s := range rec.Ended() {
+		if s.Name() == name {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// A window's publishes are one mq.publish span under the handler's, sized by
+// the rows it publishes, so a request of many rows costs a span per window
+// rather than per row (#897); one whose publish fails is marked failed.
+// Not parallel: the handler reads the global tracer provider.
+func TestIngest_PublishSpanPerWindow(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(tracenoop.NewTracerProvider())
+		_ = tp.Shutdown(context.Background())
+	})
+	rows := []map[string]any{{"page": "/a"}, {"page": "/b"}, {"page": "/c"}}
+
+	h := NewIngestHandler(fixedRegistry(testRegistry(t)), &testutil.MockPublisher{})
+	h.window = 2
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", rows)))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	handle := spansNamed(rec, "IngestHandler.Handle")
+	require.Len(t, handle, 1)
+	pubs := spansNamed(rec, "mq.publish")
+	require.Len(t, pubs, 2)
+	for i, want := range []int{2, 1} {
+		assert.Equal(t, handle[0].SpanContext().SpanID(), pubs[i].Parent().SpanID())
+		assert.Contains(t, pubs[i].Attributes(), attribute.Int("messaging.batch.message_count", want))
+		assert.Equal(t, codes.Unset, pubs[i].Status().Code)
+	}
+
+	rec.Reset()
+	h = NewIngestHandler(fixedRegistry(testRegistry(t)), &testutil.MockPublisher{Err: errors.New("boom")})
+	h.Handle(httptest.NewRecorder(), withTenant(ingestRequest(t, "clicks", rows)))
+	pubs = spansNamed(rec, "mq.publish")
+	require.Len(t, pubs, 1)
+	assert.Equal(t, codes.Error, pubs[0].Status().Code)
 }
