@@ -301,10 +301,10 @@ runs:
     # the test ClickHouse line (from internal/chversion) plus the digest of
     # that line's newest build for this platform, from `chtypes resolve` (the
     # SDK's own channel, verified, installs nothing). A new
-    # upstream build is a new key, so `main`'s post-job save captures it; the
-    # restore-keys bring back the previous build, the fetch below installs the
-    # new one on top, and --prune drops the old before the save, so an entry
-    # holds one build. runner.arch is in the key: an arm64 runner must never
+    # upstream build is a new key, which `main` saves in its own step right
+    # after a fetch that succeeded; the restore-keys bring back the previous
+    # build, the fetch below installs the new one on top, and --prune drops the
+    # old before the save, so an entry holds one build. runner.arch is in the key: an arm64 runner must never
     # restore amd64 .so files. The path is `chtypes where`, so the SDK's layout
     # version is not named here; the key's `v2` is this cache's shape (v1 was
     # keyed on the retired lock).
@@ -324,8 +324,10 @@ runs:
           echo "::warning title=chtypes::could not resolve the newest build; restoring the last cached one without saving"
         fi
 
-    # `main` saves; every other ref restores only (see the header).
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+    # `main` saves; every other ref restores only (see the header). main's
+    # save is its own step after the fetch, so a run whose fetch fell back to
+    # the cached build never saves that build under the new build's key.
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: ${{ inputs.chtypes == 'true' && steps.chtypes-key.outputs.build != '' && github.ref == 'refs/heads/main' }}
       id: chtypes-cache
       with:
@@ -359,12 +361,21 @@ runs:
     # outage falls back to the cached build, loudly, rather than failing CI.
     - name: Fetch the chtypes artifact
       if: ${{ inputs.chtypes == 'true' }}
+      id: chtypes-fetch
       shell: bash
       run: |
-        if ! scripts/fetch-chtypes.sh --prune; then
+        if scripts/fetch-chtypes.sh --prune; then
+          echo "fetched=true" >> "$GITHUB_OUTPUT"
+        else
           echo "::warning title=chtypes::fetching the newest build failed; testing on the cached build"
           scripts/fetch-chtypes.sh --offline
         fi
+
+    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ inputs.chtypes == 'true' && steps.chtypes-key.outputs.build != '' && github.ref == 'refs/heads/main' && steps.chtypes-fetch.outputs.fetched == 'true' && steps.chtypes-cache.outputs.cache-hit != 'true' }}
+      with:
+        path: ${{ steps.chtypes-key.outputs.cache }}
+        key: chtypes-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.chtypes-key.outputs.line }}-${{ steps.chtypes-key.outputs.build }}
 
     # pnpm must install before its cache step so the store path can be
     # resolved from pnpm itself.
