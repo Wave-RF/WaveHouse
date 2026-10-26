@@ -35,7 +35,7 @@ type discoveries struct {
 	build func(tenant.ID, *settings.Store) *discovery.SchemaRegistry
 	// onAttempt reports a loop's failed attempt before its first success,
 	// and onLoaded the first success: what /livez is driven by.
-	onAttempt func(tenant.ID, error)
+	onAttempt func(context.Context, tenant.ID, error)
 	onLoaded  func(tenant.ID)
 	// backoff is the boot retry's first backoff, doubling up to 60s; tests
 	// shorten it.
@@ -57,7 +57,7 @@ type tenantDiscovery struct {
 	done     chan struct{}
 }
 
-func newDiscoveries(ctx context.Context, build func(tenant.ID, *settings.Store) *discovery.SchemaRegistry, onAttempt func(tenant.ID, error), onLoaded func(tenant.ID)) *discoveries {
+func newDiscoveries(ctx context.Context, build func(tenant.ID, *settings.Store) *discovery.SchemaRegistry, onAttempt func(context.Context, tenant.ID, error), onLoaded func(tenant.ID)) *discoveries {
 	d := &discoveries{ctx: ctx, build: build, onAttempt: onAttempt, onLoaded: onLoaded, backoff: 2 * time.Second}
 	d.cur.Store(&map[tenant.ID]*tenantDiscovery{})
 	return d
@@ -146,7 +146,7 @@ func (d *discoveries) start(id tenant.ID, reg *discovery.SchemaRegistry) *tenant
 	go func() {
 		defer close(td.done)
 		if !reg.Loaded() {
-			err := reg.RetryRefresh(ctx, backoff, 60*time.Second, func(err error) { d.onAttempt(id, err) })
+			err := reg.RetryRefresh(ctx, backoff, 60*time.Second, func(ctx context.Context, err error) { d.onAttempt(ctx, id, err) })
 			if err != nil {
 				// ctx cancelled before success — the process is stopping, or
 				// the tenant is no longer served.

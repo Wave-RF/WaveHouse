@@ -411,8 +411,8 @@ func (a *App) wireDiscovery(ctx context.Context) {
 		func(id tenant.ID, _ *settings.Store) *discovery.SchemaRegistry {
 			return discovery.NewSchemaRegistry(a.discoverySource(id), id, perTenant(a.tenants, (*settings.Store).SchemaRefreshInterval))
 		},
-		func(id tenant.ID, err error) {
-			slog.Warn("schema discovery retry failed", "tenant", id, "error", err)
+		func(ctx context.Context, id tenant.ID, err error) {
+			slog.WarnContext(ctx, "schema discovery retry failed", "tenant", id, "error", err)
 			mu.Lock()
 			defer mu.Unlock()
 			// A loop a reload stopped may report one last attempt after its
