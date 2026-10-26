@@ -771,7 +771,8 @@ func newDynamoMetrics() dynamoMetrics {
 	requests, _ := meter.Int64Counter("wavehouse_dedupe_dynamodb_requests_total",
 		metric.WithDescription("DynamoDB dedupe requests by operation and outcome (ok, condition_failed, unavailable, canceled, error)"))
 	duration, _ := meter.Float64Histogram("wavehouse_dedupe_dynamodb_request_duration_seconds",
-		metric.WithDescription("DynamoDB dedupe request latency, SDK retries included"), metric.WithUnit("s"))
+		metric.WithDescription("DynamoDB dedupe request latency, SDK retries included"), metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5))
 	unprocessed, _ := meter.Int64Counter("wavehouse_dedupe_dynamodb_unprocessed_items_total",
 		metric.WithDescription("Commit items DynamoDB left unprocessed and the backend retried"))
 	shorted, _ := meter.Int64Counter("wavehouse_dedupe_dynamodb_short_circuits_total",
