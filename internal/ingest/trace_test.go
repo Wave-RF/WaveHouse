@@ -151,6 +151,12 @@ func TestInsertToClickHouse_SpanIsTheFlushSpansChild(t *testing.T) {
 	assert.Equal(t, int64(8123), attr(insert, "server.port").AsInt64())
 	assert.Equal(t, int64(2), attr(insert, "rows").AsInt64())
 	assert.Equal(t, codes.Unset, insert.Status().Code)
+
+	// The INSERT sends its own span to ClickHouse as the request's traceparent.
+	sent := rt.Captured()
+	require.Len(t, sent, 1)
+	sc := insert.SpanContext()
+	assert.Equal(t, "00-"+sc.TraceID().String()+"-"+sc.SpanID().String()+"-01", sent[0].Header.Get("traceparent"))
 }
 
 func TestInsertToClickHouse_SpanRecordsTheFailure(t *testing.T) {

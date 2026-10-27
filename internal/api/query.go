@@ -270,7 +270,8 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// The call is timed, and spanned, from the request to the end of the
 	// response body: ClickHouse streams the result, so the body is most of
 	// the query.
-	_, span := otel.Tracer(chTracerName).Start(ctx, chQuerySpanName, chQuerySpanOptions(target, true, opOpsQuery, req.SQL)...)
+	spanCtx, span := otel.Tracer(chTracerName).Start(ctx, chQuerySpanName, chQuerySpanOptions(target, true, opOpsQuery, req.SQL)...)
+	chconn.InjectTraceContext(spanCtx, httpReq.Header)
 	start := time.Now()
 	resp, err := h.clients.For(target).Do(httpReq)
 	if err != nil {
