@@ -935,6 +935,9 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 	if len(msgs) == 0 {
 		return
 	}
+	// Counted here, not after each ack: the rows are in ClickHouse whatever
+	// the ack does. One whose ack fails can be redelivered, and is then
+	// written and counted again, as every INSERT that succeeds is.
 	countRows(ctx, tableName, rowsInserted, len(msgs))
 	// A batch is one tenant's (dispatchLoop keys its loops by tenant table),
 	// so the first row names whose namespaces the insert changed.

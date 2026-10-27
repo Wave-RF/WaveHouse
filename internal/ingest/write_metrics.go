@@ -69,7 +69,7 @@ func newWriteMetrics(m metric.Meter) (writeMetrics, error) {
 	)
 	rows, err4 := m.Int64Counter(
 		"wavehouse_ingest_rows_total",
-		metric.WithDescription("Rows the ingest worker settled, by outcome: inserted into ClickHouse, dead_lettered on the DLQ, or left_unacked to come back on redelivery (the DLQ is off for the table, or the DLQ publish or ack failed); a row left unacked is counted again on every attempt"),
+		metric.WithDescription("Rows the ingest worker settled, by outcome: inserted into ClickHouse (a row whose ack then fails can come back and is counted again), dead_lettered on the DLQ, or left_unacked to come back on redelivery (the DLQ is off for the table, or the DLQ publish or ack failed); a row left unacked is counted again on every attempt"),
 	)
 	return writeMetrics{insertSeconds, batchRows, isolations, rows}, errors.Join(err1, err2, err3, err4)
 }

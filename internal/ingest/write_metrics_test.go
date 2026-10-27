@@ -242,3 +242,16 @@ func TestWriteMetrics_NoConnectionAndFailedPark(t *testing.T) {
 	wait()
 	assert.Equal(t, map[string]int64{rowsInserted: 1, rowsDeadLettered: 2, rowsLeftUnacked: 3}, read().rows)
 }
+
+// TestWriteMetrics_InsertedBeforeAck pins that a row ClickHouse took is
+// counted inserted even when its ack then fails: the row is in ClickHouse,
+// and a redelivery is written and counted again (deployment.md, Ingest writes).
+func TestWriteMetrics_InsertedBeforeAck(t *testing.T) {
+	read := swapWriteMetrics(t)
+	w, _, _, wait := newTestWorker(okRoundTripper())
+	m := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	m.DoubleAckErr = errors.New("ack timed out")
+	w.flushTable(context.Background(), "events", parseAll(t, w, m))
+	wait()
+	assert.Equal(t, map[string]int64{rowsInserted: 1}, read().rows)
+}
