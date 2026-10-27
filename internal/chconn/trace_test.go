@@ -81,6 +81,12 @@ func TestInjectTraceContext(t *testing.T) {
 	chconn.InjectTraceContext(trace.ContextWithSpanContext(ctx, spanContext(0)), h)
 	assert.Equal(t, "00-0102030405060708090a0b0c0d0e0f10-0102030405060708-00", h.Get("traceparent"), "an unsampled span is sent unsampled")
 
+	ts, err := trace.ParseTraceState("vendor=value")
+	require.NoError(t, err)
+	h = http.Header{"Tracestate": {"configured=1"}}
+	chconn.InjectTraceContext(trace.ContextWithSpanContext(ctx, spanContext(trace.FlagsSampled).WithTraceState(ts)), h)
+	assert.Equal(t, []string{"vendor=value"}, h.Values("tracestate"), "a span's tracestate replaces the configured one")
+
 	h = http.Header{"Traceparent": {"configured"}}
 	chconn.InjectTraceContext(ctx, h)
 	assert.Equal(t, http.Header{"Traceparent": {"configured"}}, h, "no span, no change")
