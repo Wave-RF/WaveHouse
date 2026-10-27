@@ -219,8 +219,8 @@ func TestInitProvider_TenantLabel(t *testing.T) {
 }
 
 // TestInitProvider_SeriesLimitOverflows pins what configuration.mdx § Metric
-// labels tells operators to alert on: the SDK keeps 2,000 series per metric,
-// so past 1,999 label sets of its own a metric's new ones fold into one series
+// labels tells operators to alert on: the SDK keeps 2,000 label sets per
+// metric, so past 1,999 of its own a metric's new ones fold into one set
 // labeled otel_metric_overflow="true".
 func TestInitProvider_SeriesLimitOverflows(t *testing.T) {
 	// No t.Parallel(): InitProvider mutates global OTel state, and t.Setenv.
