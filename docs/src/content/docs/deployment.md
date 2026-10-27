@@ -887,6 +887,29 @@ The 99th percentile of each route's latency:
 histogram_quantile(0.99, sum by (route, le) (rate(wavehouse_http_request_duration_seconds_bucket[5m])))
 ```
 
+### Ingest writes
+
+An ingest process reports what it writes to ClickHouse. None of these carries a tenant label:
+
+| Metric | Meaning |
+| --- | --- |
+| `wavehouse_ingest_rows_total{table, outcome}` | Rows the worker settled. `outcome` is `inserted` (written by an `INSERT` that succeeded), `dead_lettered` (parked on the [DLQ](#dead-letter-queue-dlq) after ClickHouse rejected the row on its own, or because its tenant had no ClickHouse connection) or `left_unacked` (neither, so the row comes back on redelivery: the DLQ is off for the table, or the DLQ publish or its ack failed). A row left unacked is counted again on every attempt. |
+| `wavehouse_ingest_insert_duration_seconds{mode, result}` | Each `INSERT` the worker sent, with buckets from 5 ms to the insert client's 30 s timeout. `mode` is `batch`, or `isolated` for one row of a batch that fell back to row-by-row isolation. `result` is `ok`, or the failure's class as `wavehouse_ingest_retries_total` labels it: `rejected`, `unavailable`, `denied` or `unknown`. A tenant with no ClickHouse connection sends nothing and records nothing. |
+| `wavehouse_ingest_batch_rows` | Rows in each bulk `INSERT`, with buckets `1, 5, 10, 50, 100, 250, 500, 1000`. A batch is flushed at 500 rows or after 5 seconds, so batches that sit low mean many small parts in ClickHouse, and batches always at 500 mean the worker is the bottleneck. |
+| `wavehouse_ingest_isolations_total{table}` | Bulk `INSERT`s ClickHouse refused that the worker retried row by row. |
+
+Every delivery the worker takes ends in exactly one of `wavehouse_ingest_rows_total`, `wavehouse_ingest_retries_total` (handed back for a delayed retry) and `wavehouse_ingest_poison_total` (an envelope it could not read). Whether ingest is writing:
+
+```promql
+sum by (table) (rate(wavehouse_ingest_rows_total{outcome="inserted"}[5m]))
+```
+
+The 99th percentile of a bulk `INSERT`'s latency, which rises before inserts start failing when ClickHouse is in trouble:
+
+```promql
+histogram_quantile(0.99, sum by (le) (rate(wavehouse_ingest_insert_duration_seconds_bucket{mode="batch"}[5m])))
+```
+
 ### Settings reloads
 
 Every process reads the settings directory and reloads it on its own, so a reload can be adopted by one pod and rejected, or only half applied, by the next. These metrics report each process's reloads; none carries a tenant label, and which tenant was rejected is in the reload's log line:
