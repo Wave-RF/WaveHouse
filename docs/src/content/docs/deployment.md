@@ -960,7 +960,7 @@ For production posture where metrics should not be exposed on the public API lis
 
 ### Many tables
 
-Eight metrics carry a `table` label, so each grows by one series per table that sees traffic, multiplied by its other labels. At a few dozen tables that is noise; with table-per-tenant schemas or thousands of tables it shows up in your time-series database's memory and bill. Set `prometheus.per_table_metrics: false` (`WH_METRICS_PER_TABLE=false`) to drop the label and report each metric summed over every table, on the Prometheus endpoint and OTLP push alike. WaveHouse logs one `WARN` naming the setting once its metrics have carried more than 500 distinct tables. See [Configuration → Metric labels](/configuration#metric-labels).
+Ten metrics carry a `table` label, so each grows by one series per table that sees traffic, multiplied by its other labels. At a few dozen tables that is noise; with table-per-tenant schemas or thousands of tables it shows up in your time-series database's memory and bill. Set `prometheus.per_table_metrics: false` (`WH_METRICS_PER_TABLE=false`) to drop the label and report each metric summed over every table, on the Prometheus endpoint and OTLP push alike. WaveHouse logs one `WARN` naming the setting once its metrics have carried more than 500 distinct tables. See [Configuration → Metric labels](/configuration#metric-labels).
 
 ### Profiling
 
