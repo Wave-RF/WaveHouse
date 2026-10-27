@@ -288,7 +288,7 @@ func (h *Hub) Broadcast(topic mq.Topic, raw []byte) {
 			specsResolved = true
 		}
 		for _, sub := range rb.bucket.Snapshot() {
-			if h.rowAdmitted(p, rb.role, ev, sub.claims, colSpecs) {
+			if h.rowAdmitted(topic.Tenant, p, rb.role, ev, sub.claims, colSpecs) {
 				deliver(sub, plan)
 			}
 		}
@@ -324,10 +324,10 @@ func deliver(sub *Subscriber, plan rolePlan) {
 // row-filter, counting a withheld row when they don't. It is the one admission
 // step shared by the live fan-out (per subscriber) and replay (per connection),
 // so the two delivery paths can't drift on how row-level security is evaluated.
-func (h *Hub) rowAdmitted(p *policy.Policy, role string, ev *eventView, claims map[string]any, colSpecs map[string]policy.ColumnSpec) bool {
+func (h *Hub) rowAdmitted(id tenant.ID, p *policy.Policy, role string, ev *eventView, claims map[string]any, colSpecs map[string]policy.ColumnSpec) bool {
 	perms := policy.Evaluate(p, role, ev.evt.TableName, "select", claims)
 	if !h.rowEvaluator().Visible(perms, ev.row, colSpecs) {
-		h.metric.RowWithheld(ev.evt.TableName, role)
+		h.metric.RowWithheld(id, ev.evt.TableName, role)
 		return false
 	}
 	return true
@@ -563,7 +563,7 @@ func (h *Hub) ReplayProjector(id tenant.ID, role string, sub *Subscriber) func(r
 				colSpecs = h.columnSpecs(id, ev.evt.TableName)
 				specsFor = ev.evt.TableName
 			}
-			if !h.rowAdmitted(p, role, ev, sub.claims, colSpecs) {
+			if !h.rowAdmitted(id, p, role, ev, sub.claims, colSpecs) {
 				return nil // this row is filtered out for these claims
 			}
 		}

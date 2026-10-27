@@ -216,12 +216,14 @@ func (a *App) wireObservability(ctx context.Context) {
 		return
 	}
 	shutdown, promHandler, err := observability.InitProvider(ctx, a.identity(), observability.ProviderConfig{
-		TracesEnabled:     cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
-		TracesSampleRate:  cfg.OTel.Traces.SampleRate,
-		MetricsEnabled:    cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
-		PrometheusEnabled: cfg.Prometheus.Enabled,
-		LogsEnabled:       cfg.OTel.Enabled && cfg.OTel.Logs.Enabled,
-		AggregateTables:   !cfg.Prometheus.PerTableMetrics,
+		TracesEnabled:       cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
+		TracesSampleRate:    cfg.OTel.Traces.SampleRate,
+		MetricsEnabled:      cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
+		PrometheusEnabled:   cfg.Prometheus.Enabled,
+		LogsEnabled:         cfg.OTel.Enabled && cfg.OTel.Logs.Enabled,
+		AggregateTables:     !cfg.Prometheus.PerTableMetrics,
+		AggregateTenants:    !cfg.Prometheus.PerTenantMetrics,
+		HTTPBodySizeMetrics: cfg.Prometheus.HTTPBodySizeMetrics,
 	})
 	if err != nil {
 		slog.Error("failed to initialize observability, falling back to stdout", "error", err)

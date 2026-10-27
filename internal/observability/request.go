@@ -28,6 +28,7 @@ type requestScope struct {
 	id     string
 	client atomic.Pointer[string]
 	tenant atomic.Pointer[string]
+	served atomic.Bool // the tenant is one the process serves (SetRequestServed)
 }
 
 type requestScopeKey struct{}
@@ -57,6 +58,7 @@ func RequestID(ctx context.Context) string {
 func SetRequestTenant(ctx context.Context, tenant string) {
 	if s := scopeFrom(ctx); s != nil {
 		s.tenant.Store(&tenant)
+		s.served.Store(false) // until SetRequestServed says this one is
 	}
 	trace.SpanFromContext(ctx).SetAttributes(attribute.String(TenantKey, tenant))
 }

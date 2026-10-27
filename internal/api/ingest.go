@@ -19,6 +19,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
 
@@ -753,7 +754,7 @@ func (h *IngestHandler) prepareRecord(
 				rec.key = &dedupe.Key{Table: table, ID: fmt.Sprint(idVal)}
 				rec.retention = dd.Retention
 			} else {
-				dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
+				dedupeMissingIDCounter.Add(ctx, 1, observability.MetricAttrs(ctx, attribute.String("table", table)))
 				if dd.RequireID {
 					slog.WarnContext(ctx, "dedupe id_field missing or null; rejecting", "id_field", idField, "table", table)
 					return pendingRecord{reject: &recordReject{
@@ -883,7 +884,7 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 		// The counter carries the signal (a burst is a reload; a steady rate
 		// is the store and settings out of step), so the line is Debug rather
 		// than a WARN per record.
-		dedupeDisabledCounter.Add(ctx, int64(len(keys)), metric.WithAttributes(attribute.String("table", table)))
+		dedupeDisabledCounter.Add(ctx, int64(len(keys)), observability.MetricAttrs(ctx, attribute.String("table", table)))
 		slog.DebugContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "records", len(keys), "table", table)
 		return nil
 	case errors.Is(err, dedupe.ErrUnavailable):
@@ -1005,7 +1006,7 @@ func commitClaims(ctx context.Context, dd dedupe.Deduplicator, recs []pendingRec
 		switch {
 		case err == nil, errors.Is(err, dedupe.ErrDisabled):
 		default:
-			dedupeCommitFailedCounter.Add(ctx, int64(len(claims)), metric.WithAttributes(attribute.String("table", table)))
+			dedupeCommitFailedCounter.Add(ctx, int64(len(claims)), observability.MetricAttrs(ctx, attribute.String("table", table)))
 			slog.ErrorContext(ctx, "dedupe commit failed after publish; the ids lapse with their lease", "error", err, "table", table, "records", len(claims))
 		}
 	}

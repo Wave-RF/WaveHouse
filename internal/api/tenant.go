@@ -115,7 +115,11 @@ func opsStore(w http.ResponseWriter, r *http.Request, tenants *settings.Registry
 		id = tenant.Default
 		observability.SetRequestTenant(r.Context(), id.String())
 	}
-	return resolveStore(w, tenants, id)
+	store, ok := resolveStore(w, tenants, id)
+	if ok {
+		observability.SetRequestServed(r.Context())
+	}
+	return store, ok
 }
 
 // requestTenant is the tenant a request names: the tenant.Header value,
@@ -159,6 +163,7 @@ func TenantMW(tenants *settings.Registry) func(http.Handler) http.Handler {
 			if !ok {
 				return
 			}
+			observability.SetRequestServed(r.Context())
 			next.ServeHTTP(w, r.WithContext(WithStore(r.Context(), store)))
 		})
 	}

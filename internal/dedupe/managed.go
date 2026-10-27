@@ -10,6 +10,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // ErrDisabled is returned by Managed's calls while dedupe is switched off.
@@ -122,7 +124,7 @@ func (m *Managed) Open() bool {
 func (m *Managed) Reserve(ctx context.Context, keys []Key, lease time.Duration) ([]Claim, error) {
 	for _, k := range keys {
 		if k.Hashed() {
-			hashedIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", k.Table)))
+			hashedIDCounter.Add(ctx, 1, observability.MetricAttrs(ctx, attribute.String("table", k.Table)))
 		}
 	}
 	if lease <= 0 {

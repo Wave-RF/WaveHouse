@@ -9,6 +9,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // publishBuckets run from 1 ms to 20 s: each attempt is bounded by the
@@ -48,9 +50,10 @@ func UsePublishMeter(m metric.Meter) (restore func(), err error) {
 }
 
 // recordPublish records one publish of kind that began at start and ended
-// with err.
+// with err, labeled with the tenant ctx names (#891): the request's for an
+// ingest publish, the worker's batch for a park.
 func recordPublish(ctx context.Context, kind string, start time.Time, err error) {
-	(*publishSeconds.Load()).Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(
+	(*publishSeconds.Load()).Record(ctx, time.Since(start).Seconds(), observability.MetricAttrs(ctx,
 		attribute.String("kind", kind),
 		attribute.String("result", publishResult(ctx, err)),
 	))

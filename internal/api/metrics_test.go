@@ -16,6 +16,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/pipes"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -119,6 +120,38 @@ func TestHTTPMetrics_LabelsByRoutePattern(t *testing.T) {
 		"method=GET,route=/boom,status_class=5xx":            1,
 	}, histogramCounts(t, reader, "wavehouse_http_request_duration_seconds"),
 		"/v1/stream is not timed: its lifetime is wavehouse_sse_stream_duration_seconds")
+}
+
+// TestHTTPMetrics_LabelsServedTenant: a request is labeled with its tenant
+// once TenantMW has resolved one the process serves (#891); a tenant id it
+// does not serve is the client's to make up, so it adds no series.
+func TestHTTPMetrics_LabelsServedTenant(t *testing.T) {
+	t.Parallel()
+	mp, reader := testMeterReader(t)
+	m := httpMetricsOn(mp.Meter(meterName))
+
+	r := chi.NewRouter()
+	r.Use(requestID)
+	r.Use(m.middleware)
+	r.With(TenantMW(testTenants())).Get("/v1/pipes/{name}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	r.Get("/version", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	for _, id := range []string{"", "nobody"} {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/pipes/a", nil)
+		if id != "" {
+			req.Header.Set(tenant.Header, id)
+		}
+		r.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/version", nil))
+
+	assert.Equal(t, map[string]uint64{
+		"method=GET,route=/v1/pipes/{name},status_class=2xx,tenant=" + tenant.Default.String(): 1,
+		"method=GET,route=/v1/pipes/{name},status_class=4xx":                                   1,
+		"method=GET,route=/version,status_class=2xx":                                           1,
+	}, histogramCounts(t, reader, "wavehouse_http_request_duration_seconds"))
 }
 
 // TestHTTPMetrics_RouterRecords: the routers every listener serves time
@@ -227,7 +260,7 @@ func TestQueryMetrics_NilIsNoop(t *testing.T) {
 	var m *queryMetrics
 	assert.NotPanics(t, func() {
 		m.observe(context.Background(), opPipe, time.Second, nil, queryCaps{})
-		m.record(opOpsQuery, time.Second, resultOK)
+		m.record(t.Context(), opOpsQuery, time.Second, resultOK)
 	})
 	var hm *httpMetrics
 	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})

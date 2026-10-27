@@ -49,13 +49,22 @@ func (p *pendingBumps) add(id tenant.ID, keys ...string) {
 	p.n.Store(int64(len(p.keys)))
 }
 
-// snapshot returns the keys owed a bump with the generation each was added
-// at, for a later done.
-func (p *pendingBumps) snapshot() map[string]uint64 {
+// owed returns the keys owed a bump with the tenant each is owed for and the
+// generation it was added at, for a later done.
+func (p *pendingBumps) owed() map[string]pendingKey {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := make(map[string]uint64, len(p.keys))
+	out := make(map[string]pendingKey, len(p.keys))
 	for k, pk := range p.keys {
+		out[k] = pk
+	}
+	return out
+}
+
+// snapshot is owed with the generations alone, the form done takes.
+func (p *pendingBumps) snapshot() map[string]uint64 {
+	out := map[string]uint64{}
+	for k, pk := range p.owed() {
 		out[k] = pk.gen
 	}
 	return out

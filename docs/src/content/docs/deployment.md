@@ -611,7 +611,7 @@ The query-result cache is shared the same way. With the default `cache.backend: 
 
 **Coalescing stays per instance.** `singleflight` collapses identical concurrent queries within each instance, so a cold hot query costs at most one ClickHouse query per instance, not one per request.
 
-**Metrics** (meter `wavehouse-cache`, every series labeled `backend="redis"`, no tenant label): `wavehouse_cache_lookups_total{result}` (`hit`, `miss`, `stale`, `bypass`, `error`), `wavehouse_cache_op_duration_seconds{op}` (`lookup`, `set`, `invalidate`), `wavehouse_cache_breaker_open` (1 while the cache is bypassed), `wavehouse_cache_invalidations_total{result}` (`ok` counts every bump that lands, retried ones included, and `deferred` each bump an invalidation could not deliver when made, a repeat of one already owed included; a failed retry is not counted again — the two overlap, not a split), `wavehouse_cache_invalidations_pending`, `wavehouse_cache_value_bytes`, `wavehouse_cache_oversize_total` and `wavehouse_cache_set_failures_total{reason}` (`oom`, `timeout`, `other`). Two signals are worth alerting on: `wavehouse_cache_breaker_open` at 1, or `wavehouse_cache_invalidations_pending` above 0, for more than a few minutes.
+**Metrics** (meter `wavehouse-cache`, every series labeled `backend="redis"`, and those about one tenant with its [tenant label](/configuration#metric-labels)): `wavehouse_cache_lookups_total{result}` (`hit`, `miss`, `stale`, `bypass`, `error`), `wavehouse_cache_op_duration_seconds{op}` (`lookup`, `set`, `invalidate`), `wavehouse_cache_breaker_open` (1 while the cache is bypassed), `wavehouse_cache_invalidations_total{result}` (`ok` counts every bump that lands, retried ones included, and `deferred` each bump an invalidation could not deliver when made, a repeat of one already owed included; a failed retry is not counted again — the two overlap, not a split), `wavehouse_cache_invalidations_pending`, `wavehouse_cache_value_bytes`, `wavehouse_cache_oversize_total` and `wavehouse_cache_set_failures_total{reason}` (`oom`, `timeout`, `other`). Two signals are worth alerting on: `wavehouse_cache_breaker_open` at 1, or `wavehouse_cache_invalidations_pending` above 0, for more than a few minutes.
 
 For local development, `docker compose -f deployments/compose/dependencies.yaml --profile redis up -d` starts a Redis on `localhost:6379` with no persistence.
 
@@ -864,7 +864,7 @@ count by (version) (wavehouse_build_info)
 
 ### Request latency and ClickHouse queries
 
-Every process times the HTTP requests on `server.port` (scrapes on a dedicated `prometheus.port` listener are not timed), and an API process times each statement its query paths send to ClickHouse. Both are histograms in seconds, with buckets from 5 ms to 30 s, and neither carries a tenant label:
+Every process times the HTTP requests on `server.port` (scrapes on a dedicated `prometheus.port` listener are not timed), and an API process times each statement its query paths send to ClickHouse. Both are histograms in seconds, with buckets from 5 ms to 30 s, and both carry the [tenant label](/configuration#metric-labels) of a served tenant's requests:
 
 | Metric | Labels |
 | --- | --- |
@@ -891,7 +891,7 @@ histogram_quantile(0.99, sum by (route, le) (rate(wavehouse_http_request_duratio
 
 ### Ingest requests and queue publishes
 
-An API process counts what `POST /v1/ingest` does with each record, and every process that publishes times each publish: the API its ingest rows, the `ingest` role its dead-letter parks. Neither metric carries a tenant label:
+An API process counts what `POST /v1/ingest` does with each record, and every process that publishes times each publish: the API its ingest rows, the `ingest` role its dead-letter parks. Both carry the [tenant label](/configuration#metric-labels):
 
 | Metric | Meaning |
 | --- | --- |
@@ -912,7 +912,7 @@ sum(rate(wavehouse_mq_publish_duration_seconds_count{kind="dlq", result!="ok"}[5
 
 ### Ingest writes
 
-An ingest process reports what it writes to ClickHouse. None of these carries a tenant label:
+An ingest process reports what it writes to ClickHouse. Each carries the [tenant label](/configuration#metric-labels) of the rows' tenant:
 
 | Metric | Meaning |
 | --- | --- |
@@ -965,7 +965,7 @@ Each SSE stream has an outbound queue of 64 frames. When a client reads slower t
 | `client_gone` | The client disconnected, or a write to it failed, with the frame queued or being written. |
 | `stream_closed` | The server ended the stream with the frame queued: a shutdown, or its tenant no longer served. |
 
-`kind` is the frame's: `event`, `replay`, `schema` or `keepalive`. `table` is the streamed table when the tenant's schema has it, and empty otherwise, since the name comes from the client. A burst of drops often lands between two scrapes; `increase()` over a short window reads it as a count and clears soon after, where a 5-minute rate spreads it into a small average. Each `table`, `kind` and `reason` gets its series at its first drop, and neither `increase()` nor `rate()` counts a series' first sample, so the first burst for a combination can go unseen:
+`kind` is the frame's: `event`, `replay`, `schema` or `keepalive`. `table` is the streamed table when the tenant's schema has it, and empty otherwise, since the name comes from the client. `tenant` is the stream's [tenant label](/configuration#metric-labels), as on the other `wavehouse_sse_*` metrics but the queue peak. A burst of drops often lands between two scrapes; `increase()` over a short window reads it as a count and clears soon after, where a 5-minute rate spreads it into a small average. Each `table`, `kind` and `reason` gets its series at its first drop, and neither `increase()` nor `rate()` counts a series' first sample, so the first burst for a combination can go unseen:
 
 ```promql
 sum by (table) (increase(wavehouse_sse_dropped_frames_total{reason="buffer_full"}[1m])) > 0
@@ -984,6 +984,12 @@ For production posture where metrics should not be exposed on the public API lis
 ### Many tables
 
 Eleven metrics carry a `table` label, so each grows by one series per table that sees traffic, multiplied by its other labels. At a few dozen tables that is noise; with table-per-tenant schemas or thousands of tables it shows up in your time-series database's memory and bill. Set `prometheus.per_table_metrics: false` (`WH_METRICS_PER_TABLE=false`) to drop the label and report each metric summed over every table, on the Prometheus endpoint and OTLP push alike. WaveHouse logs one `WARN` naming the setting once its metrics have carried more than 500 distinct tables. See [Configuration → Metric labels](/configuration#metric-labels).
+
+### Many tenants
+
+The metrics about one tenant's work, such as request latency, ingest, the SSE streams and the cache, carry a `tenant` label, so each grows by one series per tenant that sees traffic. Each process labels at most 100 tenants and reports every tenant after them as `tenant="_other"`, logging one `WARN` the first time it does. Each replica fills its own 100, so past that a tenant can be labeled on one replica and in `_other` on another. With more tenants than that, or a time-series bill that matters more than a per-tenant view, set `prometheus.per_tenant_metrics: false` (`WH_METRICS_PER_TENANT=false`) to drop the label and report each metric summed over every tenant, on the Prometheus endpoint and OTLP push alike. See [Configuration → Metric labels](/configuration#metric-labels).
+
+The OpenTelemetry HTTP server metrics carry no `server.address` or `server.port`, since both come from the request's `Host` header. Their request and response body size histograms are off by default; set `prometheus.http_body_size_metrics: true` (`WH_METRICS_HTTP_BODY_SIZE=true`) to keep them.
 
 ### Profiling
 

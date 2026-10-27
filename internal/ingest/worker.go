@@ -19,6 +19,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/pkg/chsql"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	"go.opentelemetry.io/otel"
@@ -462,7 +463,7 @@ func newTableBatcher(w *IngestWorker, table string) *tableBatcher {
 // it back, so the backlog of an outage stays in the queue, not in the worker.
 func (b *tableBatcher) add(ctx context.Context, pm parsedMsg) {
 	if wait, ok := b.w.backoffs.waiting(func() chconn.Target { return b.w.target(pm.tenant) }, b.table, b.w.clock()); ok {
-		b.w.retryLater(ctx, b.table, []parsedMsg{pm}, wait, "backoff")
+		b.w.retryLater(observability.WithMetricTenant(ctx, pm.tenant.String()), b.table, []parsedMsg{pm}, wait, "backoff")
 		return
 	}
 	if len(b.batch) == 0 {
@@ -662,6 +663,8 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 		return
 	}
 	id := msgs[0].tenant
+	// Every measurement of the batch is about its tenant (#891).
+	ctx = observability.WithMetricTenant(ctx, id.String())
 	t := w.target(id)
 	if t.URL == "" {
 		w.parkBatch(ctx, tableName, msgs, noTargetError(id))
@@ -775,7 +778,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 	}
 
 	slog.WarnContext(ctx, "bulk insert failed, falling back to 1-by-1 isolation", "tenant", group[0].tenant, "table", tableName, "error", err)
-	workerMetrics.isolations.Add(ctx, 1, metric.WithAttributes(attribute.String("table", tableName)))
+	workerMetrics.isolations.Add(ctx, 1, observability.MetricAttrs(ctx, attribute.String("table", tableName)))
 
 	// ISOLATE & DLQ: re-insert one row at a time so a single poison row can't
 	// sink the whole batch.
@@ -818,7 +821,7 @@ func (w *IngestWorker) retryLater(ctx context.Context, tableName string, msgs []
 			slog.ErrorContext(ctx, "delayed nak failed; the row is redelivered after the ack wait instead", "tenant", pm.tenant, "table", tableName, "error", err)
 		}
 	}
-	retryCounter.Add(ctx, int64(len(msgs)), metric.WithAttributes(
+	retryCounter.Add(ctx, int64(len(msgs)), observability.MetricAttrs(ctx,
 		attribute.String("table", tableName),
 		attribute.String("reason", reason),
 	))
@@ -846,6 +849,8 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	// A group is one (tenant, table) batch's, so its first row names the
 	// tenant whose ClickHouse takes the insert.
 	id := msgs[0].tenant
+	// Every measurement of the batch is about its tenant (#891).
+	ctx = observability.WithMetricTenant(ctx, id.String())
 	t := w.target(id)
 	if t.URL == "" {
 		return noTargetError(id)
@@ -1008,6 +1013,7 @@ func (w *IngestWorker) invalidate(ctx context.Context, id tenant.ID, tableName s
 // unacked, exactly as the isolation path does: that is a transient DLQ
 // outage, and retrying beats destroying the row.
 func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, id tenant.ID, tableName, reason, detail string) {
+	ctx = observability.WithMetricTenant(ctx, id.String())
 	if w.dlqEnabled == nil || w.dlqEnabled(id, tableName) {
 		// Backgrounded on ackWg for the same reason handleSuccess backgrounds its
 		// acks: parkOnDLQ does a DLQ publish AND an fsync-bound DoubleAck,
@@ -1087,7 +1093,7 @@ func (w *IngestWorker) parkOnDLQ(ctx context.Context, msg *mq.Message, tableName
 
 // countPoison records one unreadable envelope under its disposition.
 func countPoison(ctx context.Context, tableName, reason, disposition string) {
-	poisonCounter.Add(ctx, 1, metric.WithAttributes(
+	poisonCounter.Add(ctx, 1, observability.MetricAttrs(ctx,
 		attribute.String("table", tableName),
 		attribute.String("reason", reason),
 		attribute.String("disposition", disposition),

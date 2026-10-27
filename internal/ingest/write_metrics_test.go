@@ -67,6 +67,8 @@ func swapWriteMetrics(t *testing.T) func() writeReading {
 				switch data := md.Data.(type) {
 				case metricdata.Sum[int64]:
 					for _, dp := range data.DataPoints {
+						// Every measurement is about its batch's tenant (#891).
+						assert.Equal(t, tenant.Default.String(), attr(dp.Attributes, "tenant"), md.Name)
 						switch md.Name {
 						case "wavehouse_ingest_rows_total":
 							assert.Equal(t, "events", attr(dp.Attributes, "table"))
@@ -81,10 +83,12 @@ func swapWriteMetrics(t *testing.T) func() writeReading {
 					}
 				case metricdata.Histogram[float64]:
 					for _, dp := range data.DataPoints {
+						assert.Equal(t, tenant.Default.String(), attr(dp.Attributes, "tenant"), md.Name)
 						r.inserts[attr(dp.Attributes, "mode")+"/"+attr(dp.Attributes, "result")] += dp.Count
 					}
 				case metricdata.Histogram[int64]:
 					for _, dp := range data.DataPoints {
+						assert.Equal(t, tenant.Default.String(), attr(dp.Attributes, "tenant"), md.Name)
 						r.batchRows += dp.Sum
 						r.batchCount += dp.Count
 					}

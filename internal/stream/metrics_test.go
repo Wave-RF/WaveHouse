@@ -90,3 +90,42 @@ func byKind(t *testing.T, dps []metricdata.DataPoint[int64], want string) int64 
 	t.Fatalf("no datapoint with kind=%q", want)
 	return 0
 }
+
+// TestMetrics_Tenant: a stream's measurements carry its tenant (#891), and
+// the process-wide Metrics they were scoped from carries none.
+func TestMetrics_Tenant(t *testing.T) {
+	// No t.Parallel(): meterReader swaps the global meter provider.
+	reader := meterReader(t)
+	m := NewMetrics()
+	acme := m.Tenant("acme")
+	acme.ConnOpened()
+	acme.FrameSent(KindEvent, 42)
+	acme.FrameDropped("events", KindEvent, DropClientGone)
+	acme.ConnClosed(time.Second)
+	m.RowWithheld("acme", "events", "viewer")
+	m.FrameSent(KindKeepalive, 3)
+
+	for name, md := range collectByName(collect(t, reader)) {
+		var sets []attribute.Set
+		switch d := md.Data.(type) {
+		case metricdata.Sum[int64]:
+			for _, dp := range d.DataPoints {
+				sets = append(sets, dp.Attributes)
+			}
+		case metricdata.Histogram[float64]:
+			for _, dp := range d.DataPoints {
+				sets = append(sets, dp.Attributes)
+			}
+		}
+		for _, set := range sets {
+			v, ok := set.Value("tenant")
+			kind, _ := set.Value("kind")
+			if kind.AsString() == KindKeepalive {
+				assert.False(t, ok, "%s: the unscoped Metrics labels no tenant", name)
+				continue
+			}
+			assert.Equal(t, "acme", v.AsString(), name)
+		}
+	}
+	assert.Nil(t, (*Metrics)(nil).Tenant("acme"), "a nil Metrics stays a no-op")
+}

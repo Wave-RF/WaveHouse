@@ -644,7 +644,7 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 
 // countFailure bumps the tenant's refresh-failure counter.
 func (sr *SchemaRegistry) countFailure(ctx context.Context) {
-	refreshFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("tenant", sr.tenant.String())))
+	refreshFailures.Add(ctx, 1, metric.WithAttributes(observability.TenantLabel(sr.tenant.String())))
 }
 
 // isNullable checks if a ClickHouse type string is Nullable.

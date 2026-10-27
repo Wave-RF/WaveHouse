@@ -12,6 +12,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // latencyBuckets are the boundaries, in seconds, of the request and query
@@ -72,7 +74,10 @@ func (m *httpMetrics) middleware(next http.Handler) http.Handler {
 				route = p
 			}
 		}
-		m.duration.Record(context.Background(), time.Since(start).Seconds(), metric.WithAttributes(
+		// The request's tenant, once a served one is resolved, is read
+		// after the handler too: the scope it lives on is filled in place.
+		ctx := r.Context()
+		m.duration.Record(ctx, time.Since(start).Seconds(), observability.MetricAttrs(ctx,
 			attribute.String("route", route),
 			attribute.String("method", methodLabel(r.Method)),
 			attribute.String("status_class", statusClass(ww.Status())),
@@ -158,16 +163,17 @@ func (m *queryMetrics) observe(reqCtx context.Context, operation string, d time.
 	default:
 		result = chResult(chFailureOf(err, http.StatusInternalServerError, caps).code)
 	}
-	m.record(operation, d, result)
+	m.record(reqCtx, operation, d, result)
 	return result
 }
 
-// record records one call of operation that took d, with result as given.
-func (m *queryMetrics) record(operation string, d time.Duration, result string) {
+// record records one call of operation that took d, with result as given,
+// labeled with the request's tenant (#891).
+func (m *queryMetrics) record(reqCtx context.Context, operation string, d time.Duration, result string) {
 	if m == nil {
 		return
 	}
-	m.duration.Record(context.Background(), d.Seconds(), metric.WithAttributes(
+	m.duration.Record(reqCtx, d.Seconds(), observability.MetricAttrs(reqCtx,
 		attribute.String("operation", operation), attribute.String("result", result)))
 }
 

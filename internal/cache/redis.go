@@ -455,72 +455,72 @@ func (r *RedisCache) Lookup(ctx context.Context, id tenant.ID, sha string, deps 
 	// to. Other processes cannot know what this one owes, and serve those
 	// entries until the bump lands.
 	if r.pending.owesAny(keys) {
-		r.metrics.lookup(resultBypass)
+		r.metrics.lookup(id, resultBypass)
 		return Entry{}, Snapshot{}, nil
 	}
 	c := r.conn()
 	if c == nil {
-		r.metrics.lookup(resultBypass)
+		r.metrics.lookup(id, resultBypass)
 		return Entry{}, Snapshot{}, nil
 	}
-	defer r.metrics.op("lookup", time.Now())
+	defer r.metrics.op(id, "lookup", time.Now())
 	opCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
 
 	vkey := valueKey(r.cfg.KeyPrefix, id, sha, deps)
 	res := c.DoMulti(opCtx, c.B().Mget().Key(keys...).Build(), c.B().Get().Key(vkey).Build())
 	if err := res[0].Error(); err != nil {
-		return r.lookupFailed(ctx, err)
+		return r.lookupFailed(ctx, id, err)
 	}
 	// An error reply such as WRONGTYPE: the value key holds something else,
 	// which the fill's plain SET replaces, so it is a miss to fill.
 	valErr := res[1].Error()
 	_, valReplied := rueidis.IsRedisErr(valErr)
 	if valErr != nil && !rueidis.IsRedisNil(valErr) && !valReplied {
-		return r.lookupFailed(ctx, valErr)
+		return r.lookupFailed(ctx, id, valErr)
 	}
 	r.record(ctx, nil)
 	tokens, missing, foreign, err := readTokens(res[0])
 	if err != nil {
-		return r.lookupFailed(ctx, err)
+		return r.lookupFailed(ctx, id, err)
 	}
 	var val []byte
 	if valErr == nil {
 		if val, err = res[1].AsBytes(); err != nil {
-			return r.lookupFailed(ctx, fmt.Errorf("%w: %w", errMalformedReply, err))
+			return r.lookupFailed(ctx, id, fmt.Errorf("%w: %w", errMalformedReply, err))
 		}
 	}
 
 	if len(missing) > 0 || len(foreign) > 0 {
 		if tokens, err = r.createTokens(opCtx, c, keys, missing, foreign); err != nil {
-			return r.lookupFailed(ctx, err)
+			return r.lookupFailed(ctx, id, err)
 		}
-		r.metrics.lookup(resultMiss)
-		return Entry{}, Snapshot{key: vkey, tokens: tokens}, nil
+		r.metrics.lookup(id, resultMiss)
+		return Entry{}, Snapshot{key: vkey, tokens: tokens, tenant: id}, nil
 	}
-	snap := Snapshot{key: vkey, tokens: tokens}
+	snap := Snapshot{key: vkey, tokens: tokens, tenant: id}
 	if val == nil {
-		r.metrics.lookup(resultMiss)
+		r.metrics.lookup(id, resultMiss)
 		return Entry{}, snap, nil
 	}
 	stored, expiresAt, payload, err := r.codec.decode(val)
 	if err != nil {
 		slog.DebugContext(ctx, "cache: unreadable value; treating as a miss", "key", vkey, "error", err)
-		r.metrics.lookup(resultMiss)
+		r.metrics.lookup(id, resultMiss)
 		return Entry{}, snap, nil
 	}
 	remaining := time.Until(expiresAt)
 	if !bytes.Equal(stored, tokens) || remaining <= 0 {
-		r.metrics.lookup(resultStale)
+		r.metrics.lookup(id, resultStale)
 		return Entry{}, snap, nil
 	}
-	r.metrics.lookup(resultHit)
+	r.metrics.lookup(id, resultHit)
 	return Entry{Value: payload, TTL: remaining}, snap, nil
 }
 
-func (r *RedisCache) lookupFailed(ctx context.Context, err error) (Entry, Snapshot, error) {
+func (r *RedisCache) lookupFailed(ctx context.Context, id tenant.ID, err error) (Entry, Snapshot, error) {
 	r.record(ctx, err)
-	r.metrics.lookup(resultError)
+	r.metrics.lookup(id, resultError)
 	return Entry{}, Snapshot{}, fmt.Errorf("cache: redis lookup: %w", err)
 }
 
@@ -597,28 +597,28 @@ func (r *RedisCache) Set(ctx context.Context, snap Snapshot, value []byte, ttl t
 		return nil
 	}
 	if len(value) > r.maxDecoded {
-		r.metrics.tooLarge()
+		r.metrics.tooLarge(snap.tenant)
 		return nil
 	}
 	b := r.codec.encode(snap.tokens, time.Now().Add(ttl), value)
 	if len(b) > r.cfg.MaxValueBytes {
-		r.metrics.tooLarge()
+		r.metrics.tooLarge(snap.tenant)
 		return nil
 	}
 	c := r.conn()
 	if c == nil {
 		return nil
 	}
-	defer r.metrics.op("set", time.Now())
+	defer r.metrics.op(snap.tenant, "set", time.Now())
 	opCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
 	err := c.Do(opCtx, c.B().Set().Key(snap.key).Value(rueidis.BinaryString(b)).Px(max(ttl, time.Millisecond)).Build()).Error()
 	r.record(ctx, err)
 	if err != nil {
-		r.metrics.setFailed(setFailureReason(err))
+		r.metrics.setFailed(snap.tenant, setFailureReason(err))
 		return fmt.Errorf("cache: redis set: %w", err)
 	}
-	r.metrics.stored(len(b))
+	r.metrics.stored(snap.tenant, len(b))
 	return nil
 }
 
@@ -659,7 +659,7 @@ func (r *RedisCache) bump(ctx context.Context, owner map[string]tenant.ID) error
 		r.deferBumps(owner)
 		return fmt.Errorf("%w: %d invalidations deferred", errBypassed, len(owner))
 	}
-	defer r.metrics.op("invalidate", time.Now())
+	defer r.metrics.op("", "invalidate", time.Now())
 	failed := map[string]tenant.ID{}
 	var firstErr error
 	// In batches, so a wide fan-out is several round trips each within the
@@ -676,7 +676,13 @@ func (r *RedisCache) bump(ctx context.Context, owner map[string]tenant.ID) error
 		}
 	}
 	r.record(ctx, firstErr)
-	r.metrics.invalidated("ok", len(owner)-len(failed))
+	landed := map[tenant.ID]int{}
+	for k, id := range owner {
+		if _, ok := failed[k]; !ok {
+			landed[id]++
+		}
+	}
+	r.metrics.invalidated("ok", landed)
 	if len(failed) > 0 {
 		r.deferBumps(failed)
 		return fmt.Errorf("cache: redis invalidate (%d deferred): %w", len(failed), firstErr)
@@ -709,10 +715,12 @@ func (r *RedisCache) sendBumps(ctx context.Context, c rueidis.Client, keys []str
 
 func (r *RedisCache) deferBumps(owner map[string]tenant.ID) {
 	first := r.pending.len() == 0
+	deferred := map[tenant.ID]int{}
 	for k, id := range owner {
 		r.pending.add(id, k)
+		deferred[id]++
 	}
-	r.metrics.invalidated("deferred", len(owner))
+	r.metrics.invalidated("deferred", deferred)
 	// The first bump owed wakes the drain now, not at its next tick: it is
 	// retried at once, or, past an open breaker, when the probe is due.
 	// Later ones join the retry already backing off.
@@ -766,7 +774,7 @@ func (r *RedisCache) drainLoop() {
 // drain delivers the pending bumps through the client conn returns,
 // reporting whether none remain.
 func (r *RedisCache) drain(ctx context.Context, conn func() rueidis.Client) bool {
-	owed := r.pending.snapshot()
+	owed := r.pending.owed()
 	keys := make([]string, 0, len(owed))
 	for k := range owed {
 		keys = append(keys, k)
@@ -778,14 +786,16 @@ func (r *RedisCache) drain(ctx context.Context, conn func() rueidis.Client) bool
 		}
 		sent, err := r.sendBumps(ctx, c, batch)
 		landed := map[string]uint64{}
+		byTenant := map[tenant.ID]int{}
 		for i, k := range batch {
 			if sent[i] {
-				landed[k] = owed[k]
+				landed[k] = owed[k].gen
+				byTenant[owed[k].tenant]++
 			}
 		}
 		r.record(ctx, err)
 		r.pending.done(landed)
-		r.metrics.invalidated("ok", len(landed))
+		r.metrics.invalidated("ok", byTenant)
 		if err != nil {
 			return false
 		}

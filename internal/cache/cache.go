@@ -21,8 +21,9 @@ type Entry struct {
 // what was read before the bump under the post-bump versions (#382). The
 // zero Snapshot makes Set a no-op.
 type Snapshot struct {
-	key    string // the backend's key for the entry at the observed versions
-	tokens []byte // RedisCache: the version tokens read, in tokenKeys order
+	key    string    // the backend's key for the entry at the observed versions
+	tokens []byte    // RedisCache: the version tokens read, in tokenKeys order
+	tenant tenant.ID // whose entry it is, for the metrics of its fill
 }
 
 // ErrForeignDependency is a Lookup whose dependencies name a tenant other
