@@ -732,6 +732,8 @@ var (
 		"wavehouse_ingest_shard_handover_seconds",
 		metric.WithDescription("Time from giving a shard up to releasing it: the drain of what it had delivered"),
 		metric.WithUnit("s"),
+		// One 50 ms poll up to twice the one-minute handover bound.
+		metric.WithExplicitBucketBoundaries(.05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120),
 	)
 )
 
