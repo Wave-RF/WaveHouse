@@ -255,3 +255,25 @@ func TestWriteMetrics_InsertedBeforeAck(t *testing.T) {
 	wait()
 	assert.Equal(t, map[string]int64{rowsInserted: 1}, read().rows)
 }
+
+// TestWriteMetrics_FailedDLQAck: a rejected row whose DLQ publish succeeds
+// but whose own ack fails is left unacked, not dead-lettered, so a
+// redelivery that parks it is the one dead_lettered counts.
+func TestWriteMetrics_FailedDLQAck(t *testing.T) {
+	read := swapWriteMetrics(t)
+	ctx := context.Background()
+	w, pub, _, wait := newTestWorker(poisonRowRT())
+	m := newIngestMsg(t, "events", "", map[string]any{"id": 1, "poison": true})
+	m.DoubleAckErr = errors.New("ack timed out")
+	w.flushTable(ctx, "events", parseAll(t, w, m))
+	wait()
+	require.Len(t, pub.Published(), 1, "parked, though the ack after it failed")
+	assert.Equal(t, map[string]int64{rowsLeftUnacked: 1}, read().rows)
+
+	// The redelivery parks again, and this time its ack succeeds.
+	m.DoubleAckErr = nil
+	w.flushTable(ctx, "events", parseAll(t, w, m))
+	wait()
+	require.Len(t, pub.Published(), 2)
+	assert.Equal(t, map[string]int64{rowsLeftUnacked: 1, rowsDeadLettered: 1}, read().rows)
+}
