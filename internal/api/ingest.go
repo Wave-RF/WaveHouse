@@ -136,6 +136,7 @@ type recordResult struct {
 type recordReject struct {
 	Status  int
 	Message string
+	Result  string // its result on wavehouse_ingest_records_total
 }
 
 // requestAbort is a whole-request failure: this record and every one that
@@ -159,6 +160,7 @@ type requestAbort struct {
 	Status     int
 	Message    string
 	RetryAfter string // non-empty → emit a Retry-After header
+	Result     string // the result on wavehouse_ingest_records_total of each record it refuses
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -331,6 +333,7 @@ func (h *IngestHandler) handleSingle(
 			return
 		}
 		slog.WarnContext(ctx, "invalid json payload", "error", err, "table", table)
+		countRecords(ctx, table, []pendingRecord{{reject: &recordReject{Result: resultInvalidBody}}}, nil)
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -341,6 +344,7 @@ func (h *IngestHandler) handleSingle(
 		abort = h.ingestWindow(ctx, store, table, scope, window)
 		rec = window[0]
 	}
+	countRecords(ctx, table, []pendingRecord{rec}, abort)
 	if abort != nil {
 		writeAbort(ctx, w, abort)
 		return
@@ -389,7 +393,9 @@ func (h *IngestHandler) handleBatch(
 	// flush runs the window's records through reserve → publish → commit and
 	// reports them in order; false when it aborted the request.
 	flush := func() bool {
-		if abort := h.ingestWindow(ctx, store, table, scope, window); abort != nil {
+		abort := h.ingestWindow(ctx, store, table, scope, window)
+		countRecords(ctx, table, window, abort)
+		if abort != nil {
 			writeAbort(ctx, w, abort)
 			return false
 		}
@@ -408,7 +414,7 @@ func (h *IngestHandler) handleBatch(
 		if err != nil {
 			if rse, ok := errors.AsType[*recordSyntaxError](err); ok {
 				result.Total++
-				window = append(window, pendingRecord{index: result.Total, reject: &recordReject{Message: rse.Error()}})
+				window = append(window, pendingRecord{index: result.Total, reject: &recordReject{Message: rse.Error(), Result: resultInvalidBody}})
 				if len(window) == size && !flush() {
 					return
 				}
@@ -425,6 +431,13 @@ func (h *IngestHandler) handleBatch(
 			// than report a misleading partial summary. Not a body read error:
 			// the readers run over an in-memory slice now.
 			slog.WarnContext(ctx, "ingest read error", "error", err, "table", table)
+			// The open window is never published: the body it came in is refused.
+			// The element that broke the stream is a record too, unless the
+			// array merely ended early.
+			if !errors.Is(err, errUnterminatedArray) {
+				window = append(window, pendingRecord{reject: &recordReject{Result: resultInvalidBody}})
+			}
+			countRecords(ctx, table, window, &requestAbort{Result: resultInvalidBody})
 			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
 		}
@@ -435,6 +448,7 @@ func (h *IngestHandler) handleBatch(
 			// Whole-request failure: surface the status rather than recording a
 			// request-scoped condition as per-record loss (see requestAbort).
 			// Nothing in the open window has been published.
+			countRecords(ctx, table, append(window, rec), abort)
 			writeAbort(ctx, w, abort)
 			return
 		}
@@ -577,6 +591,7 @@ func (h *IngestHandler) policyCheckGuard(
 	return &recordReject{
 		Status:  http.StatusForbidden,
 		Message: "policy check references column " + strings.Join(reasons, "; and column "),
+		Result:  resultForbidden,
 	}
 }
 
@@ -592,6 +607,7 @@ type pendingRecord struct {
 	retention time.Duration
 	claim     dedupe.Claim
 	duplicate bool
+	queued    bool // published
 }
 
 // prepareRecord runs the per-record half of the pipeline shared by the
@@ -618,7 +634,7 @@ func (h *IngestHandler) prepareRecord(
 ) (rec pendingRecord, abort *requestAbort) {
 	if err := h.validator().Validate(schema, data); err != nil {
 		slog.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
-		return pendingRecord{reject: &recordReject{Status: http.StatusBadRequest, Message: err.Error()}}, nil
+		return pendingRecord{reject: &recordReject{Status: http.StatusBadRequest, Message: err.Error(), Result: resultSchema}}, nil
 	}
 
 	// DEEP AUTH: column-level allow/deny + check clauses.
@@ -629,6 +645,7 @@ func (h *IngestHandler) prepareRecord(
 				return pendingRecord{reject: &recordReject{
 					Status:  http.StatusForbidden,
 					Message: fmt.Sprintf("column %q not allowed for insert", col),
+					Result:  resultForbidden,
 				}}, nil
 			}
 		}
@@ -653,6 +670,7 @@ func (h *IngestHandler) prepareRecord(
 			return pendingRecord{}, &requestAbort{
 				Status:  http.StatusForbidden,
 				Message: "insert permissions were not resolved for this request",
+				Result:  resultForbidden,
 			}
 		}
 		for col, requiredVal := range checks {
@@ -677,6 +695,7 @@ func (h *IngestHandler) prepareRecord(
 					return pendingRecord{reject: &recordReject{
 						Status:  http.StatusForbidden,
 						Message: fmt.Sprintf("check failed for column %q", col),
+						Result:  resultForbidden,
 					}}, nil
 				}
 				continue
@@ -697,6 +716,7 @@ func (h *IngestHandler) prepareRecord(
 					return pendingRecord{reject: &recordReject{
 						Status:  http.StatusForbidden,
 						Message: fmt.Sprintf("check failed for column %q", col),
+						Result:  resultForbidden,
 					}}, nil
 				}
 			} else {
@@ -739,6 +759,7 @@ func (h *IngestHandler) prepareRecord(
 					return pendingRecord{reject: &recordReject{
 						Status:  http.StatusBadRequest,
 						Message: fmt.Sprintf("missing dedupe id field %q", idField),
+						Result:  resultMissingID,
 					}}, nil
 				}
 				slog.WarnContext(ctx, "dedupe id_field missing or null; publishing without idempotency", "id_field", idField, "table", table)
@@ -754,7 +775,7 @@ func (h *IngestHandler) prepareRecord(
 	row, err := ingest.EncodeCompactRow(cols, data)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to encode compact row", "error", err, "table", table)
-		return pendingRecord{}, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
+		return pendingRecord{}, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed", Result: resultPublishFailed}
 	}
 
 	evt := ingest.EventMessage{
@@ -769,7 +790,7 @@ func (h *IngestHandler) prepareRecord(
 	rec.payload, err = json.Marshal(evt)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to marshal event message", "error", err)
-		return pendingRecord{}, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
+		return pendingRecord{}, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed", Result: resultPublishFailed}
 	}
 	return rec, nil
 }
@@ -825,6 +846,7 @@ func (h *IngestHandler) ingestWindow(ctx context.Context, store *settings.Store,
 			endPublish(sent, err)
 			return h.publishFailed(ctx, dd, topic, recs, i, err)
 		}
+		rec.queued = true
 	}
 	endPublish(sent, nil)
 	commitClaims(ctx, dd, recs, table)
@@ -866,7 +888,7 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 		return nil
 	case errors.Is(err, dedupe.ErrUnavailable):
 		slog.WarnContext(ctx, "dedupe store unavailable", "error", err, "table", table)
-		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "dedupe store unavailable", RetryAfter: "5"}
+		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "dedupe store unavailable", RetryAfter: "5", Result: resultDedupeUnavailable}
 	case err != nil:
 		if ctx.Err() != nil {
 			// The request's own context ended — the client is gone, or its
@@ -878,7 +900,7 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 		} else {
 			slog.ErrorContext(ctx, "dedupe reserve failed", "error", err, "table", table)
 		}
-		return &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}
+		return &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed", Result: resultDedupeUnavailable}
 	}
 	var held *dedupe.Key
 	for j, i := range keyed {
@@ -901,6 +923,7 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 			Status:     http.StatusServiceUnavailable,
 			Message:    "a request with the same dedupe id is in flight",
 			RetryAfter: strconv.Itoa(int(math.Ceil(lease.Seconds()))),
+			Result:     resultInFlight,
 		}
 	}
 	return nil
@@ -934,17 +957,17 @@ func (h *IngestHandler) publishFailed(ctx context.Context, dd dedupe.Deduplicato
 	switch {
 	case definite:
 		slog.WarnContext(ctx, "ingest queue is full", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
-		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30"}
+		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30", Result: resultQueueFull}
 	case errors.Is(err, mq.ErrUnavailable):
 		retryAfter := "5"
 		if recs[k].claim.Status == dedupe.Claimed {
 			retryAfter = strconv.Itoa(int(math.Ceil(h.lease().Seconds())))
 		}
 		slog.WarnContext(ctx, "ingest queue unavailable", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
-		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: retryAfter}
+		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: retryAfter, Result: resultQueueUnavailable}
 	}
 	slog.ErrorContext(ctx, "failed to publish to the ingest queue", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
-	return &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed"}
+	return &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed", Result: resultPublishFailed}
 }
 
 // claimedIn is the Claimed claims among recs.
