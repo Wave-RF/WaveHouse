@@ -60,7 +60,8 @@ func beginPublish(ctx context.Context, kind string) (context.Context, func(attem
 	return spanCtx, func(attempts int, err error) {
 		setPublishResult(ctx, span, attempts, err)
 		span.End()
-		recordPublish(ctx, kind, start, err)
+		// Recorded under the publish's own span, so an exemplar links to it.
+		recordPublish(spanCtx, kind, start, err)
 	}
 }
 
