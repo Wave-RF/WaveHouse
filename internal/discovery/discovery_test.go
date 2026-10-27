@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/Wave-RF/WaveHouse/internal/chconn/chconntest"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
@@ -273,20 +274,24 @@ type fakeConn struct {
 	driver.Conn
 	errsThenSuccess []error
 	calls           atomic.Int32
-	tz              string       // SELECT timezone() answer; "" ⇒ "UTC"
-	version         string       // SELECT version() answer; "" ⇒ "24.1.1.1"
-	versionErr      error        // non-nil ⇒ the version() probe fails
-	columns         []fakeColumn // system.columns rows served on success; nil ⇒ none
-	iterErr         error        // rows.Err() after the served rows; nil ⇒ clean iteration
-	tables          [][2]string  // system.tables rows: {name, create_table_query}
-	tablesErr       error        // non-nil ⇒ the system.tables query fails
-	onQueryArgs     func([]any)  // non-nil ⇒ observe each query's bound args
+	tz              string                // SELECT timezone() answer; "" ⇒ "UTC"
+	version         string                // SELECT version() answer; "" ⇒ "24.1.1.1"
+	versionErr      error                 // non-nil ⇒ the version() probe fails
+	columns         []fakeColumn          // system.columns rows served on success; nil ⇒ none
+	iterErr         error                 // rows.Err() after the served rows; nil ⇒ clean iteration
+	tables          [][2]string           // system.tables rows: {name, create_table_query}
+	tablesErr       error                 // non-nil ⇒ the system.tables query fails
+	onQueryArgs     func([]any)           // non-nil ⇒ observe each query's bound args
+	onCtx           func(context.Context) // non-nil ⇒ observe each statement's context
 }
 
 // Query serves both of Refresh's result sets. Only the system.columns call
 // advances errsThenSuccess and the calls counter, so the retry tests still count
 // refresh attempts rather than statements.
-func (c *fakeConn) Query(_ context.Context, q string, args ...any) (driver.Rows, error) {
+func (c *fakeConn) Query(ctx context.Context, q string, args ...any) (driver.Rows, error) {
+	if c.onCtx != nil {
+		c.onCtx(ctx)
+	}
 	if c.onQueryArgs != nil {
 		c.onQueryArgs(args)
 	}
@@ -312,7 +317,10 @@ func (c *fakeConn) Query(_ context.Context, q string, args ...any) (driver.Rows,
 // QueryRow answers the SELECT timezone() (#372) and SELECT version() probes
 // Refresh issues before the system.columns query; errsThenSuccess sequencing
 // stays keyed on Query.
-func (c *fakeConn) QueryRow(_ context.Context, q string, _ ...any) driver.Row {
+func (c *fakeConn) QueryRow(ctx context.Context, q string, _ ...any) driver.Row {
+	if c.onCtx != nil {
+		c.onCtx(ctx)
+	}
 	if strings.Contains(q, "version()") {
 		if c.versionErr != nil {
 			return scalarRow{err: c.versionErr}
@@ -1146,6 +1154,29 @@ func TestRefresh_SpanRecordsFailure(t *testing.T) {
 	require.Len(t, spans, 1)
 	assert.Equal(t, codes.Unset, spans[0].Status().Code, "a canceled refresh is not a failure")
 	assert.Empty(t, spans[0].Events())
+}
+
+// Every statement of a refresh sends the refresh span to ClickHouse as its
+// trace context.
+func TestRefresh_SendsTraceContext(t *testing.T) {
+	rec := recordSpans(t)
+	var sent []trace.SpanContext
+	conn := &fakeConn{
+		columns: []fakeColumn{{table: "clicks", name: "id", chType: "String", position: 1}},
+		onCtx: func(ctx context.Context) {
+			span, _ := chconntest.QueryOptions(ctx, t)
+			sent = append(sent, span)
+		},
+	}
+	sr := NewSchemaRegistry(sourceOf(conn), tenant.ID("acme"), func(tenant.ID) time.Duration { return time.Hour })
+	require.NoError(t, sr.Refresh(context.Background()))
+
+	spans := rec.Ended()
+	require.Len(t, spans, 1)
+	require.Len(t, sent, 4, "timezone, version, system.columns, system.tables")
+	for _, sc := range sent {
+		assert.Equal(t, spans[0].SpanContext(), sc)
+	}
 }
 
 // RetryRefresh hands a failed attempt to onAttempt under that attempt's span,

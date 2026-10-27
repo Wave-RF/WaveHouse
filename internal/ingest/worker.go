@@ -876,6 +876,7 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-ClickHouse-User", t.Username)
 	req.Header.Set("X-ClickHouse-Key", t.Password)
+	chconn.InjectTraceContext(ctx, req.Header)
 
 	// TODO: future optimization: could build list for cache invalidation here while waiting on the network request
 	resp, err := w.clients.For(t).Do(req)

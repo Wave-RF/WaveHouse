@@ -53,6 +53,7 @@ func timeoutOf(timeout func(*settings.Store) time.Duration, store *settings.Stor
 // The raw-SQL endpoint (/v1/ops/query) proxies straight to ClickHouse
 // over HTTP and never calls this; see internal/api/query.go.
 func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []any) ([]map[string]any, error) {
+	ctx = chconn.WithTraceContext(ctx)
 	if IsMutation(sql) {
 		if err := conn.Exec(ctx, sql, params...); err != nil {
 			return nil, fmt.Errorf("clickhouse exec: %w", err)

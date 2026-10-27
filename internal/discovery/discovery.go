@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 
@@ -300,6 +301,8 @@ func (sr *SchemaRegistry) refresh(ctx context.Context) error {
 	if conn == nil {
 		return fmt.Errorf("%w for tenant %s", ErrNoConnection, sr.tenant)
 	}
+	// Every query of the refresh carries the refresh span's trace context.
+	ctx = chconn.WithTraceContext(ctx)
 
 	// ClickHouse interprets zone-less timestamp strings in the server's default
 	// zone; canonicalization applies the same rule so the instant never changes (#372).
