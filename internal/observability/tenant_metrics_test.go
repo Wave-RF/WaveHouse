@@ -217,3 +217,44 @@ func TestInitProvider_TenantLabel(t *testing.T) {
 		require.NoError(t, shutdown(t.Context()))
 	}
 }
+
+// TestInitProvider_SeriesLimitOverflows pins what configuration.mdx § Metric
+// labels tells operators to alert on: the SDK keeps 2,000 series per metric,
+// so past 1,999 label sets of its own a metric's new ones fold into one series
+// labeled otel_metric_overflow="true".
+func TestInitProvider_SeriesLimitOverflows(t *testing.T) {
+	// No t.Parallel(): InitProvider mutates global OTel state, and t.Setenv.
+	t.Setenv("OTEL_GO_X_CARDINALITY_LIMIT", "")
+	savedProp := otel.GetTextMapPropagator()
+	savedMP := otel.GetMeterProvider()
+	t.Cleanup(func() {
+		otel.SetTextMapPropagator(savedProp)
+		otel.SetMeterProvider(savedMP)
+	})
+
+	shutdown, promHandler, err := InitProvider(t.Context(), testIdentity, ProviderConfig{PrometheusEnabled: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+	counter, err := otel.Meter("test").Int64Counter("wavehouse_series_limit_test_total")
+	require.NoError(t, err)
+	for i := range 2001 {
+		counter.Add(t.Context(), 1, metric.WithAttributes(TableAttr.String(fmt.Sprintf("t%d", i))))
+	}
+
+	rec := httptest.NewRecorder()
+	promHandler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
+	body, err := io.ReadAll(rec.Body)
+	require.NoError(t, err)
+	var series, overflow int
+	for line := range strings.SplitSeq(string(body), "\n") {
+		if strings.HasPrefix(line, "wavehouse_series_limit_test_total{") {
+			series++
+			if strings.Contains(line, `otel_metric_overflow="true"`) {
+				overflow++
+				assert.NotContains(t, line, "table=", "the overflow series carries none of the metric's labels")
+			}
+		}
+	}
+	assert.Equal(t, 2000, series)
+	assert.Equal(t, 1, overflow)
+}
