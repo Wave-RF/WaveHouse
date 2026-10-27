@@ -29,7 +29,7 @@ func init() {
 func newPublishHistogram(m metric.Meter) (metric.Float64Histogram, error) {
 	return m.Float64Histogram(
 		"wavehouse_mq_publish_duration_seconds",
-		metric.WithDescription("Duration of each publish to the queue, retries included, by kind (ingest, or dlq for a row the worker parked) and result (ok, queue_full, unavailable, error)"),
+		metric.WithDescription("Duration of each publish to the queue, retries included, by kind (ingest, or dlq for a row the worker parked) and result (ok, queue_full, unavailable, error, or canceled when the caller went away)"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(publishBuckets...),
 	)
@@ -52,15 +52,19 @@ func UsePublishMeter(m metric.Meter) (restore func(), err error) {
 func recordPublish(ctx context.Context, kind string, start time.Time, err error) {
 	(*publishSeconds.Load()).Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(
 		attribute.String("kind", kind),
-		attribute.String("result", publishResult(err)),
+		attribute.String("result", publishResult(ctx, err)),
 	))
 }
 
-// publishResult is the result label of a publish that ended with err.
-func publishResult(err error) string {
+// publishResult is the result label of a publish that ended with err. One
+// whose ctx was canceled, the caller gone, is canceled rather than a
+// failure, as its span is not marked failed.
+func publishResult(ctx context.Context, err error) string {
 	switch {
 	case err == nil:
 		return "ok"
+	case ctx.Err() != nil:
+		return "canceled"
 	case errors.Is(err, ErrQueueFull):
 		return "queue_full"
 	case errors.Is(err, ErrUnavailable):

@@ -432,6 +432,11 @@ func (h *IngestHandler) handleBatch(
 			// the readers run over an in-memory slice now.
 			slog.WarnContext(ctx, "ingest read error", "error", err, "table", table)
 			// The open window is never published: the body it came in is refused.
+			// The element that broke the stream is a record too, unless the
+			// array merely ended early.
+			if !errors.Is(err, errUnterminatedArray) {
+				window = append(window, pendingRecord{reject: &recordReject{Result: resultInvalidBody}})
+			}
 			countRecords(ctx, table, window, &requestAbort{Result: resultInvalidBody})
 			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return

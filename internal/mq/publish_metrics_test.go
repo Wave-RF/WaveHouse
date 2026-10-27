@@ -35,6 +35,10 @@ func TestPublishResult_EveryOutcome(t *testing.T) {
 	endBatch(4, nil)
 	_, end := beginPublish(context.Background(), publishKindDLQ)
 	end(2, fmt.Errorf("%w: no answer", ErrUnavailable))
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, end = beginPublish(gone, publishKindDLQ)
+	end(1, fmt.Errorf("publish: %w", context.Canceled))
 
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
@@ -50,6 +54,6 @@ func TestPublishResult_EveryOutcome(t *testing.T) {
 	}
 	assert.Equal(t, map[string]uint64{
 		"ingest/ok": 1, "ingest/queue_full": 1, "ingest/unavailable": 1, "ingest/error": 1,
-		"dlq/unavailable": 1,
+		"dlq/unavailable": 1, "dlq/canceled": 1,
 	}, got)
 }

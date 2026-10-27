@@ -22,6 +22,7 @@ const (
 	resultQueueFull         = "queue_full"
 	resultQueueUnavailable  = "queue_unavailable"
 	resultPublishFailed     = "publish_failed"
+	resultRecordsCanceled   = "canceled"
 )
 
 // ingestRecords counts every record the ingest handler read, by table and
@@ -35,15 +36,23 @@ var ingestRecords, _ = newIngestRecordsCounter(otel.Meter("wavehouse-ingest"))
 func newIngestRecordsCounter(m metric.Meter) (metric.Int64Counter, error) {
 	return m.Int64Counter(
 		"wavehouse_ingest_records_total",
-		metric.WithDescription("Records POST /v1/ingest read, by result: queued, duplicate, in_flight, a rejection (invalid_body, schema, forbidden, missing_id) or a failure (dedupe_unavailable, queue_full, queue_unavailable, publish_failed)"),
+		metric.WithDescription("Records POST /v1/ingest read, by result: queued, duplicate, in_flight, a rejection (invalid_body, schema, forbidden, missing_id), a failure (dedupe_unavailable, queue_full, queue_unavailable, publish_failed), or canceled when the client went away first"),
 	)
 }
 
 // countRecords counts recs under their results. A record that was neither
 // rejected, a duplicate nor published takes the result of abort, the
-// whole-request failure that stopped it; with no abort, every such record was
-// published.
+// whole-request failure that stopped it, or canceled when the client went
+// away first: that is not the dedupe store's or the queue's failure. With no
+// abort, every such record was published.
 func countRecords(ctx context.Context, table string, recs []pendingRecord, abort *requestAbort) {
+	stopped := ""
+	if abort != nil {
+		stopped = abort.Result
+		if ctx.Err() != nil {
+			stopped = resultRecordsCanceled
+		}
+	}
 	counts := map[string]int64{}
 	for i := range recs {
 		rec := &recs[i]
@@ -55,7 +64,7 @@ func countRecords(ctx context.Context, table string, recs []pendingRecord, abort
 		case rec.queued || abort == nil:
 			counts[resultQueued]++
 		default:
-			counts[abort.Result]++
+			counts[stopped]++
 		}
 	}
 	for result, n := range counts {

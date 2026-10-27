@@ -127,7 +127,18 @@ func TestIngestRecords_EveryResult(t *testing.T) {
 		}, map[string]int64{resultQueued: 1, resultQueueFull: 2}},
 		{"array that breaks off", plain, nil, 0, func(t *testing.T) *http.Request {
 			return rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"}, {bad]`)
+		}, map[string]int64{resultInvalidBody: 2}},
+		{"array whose first element breaks it", plain, nil, 0, func(t *testing.T) *http.Request {
+			return rawIngestRequest(t, "clicks", "application/json", `[{bad]`)
 		}, map[string]int64{resultInvalidBody: 1}},
+		{"array cut off before its end", plain, nil, 0, func(t *testing.T) *http.Request {
+			return rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"}`)
+		}, map[string]int64{resultInvalidBody: 1}},
+		{"client gone before the publish failed", plain, errors.New("nats: connection closed"), 0, func(t *testing.T) *http.Request {
+			c, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ingestRequest(t, "clicks", map[string]any{"page": "/a"}).WithContext(c)
+		}, map[string]int64{resultRecordsCanceled: 1}},
 		{"unknown table counts nothing", plain, nil, 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "nope", map[string]any{"page": "/a"})
 		}, map[string]int64{}},
