@@ -889,6 +889,50 @@ The 99th percentile of each route's latency:
 histogram_quantile(0.99, sum by (route, le) (rate(wavehouse_http_request_duration_seconds_bucket[5m])))
 ```
 
+### Ingest requests and queue publishes
+
+An API process counts what `POST /v1/ingest` does with each record, and every process that publishes times each publish: the API its ingest rows, the `ingest` role its dead-letter parks. Neither metric carries a tenant label:
+
+| Metric | Meaning |
+| --- | --- |
+| `wavehouse_ingest_records_total{table, result}` | Each record the handler read, in a single object or a batch, once. `result` is `queued`; `duplicate` (skipped by dedupe); a rejection: `invalid_body` (a record that does not parse), `schema` (failed validation), `forbidden` (a column or check rule of the insert grant) or `missing_id` (no dedupe id under `dedupe.require_id`); or a whole-request failure: `in_flight` (an id another request holds), `dedupe_unavailable` (the dedupe store could not answer, or failed), `queue_full`, `queue_unavailable` or `publish_failed` (any other publish or encode failure); or `canceled`, when the client went away before the request finished. A whole-request failure stops the request in the window it hit: that window's records not yet published are counted under the failure's result, those already published as `queued`, and rejected ones under their rejection. The records after it are never read. A batch body that breaks off partway counts its open window's records that were not rejected as `invalid_body`, and the element or line that broke it as one more, unless the array simply ended before its `]`. A request refused before any record is read (no table, an unknown table, a schema not loaded yet, the content type, a body over the size cap, an empty body, the table's insert grant) counts nothing here: `wavehouse_http_request_duration_seconds` has it. |
+| `wavehouse_mq_publish_duration_seconds{kind, result}` | Each publish, retries included, on either broker. `kind` is `ingest`, or `dlq` for a row the worker parked on the [dead-letter queue](#dead-letter-queue-dlq). `result` is `ok`, `queue_full`, `unavailable`, `error`, or `canceled` when the caller went away first (a client gone, or a worker stopping mid-park). Buckets run from 1 ms to 20 s, which covers three attempts at the 5 s publish timeout. |
+
+A batch answers `200` with its rejected records in the body, so the HTTP histogram does not see them. The share of records rejected for their schema, which jumps when a producer starts sending a field the table does not have:
+
+```promql
+sum by (table) (rate(wavehouse_ingest_records_total{result="schema"}[5m])) / sum by (table) (rate(wavehouse_ingest_records_total[5m]))
+```
+
+Dead-letter parks that failed, whose rows stay in the ingest queue and are retried:
+
+```promql
+sum(rate(wavehouse_mq_publish_duration_seconds_count{kind="dlq", result!="ok"}[5m])) > 0
+```
+
+### Ingest writes
+
+An ingest process reports what it writes to ClickHouse. None of these carries a tenant label:
+
+| Metric | Meaning |
+| --- | --- |
+| `wavehouse_ingest_rows_total{table, outcome}` | Rows the worker settled. `outcome` is `inserted` (written by an `INSERT` that succeeded; if the ack that follows fails, the row can come back on redelivery, and is then written and counted again), `dead_lettered` (parked on the [DLQ](#dead-letter-queue-dlq) after ClickHouse rejected the row on its own, or because its tenant had no ClickHouse connection) or `left_unacked` (neither, so the row comes back on redelivery: the DLQ is off for the table, or the DLQ publish or its ack failed). A row left unacked is counted again on every attempt. |
+| `wavehouse_ingest_insert_duration_seconds{mode, result}` | Each `INSERT` the worker sent, with buckets from 5 ms to the insert client's 30 s timeout. `mode` is `batch`, or `isolated` for one row of a batch that fell back to row-by-row isolation. `result` is `ok`, or the failure's class as `wavehouse_ingest_retries_total` labels it: `rejected`, `unavailable`, `denied` or `unknown`. A tenant with no ClickHouse connection sends nothing and records nothing. |
+| `wavehouse_ingest_batch_rows` | Rows in each bulk `INSERT`, with buckets `1, 5, 10, 50, 100, 250, 500, 1000`. A batch is flushed once it reaches 500 rows or 5 seconds after its first row, and keeps filling past 500 while the table's previous flush is still running. When the worker stops, it flushes whatever each table holds, whatever its size. Batches that sit low mean many small parts in ClickHouse; batches above 500 (the `_count` less the `le="500"` bucket; a batch of exactly 500 is the normal full flush) mean rows arrived while the previous flush was still running, faster than one flush at a time drains them (see the insert latency below). |
+| `wavehouse_ingest_isolations_total{table}` | Bulk `INSERT`s ClickHouse refused that the worker retried row by row. |
+
+Every delivery the worker settles is counted in exactly one of `wavehouse_ingest_rows_total`, `wavehouse_ingest_retries_total` (handed back for a delayed retry; a hand-back whose delayed NAK fails is still counted here, and that row comes back after the ack wait instead) and `wavehouse_ingest_poison_total` (an envelope it could not read). Two kinds are counted in none: an unreadable envelope whose DLQ publish or ack failed, which stays in the stream and is counted once it is parked or dropped, and rows handed back unprocessed when the worker stops. Whether ingest is writing:
+
+```promql
+sum by (table) (rate(wavehouse_ingest_rows_total{outcome="inserted"}[5m]))
+```
+
+The 99th percentile of a bulk `INSERT`'s latency, which rises before inserts start failing when ClickHouse is in trouble:
+
+```promql
+histogram_quantile(0.99, sum by (le) (rate(wavehouse_ingest_insert_duration_seconds_bucket{mode="batch"}[5m])))
+```
+
 ### Settings reloads
 
 Every process reads the settings directory and reloads it on its own, so a reload can be adopted by one pod and rejected, or only half applied, by the next. These metrics report each process's reloads; none carries a tenant label, and which tenant was rejected is in the reload's log line:
@@ -939,7 +983,7 @@ For production posture where metrics should not be exposed on the public API lis
 
 ### Many tables
 
-Eight metrics carry a `table` label, so each grows by one series per table that sees traffic, multiplied by its other labels. At a few dozen tables that is noise; with table-per-tenant schemas or thousands of tables it shows up in your time-series database's memory and bill. Set `prometheus.per_table_metrics: false` (`WH_METRICS_PER_TABLE=false`) to drop the label and report each metric summed over every table, on the Prometheus endpoint and OTLP push alike. WaveHouse logs one `WARN` naming the setting once its metrics have carried more than 500 distinct tables. See [Configuration → Metric labels](/configuration#metric-labels).
+Eleven metrics carry a `table` label, so each grows by one series per table that sees traffic, multiplied by its other labels. At a few dozen tables that is noise; with table-per-tenant schemas or thousands of tables it shows up in your time-series database's memory and bill. Set `prometheus.per_table_metrics: false` (`WH_METRICS_PER_TABLE=false`) to drop the label and report each metric summed over every table, on the Prometheus endpoint and OTLP push alike. WaveHouse logs one `WARN` naming the setting once its metrics have carried more than 500 distinct tables. See [Configuration → Metric labels](/configuration#metric-labels).
 
 ### Profiling
 

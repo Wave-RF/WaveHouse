@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -121,10 +122,15 @@ func newPoisonCounter(m metric.Meter) (metric.Int64Counter, error) {
 // (unavailable, denied, unknown), or backoff for rows turned away without a
 // try while their pool was backing off. A sustained rate is an outage that
 // is holding rows in the queue — none of them reach the DLQ.
-var retryCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
-	"wavehouse_ingest_retries_total",
-	metric.WithDescription("Rows handed back to the ingest queue for a delayed retry because ClickHouse could not take them, by reason"),
-)
+var retryCounter, _ = newRetryCounter(otel.Meter("wavehouse-ingest"))
+
+// newRetryCounter builds the counter on m (a test builds it on its own meter).
+func newRetryCounter(m metric.Meter) (metric.Int64Counter, error) {
+	return m.Int64Counter(
+		"wavehouse_ingest_retries_total",
+		metric.WithDescription("Rows handed back to the ingest queue for a delayed retry because ClickHouse could not take them, by reason"),
+	)
+}
 
 // Batching defaults; overridable on the struct for tests.
 // TODO: eventually make this configurable not just in tests
@@ -759,7 +765,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 	defer func() { recordSpanError(span, err) }()
 	cols := group[0].columns
 
-	err = w.insertToClickHouse(ctx, tableName, cols, group)
+	err = w.insert(ctx, tableName, cols, group, modeBatch)
 	if err == nil {
 		w.handleSuccess(ctx, tableName, group)
 		return nil, nil
@@ -769,12 +775,13 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 	}
 
 	slog.WarnContext(ctx, "bulk insert failed, falling back to 1-by-1 isolation", "tenant", group[0].tenant, "table", tableName, "error", err)
+	workerMetrics.isolations.Add(ctx, 1, metric.WithAttributes(attribute.String("table", tableName)))
 
 	// ISOLATE & DLQ: re-insert one row at a time so a single poison row can't
 	// sink the whole batch.
 	// TODO: potentially could try a binary search or something eventually maybe? unclear if faster...
 	for i, pm := range group {
-		singleErr := w.insertToClickHouse(ctx, tableName, cols, []parsedMsg{pm})
+		singleErr := w.insert(ctx, tableName, cols, []parsedMsg{pm}, modeIsolated)
 		switch {
 		case singleErr == nil:
 			w.handleSuccess(ctx, tableName, []parsedMsg{pm})
@@ -785,6 +792,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 			return group[i:], singleErr
 		case w.dlqEnabled != nil && !w.dlqEnabled(pm.tenant, tableName):
 			slog.ErrorContext(ctx, "isolated bad row, DLQ disabled for table — left unacked, NATS will redeliver it until it inserts or dlq is enabled", "tenant", pm.tenant, "table", tableName, "error", singleErr)
+			countRows(ctx, tableName, rowsLeftUnacked, 1)
 		default:
 			slog.ErrorContext(ctx, "isolated bad row, sending to DLQ", "tenant", pm.tenant, "table", tableName, "error", singleErr)
 			w.sendToDLQ(ctx, tableName, pm, singleErr.Error())
@@ -895,11 +903,14 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	return nil
 }
 
+// errNoTarget marks noTargetError's failures.
+var errNoTarget = errors.New("no ClickHouse connection is open")
+
 // noTargetError is the failure of tenant id's inserts while it is on no pool:
 // no longer served, or refused one, such as by the connection ceiling. No
 // request is made.
 func noTargetError(id tenant.ID) error {
-	return fmt.Errorf("no ClickHouse connection is open for tenant %s", id)
+	return fmt.Errorf("%w for tenant %s", errNoTarget, id)
 }
 
 // parkBatch disposes of a batch whose tenant has no ClickHouse connection in
@@ -912,6 +923,7 @@ func (w *IngestWorker) parkBatch(ctx context.Context, tableName string, msgs []p
 	id := msgs[0].tenant
 	if w.dlqEnabled != nil && !w.dlqEnabled(id, tableName) {
 		slog.ErrorContext(ctx, "no ClickHouse connection for tenant, DLQ disabled for table — batch left unacked, NATS will redeliver it until the tenant has one or dlq is enabled", "tenant", id, "table", tableName, "rows", len(msgs))
+		countRows(ctx, tableName, rowsLeftUnacked, len(msgs))
 		return
 	}
 	slog.ErrorContext(ctx, "no ClickHouse connection for tenant, parking the batch on the DLQ", "tenant", id, "table", tableName, "rows", len(msgs))
@@ -924,6 +936,10 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 	if len(msgs) == 0 {
 		return
 	}
+	// Counted here, not after each ack: the rows are in ClickHouse whatever
+	// the ack does. One whose ack fails can be redelivered, and is then
+	// written and counted again, as every INSERT that succeeds is.
+	countRows(ctx, tableName, rowsInserted, len(msgs))
 	// A batch is one tenant's (dispatchLoop keys its loops by tenant table),
 	// so the first row names whose namespaces the insert changed.
 	w.invalidate(ctx, msgs[0].tenant, tableName, msgs)
@@ -1023,10 +1039,16 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, id tenan
 	})
 }
 
-// sendToDLQ parks a row that failed its own isolated INSERT. Distinct from
-// rejectPoison, which parks an envelope the worker could not read at all.
+// sendToDLQ parks a row that failed its own isolated INSERT, or whose tenant
+// has no ClickHouse connection. Distinct from rejectPoison, which parks an
+// envelope the worker could not read at all. A park that failed leaves the
+// row in the stream, so it is counted as left unacked, not dead-lettered.
 func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parsedMsg, errMsg string) {
-	_ = w.parkOnDLQ(ctx, pm.msg, tableName, errMsg)
+	outcome := rowsLeftUnacked
+	if w.parkOnDLQ(ctx, pm.msg, tableName, errMsg) {
+		outcome = rowsDeadLettered
+	}
+	countRows(ctx, tableName, outcome, 1)
 }
 
 // parkOnDLQ parks one message on the dead-letter queue (under the topic it
