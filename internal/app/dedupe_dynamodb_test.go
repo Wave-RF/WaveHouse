@@ -386,7 +386,10 @@ func TestRun_DynamoDBDedupeTableCheckMetrics(t *testing.T) {
 	fake.setExists(true)
 	require.Eventually(t, a.dedup.For("acme").Open, 10*time.Second, 50*time.Millisecond)
 	assert.Equal(t, 1.0, gauge("wavehouse_dedupe_dynamodb_table_ok"))
-	assert.GreaterOrEqual(t, gauge("wavehouse_dedupe_dynamodb_table_check_success_timestamp_seconds"), float64(before))
+	timestamp := gauge("wavehouse_dedupe_dynamodb_table_check_success_timestamp_seconds")
+	after := time.Now().Unix()
+	assert.GreaterOrEqual(t, timestamp, float64(before))
+	assert.LessOrEqual(t, timestamp, float64(after))
 	require.NoError(t, stop())
 }
 
