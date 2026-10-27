@@ -887,6 +887,27 @@ The 99th percentile of each route's latency:
 histogram_quantile(0.99, sum by (route, le) (rate(wavehouse_http_request_duration_seconds_bucket[5m])))
 ```
 
+### Ingest requests and queue publishes
+
+An API process counts what `POST /v1/ingest` does with each record and times each publish to the queue. Neither carries a tenant label:
+
+| Metric | Meaning |
+| --- | --- |
+| `wavehouse_ingest_records_total{table, result}` | Each record the handler read, in a single object or a batch, once. `result` is `queued`; `duplicate` (skipped by dedupe); a rejection: `invalid_body` (a record that does not parse), `schema` (failed validation), `forbidden` (a column or check rule of the insert grant) or `missing_id` (no dedupe id under `dedupe.require_id`); or a whole-request failure: `in_flight` (an id another request holds), `dedupe_unavailable`, `queue_full`, `queue_unavailable` or `publish_failed`. A whole-request failure refuses the records of the window it stopped, each counted under its result, and the records after it are never read. A batch body that breaks off partway counts the records it had not yet published as `invalid_body`. A request refused before any record is read (no table, an unknown table, the content type, an empty body, the table's insert grant) counts nothing here: `wavehouse_http_request_duration_seconds` has it. |
+| `wavehouse_mq_publish_duration_seconds{kind, result}` | Each publish, retries included, on either broker. `kind` is `ingest`, or `dlq` for a row the worker parked on the [dead-letter queue](#dead-letter-queue-dlq). `result` is `ok`, `queue_full`, `unavailable` or `error`. Buckets run from 1 ms to 20 s, which covers three attempts at the 5 s publish timeout. |
+
+A batch answers `200` with its rejected records in the body, so the HTTP histogram does not see them. The share of records rejected for their schema, which jumps when a producer starts sending a field the table does not have:
+
+```promql
+sum by (table) (rate(wavehouse_ingest_records_total{result="schema"}[5m])) / sum by (table) (rate(wavehouse_ingest_records_total[5m]))
+```
+
+Dead-letter parks that failed, whose rows stay in the ingest queue and are retried:
+
+```promql
+sum(rate(wavehouse_mq_publish_duration_seconds_count{kind="dlq", result!="ok"}[5m])) > 0
+```
+
 ### Settings reloads
 
 Every process reads the settings directory and reloads it on its own, so a reload can be adopted by one pod and rejected, or only half applied, by the next. These metrics report each process's reloads; none carries a tenant label, and which tenant was rejected is in the reload's log line:
@@ -937,7 +958,7 @@ For production posture where metrics should not be exposed on the public API lis
 
 ### Many tables
 
-Eight metrics carry a `table` label, so each grows by one series per table that sees traffic, multiplied by its other labels. At a few dozen tables that is noise; with table-per-tenant schemas or thousands of tables it shows up in your time-series database's memory and bill. Set `prometheus.per_table_metrics: false` (`WH_METRICS_PER_TABLE=false`) to drop the label and report each metric summed over every table, on the Prometheus endpoint and OTLP push alike. WaveHouse logs one `WARN` naming the setting once its metrics have carried more than 500 distinct tables. See [Configuration → Metric labels](/configuration#metric-labels).
+Nine metrics carry a `table` label, so each grows by one series per table that sees traffic, multiplied by its other labels. At a few dozen tables that is noise; with table-per-tenant schemas or thousands of tables it shows up in your time-series database's memory and bill. Set `prometheus.per_table_metrics: false` (`WH_METRICS_PER_TABLE=false`) to drop the label and report each metric summed over every table, on the Prometheus endpoint and OTLP push alike. WaveHouse logs one `WARN` naming the setting once its metrics have carried more than 500 distinct tables. See [Configuration → Metric labels](/configuration#metric-labels).
 
 ### Profiling
 

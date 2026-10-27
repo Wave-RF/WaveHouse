@@ -3,6 +3,7 @@ package mq
 import (
 	"context"
 	"sync/atomic"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -45,15 +46,21 @@ func StartPublishBatch(ctx context.Context) (context.Context, func(messages int,
 // the headers the publish injects carry it and the worker's flush links to it
 // rather than to the request's span (#897). An ingest publish under
 // StartPublishBatch opens none: it rides on the batch's span and adds its
-// attempts to it. end takes the attempts the publish made and its error.
+// attempts to it. end takes the attempts the publish made and its error, and
+// records the publish's duration either way (recordPublish).
 func beginPublish(ctx context.Context, kind string) (context.Context, func(attempts int, err error)) {
+	start := time.Now()
 	if batch, ok := ctx.Value(publishBatchKey{}).(*publishBatch); ok && kind == publishKindIngest {
-		return ctx, func(attempts int, _ error) { batch.attempts.Add(int64(attempts)) }
+		return ctx, func(attempts int, err error) {
+			batch.attempts.Add(int64(attempts))
+			recordPublish(ctx, kind, start, err)
+		}
 	}
 	spanCtx, span := otel.Tracer(tracerName).Start(ctx, publishSpanName, publishSpanOptions(kind)...)
 	return spanCtx, func(attempts int, err error) {
 		setPublishResult(ctx, span, attempts, err)
 		span.End()
+		recordPublish(ctx, kind, start, err)
 	}
 }
 
