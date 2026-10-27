@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
@@ -190,4 +192,53 @@ func TestWriteMetrics_RecordedAndReconciled(t *testing.T) {
 	}
 	assert.Equal(t, int64(delivered), settled+got.retries+got.poison,
 		"every delivery is counted once across rows, retries and poison")
+}
+
+// TestWriteMetrics_NoConnectionAndFailedPark covers the outcomes no INSERT
+// succeeds for: a tenant with no ClickHouse connection, whose batch is parked
+// or left by its DLQ switch and which sends and times nothing, and a rejected
+// row whose DLQ publish fails, which stays in the stream.
+func TestWriteMetrics_NoConnectionAndFailedPark(t *testing.T) {
+	read := swapWriteMetrics(t)
+	ctx := context.Background()
+	noTarget := func(tenant.ID) chconn.Target { return chconn.Target{} }
+	rows := func() []*testutil.MockMessage {
+		return []*testutil.MockMessage{
+			newIngestMsg(t, "events", "", map[string]any{"id": 1}),
+			newIngestMsg(t, "events", "", map[string]any{"id": 2}),
+		}
+	}
+
+	// No connection, DLQ on: the batch is parked whole.
+	w, _, _, wait := newTestWorker(okRoundTripper())
+	w.target = noTarget
+	w.flushTable(ctx, "events", parseAll(t, w, rows()...))
+	wait()
+	assert.Equal(t, map[string]int64{rowsDeadLettered: 2}, read().rows)
+
+	// No connection, DLQ off: the batch is left for redelivery.
+	w, _, _, wait = newTestWorker(okRoundTripper())
+	w.target = noTarget
+	w.dlqEnabled = func(tenant.ID, string) bool { return false }
+	w.flushTable(ctx, "events", parseAll(t, w, rows()...))
+	wait()
+	assert.Equal(t, map[string]int64{rowsDeadLettered: 2, rowsLeftUnacked: 2}, read().rows)
+
+	// An INSERT with no connection makes no request, so it records no sample.
+	w, _, _, _ = newTestWorker(okRoundTripper())
+	w.target = noTarget
+	msgs := parseAll(t, w, rows()...)
+	require.ErrorIs(t, w.insert(ctx, "events", msgs[0].columns, msgs, modeBatch), errNoTarget)
+	got := read()
+	assert.Empty(t, got.inserts)
+	assert.Zero(t, got.batchCount)
+
+	// A rejected row whose DLQ publish fails is left unacked, not dead-lettered.
+	w, pub, _, wait := newTestWorker(poisonRowRT())
+	pub.Err = errors.New("jetstream unavailable")
+	w.flushTable(ctx, "events", parseAll(t, w,
+		newIngestMsg(t, "events", "", map[string]any{"id": 3, "poison": false}),
+		newIngestMsg(t, "events", "", map[string]any{"id": 4, "poison": true})))
+	wait()
+	assert.Equal(t, map[string]int64{rowsInserted: 1, rowsDeadLettered: 2, rowsLeftUnacked: 3}, read().rows)
 }
