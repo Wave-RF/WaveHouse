@@ -69,3 +69,20 @@ func TestPendingBumps_OwesAny(t *testing.T) {
 	assert.False(t, p.owesAny(events))
 	assert.Zero(t, p.len())
 }
+
+// owed names the tenant each key is owed for as of the snapshot, so a drain
+// counts a landed bump under its tenant even when an add past the maximum has
+// collapsed the set meanwhile (#891).
+func TestPendingBumps_OwedKeepsTenants(t *testing.T) {
+	t.Parallel()
+	p := newPendingBumps("wh", 2)
+	p.add("acme", "wh:{acme}:B:a")
+	p.add("globex", "wh:{globex}:B:a")
+	owed := p.owed()
+
+	p.add("acme", "wh:{acme}:B:b") // past the maximum: collapses
+	assert.Equal(t, map[string]pendingKey{
+		"wh:{acme}:B:a":   {tenant: "acme", gen: 1},
+		"wh:{globex}:B:a": {tenant: "globex", gen: 2},
+	}, owed)
+}

@@ -22,8 +22,13 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 )
 
+// tableView is metricsView with only the table choices set.
+func tableView(aggregate bool, threshold int) sdkmetric.View {
+	return metricsView(viewOptions{aggregateTables: aggregate, tableThreshold: threshold})
+}
+
 // collectSums records each attribute set once on a counter named name, behind
-// tableView, and returns the exported data points as attribute set → value.
+// view, and returns the exported data points as attribute set → value.
 func collectSums(t *testing.T, view sdkmetric.View, name string, sets ...[]attribute.KeyValue) map[string]int64 {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()

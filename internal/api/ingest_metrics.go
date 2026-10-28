@@ -6,6 +6,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // Results on wavehouse_ingest_records_total: what became of a record the
@@ -68,7 +70,7 @@ func countRecords(ctx context.Context, table string, recs []pendingRecord, abort
 		}
 	}
 	for result, n := range counts {
-		ingestRecords.Add(ctx, n, metric.WithAttributes(
+		ingestRecords.Add(ctx, n, observability.MetricAttrs(ctx,
 			attribute.String("table", table),
 			attribute.String("result", result),
 		))

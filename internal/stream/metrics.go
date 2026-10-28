@@ -7,6 +7,9 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/Wave-RF/WaveHouse/internal/observability"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // Frame kinds for the "kind" attribute on the frame and byte counters.
@@ -38,6 +41,26 @@ type Metrics struct {
 
 	meter     metric.Meter
 	queuePeak metric.Int64ObservableGauge
+
+	// tenant is the tenant label every per-stream measurement carries (#891),
+	// set by Tenant; none on the process-wide Metrics.
+	tenant []attribute.KeyValue
+}
+
+// Tenant returns m's instruments labeled with tenant id, for the measurements
+// of one stream of that tenant. A nil m stays nil.
+func (m *Metrics) Tenant(id tenant.ID) *Metrics {
+	if m == nil {
+		return nil
+	}
+	c := *m
+	c.tenant = []attribute.KeyValue{observability.TenantLabel(id.String())}
+	return &c
+}
+
+// attrs is attrs plus m's tenant label, if it has one.
+func (m *Metrics) attrs(attrs ...attribute.KeyValue) metric.MeasurementOption {
+	return metric.WithAttributes(append(attrs, m.tenant...)...)
 }
 
 // NewMetrics builds the SSE instruments on the global meter provider. Call it
@@ -70,7 +93,7 @@ func (m *Metrics) ConnOpened() {
 	if m == nil {
 		return
 	}
-	m.active.Add(context.Background(), 1)
+	m.active.Add(context.Background(), 1, m.attrs())
 }
 
 // ConnClosed records a stream closing and its total lifetime.
@@ -78,8 +101,8 @@ func (m *Metrics) ConnClosed(d time.Duration) {
 	if m == nil {
 		return
 	}
-	m.active.Add(context.Background(), -1)
-	m.duration.Record(context.Background(), d.Seconds())
+	m.active.Add(context.Background(), -1, m.attrs())
+	m.duration.Record(context.Background(), d.Seconds(), m.attrs())
 }
 
 // FrameSent records one frame of the given kind (a Kind* constant) and its size
@@ -88,7 +111,7 @@ func (m *Metrics) FrameSent(kind string, n int) {
 	if m == nil {
 		return
 	}
-	attrs := metric.WithAttributes(attribute.String("kind", kind))
+	attrs := m.attrs(attribute.String("kind", kind))
 	m.frames.Add(context.Background(), 1, attrs)
 	m.bytes.Add(context.Background(), int64(n), attrs)
 }
@@ -99,7 +122,7 @@ func (m *Metrics) FrameDropped(table, kind, reason string) {
 	if m == nil {
 		return
 	}
-	m.dropped.Add(context.Background(), 1, metric.WithAttributes(
+	m.dropped.Add(context.Background(), 1, m.attrs(
 		attribute.String("table", table), attribute.String("kind", kind), attribute.String("reason", reason)))
 }
 
@@ -116,14 +139,15 @@ func (m *Metrics) observeQueuePeak(peak func() int64) {
 	}, m.queuePeak)
 }
 
-// RowWithheld records one event row withheld from one subscriber (live or replay)
-// by the role's row-level-security filter, including fail-closed evaluations.
-// Labeled by table and role (policy-bounded, not data-bounded) so an operator can
-// tell "no matching rows" from "a misconfigured filter withholding everything".
-func (m *Metrics) RowWithheld(table, role string) {
+// RowWithheld records one event row of tenant id withheld from one subscriber
+// (live or replay) by the role's row-level-security filter, including
+// fail-closed evaluations. Labeled by table and role (policy-bounded, not
+// data-bounded) so an operator can tell "no matching rows" from "a
+// misconfigured filter withholding everything".
+func (m *Metrics) RowWithheld(id tenant.ID, table, role string) {
 	if m == nil {
 		return
 	}
-	m.withheld.Add(context.Background(), 1,
-		metric.WithAttributes(attribute.String("table", table), attribute.String("role", role)))
+	m.withheld.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("table", table), attribute.String("role", role), observability.TenantLabel(id.String())))
 }

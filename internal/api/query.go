@@ -297,7 +297,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if int64(len(body)) > respCap {
-		h.metrics.record(opOpsQuery, elapsed, chResult(codeCHResponseTooLarge))
+		h.metrics.record(r.Context(), opOpsQuery, elapsed, chResult(codeCHResponseTooLarge))
 		setCHQueryResult(span, chResult(codeCHResponseTooLarge))
 		span.End()
 		// The same query overflows again, so not retryable.
@@ -325,7 +325,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		writeCHError(w, r, chErr, msg, http.StatusBadGateway, queryCaps{})
 		return
 	}
-	h.metrics.record(opOpsQuery, elapsed, resultOK)
+	h.metrics.record(r.Context(), opOpsQuery, elapsed, resultOK)
 	setCHQueryResult(span, resultOK)
 	span.End()
 

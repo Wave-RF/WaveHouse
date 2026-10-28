@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -17,7 +18,7 @@ import (
 // off the queue was settled. Together with wavehouse_ingest_retries_total
 // (rows handed back for a delayed retry) and wavehouse_ingest_poison_total
 // (envelopes it could not read), every delivery the worker settles is counted
-// exactly once. No instrument carries a tenant (#891).
+// exactly once. Each is labeled with the batch's tenant (#891).
 type writeMetrics struct {
 	insertSeconds metric.Float64Histogram
 	batchRows     metric.Int64Histogram
@@ -87,19 +88,19 @@ func (w *IngestWorker) insert(ctx context.Context, tableName string, columns []s
 	if err != nil {
 		result = chconn.Classify(err).String()
 	}
-	workerMetrics.insertSeconds.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(
+	workerMetrics.insertSeconds.Record(ctx, time.Since(start).Seconds(), observability.MetricAttrs(ctx,
 		attribute.String("mode", mode),
 		attribute.String("result", result),
 	))
 	if mode == modeBatch {
-		workerMetrics.batchRows.Record(ctx, int64(len(msgs)))
+		workerMetrics.batchRows.Record(ctx, int64(len(msgs)), observability.MetricAttrs(ctx))
 	}
 	return err
 }
 
 // countRows records n rows of tableName settled with outcome.
 func countRows(ctx context.Context, tableName, outcome string, n int) {
-	workerMetrics.rows.Add(ctx, int64(n), metric.WithAttributes(
+	workerMetrics.rows.Add(ctx, int64(n), observability.MetricAttrs(ctx,
 		attribute.String("table", tableName),
 		attribute.String("outcome", outcome),
 	))

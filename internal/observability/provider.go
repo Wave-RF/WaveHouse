@@ -54,6 +54,12 @@ type ProviderConfig struct {
 	// AggregateTables drops the table attribute from every metric, reporting
 	// one series summed over all tables (prometheus.per_table_metrics: false).
 	AggregateTables bool
+	// AggregateTenants does the same for the tenant attribute
+	// (prometheus.per_tenant_metrics: false).
+	AggregateTenants bool
+	// HTTPBodySizeMetrics keeps otelhttp's request and response body size
+	// histograms (prometheus.http_body_size_metrics), dropped otherwise.
+	HTTPBodySizeMetrics bool
 }
 
 // InitProvider sets up the OpenTelemetry pipeline, registering only the
@@ -192,7 +198,11 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 			promHandler = promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 		}
 
-		mpOpts := []metric.Option{metric.WithResource(res), metric.WithView(tableView(cfg.AggregateTables, TableWarnThreshold))}
+		processTenants.off.Store(cfg.AggregateTenants)
+		mpOpts := []metric.Option{metric.WithResource(res), metric.WithView(metricsView(viewOptions{
+			aggregateTables: cfg.AggregateTables, tableThreshold: TableWarnThreshold,
+			aggregateTenants: cfg.AggregateTenants, httpBodySize: cfg.HTTPBodySizeMetrics,
+		}))}
 		for _, r := range readers {
 			mpOpts = append(mpOpts, metric.WithReader(r))
 		}

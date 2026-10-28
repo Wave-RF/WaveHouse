@@ -8,6 +8,9 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/Wave-RF/WaveHouse/internal/observability"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // Lookup outcomes for the "result" attribute of wavehouse_cache_lookups_total.
@@ -19,8 +22,9 @@ const (
 	resultError  = "error"  // server failed or timed out
 )
 
-// metrics are a shared-cache backend's instruments. No tenant attribute:
-// lookups are the hot path, and tenants are unbounded.
+// metrics are a shared-cache backend's instruments. A measurement about one
+// tenant carries its observability.TenantLabel (#891); the gauges, and an
+// invalidation's round trip, which can span several tenants, carry none.
 type metrics struct {
 	backend      attribute.KeyValue
 	lookups      metric.Int64Counter
@@ -74,31 +78,45 @@ func newMetrics(backend string, breakerOpen func() bool, pending func() int) (*m
 	return m, nil
 }
 
-func (m *metrics) lookup(result string) {
-	m.lookups.Add(context.Background(), 1, metric.WithAttributes(m.backend, attribute.String("result", result)))
+// attrs is m's backend label, the tenant id's (#891) unless id is empty (a
+// measurement about no one tenant), and attrs.
+func (m *metrics) attrs(id tenant.ID, attrs ...attribute.KeyValue) metric.MeasurementOption {
+	attrs = append(attrs, m.backend)
+	if id != "" {
+		attrs = append(attrs, observability.TenantLabel(id.String()))
+	}
+	return metric.WithAttributes(attrs...)
 }
 
-func (m *metrics) op(op string, start time.Time) {
-	m.duration.Record(context.Background(), time.Since(start).Seconds(),
-		metric.WithAttributes(m.backend, attribute.String("op", op)))
+func (m *metrics) lookup(id tenant.ID, result string) {
+	m.lookups.Add(context.Background(), 1, m.attrs(id, attribute.String("result", result)))
 }
 
-func (m *metrics) invalidated(result string, n int) {
-	if n > 0 {
-		m.invalidation.Add(context.Background(), int64(n), metric.WithAttributes(m.backend, attribute.String("result", result)))
+// op records one round trip of op that began at start: a lookup or set is
+// one tenant's, an invalidation round trip may carry several (id empty).
+func (m *metrics) op(id tenant.ID, op string, start time.Time) {
+	m.duration.Record(context.Background(), time.Since(start).Seconds(), m.attrs(id, attribute.String("op", op)))
+}
+
+// invalidated records bumps of each tenant with result.
+func (m *metrics) invalidated(result string, byTenant map[tenant.ID]int) {
+	for id, n := range byTenant {
+		if n > 0 {
+			m.invalidation.Add(context.Background(), int64(n), m.attrs(id, attribute.String("result", result)))
+		}
 	}
 }
 
-func (m *metrics) stored(n int) {
-	m.valueBytes.Record(context.Background(), int64(n), metric.WithAttributes(m.backend))
+func (m *metrics) stored(id tenant.ID, n int) {
+	m.valueBytes.Record(context.Background(), int64(n), m.attrs(id))
 }
 
-func (m *metrics) tooLarge() {
-	m.oversize.Add(context.Background(), 1, metric.WithAttributes(m.backend))
+func (m *metrics) tooLarge(id tenant.ID) {
+	m.oversize.Add(context.Background(), 1, m.attrs(id))
 }
 
-func (m *metrics) setFailed(reason string) {
-	m.setFailures.Add(context.Background(), 1, metric.WithAttributes(m.backend, attribute.String("reason", reason)))
+func (m *metrics) setFailed(id tenant.ID, reason string) {
+	m.setFailures.Add(context.Background(), 1, m.attrs(id, attribute.String("reason", reason)))
 }
 
 func (m *metrics) close() {

@@ -12,6 +12,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // TestPublishResult_EveryOutcome: each way a publish ends is recorded under
@@ -65,4 +67,31 @@ func TestPublishResult_EveryOutcome(t *testing.T) {
 		"ingest/ok": 1, "ingest/queue_full": 1, "ingest/unavailable": 1, "ingest/error": 1,
 		"dlq/unavailable": 1, "dlq/canceled": 1, "dlq/ok": 1,
 	}, got)
+}
+
+// TestRecordPublish_Tenant: a publish is labeled with the tenant its context
+// names (#891), and one about no tenant carries none. Not parallel: it swaps
+// the package's histogram.
+func TestRecordPublish_Tenant(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	restore, err := UsePublishMeter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
+	require.NoError(t, err)
+	t.Cleanup(restore)
+
+	recordPublish(observability.WithMetricTenant(context.Background(), "acme"), publishKindIngest, time.Now(), nil)
+	recordPublish(context.Background(), publishKindDLQ, time.Now(), nil)
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	got := map[string]string{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, md := range sm.Metrics {
+			for _, dp := range md.Data.(metricdata.Histogram[float64]).DataPoints {
+				kind, _ := dp.Attributes.Value("kind")
+				id, _ := dp.Attributes.Value("tenant")
+				got[kind.AsString()] = id.AsString()
+			}
+		}
+	}
+	assert.Equal(t, map[string]string{publishKindIngest: "acme", publishKindDLQ: ""}, got)
 }
