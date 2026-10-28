@@ -1198,6 +1198,15 @@ func TestPanicCounter_ZeroFromRegistration(t *testing.T) {
 	assert.Equal(t, int64(0), readPanicCounter(t, &n)())
 }
 
+// TestPanicCounter_RegisteredOnTheAPIMeter: the process registers the counter
+// over panicsRecovered on the API meter at package init, the registration the
+// tests above make on their own meter.
+func TestPanicCounter_RegisteredOnTheAPIMeter(t *testing.T) {
+	t.Parallel()
+	require.NoError(t, panicCounterErr)
+	assert.NotNil(t, panicCounter)
+}
+
 // TestJSONRecoverer_CountsPanics: a recovered handler panic adds one to
 // wavehouse_http_panics_recovered_total and still answers the JSON 500
 // (#902). Not parallel: it reads the process-wide count, which the other

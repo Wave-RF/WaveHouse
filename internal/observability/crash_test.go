@@ -99,10 +99,17 @@ func TestGoroutinesAreCrashGuarded(t *testing.T) {
 					fn = n.Call.Fun
 				case *ast.CallExpr:
 					sel, ok := n.Fun.(*ast.SelectorExpr)
-					if !ok || sel.Sel.Name != "Go" || len(n.Args) != 1 {
+					switch {
+					case ok && sel.Sel.Name == "Go" && len(n.Args) == 1:
+						fn = n.Args[0]
+					// A JetStream Consume calls its handler on a
+					// goroutine of the client's (internal/mq is the only
+					// package that imports JetStream).
+					case ok && sel.Sel.Name == "Consume" && len(n.Args) > 0 && jetstreamFile(file):
+						fn = n.Args[0]
+					default:
 						return true
 					}
-					fn = n.Args[0]
 				default:
 					return true
 				}
@@ -116,6 +123,16 @@ func TestGoroutinesAreCrashGuarded(t *testing.T) {
 		require.NoError(t, err)
 	}
 	assert.Positive(t, checked, "the scan found no goroutine, so it is not reading the source")
+}
+
+// jetstreamFile reports whether file imports the JetStream client.
+func jetstreamFile(file *ast.File) bool {
+	for _, imp := range file.Imports {
+		if imp.Path.Value == `"github.com/nats-io/nats.go/jetstream"` {
+			return true
+		}
+	}
+	return false
 }
 
 // crashGuarded reports whether fn is a func literal whose first statement

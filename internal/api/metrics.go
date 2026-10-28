@@ -57,8 +57,8 @@ var panicsRecovered atomic.Int64
 
 // panicCounter exports panicsRecovered. It is observable, so it reads 0 from
 // registration on: a counter added to before the provider is set would lose
-// its zero.
-var _, _ = newPanicCounter(otel.Meter(meterName), &panicsRecovered)
+// its zero. The registration is kept so a test can see it was made.
+var panicCounter, panicCounterErr = newPanicCounter(otel.Meter(meterName), &panicsRecovered)
 
 // newPanicCounter registers wavehouse_http_panics_recovered_total on meter,
 // read from n on every collection.

@@ -750,6 +750,7 @@ func (e *ExternalNATS) Subscribe(ctx context.Context, consumerName string, handl
 		return fmt.Errorf("history consumer: %w", e.apiError(err))
 	}
 	cc, err := cons.Consume(func(m jetstream.Msg) {
+		defer observability.Crash("mq_delivery", slog.String("consumer", consumerName))
 		msg := e.wrapMsg(observability.ExtractHeaders(ctx, m.Headers()), m, false)
 		if err := handler(msg); err != nil {
 			slog.Warn("mq: subscriber could not handle an event", "component", "nats", "consumer", consumerName, "topic", msg.TopicKey(), "error", err)
