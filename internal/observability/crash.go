@@ -26,8 +26,9 @@ const crashFlushWait = 2 * time.Second
 //
 // On a panic it logs one ERROR, "panic in background goroutine", through the
 // default logger with component, error, stack and attrs (the tenant or table
-// the goroutine serves, where it knows them), and flushes the OTLP log
-// exporter for up to crashFlushWait so the record reaches OTLP too. Without a
+// the goroutine serves, where it knows them), and tries to flush the OTLP
+// log exporter for up to crashFlushWait so the record reaches OTLP too; that
+// is best effort (the error is ignored: stdout has the record). Without a
 // panic it does nothing. It never carries on after one: a goroutine that
 // panicked may have left the process's state inconsistent, so exiting is
 // right; Go's own panic trace still follows on stderr.
