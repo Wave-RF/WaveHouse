@@ -8,6 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
@@ -43,11 +46,17 @@ func (a *App) wireDynamoDedupe(ctx context.Context) error {
 	}
 	var mu sync.Mutex
 	state := errDynamoUnchecked // nil once the table has passed, for good
+	var passed time.Time        // when it passed
 	ready := func() error {
 		mu.Lock()
 		defer mu.Unlock()
 		return state
 	}
+	a.wireDynamoTableMetrics(func() (bool, time.Time) {
+		mu.Lock()
+		defer mu.Unlock()
+		return state == nil, passed
+	})
 	// check is only ever run by boot, then by the retry loop, one at a time.
 	check := func(ctx context.Context) error {
 		var err error
@@ -61,6 +70,9 @@ func (a *App) wireDynamoDedupe(ctx context.Context) error {
 		defer mu.Unlock()
 		if state != nil {
 			state = err
+			if err == nil {
+				passed = time.Now()
+			}
 		}
 		return state
 	}
@@ -140,4 +152,50 @@ func (a *App) anyDedupeEnabled() bool {
 		}
 	}
 	return false
+}
+
+// wireDynamoTableMetrics exports the DynamoDB dedupe table check (#883): while
+// it fails, ingest with dedupe on fails closed and sends the table no dedupe
+// request, and the check's own calls are not counted, so
+// wavehouse_dedupe_dynamodb_requests_total shows nothing. check reports
+// whether the table has passed and when.
+func (a *App) wireDynamoTableMetrics(check func() (ok bool, passed time.Time)) {
+	if !a.cfg.OTel.Enabled && !a.cfg.Prometheus.Enabled {
+		return
+	}
+	reg, err := registerDynamoTableMetrics(otel.Meter("wavehouse-dedupe"), check)
+	if err != nil {
+		slog.Error("failed to register dedupe table metrics", "error", err)
+		return
+	}
+	a.add(component{name: "dedupe table metrics", close: withoutContext(reg.Unregister)})
+}
+
+// registerDynamoTableMetrics registers the table check gauges on meter, read
+// from check on every collection.
+func registerDynamoTableMetrics(meter metric.Meter, check func() (bool, time.Time)) (metric.Registration, error) {
+	var errs [3]error
+	var tableOK, lastSuccess metric.Int64ObservableGauge
+	tableOK, errs[0] = meter.Int64ObservableGauge("wavehouse_dedupe_dynamodb_table_ok",
+		metric.WithDescription("1 once the DynamoDB dedupe table has passed its check, else 0 (not checked yet, or failing and retried); while 0, ingest with dedupe on fails closed"))
+	lastSuccess, errs[1] = meter.Int64ObservableGauge("wavehouse_dedupe_dynamodb_table_check_success_timestamp_seconds",
+		metric.WithDescription("Unix time the DynamoDB dedupe table passed its check; 0 if it has not"))
+	var reg metric.Registration
+	reg, errs[2] = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		ok, passed := check()
+		var v, at int64
+		if ok {
+			v = 1
+		}
+		if !passed.IsZero() {
+			at = passed.Unix()
+		}
+		o.ObserveInt64(tableOK, v)
+		o.ObserveInt64(lastSuccess, at)
+		return nil
+	}, tableOK, lastSuccess)
+	if err := errors.Join(errs[:]...); err != nil {
+		return nil, err
+	}
+	return reg, nil
 }

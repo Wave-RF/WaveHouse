@@ -23,6 +23,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - Only a span WaveHouse opened is sent. With traces off WaveHouse adds no trace context, so only a `traceparent` or `tracestate` set under `clickhouse.headers` is sent, and a `traceparent` a client sent is never passed on to ClickHouse.
   - A server with tracing set up writes its spans for a sampled statement to `system.opentelemetry_span_log`, under the engine's span, which can cost it some storage. A server without tracing ignores the context. Following D3 in #908, exporting those spans is ClickHouse's own monitoring, and WaveHouse does not read them.
 
+- **The DynamoDB dedupe table check is a metric** (`internal/app/wire_dynamodb.go` (+ tests), `docs/src/content/docs/{deployment,architecture}.md`): closes [#883](https://github.com/Wave-RF/WaveHouse/issues/883), part of [#908](https://github.com/Wave-RF/WaveHouse/issues/908). While the table was missing or unreachable, ingest with dedupe on failed closed and the only signal was an `ERROR` line every 30 seconds: no dedupe request reached the table (the check's own calls are not counted), so `wavehouse_dedupe_dynamodb_requests_total` showed nothing, which looked the same as no dedupe traffic.
+  - `wavehouse_dedupe_dynamodb_table_ok` is 1 once the table has passed its check, and 0 before that (not checked yet, or failing and being retried).
+  - `wavehouse_dedupe_dynamodb_table_check_success_timestamp_seconds` is the Unix time it passed, 0 before that.
+  - Neither has labels. The check is not repeated once it passes, so a table lost afterwards shows in the request counter's outcomes.
+
 ### Changed
 
 - **Routine success no longer logs at `INFO`, and client mistakes on ingest no longer log at `ERROR`** (`internal/discovery/discovery.go`, `internal/auth/auth.go`, `internal/api/ingest.go` (+ tests), `docs/src/content/docs/{access-control.mdx,architecture.md}`, `AGENTS.md`): closes [#888](https://github.com/Wave-RF/WaveHouse/issues/888), [#890](https://github.com/Wave-RF/WaveHouse/issues/890) and [#904](https://github.com/Wave-RF/WaveHouse/issues/904), part of [#908](https://github.com/Wave-RF/WaveHouse/issues/908). On an idle v0.2.1 deployment the schema refresh line alone was 64% of all log records. Log-based alerts or dashboards that key on these lines need updating:
