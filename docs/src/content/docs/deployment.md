@@ -993,6 +993,18 @@ sum by (table) (increase(wavehouse_sse_dropped_frames_total{reason="buffer_full"
 
 The logs name the connection. Every stream logs `SSE stream opened` and `SSE stream closed` at `INFO`, with its `table` and `role` and, like every request's record, its `request_id` and `tenant` (the response's `X-Request-Id` is the same id). A stream dropping `buffer_full` frames logs `SSE stream dropping frames` at `WARN`, at most once every 10 seconds, with the frames dropped since its last such line (`frames_dropped`), its total so far, and its queue's depth, peak and capacity. Every close line says how the stream ended (`end`: `client_gone`, `shutdown` or `evicted`), how long it lasted (`duration`), how many frames it dropped to a full queue (`frames_dropped_total`) and how many it left queued (`frames_discarded`); it is a `WARN` rather than an `INFO` when the stream dropped `buffer_full` frames.
 
+### Panics
+
+A panic is a bug in WaveHouse, and both kinds leave a record:
+
+- **In a request handler.** The handler's panic is recovered, logged at `ERROR` as `panic recovered in handler` with `err`, `stack`, `path` and `method`, and answered with a JSON `500` unless the handler had already started its response. `wavehouse_http_panics_recovered_total` counts them. It has no labels, is present at `0` from start, and doesn't count `http.ErrAbortHandler`, which is `net/http`'s own way to end a response. A `500` it answers also lands in `wavehouse_http_request_duration_seconds` under `status_class="5xx"`, and a panic after the response started keeps the status already sent, so the counter is how you tell a panic from any other failure:
+
+  ```promql
+  increase(wavehouse_http_panics_recovered_total[10m]) > 0
+  ```
+
+- **In a background goroutine** (the ingest worker and its flushes and acks, the shard claims, a lease renewal, a schema refresh, the queue's consumers, the cache, and every other goroutine WaveHouse starts). The panic is not recovered: the process may be left inconsistent, so it still exits with status 2, and your orchestrator restarts it. First it logs one `ERROR`, `panic in background goroutine`, with `component` (`ingest_worker`, `shard_claims`, `mq_lease`, `schema_refresh`, …), `error`, `stack`, and what the goroutine was serving where it knows it: a `tenant`, `table` or `unit`, or the `lease`, `server`, `loop` or `releasing` it names. That record is JSON on stdout like every other, carries the process's `instance_id`, and is flushed to OTLP before the exit, for up to two seconds. Go's own plain-text panic trace still follows on stderr.
+
 ### Separating the `/metrics` listener
 
 By default, `prometheus.port` is `0`, which mounts `/metrics` on the main API server port (typically `8080`). This is the friendliest setup for compose / quick-start use.

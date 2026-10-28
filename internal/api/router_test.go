@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +26,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 func TestRequireAdmin_AdminAllowed(t *testing.T) {
@@ -1164,4 +1167,64 @@ func TestNewOpsRouter(t *testing.T) {
 
 	deps.Settings = nil
 	assert.Equal(t, http.StatusNotFound, do(NewOpsRouter(deps), http.MethodPost, "/v1/ops/settings/reload", key))
+}
+
+// readPanicCounter registers wavehouse_http_panics_recovered_total over n on
+// a fresh meter and returns a function that collects it.
+func readPanicCounter(t *testing.T, n *atomic.Int64) func() int64 {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	reg, err := newPanicCounter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"), n)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reg.Unregister() })
+	return func() int64 {
+		var rm metricdata.ResourceMetrics
+		require.NoError(t, reader.Collect(context.Background(), &rm))
+		require.Len(t, rm.ScopeMetrics, 1)
+		require.Len(t, rm.ScopeMetrics[0].Metrics, 1)
+		sum, ok := rm.ScopeMetrics[0].Metrics[0].Data.(metricdata.Sum[int64])
+		require.True(t, ok, "a counter")
+		assert.True(t, sum.IsMonotonic)
+		require.Len(t, sum.DataPoints, 1)
+		return sum.DataPoints[0].Value
+	}
+}
+
+// TestPanicCounter_ZeroFromRegistration: the counter is exported at 0 before
+// any panic, so an alert on its increase sees the first one (#902).
+func TestPanicCounter_ZeroFromRegistration(t *testing.T) {
+	t.Parallel()
+	var n atomic.Int64
+	assert.Equal(t, int64(0), readPanicCounter(t, &n)())
+}
+
+// TestJSONRecoverer_CountsPanics: a recovered handler panic adds one to
+// wavehouse_http_panics_recovered_total and still answers the JSON 500
+// (#902). Not parallel: it reads the process-wide count, which the other
+// recoverer tests add to.
+func TestJSONRecoverer_CountsPanics(t *testing.T) {
+	read := readPanicCounter(t, &panicsRecovered)
+	before := read()
+	handler := jsonRecoverer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		panic("boom")
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	testutil.AssertJSONErrorResponse(t, rec)
+	assert.Equal(t, before+1, read(), "one panic, one count")
+}
+
+// TestJSONRecoverer_AbortHandlerNotCounted: http.ErrAbortHandler is net/http's
+// own way to end a response, not a bug, so it is passed on uncounted. Not
+// parallel, as TestJSONRecoverer_CountsPanics.
+func TestJSONRecoverer_AbortHandlerNotCounted(t *testing.T) {
+	before := panicsRecovered.Load()
+	handler := jsonRecoverer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+	assert.Panics(t, func() {
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
+	})
+	assert.Equal(t, before, panicsRecovered.Load())
 }

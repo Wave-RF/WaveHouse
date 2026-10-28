@@ -284,8 +284,14 @@ func (c *externalConsumer) Consume(handler func(msg *Message), prefetch int) (fu
 			share = max(1, share/4)
 		}
 		part.start(share, c.maxHeld)
-		go c.run(part)
-		go c.deliver(part, handler)
+		go func() {
+			defer observability.Crash("mq_consumer", slog.String("unit", part.unit.id()))
+			c.run(part)
+		}()
+		go func() {
+			defer observability.Crash("mq_consumer", slog.String("unit", part.unit.id()))
+			c.deliver(part, handler)
+		}()
 	}
 	untrack := c.e.track(c.shutdown)
 	return func() {
@@ -295,6 +301,7 @@ func (c *externalConsumer) Consume(handler func(msg *Message), prefetch int) (fu
 			part.halt()
 			if c.whole {
 				go func() {
+					defer observability.Crash("mq_consumer", slog.String("unit", part.unit.id()))
 					<-part.drained
 					c.releaseAfterDrain(part)
 				}()

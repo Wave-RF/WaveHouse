@@ -12,6 +12,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // The sweep's cadence. Expired keys are already absent to Reserve, so the
@@ -51,6 +53,7 @@ func (e *Embedded) startSweep(db *pebble.DB) (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
+		defer observability.Crash("dedupe_sweep")
 		defer close(done)
 		wait := e.sweepFirst
 		for {

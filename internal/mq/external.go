@@ -247,7 +247,10 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 		return nil, fmt.Errorf("register mq gauges: %w", err)
 	}
 	e.stopping, e.stop = context.WithCancel(context.Background()) //nolint:gosec // G118: Close calls it
-	go e.watch(orDefault(cfg.recheckEvery, topologyRecheck), orDefault(cfg.historyEvery, historyPoll))
+	go func() {
+		defer observability.Crash("mq_external")
+		e.watch(orDefault(cfg.recheckEvery, topologyRecheck), orDefault(cfg.historyEvery, historyPoll))
+	}()
 	return e, nil
 }
 
@@ -759,6 +762,7 @@ func (e *ExternalNATS) Subscribe(ctx context.Context, consumerName string, handl
 	}
 	untrack := e.track(cc.Stop)
 	go func() {
+		defer observability.Crash("mq_external")
 		select {
 		case <-ctx.Done():
 		case <-cc.Closed():

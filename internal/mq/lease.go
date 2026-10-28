@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/Wave-RF/WaveHouse/internal/coord"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // Lease timings, client-go's leader-election defaults. A holder steps down
@@ -214,7 +215,10 @@ func (l *natsLeases) TryAcquire(ctx context.Context, name string) (coord.Term, e
 	}
 	l.held[name] = t
 	l.mu.Unlock()
-	go t.renew(sent)
+	go func() {
+		defer observability.Crash("mq_lease", slog.String("lease", name))
+		t.renew(sent)
+	}()
 	return t, nil
 }
 

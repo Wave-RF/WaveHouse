@@ -25,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
@@ -438,6 +439,7 @@ func (s *dynamoStore) Reserve(ctx context.Context, keys []Key, lease time.Durati
 		token := newToken()
 		tried[i] = Claim{Key: k, Status: Claimed, Token: token}
 		g.Go(func() error {
+			defer observability.Crash("dedupe_dynamodb")
 			if err := gctx.Err(); err != nil {
 				return err
 			}
@@ -644,7 +646,11 @@ func forEach(n, limit int, do func(i int) error) error {
 	var g errgroup.Group
 	g.SetLimit(limit)
 	for i := range n {
-		g.Go(func() error { errs[i] = do(i); return nil })
+		g.Go(func() error {
+			defer observability.Crash("dedupe_dynamodb")
+			errs[i] = do(i)
+			return nil
+		})
 	}
 	_ = g.Wait()
 	return errors.Join(errs...)

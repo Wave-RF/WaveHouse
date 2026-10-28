@@ -732,6 +732,7 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, consumerName string, handl
 	}
 
 	go func() {
+		defer observability.Crash("mq_embedded")
 		<-ctx.Done()
 		stop()
 	}()
@@ -934,6 +935,7 @@ func (f *fanIn) run(id tenant.ID) error {
 		return nil
 	}
 	go func() {
+		defer observability.Crash("mq_embedded")
 		<-cctx.Closed()
 		if f.stopped.Load() || !f.delivering(id, cctx) {
 			return

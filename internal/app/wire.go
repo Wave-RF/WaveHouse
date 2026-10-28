@@ -1129,7 +1129,10 @@ func (a *App) serve(ctx context.Context, name string, srv *http.Server, ln net.L
 	}
 	slog.Info("starting "+name, "addr", ln.Addr().String())
 	served := make(chan error, 1)
-	go func() { served <- srv.Serve(ln) }()
+	go func() {
+		defer observability.Crash("http_server", slog.String("server", name))
+		served <- srv.Serve(ln)
+	}()
 	select {
 	case err := <-served:
 		if errors.Is(err, http.ErrServerClosed) {

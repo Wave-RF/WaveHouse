@@ -9,6 +9,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
@@ -273,6 +274,7 @@ func (h *StreamHandler) closeStream(ctx context.Context, sub *stream.Subscriber,
 func (h *StreamHandler) replayContext(r *http.Request, sub *stream.Subscriber) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(r.Context())
 	go func() {
+		defer observability.Crash("sse_stream")
 		select {
 		case <-h.Closing:
 		case <-sub.Evicted():

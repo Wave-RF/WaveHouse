@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
@@ -105,6 +106,7 @@ func (k *keepalives) turn(tw *tenantWheel) *tenantWheel {
 	ctx, cancel := context.WithCancel(k.ctx)
 	turning := &tenantWheel{wheel: tw.wheel, cancel: cancel, done: make(chan struct{})}
 	go func() {
+		defer observability.Crash("cache_keepalive")
 		defer close(turning.done)
 		turning.wheel.Run(ctx)
 	}()

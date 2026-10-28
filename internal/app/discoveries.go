@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
@@ -144,6 +146,7 @@ func (d *discoveries) start(id tenant.ID, reg *discovery.SchemaRegistry) *tenant
 	td := &tenantDiscovery{id: id, registry: reg, cancel: cancel, done: make(chan struct{})}
 	backoff := d.backoff
 	go func() {
+		defer observability.Crash("schema_refresh", slog.String("tenant", id.String()))
 		defer close(td.done)
 		if !reg.Loaded() {
 			err := reg.RetryRefresh(ctx, backoff, 60*time.Second, func(ctx context.Context, err error) { d.onAttempt(ctx, id, err) })

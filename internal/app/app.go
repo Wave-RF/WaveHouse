@@ -42,6 +42,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
@@ -253,6 +254,7 @@ func (a *App) Run(ctx context.Context) error {
 			continue
 		}
 		g.Go(func() error {
+			defer observability.Crash("app", slog.String("loop", c.name))
 			err := c.run(gctx)
 			// A stop the caller asked for is clean whatever the loop
 			// reported on its way out (a consumer creation cut short, say).
@@ -326,7 +328,10 @@ func (a *App) Close(ctx context.Context) error {
 // exits; the error names it so the flush can report which store was stuck.
 func closeWithin(ctx context.Context, name string, release func(context.Context) error) error {
 	done := make(chan error, 1)
-	go func() { done <- release(ctx) }()
+	go func() {
+		defer observability.Crash("shutdown", slog.String("releasing", name))
+		done <- release(ctx)
+	}()
 	select {
 	case err := <-done:
 		if err != nil {

@@ -117,7 +117,10 @@ func main() {
 	// before the first is read must buffer, not drop.
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	go stopOnSignals(sigs, cancel, os.Exit)
+	go func() {
+		defer observability.Crash("signals")
+		stopOnSignals(sigs, cancel, os.Exit)
+	}()
 	os.Exit(run(ctx))
 }
 

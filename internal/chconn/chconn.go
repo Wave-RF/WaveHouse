@@ -31,6 +31,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
@@ -745,7 +746,10 @@ func (p *Pools) Ping(ctx context.Context) error {
 	}
 	results := make(chan result, len(ids))
 	for i, id := range ids {
-		go func() { results <- result{i, snap.tuples[id].manager.Ping(ctx)} }()
+		go func() {
+			defer observability.Crash("clickhouse_ping")
+			results <- result{i, snap.tuples[id].manager.Ping(ctx)}
+		}()
 	}
 	errs := make([]error, len(ids))
 	for range ids {
