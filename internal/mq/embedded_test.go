@@ -118,9 +118,12 @@ func TestEmbeddedNATS_Stats(t *testing.T) {
 
 	stats, err := e.Stats()
 	require.NoError(t, err)
-	// The process's own in-process client is connected.
+	// The figures are the server's: the process's own in-process client is
+	// connected, and its JetStream setup went through the server.
+	assert.True(t, stats.Embedded)
 	assert.GreaterOrEqual(t, stats.Connections, int64(1))
-	assert.GreaterOrEqual(t, stats.InMsgs, int64(0))
+	assert.Positive(t, stats.InMsgs)
+	assert.Positive(t, stats.OutMsgs)
 }
 
 func TestEmbeddedNATS_PublishHeaders(t *testing.T) {

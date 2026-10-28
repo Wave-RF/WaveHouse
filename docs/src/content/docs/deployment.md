@@ -483,7 +483,7 @@ The ingest processes export these for their shards:
 | `wavehouse_ingest_shard_events_total{event}` | `taken`, `released`, `reset` (a dead owner's rows redelivered at takeover), `handover_timeout` (a shard released before its rows were acked or handed back), `lost` (the membership lease ended under the process), `bind_failed` (a shard could not be bound; tried again next tick, and logged as an error once it has failed for a minute). A configured shard durable (one of the N×V) that is gone, with its stream or alone, or that no longer fits the worker (its `ack_wait` shorter than a minute, or no `max_ack_pending`), ends the worker instead, as a durable deleted while it is pulled does; a leftover durable past a lower N or V is only logged. |
 | `wavehouse_ingest_shard_handover_seconds` | From giving a shard up to releasing it. Buckets run from 0.05 s (one poll) to 120 s (twice the one-minute handover bound): `.05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120`. |
 
-`wavehouse_nats_connections` and `wavehouse_nats_in_msgs_total` describe this process's client connection under `nats` (`1` or `0`, and the messages it has received), where under `embedded` they describe the embedded server.
+Each process also exports counters for its client connection to the cluster: see [Message queue connection](#message-queue-connection).
 
 Under `coord.backend: nats` every ingest process exports its lease, labeled by name (`ingest.m<j>`, its membership slot; there is no sweeper lease under this backend):
 
@@ -769,7 +769,7 @@ To drain before upgrading:
 
 1. **Stop the producers**, or cut `/v1/ingest` at the reverse proxy. Nothing new should enter the stream.
 2. **Wait for the in-flight batches to flush.** A table's batch closes on size or after `maxWait` (5s by default), so a few seconds after the last write is enough; give it longer if ClickHouse is slow.
-3. **Confirm nothing is left unconsumed** before swapping binaries. Not that the stream is empty: it is dual-use, and deliberately retains ACKed messages for the SSE replay window, so a non-zero depth right after a clean drain is expected. Rows landing in ClickHouse is a success signal, **not proof the queue is drained** — when the DLQ is off, a row that fails its retry is skipped without being acked, so NATS keeps redelivering it while its neighbors land. Check that nothing is still failing or redelivering, and note which signal covers which case: [`GET /v1/ops/dlq/stats`](/api#get-v1opsdlqstats--dlq-statistics) is non-zero only where the DLQ is **on**; on a build that exposes it (from the v2 envelope on), `wavehouse_ingest_poison_total` counts unreadable envelopes on **either** setting, told apart by its `disposition` label (`parked` / `dropped`); and for a twice-failed row with the DLQ off — the case just described — the **only** signal is the `ERROR` log: `isolated bad row, DLQ disabled for table` on a build with the per-table switch, or, on v0.1.0, `isolated bad row, sending to DLQ` followed by `NATS DLQ publish failed`. A clean `dlq/stats` with the DLQ off proves nothing. There is no queue-depth gauge today ([#544](https://github.com/Wave-RF/WaveHouse/issues/544) tracks the related in-flight accounting), and `wavehouse_nats_in_msgs_total` going flat is a supporting signal rather than a guarantee. Enabling the DLQ is not itself a drain: a parked row is not inserted, and the upgrade deletes it.
+3. **Confirm nothing is left unconsumed** before swapping binaries. Not that the stream is empty: it is dual-use, and deliberately retains ACKed messages for the SSE replay window, so a non-zero depth right after a clean drain is expected. Rows landing in ClickHouse is a success signal, **not proof the queue is drained** — when the DLQ is off, a row that fails its retry is skipped without being acked, so NATS keeps redelivering it while its neighbors land. Check that nothing is still failing or redelivering, and note which signal covers which case: [`GET /v1/ops/dlq/stats`](/api#get-v1opsdlqstats--dlq-statistics) is non-zero only where the DLQ is **on**; on a build that exposes it (from the v2 envelope on), `wavehouse_ingest_poison_total` counts unreadable envelopes on **either** setting, told apart by its `disposition` label (`parked` / `dropped`); and for a twice-failed row with the DLQ off — the case just described — the **only** signal is the `ERROR` log: `isolated bad row, DLQ disabled for table` on a build with the per-table switch, or, on v0.1.0, `isolated bad row, sending to DLQ` followed by `NATS DLQ publish failed`. A clean `dlq/stats` with the DLQ off proves nothing. There is no queue-depth gauge today ([#544](https://github.com/Wave-RF/WaveHouse/issues/544) tracks the related in-flight accounting), and `wavehouse_nats_in_msgs_total` (the old build's count of messages the embedded server received, its own pull requests included) dropping back to its idle rate is a supporting signal rather than a guarantee. Enabling the DLQ is not itself a drain: a parked row is not inserted, and the upgrade deletes it.
 4. **Upgrade** as [Upgrading → Switch over](/upgrading#switch-over) describes, then re-enable ingest.
 
 If you skipped the drain, the boot's `WARN` line for each deleted stream (`deleted the stream an earlier build kept for every tenant together`) says how many messages went with it: for `WAVEHOUSE_DLQ`, the parked rows lost; for `WAVEHOUSE`, a count that includes the acknowledged history kept for replay, already in ClickHouse — so it bounds the events lost rather than counting them, and is non-zero even after a clean drain.
@@ -932,6 +932,24 @@ The 99th percentile of a bulk `INSERT`'s latency, which rises before inserts sta
 ```promql
 histogram_quantile(0.99, sum by (le) (rate(wavehouse_ingest_insert_duration_seconds_bucket{mode="batch"}[5m])))
 ```
+
+### Message queue connection
+
+WaveHouse reports its connection to the message queue, and under `embedded` the embedded server's traffic. These metrics count every message on the wire, including the client's own control traffic (JetStream API replies, KV reads, consumer heartbeats), so they climb on an idle deployment and are not a count of events. Count rows with `wavehouse_ingest_records_total` and `wavehouse_ingest_rows_total` instead ([Ingest requests and queue publishes](#ingest-requests-and-queue-publishes), [Ingest writes](#ingest-writes)).
+
+Under `mq.backend: nats` each process reports its own client connection:
+
+| Counter | Meaning |
+| --- | --- |
+| `wavehouse_mq_client_messages_total{direction}` | Messages this process's client connection has received (`in`) and sent (`out`). |
+| `wavehouse_mq_client_bytes_total{direction}` | Bytes it has received (`in`) and sent (`out`). |
+| `wavehouse_mq_client_reconnects_total` | Times it has reconnected to the cluster. |
+
+Its connectivity is `wavehouse_mq_connected` ([External NATS monitoring](#monitoring)).
+
+Under `mq.backend: embedded` the embedded server reports `wavehouse_mq_embedded_connections` (the clients connected to it, the process's own included) and `wavehouse_mq_embedded_messages_total{direction}` (messages it has received from and sent to all of them). Neither backend exports the other's set.
+
+`wavehouse_nats_connections` and `wavehouse_nats_in_msgs_total` are deprecated and will be removed in the next minor release. They describe this process's client connection under `nats` (`1` or `0`, and the messages it has received), and the embedded server under `embedded`, and `wavehouse_nats_in_msgs_total` is a gauge despite its name. Use `wavehouse_mq_connected` or `wavehouse_mq_embedded_connections`, and the `direction="in"` series of the message counters, instead.
 
 ### Settings reloads
 
