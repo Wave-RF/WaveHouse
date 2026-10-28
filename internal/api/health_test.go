@@ -4,13 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 )
 
 // pingFailConn satisfies driver.Conn via the embedded nil interface — the
@@ -228,4 +237,173 @@ func TestHealth_Online(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 		assert.Empty(t, w.Body.String(), "Online must write no body even on 503")
 	})
+}
+
+// readinessReading is what the readiness gauges report on one collection.
+type readinessReading struct {
+	ok   map[string]int64
+	last int64
+}
+
+// readReadiness collects reader's readiness gauges.
+func readReadiness(t *testing.T, reader *sdkmetric.ManualReader) readinessReading {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	out := readinessReading{ok: map[string]int64{}, last: -1}
+	for _, sm := range rm.ScopeMetrics {
+		for _, md := range sm.Metrics {
+			g := md.Data.(metricdata.Gauge[int64])
+			switch md.Name {
+			case "wavehouse_readiness_check_ok":
+				for _, dp := range g.DataPoints {
+					check, _ := dp.Attributes.Value(attribute.Key("check"))
+					out.ok[check.AsString()] = dp.Value
+				}
+			case "wavehouse_readiness_last_check_timestamp_seconds":
+				require.Len(t, g.DataPoints, 1)
+				out.last = g.DataPoints[0].Value
+			}
+		}
+	}
+	return out
+}
+
+// TestHealth_ReadinessMetrics: every check, the boot diagnostic as
+// check="boot", is exported at 0 from registration, before any probe; each
+// probe records each check's outcome and when it ran (#901).
+func TestHealth_ReadinessMetrics(t *testing.T) {
+	t.Parallel()
+	var chErr atomic.Pointer[error]
+	ok := error(nil)
+	chErr.Store(&ok)
+	h := NewHealthHandler(
+		Check{Name: "clickhouse", Run: func(context.Context) error { return *chErr.Load() }},
+		Check{Name: "mq", Run: func(context.Context) error { return nil }},
+	)
+	h.Boot = NewBootState(nil)
+	reader := sdkmetric.NewManualReader()
+	reg, err := h.RegisterReadinessMetrics(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reg.Unregister() })
+
+	probe := func() int {
+		w := httptest.NewRecorder()
+		h.Readiness(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil))
+		return w.Code
+	}
+
+	assert.Equal(t, readinessReading{ok: map[string]int64{"boot": 0, "clickhouse": 0, "mq": 0}, last: 0}, readReadiness(t, reader),
+		"before any probe each check is present at 0 and nothing has run")
+
+	require.Equal(t, http.StatusOK, probe())
+	got := readReadiness(t, reader)
+	assert.Equal(t, map[string]int64{"boot": 1, "clickhouse": 1, "mq": 1}, got.ok)
+	assert.Positive(t, got.last)
+
+	down := errors.New("no pool answered")
+	chErr.Store(&down)
+	require.Equal(t, http.StatusServiceUnavailable, probe())
+	assert.Equal(t, map[string]int64{"boot": 1, "clickhouse": 0, "mq": 1}, readReadiness(t, reader).ok,
+		"only the failing check reads 0")
+
+	chErr.Store(&ok)
+	require.Equal(t, http.StatusOK, probe())
+	assert.Equal(t, map[string]int64{"boot": 1, "clickhouse": 1, "mq": 1}, readReadiness(t, reader).ok)
+
+	h.Boot.Set(errors.New("schema discovery: connection refused"))
+	require.Equal(t, http.StatusServiceUnavailable, probe())
+	assert.Equal(t, map[string]int64{"boot": 0, "clickhouse": 1, "mq": 1}, readReadiness(t, reader).ok,
+		"a failing boot diagnostic reads 0; the checks it skips keep their last outcome")
+}
+
+// TestHealth_ReadinessMetrics_NoBoot: a handler without a boot diagnostic (a
+// process without the api role) exports no boot series.
+func TestHealth_ReadinessMetrics_NoBoot(t *testing.T) {
+	t.Parallel()
+	h := NewHealthHandler(Check{Name: "mq", Run: func(context.Context) error { return nil }})
+	reader := sdkmetric.NewManualReader()
+	reg, err := h.RegisterReadinessMetrics(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reg.Unregister() })
+	assert.Equal(t, map[string]int64{"mq": 0}, readReadiness(t, reader).ok)
+}
+
+// TestHealth_Readiness_LogsOnlyOnChange: a check that starts failing logs one
+// WARN naming it and the error, repeated failing probes log nothing more, and
+// recovery logs one INFO with how long it failed; a passing check that never
+// failed logs nothing (#901). Not parallel: it captures the default logger.
+func TestHealth_Readiness_LogsOnlyOnChange(t *testing.T) {
+	buf := logtest.Capture(t, slog.LevelInfo)
+	var failing atomic.Bool
+	h := NewHealthHandler(
+		Check{Name: "clickhouse", Run: func(context.Context) error {
+			if failing.Load() {
+				return errors.New("no pool answered")
+			}
+			return nil
+		}},
+		Check{Name: "mq", Run: func(context.Context) error { return nil }},
+	)
+	probe := func() {
+		h.Readiness(httptest.NewRecorder(), httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil))
+	}
+
+	probe()
+	assert.Empty(t, buf.String(), "a first pass logs nothing")
+
+	failing.Store(true)
+	for range 3 {
+		probe()
+	}
+	out := buf.String()
+	assert.Equal(t, 1, strings.Count(out, `"msg":"readiness check failing"`), out)
+	assert.Contains(t, out, `"level":"WARN"`)
+	assert.Contains(t, out, `"check":"clickhouse"`)
+	assert.Contains(t, out, `"error":"no pool answered"`)
+	assert.NotContains(t, out, `"check":"mq"`)
+
+	failing.Store(false)
+	probe()
+	probe()
+	out = buf.String()
+	assert.Equal(t, 1, strings.Count(out, `"msg":"readiness check passing again"`), out)
+	assert.Contains(t, out, `"failed_for":`)
+	assert.Equal(t, 1, strings.Count(out, `"msg":"readiness check failing"`), "recovery adds no WARN")
+}
+
+// TestHealth_Readiness_FirstFailureLogs: a check that fails on its first
+// probe logs the WARN, so a process that boots not ready says why.
+func TestHealth_Readiness_FirstFailureLogs(t *testing.T) {
+	buf := logtest.Capture(t, slog.LevelInfo)
+	h := NewHealthHandler(Check{Name: "mq", Run: func(context.Context) error { return errors.New("not connected") }})
+	h.Readiness(httptest.NewRecorder(), httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil))
+	out := buf.String()
+	assert.Equal(t, 1, strings.Count(out, `"msg":"readiness check failing"`), out)
+	assert.Contains(t, out, `"check":"mq"`)
+}
+
+// TestHealth_Readiness_DropsOlderOutcome: an outcome taken before the one
+// recorded, from a slower concurrent probe, changes neither the gauge nor the
+// logs, and an earlier call does not move the last-call time back (#901). Not
+// parallel: it captures the default logger.
+func TestHealth_Readiness_DropsOlderOutcome(t *testing.T) {
+	buf := logtest.Capture(t, slog.LevelInfo)
+	h := NewHealthHandler(Check{Name: "clickhouse", Run: func(context.Context) error { return nil }})
+	reader := sdkmetric.NewManualReader()
+	reg, err := h.RegisterReadinessMetrics(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reg.Unregister() })
+
+	t2 := time.Unix(2_000_000, 0)
+	t1 := t2.Add(-time.Second)
+	h.results.called(t2)
+	h.results.record(context.Background(), "clickhouse", t2, nil)
+	h.results.called(t1)
+	h.results.record(context.Background(), "clickhouse", t1, errors.New("no pool answered"))
+
+	got := readReadiness(t, reader)
+	assert.Equal(t, map[string]int64{"clickhouse": 1}, got.ok, "the older failure is dropped")
+	assert.Equal(t, t2.Unix(), got.last, "the last-call time does not move back")
+	assert.Empty(t, buf.String(), "a dropped outcome logs nothing")
 }

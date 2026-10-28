@@ -238,6 +238,22 @@ API servers in standalone mode expose liveness and readiness endpoints under the
 - `GET /livez` — Liveness probe. Returns 200 once the gateway has discovered ClickHouse table schemas at least once. Returns 503 with a diagnostic body while the boot-time schema discovery retry loop is still running (e.g. ClickHouse unreachable, target database missing). After successful boot, `/livez` stays 200 — transient ClickHouse blips at runtime are reflected in `/readyz`, not `/livez`. Over a [nested settings directory](#the-nested-settings-directory) it is 503 while no tenant has completed a first discovery, and 200 from the first tenant's success on.
 - `GET /readyz` — Readiness probe. Returns 200 if the gateway is fully booted and every backend it cannot do its job without is answering, 503 otherwise, naming each check that failed: `clickhouse` (every open pool is pinged at once and one that answers is enough; the failure names every pool that did not), `mq` under [`mq.backend: nats`](#external-nats) (the connection is down, or the topology failed its last check — the lease bucket of `coord.backend: nats` included). The shared cache and the dedupe stores are not checks: a tripped breaker falls back to ClickHouse, and a dedupe store that is not answering fails that tenant's ingest closed per request. Full behavior in the [API reference](/api#get-readyz--readiness-probe).
 
+**Readiness metrics and logs.** So a replica that left rotation can say afterwards which dependency failed, every `/readyz` call records the outcome of each check it runs, exported through [OpenTelemetry or Prometheus](#observability) when either is on:
+
+| Metric | Meaning |
+|---|---|
+| `wavehouse_readiness_check_ok{check}` | `1` if the check passed the last time it ran, else `0` (it failed, or has not run yet). `check` is `clickhouse` in a process with the `api` or `ingest` role, `mq` under `mq.backend: nats`, and `boot` for the boot diagnostic in a process with the `api` role. Each series is present from boot. |
+| `wavehouse_readiness_last_check_timestamp_seconds` | Unix time of the last `/readyz` call, `0` before the first. |
+
+The checks run only when something calls `/readyz`, so these are as old as the last probe: if the timestamp stops advancing, nothing is probing and the gauges are stale. While `boot` fails, `/readyz` answers without running the other checks, which keep their last value. Every check reads `0` until the first probe, which under a [`startupProbe`](#kubernetes--orchestrator-note) can be minutes after start, so alert only once the process has been probed, and separately on probing that stopped:
+
+```promql
+wavehouse_readiness_check_ok == 0 and ignoring(check) wavehouse_readiness_last_check_timestamp_seconds > 0
+time() - wavehouse_readiness_last_check_timestamp_seconds > 60 and wavehouse_readiness_last_check_timestamp_seconds > 0
+```
+
+A check that starts failing logs one `WARN`, `readiness check failing`, with `check` and `error`. When it passes again, one `INFO`, `readiness check passing again`, gives `check` and `failed_for`, how long it failed (from the first failing probe to the first passing one). A probe that finds no change logs nothing, so a probe every few seconds adds no lines while the state holds.
+
 `/healthz` remains registered as a **permanent alias** of `/livez` (it's the most widely-recognized name); `/health` and `/ready` are **deprecated aliases**: still served in 0.2.1, and to be removed in a later release ([#818](https://github.com/Wave-RF/WaveHouse/issues/818)). Point new deployments at the `/livez` / `/readyz` names.
 
 Configure your load balancer or orchestrator to use these endpoints.
