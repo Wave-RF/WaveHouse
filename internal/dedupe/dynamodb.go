@@ -25,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
@@ -61,6 +62,8 @@ const (
 	// opReserve is the operation the breaker watches: Release and Commit
 	// answers say nothing about whether a new Reserve would get through.
 	opReserve = "put_item"
+	opCommit  = "batch_write_item"
+	opRelease = "delete_item"
 )
 
 // DynamoConfig is the DynamoDB backend's wiring. Credentials are never here:
@@ -564,7 +567,7 @@ func (s *dynamoStore) Commit(ctx context.Context, claims []Claim, retention time
 func (s *dynamoStore) commitChunk(ctx context.Context, writes []types.WriteRequest) error {
 	for attempt := 0; ; attempt++ {
 		var unprocessed []types.WriteRequest
-		err := s.d.call(ctx, "batch_write_item", func(ctx context.Context) error {
+		err := s.d.call(ctx, opCommit, func(ctx context.Context) error {
 			out, err := s.d.api.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{
 				RequestItems: map[string][]types.WriteRequest{s.d.cfg.Table: writes},
 			})
@@ -614,7 +617,7 @@ func (s *dynamoStore) Release(ctx context.Context, claims []Claim) error {
 	// Every claim is attempted: one left behind holds its id for a lease.
 	return forEach(len(claims), s.d.cfg.ReserveConcurrency, func(i int) error {
 		c := claims[i]
-		err := s.d.call(ctx, "delete_item", func(ctx context.Context) error {
+		err := s.d.call(ctx, opRelease, func(ctx context.Context) error {
 			_, err := s.d.api.DeleteItem(ctx, &dynamodb.DeleteItemInput{
 				TableName:           &s.d.cfg.Table,
 				Key:                 s.key(c.Key),
@@ -777,6 +780,17 @@ func newDynamoMetrics() dynamoMetrics {
 		metric.WithDescription("Commit items DynamoDB left unprocessed and the backend retried"))
 	shorted, _ := meter.Int64Counter("wavehouse_dedupe_dynamodb_short_circuits_total",
 		metric.WithDescription("Reserves refused without a request while DynamoDB was failing"))
+	// Every op and outcome reads 0 from here on, so the first failure is an
+	// increase (#905).
+	// A BatchWriteItem carries no condition, so commit has no
+	// condition_failed series to publish.
+	outcomes := []string{"ok", "unavailable", "canceled", "error"}
+	observability.ZeroCounter(requests, 0, append(
+		observability.LabelSets(observability.Values("op", opReserve, opRelease),
+			observability.Values("outcome", append(outcomes, "condition_failed")...)),
+		observability.LabelSets(observability.Values("op", opCommit), observability.Values("outcome", outcomes...))...)...)
+	observability.ZeroCounter(unprocessed, 0)
+	observability.ZeroCounter(shorted, 0)
 	return dynamoMetrics{requests: requests, duration: duration, unprocessed: unprocessed, shorted: shorted}
 }
 

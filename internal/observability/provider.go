@@ -199,6 +199,14 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 		}
 
 		processTenants.off.Store(cfg.AggregateTenants)
+		var dropped Carries
+		if cfg.AggregateTables {
+			dropped |= CarriesTable
+		}
+		if cfg.AggregateTenants {
+			dropped |= CarriesTenant
+		}
+		labelsDropped.Store(uint32(dropped))
 		mpOpts := []metric.Option{metric.WithResource(res), metric.WithView(metricsView(viewOptions{
 			aggregateTables: cfg.AggregateTables, tableThreshold: TableWarnThreshold,
 			aggregateTenants: cfg.AggregateTenants, httpBodySize: cfg.HTTPBodySizeMetrics,

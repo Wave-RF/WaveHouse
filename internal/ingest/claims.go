@@ -18,6 +18,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // Shard claims: over a sharded queue (mq.Sharded), each unit — one shard of
@@ -213,6 +214,7 @@ func (c *claimingConsumer) Consume(handler func(*mq.Message), prefetch int) (fun
 	if l.gauges, err = registerClaimGauges(l); err != nil {
 		slog.Warn("ingest: shard claim gauges not registered", "error", err)
 	}
+	observability.ZeroCounter(claimEvents, 0, observability.LabelSets(observability.Values("event", claimEventNames...))...)
 	c.loop.Store(l)
 	go l.run()
 	return l.stop, l.failed, nil
@@ -740,6 +742,10 @@ var (
 // claimMeter is the meter the claim gauges register on (tests substitute
 // their own rather than the global provider, which binds only once).
 var claimMeter = func() metric.Meter { return otel.Meter("wavehouse-ingest") }
+
+// claimEventNames are wavehouse_ingest_shard_events_total's events, all
+// exported at 0 once a process claims shards (#905).
+var claimEventNames = []string{"taken", "released", "reset", "handover_timeout", "lost", "bind_failed"}
 
 func eventAttr(event string) metric.AddOption {
 	return metric.WithAttributes(attribute.String("event", event))

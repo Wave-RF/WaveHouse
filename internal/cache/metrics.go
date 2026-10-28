@@ -75,6 +75,16 @@ func newMetrics(backend string, breakerOpen func() bool, pending func() int) (*m
 	if err := errors.Join(errs[:]...); err != nil {
 		return nil, err
 	}
+	// The counters carry the tenant, so their closed sets are exported at 0
+	// only while per_tenant_metrics drops it (#905).
+	backendSet := []attribute.KeyValue{m.backend}
+	observability.ZeroCounter(m.lookups, observability.CarriesTenant, observability.LabelSets(backendSet,
+		observability.Values("result", resultHit, resultMiss, resultStale, resultBypass, resultError))...)
+	observability.ZeroCounter(m.invalidation, observability.CarriesTenant, observability.LabelSets(backendSet,
+		observability.Values("result", "ok", "deferred"))...)
+	observability.ZeroCounter(m.oversize, observability.CarriesTenant, observability.LabelSets(backendSet)...)
+	observability.ZeroCounter(m.setFailures, observability.CarriesTenant, observability.LabelSets(backendSet,
+		observability.Values("reason", "oom", "timeout", "other"))...)
 	return m, nil
 }
 

@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/Wave-RF/WaveHouse/internal/coord"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // Lease timings, client-go's leader-election defaults. A holder steps down
@@ -214,6 +215,7 @@ func (l *natsLeases) TryAcquire(ctx context.Context, name string) (coord.Term, e
 	}
 	l.held[name] = t
 	l.mu.Unlock()
+	observability.ZeroCounter(l.renewalFailures, 0, attribute.NewSet(leaseAttr(name)))
 	go t.renew(sent)
 	return t, nil
 }

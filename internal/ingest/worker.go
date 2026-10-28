@@ -201,6 +201,8 @@ func StartIngestWorker(
 		dlqEnabled: dlqEnabled,
 	}
 
+	zeroWorkerCounters()
+
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	worker.wg.Add(1)
 
