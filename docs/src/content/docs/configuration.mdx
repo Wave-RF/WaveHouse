@@ -342,7 +342,7 @@ While a counter keeps its `table` or `tenant` label, its series still appear at 
 
 ```promql
 increase(wavehouse_ingest_poison_total[10m]) > 0
-  or (wavehouse_ingest_poison_total unless wavehouse_ingest_poison_total offset 10m)
+  or ((wavehouse_ingest_poison_total > 0) unless wavehouse_ingest_poison_total offset 10m)
 ```
 
 New metrics follow one rule for their labels:
