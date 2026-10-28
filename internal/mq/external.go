@@ -1075,13 +1075,24 @@ func (e *ExternalNATS) MaxBytes(id tenant.ID) int64 {
 	return 0
 }
 
-// Stats reports this process's connection and its inbound message count.
+// Stats reports this process's client connection: whether it is connected,
+// and its cumulative message, byte and reconnect counts.
 func (e *ExternalNATS) Stats() (observability.MQStats, error) {
 	s := e.nc.Stats()
 	return observability.MQStats{
 		Connections: boolGauge(e.nc.IsConnected()),
-		InMsgs:      int64(min(s.InMsgs, uint64(1<<62))), //nolint:gosec // capped
+		InMsgs:      capInt64(s.InMsgs),
+		OutMsgs:     capInt64(s.OutMsgs),
+		InBytes:     capInt64(s.InBytes),
+		OutBytes:    capInt64(s.OutBytes),
+		Reconnects:  capInt64(s.Reconnects),
 	}, nil
+}
+
+// capInt64 converts a cumulative count for an int64 instrument, capped far
+// above anything a process reaches.
+func capInt64(n uint64) int64 {
+	return int64(min(n, uint64(1<<62))) //nolint:gosec // capped
 }
 
 // Close stops every consumer, so none reports failed, then drains the

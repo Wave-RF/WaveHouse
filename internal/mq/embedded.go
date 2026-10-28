@@ -1180,14 +1180,19 @@ func (e *EmbeddedNATS) ReplaySince(ctx context.Context, topic Topic, since time.
 	}
 }
 
-// Stats reports the embedded server's connection and inbound-message counters
-// for observability.RegisterSystemMetrics.
+// Stats reports the embedded server's client connections and its cumulative
+// message counts, across every client connected to it.
 func (e *EmbeddedNATS) Stats() (observability.MQStats, error) {
 	varz, err := e.server.Varz(nil)
 	if err != nil {
 		return observability.MQStats{}, err
 	}
-	return observability.MQStats{Connections: int64(varz.Connections), InMsgs: varz.InMsgs}, nil
+	return observability.MQStats{
+		Embedded:    true,
+		Connections: int64(varz.Connections),
+		InMsgs:      varz.InMsgs,
+		OutMsgs:     varz.OutMsgs,
+	}, nil
 }
 
 func (e *EmbeddedNATS) Close() error {

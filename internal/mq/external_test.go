@@ -109,6 +109,17 @@ func TestExternalNATS_Reconnect(t *testing.T) {
 		t.Fatalf("a reconnect reported failed: %v", err)
 	case <-time.After(300 * time.Millisecond):
 	}
+
+	// Stats describe this process's client connection, across the reconnect.
+	stats, err := e.Stats()
+	require.NoError(t, err)
+	assert.False(t, stats.Embedded)
+	assert.Equal(t, int64(1), stats.Connections)
+	assert.Equal(t, int64(1), stats.Reconnects)
+	assert.Positive(t, stats.InMsgs)
+	assert.Positive(t, stats.OutMsgs)
+	assert.Positive(t, stats.InBytes)
+	assert.Positive(t, stats.OutBytes)
 }
 
 // A reconnect checks the topology at once rather than at the next periodic
