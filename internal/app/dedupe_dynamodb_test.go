@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
@@ -354,6 +357,42 @@ func TestRun_DynamoDBDedupeRetriesTheTableCheck(t *testing.T) {
 	require.NoError(t, stop())
 }
 
+// The table check is exported (#883): 0 while it fails, when ingest sends the
+// table no dedupe request for the request counter to show, then 1 with the
+// time it passed once the retry gets through.
+func TestRun_DynamoDBDedupeTableCheckMetrics(t *testing.T) {
+	guardGlobals(t)
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": dedupeOn})
+	cfg := testConfig(t, root)
+	cfg.Prometheus = config.Prometheus{Enabled: true, Path: "/metrics"}
+	fake := dynamoConfig(t, cfg, false)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	a := newApp(t, cfg, Options{Listener: ln})
+	a.dynamoRetry = 10 * time.Millisecond
+	gauge := func(name string) float64 {
+		m := regexp.MustCompile(`(?m)^` + name + `\{[^}]*\} (\S+)$`).FindStringSubmatch(get(t, a.Handler(), "/metrics").Body.String())
+		require.NotNil(t, m, "%s is exported", name)
+		v, err := strconv.ParseFloat(m[1], 64)
+		require.NoError(t, err)
+		return v
+	}
+	assert.Zero(t, gauge("wavehouse_dedupe_dynamodb_table_ok"), "failing: 0")
+	assert.Zero(t, gauge("wavehouse_dedupe_dynamodb_table_check_success_timestamp_seconds"), "never passed: 0")
+
+	before := time.Now().Unix()
+	_, stop := runApp(t, a, ln)
+	fake.setExists(true)
+	require.Eventually(t, a.dedup.For("acme").Open, 10*time.Second, 50*time.Millisecond)
+	assert.Equal(t, 1.0, gauge("wavehouse_dedupe_dynamodb_table_ok"))
+	timestamp := gauge("wavehouse_dedupe_dynamodb_table_check_success_timestamp_seconds")
+	after := time.Now().Unix()
+	assert.GreaterOrEqual(t, timestamp, float64(before))
+	assert.LessOrEqual(t, timestamp, float64(after))
+	require.NoError(t, stop())
+}
+
 // No region anywhere is a certain config error: refused at boot in either
 // shape rather than failing every check afterwards.
 func TestNew_DynamoDBDedupeRefusesNoRegion(t *testing.T) {
@@ -404,4 +443,28 @@ func TestReload_DynamoDBDedupeDoesNotWaitOnInFlightCommit(t *testing.T) {
 
 	cancelCommit()
 	<-commitDone // let the hung call finish (canceled) before the app closes
+}
+
+func TestRegisterDynamoTableMetrics(t *testing.T) {
+	t.Parallel()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	var ok bool
+	var passed time.Time
+	reg, err := registerDynamoTableMetrics(mp.Meter("test"), func() (bool, time.Time) { return ok, passed })
+	require.NoError(t, err)
+
+	got := collectSettingsMetrics(t, reader)
+	assert.Equal(t, map[string]int64{"": 0}, got["wavehouse_dedupe_dynamodb_table_ok"], "not passed yet reads 0")
+	assert.Equal(t, map[string]int64{"": 0}, got["wavehouse_dedupe_dynamodb_table_check_success_timestamp_seconds"])
+
+	ok, passed = true, time.Unix(1_700_000_000, 0)
+	got = collectSettingsMetrics(t, reader)
+	assert.Equal(t, map[string]int64{"": 1}, got["wavehouse_dedupe_dynamodb_table_ok"])
+	assert.Equal(t, map[string]int64{"": passed.Unix()}, got["wavehouse_dedupe_dynamodb_table_check_success_timestamp_seconds"])
+
+	require.NoError(t, reg.Unregister())
+	assert.Empty(t, collectSettingsMetrics(t, reader), "Close unregisters the callback")
 }
