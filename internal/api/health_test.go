@@ -407,3 +407,44 @@ func TestHealth_Readiness_DropsOlderOutcome(t *testing.T) {
 	assert.Equal(t, t2.Unix(), got.last, "the last-call time does not move back")
 	assert.Empty(t, buf.String(), "a dropped outcome logs nothing")
 }
+
+// TestHealth_Readiness_CheckOutlivesProber: a check runs to completion even
+// when the prober has hung up, so a dependency that is fine is recorded as
+// passing and logs nothing, not as a failure (#901).
+func TestHealth_Readiness_CheckOutlivesProber(t *testing.T) {
+	buf := logtest.Capture(t, slog.LevelInfo)
+	h := NewHealthHandler(Check{Name: "clickhouse", Run: func(ctx context.Context) error { return ctx.Err() }})
+	reader := sdkmetric.NewManualReader()
+	reg, err := h.RegisterReadinessMetrics(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reg.Unregister() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.Readiness(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, http.MethodGet, "/readyz", nil))
+	assert.Equal(t, map[string]int64{"clickhouse": 1}, readReadiness(t, reader).ok)
+	assert.Empty(t, buf.String())
+}
+
+// TestHealth_Readiness_HungCheckFails: a check that does not answer within
+// CheckTimeout fails, is recorded at 0 and logged, so a dependency that hangs
+// (rather than refusing) still shows (#901).
+func TestHealth_Readiness_HungCheckFails(t *testing.T) {
+	buf := logtest.Capture(t, slog.LevelInfo)
+	h := NewHealthHandler(Check{Name: "clickhouse", Run: func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}})
+	h.CheckTimeout = 10 * time.Millisecond
+	reader := sdkmetric.NewManualReader()
+	reg, err := h.RegisterReadinessMetrics(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reg.Unregister() })
+
+	w := httptest.NewRecorder()
+	h.Readiness(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil))
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Contains(t, w.Body.String(), "context deadline exceeded")
+	assert.Equal(t, map[string]int64{"clickhouse": 0}, readReadiness(t, reader).ok)
+	assert.Contains(t, buf.String(), `"msg":"readiness check failing"`)
+}

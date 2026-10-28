@@ -72,11 +72,19 @@ type HealthHandler struct {
 	// retry loop. A nil Boot preserves the pre-retry-loop behaviour
 	// (Liveness always 200; Readiness 503 only on a failed check).
 	Boot *BootState
+	// CheckTimeout bounds each check; one that has not answered by then
+	// fails. Zero means DefaultCheckTimeout.
+	CheckTimeout time.Duration
 
 	// results is each check's last outcome, for the readiness metrics and
 	// the edge-triggered logs (#901).
 	results readinessResults
 }
+
+// DefaultCheckTimeout is how long a readiness check has to answer when
+// HealthHandler.CheckTimeout is unset: long enough for a ping across regions,
+// short enough that a hung dependency reads as failing within a probe period.
+const DefaultCheckTimeout = 5 * time.Second
 
 // bootCheck is the check name the boot diagnostic reports under.
 const bootCheck = "boot"
@@ -155,6 +163,23 @@ func (r *readinessResults) record(ctx context.Context, name string, started time
 	}
 }
 
+// run runs c to completion even if the prober hangs up, bounded by
+// CheckTimeout. Under the request's context, a ClickHouse that stops
+// answering without refusing the connection would be cut off by the probe's
+// own timeout (kubelet's is 1s by default) as context.Canceled: recorded,
+// that reads as a failure for every client that merely went away; skipped, a
+// hung dependency never reads 0. Its own deadline makes a hang a recorded
+// failure and a hangup irrelevant (#901).
+func (h *HealthHandler) run(ctx context.Context, c Check) error {
+	timeout := h.CheckTimeout
+	if timeout <= 0 {
+		timeout = DefaultCheckTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	return c.Run(ctx)
+}
+
 func NewHealthHandler(checks ...Check) *HealthHandler {
 	return &HealthHandler{Checks: checks}
 }
@@ -193,7 +218,7 @@ func (h *HealthHandler) Readiness(w http.ResponseWriter, r *http.Request) {
 	}
 	var failed []error
 	for _, c := range h.Checks {
-		err := c.Run(r.Context())
+		err := h.run(r.Context(), c)
 		h.results.record(r.Context(), c.Name, started, err)
 		if err != nil {
 			failed = append(failed, fmt.Errorf("%s: %w", c.Name, err))
