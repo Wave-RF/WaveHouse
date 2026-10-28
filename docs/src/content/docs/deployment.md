@@ -238,17 +238,26 @@ API servers in standalone mode expose liveness and readiness endpoints under the
 - `GET /livez` — Liveness probe. Returns 200 once the gateway has discovered ClickHouse table schemas at least once. Returns 503 with a diagnostic body while the boot-time schema discovery retry loop is still running (e.g. ClickHouse unreachable, target database missing). After successful boot, `/livez` stays 200 — transient ClickHouse blips at runtime are reflected in `/readyz`, not `/livez`. Over a [nested settings directory](#the-nested-settings-directory) it is 503 while no tenant has completed a first discovery, and 200 from the first tenant's success on.
 - `GET /readyz` — Readiness probe. Returns 200 if the gateway is fully booted and every backend it cannot do its job without is answering, 503 otherwise, naming each check that failed: `clickhouse` (every open pool is pinged at once and one that answers is enough; the failure names every pool that did not), `mq` under [`mq.backend: nats`](#external-nats) (the connection is down, or the topology failed its last check — the lease bucket of `coord.backend: nats` included). The shared cache and the dedupe stores are not checks: a tripped breaker falls back to ClickHouse, and a dedupe store that is not answering fails that tenant's ingest closed per request. Full behavior in the [API reference](/api#get-readyz--readiness-probe).
 
-**Readiness metrics and logs.** So a replica that left rotation can say afterward which dependency failed, every `/readyz` call records the outcome of each check it runs, exported through [OpenTelemetry or Prometheus](#observability) when either is on:
+**Readiness metrics and logs.** So a replica that left rotation can say afterward which dependency failed, every `/readyz` call records the outcome of each check it runs, exported when [OTLP metrics or Prometheus](#observability) is on:
 
 | Metric | Meaning |
 |---|---|
 | `wavehouse_readiness_check_ok{check}` | `1` if the check passed the last time it ran, else `0` (it failed, or has not run yet). `check` is `clickhouse` in a process with the `api` or `ingest` role, `mq` under `mq.backend: nats`, and `boot` for the boot diagnostic in a process with the `api` role. Each series is present from boot. |
 | `wavehouse_readiness_last_check_timestamp_seconds` | Unix time of the last `/readyz` call, `0` before the first. |
 
-The checks run only when something calls `/readyz`, so these are as old as the last probe: if the timestamp stops advancing, nothing is probing and the gauges are stale. While `boot` fails, `/readyz` answers without running the other checks, which keep their last value. Each check has 5 seconds to answer: one that hangs fails with a timeout error (`i/o timeout` when the connection could not be opened, `context deadline exceeded` otherwise) and reads `0`. A check runs to the end even if the prober hangs up first, so a client that went away records no failure. Set the `readinessProbe`'s `timeoutSeconds` above 5 (kubelet's default is 1): with a shorter one, a dependency that answers in between takes the pod out of rotation while its check reads `1`. Every check reads `0` until the first probe, which under a [`startupProbe`](#kubernetes--orchestrator-note) can be minutes after start, so alert only once the process has been probed, and separately on probing that stopped:
+The checks run only when something calls `/readyz`, so these are as old as the last probe: if the timestamp stops advancing, nothing is probing and the gauges are stale. While `boot` fails, `/readyz` answers without running the other checks, which keep their last value (`0` if they have never run), so the alert below reports only `boot` then. Each check has 5 seconds to answer: one that hangs fails with a timeout error (`i/o timeout` when the connection could not be opened, `context deadline exceeded` otherwise) and reads `0`. A check runs to the end even if the prober hangs up first, so a client that went away records no failure. Set the `readinessProbe`'s `timeoutSeconds` above 5 (kubelet's default is 1): with a shorter one, a dependency that answers in between takes the pod out of rotation while its check reads `1`. Every check reads `0` until the first probe, which under a [`startupProbe`](#kubernetes--orchestrator-note) can be minutes after start, so alert only once the process has been probed, and separately on probing that stopped:
 
 ```promql
-wavehouse_readiness_check_ok == 0 and ignoring(check) wavehouse_readiness_last_check_timestamp_seconds > 0
+# A check failing (only boot while boot fails), once the process has been probed
+(
+  wavehouse_readiness_check_ok{check="boot"} == 0
+  or (
+    wavehouse_readiness_check_ok == 0
+    unless ignoring(check) wavehouse_readiness_check_ok{check="boot"} == 0
+  )
+) and ignoring(check) wavehouse_readiness_last_check_timestamp_seconds > 0
+
+# Probing stopped
 time() - wavehouse_readiness_last_check_timestamp_seconds > 60 and wavehouse_readiness_last_check_timestamp_seconds > 0
 ```
 
@@ -477,7 +486,7 @@ Two things the automated tests do not cover. Check them once on your own cluster
 
 ### Monitoring
 
-These gauges are exported through [OpenTelemetry or Prometheus](#observability) under `mq.backend: nats`; `/readyz` fails, naming `mq`, while either of the first two reads `0`, so the orchestrator moves traffic away from a process the cluster has dropped ([Health Checks](#health-checks)):
+These gauges are exported when [OTLP metrics or Prometheus](#observability) is on, under `mq.backend: nats`; `/readyz` fails, naming `mq`, while either of the first two reads `0`, so the orchestrator moves traffic away from a process the cluster has dropped ([Health Checks](#health-checks)):
 
 | Gauge | Meaning |
 | --- | --- |
