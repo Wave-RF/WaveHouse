@@ -462,8 +462,11 @@ func newTableBatcher(w *IngestWorker, table string) *tableBatcher {
 // it here would only pin it in memory until a flush that is certain to hand
 // it back, so the backlog of an outage stays in the queue, not in the worker.
 func (b *tableBatcher) add(ctx context.Context, pm parsedMsg) {
-	if wait, ok := b.w.backoffs.waiting(func() chconn.Target { return b.w.target(pm.tenant) }, b.table, b.w.clock()); ok {
-		b.w.retryLater(observability.WithMetricTenant(ctx, pm.tenant.String()), b.table, []parsedMsg{pm}, wait, "backoff")
+	// waiting resolves the target only while a backoff is open, and the
+	// retry reuses it rather than resolving it again on this per-row path.
+	var t chconn.Target
+	if wait, ok := b.w.backoffs.waiting(func() chconn.Target { t = b.w.target(pm.tenant); return t }, b.table, b.w.clock()); ok {
+		b.w.retryLater(withMetricTenant(ctx, pm.tenant, t), b.table, []parsedMsg{pm}, wait, "backoff")
 		return
 	}
 	if len(b.batch) == 0 {
@@ -663,9 +666,10 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 		return
 	}
 	id := msgs[0].tenant
-	// Every measurement of the batch is about its tenant (#891).
-	ctx = observability.WithMetricTenant(ctx, id.String())
+	// Every measurement of the batch is about its tenant, and is labeled
+	// with it when it has a target (#891).
 	t := w.target(id)
+	ctx = withMetricTenant(ctx, id, t)
 	if t.URL == "" {
 		w.parkBatch(ctx, tableName, msgs, noTargetError(id))
 		return
@@ -849,9 +853,10 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	// A group is one (tenant, table) batch's, so its first row names the
 	// tenant whose ClickHouse takes the insert.
 	id := msgs[0].tenant
-	// Every measurement of the batch is about its tenant (#891).
-	ctx = observability.WithMetricTenant(ctx, id.String())
+	// Every measurement of the batch is about its tenant, and is labeled
+	// with it when it has a target (#891).
 	t := w.target(id)
+	ctx = withMetricTenant(ctx, id, t)
 	if t.URL == "" {
 		return noTargetError(id)
 	}
@@ -1005,6 +1010,19 @@ func (w *IngestWorker) invalidate(ctx context.Context, id tenant.ID, tableName s
 	}
 }
 
+// withMetricTenant labels ctx's measurements with tenant id while id resolves
+// to t, a ClickHouse target. A topic can name a tenant that was removed or
+// never existed, or one with no pool (refused at a reload, such as by the
+// connection ceiling), and its measurements are recorded unlabeled instead,
+// so such ids cannot take any of the process's tenant labels from the
+// tenants it writes for (#891).
+func withMetricTenant(ctx context.Context, id tenant.ID, t chconn.Target) context.Context {
+	if t.URL == "" {
+		return ctx
+	}
+	return observability.WithMetricTenant(ctx, id.String())
+}
+
 // rejectPoison disposes of a message the worker can never insert. The DLQ is
 // preferred — the row is preserved for inspection and replay — and dropping is
 // the fallback when the DLQ is off for the table of tenant id (the topic's),
@@ -1013,7 +1031,7 @@ func (w *IngestWorker) invalidate(ctx context.Context, id tenant.ID, tableName s
 // unacked, exactly as the isolation path does: that is a transient DLQ
 // outage, and retrying beats destroying the row.
 func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, id tenant.ID, tableName, reason, detail string) {
-	ctx = observability.WithMetricTenant(ctx, id.String())
+	ctx = withMetricTenant(ctx, id, w.target(id))
 	if w.dlqEnabled == nil || w.dlqEnabled(id, tableName) {
 		// Backgrounded on ackWg for the same reason handleSuccess backgrounds its
 		// acks: parkOnDLQ does a DLQ publish AND an fsync-bound DoubleAck,

@@ -34,6 +34,11 @@ type writeReading struct {
 	inserts    map[string]uint64 // by "mode/result"
 	batchRows  int64             // rows summed over every bulk INSERT
 	batchCount uint64
+	// untenanted and untenantedSamples sum what was recorded with no tenant
+	// label, because the batch's tenant resolved to no ClickHouse target
+	// (#891): the counters' counts, and the histograms' samples.
+	untenanted        int64
+	untenantedSamples uint64
 }
 
 // swapWriteMetrics points the worker's write, retry and poison instruments at
@@ -67,8 +72,11 @@ func swapWriteMetrics(t *testing.T) func() writeReading {
 				switch data := md.Data.(type) {
 				case metricdata.Sum[int64]:
 					for _, dp := range data.DataPoints {
-						// Every measurement is about its batch's tenant (#891).
-						assert.Equal(t, tenant.Default.String(), attr(dp.Attributes, "tenant"), md.Name)
+						// Every measurement is about its batch's tenant, unless
+						// that tenant has no ClickHouse target (#891).
+						if !tenantOf(t, md.Name, dp.Attributes) {
+							r.untenanted += dp.Value
+						}
 						switch md.Name {
 						case "wavehouse_ingest_rows_total":
 							assert.Equal(t, "events", attr(dp.Attributes, "table"))
@@ -83,12 +91,16 @@ func swapWriteMetrics(t *testing.T) func() writeReading {
 					}
 				case metricdata.Histogram[float64]:
 					for _, dp := range data.DataPoints {
-						assert.Equal(t, tenant.Default.String(), attr(dp.Attributes, "tenant"), md.Name)
+						if !tenantOf(t, md.Name, dp.Attributes) {
+							r.untenantedSamples += dp.Count
+						}
 						r.inserts[attr(dp.Attributes, "mode")+"/"+attr(dp.Attributes, "result")] += dp.Count
 					}
 				case metricdata.Histogram[int64]:
 					for _, dp := range data.DataPoints {
-						assert.Equal(t, tenant.Default.String(), attr(dp.Attributes, "tenant"), md.Name)
+						if !tenantOf(t, md.Name, dp.Attributes) {
+							r.untenantedSamples += dp.Count
+						}
 						r.batchRows += dp.Sum
 						r.batchCount += dp.Count
 					}
@@ -97,6 +109,17 @@ func swapWriteMetrics(t *testing.T) func() writeReading {
 		}
 		return r
 	}
+}
+
+// tenantOf reports whether a data point carries a tenant label, and asserts
+// that any it carries is the default tenant every test batch is written for.
+func tenantOf(t *testing.T, name string, set attribute.Set) bool {
+	t.Helper()
+	v, ok := set.Value("tenant")
+	if ok {
+		assert.Equal(t, tenant.Default.String(), v.AsString(), name)
+	}
+	return ok
 }
 
 // poisonRowRT fails every bulk INSERT as rejected, and every single-row INSERT
@@ -196,6 +219,9 @@ func TestWriteMetrics_RecordedAndReconciled(t *testing.T) {
 	}
 	assert.Equal(t, int64(delivered), settled+got.retries+got.poison,
 		"every delivery is counted once across rows, retries and poison")
+	// Every tenant here has a target, so every measurement is labeled.
+	assert.Zero(t, got.untenanted)
+	assert.Zero(t, got.untenantedSamples)
 }
 
 // TestWriteMetrics_NoConnectionAndFailedPark covers the outcomes no INSERT
@@ -218,7 +244,11 @@ func TestWriteMetrics_NoConnectionAndFailedPark(t *testing.T) {
 	w.target = noTarget
 	w.flushTable(ctx, "events", parseAll(t, w, rows()...))
 	wait()
-	assert.Equal(t, map[string]int64{rowsDeadLettered: 2}, read().rows)
+	got := read()
+	assert.Equal(t, map[string]int64{rowsDeadLettered: 2}, got.rows)
+	// A tenant with no connection is not one the worker serves, so its
+	// rows take no tenant label (#891).
+	assert.Equal(t, int64(2), got.untenanted)
 
 	// No connection, DLQ off: the batch is left for redelivery.
 	w, _, _, wait = newTestWorker(okRoundTripper())
@@ -233,7 +263,7 @@ func TestWriteMetrics_NoConnectionAndFailedPark(t *testing.T) {
 	w.target = noTarget
 	msgs := parseAll(t, w, rows()...)
 	require.ErrorIs(t, w.insert(ctx, "events", msgs[0].columns, msgs, modeBatch), errNoTarget)
-	got := read()
+	got = read()
 	assert.Empty(t, got.inserts)
 	assert.Zero(t, got.batchCount)
 
@@ -244,7 +274,23 @@ func TestWriteMetrics_NoConnectionAndFailedPark(t *testing.T) {
 		newIngestMsg(t, "events", "", map[string]any{"id": 3, "poison": false}),
 		newIngestMsg(t, "events", "", map[string]any{"id": 4, "poison": true})))
 	wait()
-	assert.Equal(t, map[string]int64{rowsInserted: 1, rowsDeadLettered: 2, rowsLeftUnacked: 3}, read().rows)
+	got = read()
+	assert.Equal(t, map[string]int64{rowsInserted: 1, rowsDeadLettered: 2, rowsLeftUnacked: 3}, got.rows)
+	// Only the four rows of the two batches with no connection went unlabeled.
+	assert.Equal(t, int64(4), got.untenanted)
+
+	// A poison message on the topic of a tenant with no connection is parked
+	// and counted unlabeled too: a topic can name any tenant, served or not.
+	w, _, _, _ = newTestWorker(okRoundTripper())
+	w.target = noTarget
+	m := &testutil.MockMessage{MsgTopic: mq.Topic{Tenant: tenant.Default, Table: "events"}, MsgData: []byte(`{"table_name":`)}
+	_, ok := w.parseMsg(ctx, m.Message())
+	w.ackWg.Wait()
+	require.False(t, ok)
+	got = read()
+	assert.Equal(t, int64(1), got.poison)
+	assert.Equal(t, int64(4+1), got.untenanted, "the poison count")
+	assert.Zero(t, got.untenantedSamples, "no INSERT was sent, so none was timed")
 }
 
 // TestWriteMetrics_InsertedBeforeAck pins that a row ClickHouse took is
@@ -257,7 +303,10 @@ func TestWriteMetrics_InsertedBeforeAck(t *testing.T) {
 	m.DoubleAckErr = errors.New("ack timed out")
 	w.flushTable(context.Background(), "events", parseAll(t, w, m))
 	wait()
-	assert.Equal(t, map[string]int64{rowsInserted: 1}, read().rows)
+	got := read()
+	assert.Equal(t, map[string]int64{rowsInserted: 1}, got.rows)
+	assert.Zero(t, got.untenanted)
+	assert.Zero(t, got.untenantedSamples)
 }
 
 // TestWriteMetrics_FailedDLQAck: a rejected row whose DLQ publish succeeds
@@ -279,5 +328,8 @@ func TestWriteMetrics_FailedDLQAck(t *testing.T) {
 	w.flushTable(ctx, "events", parseAll(t, w, m))
 	wait()
 	require.Len(t, pub.Published(), 2)
-	assert.Equal(t, map[string]int64{rowsLeftUnacked: 1, rowsDeadLettered: 1}, read().rows)
+	got := read()
+	assert.Equal(t, map[string]int64{rowsLeftUnacked: 1, rowsDeadLettered: 1}, got.rows)
+	assert.Zero(t, got.untenanted)
+	assert.Zero(t, got.untenantedSamples)
 }

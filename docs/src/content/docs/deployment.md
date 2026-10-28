@@ -912,7 +912,7 @@ sum(rate(wavehouse_mq_publish_duration_seconds_count{kind="dlq", result!="ok"}[5
 
 ### Ingest writes
 
-An ingest process reports what it writes to ClickHouse. Each carries the [tenant label](/configuration#metric-labels) of the rows' tenant:
+An ingest process reports what it writes to ClickHouse. Each carries the [tenant label](/configuration#metric-labels) of the rows' tenant, when that tenant has a ClickHouse connection; rows of a tenant with none (see `dead_lettered` below) carry no tenant:
 
 | Metric | Meaning |
 | --- | --- |
