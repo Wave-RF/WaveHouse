@@ -247,7 +247,11 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 		return nil, fmt.Errorf("register mq gauges: %w", err)
 	}
 	e.stopping, e.stop = context.WithCancel(context.Background()) //nolint:gosec // G118: Close calls it
-	go e.watch(orDefault(cfg.recheckEvery, topologyRecheck), orDefault(cfg.historyEvery, historyPoll))
+	go func() {
+		defer observability.Crash("mq_external")
+		e.watch(orDefault(cfg.recheckEvery, topologyRecheck), orDefault(cfg.historyEvery, historyPoll))
+		close(e.loopDone)
+	}()
 	return e, nil
 }
 
@@ -419,7 +423,6 @@ func (e *ExternalNATS) readExtras(ctx context.Context) error {
 
 // watch re-checks the topology and polls the history until Close.
 func (e *ExternalNATS) watch(recheck, poll time.Duration) {
-	defer close(e.loopDone)
 	topology := time.NewTicker(recheck)
 	defer topology.Stop()
 	history := time.NewTicker(poll)
@@ -747,6 +750,7 @@ func (e *ExternalNATS) Subscribe(ctx context.Context, consumerName string, handl
 		return fmt.Errorf("history consumer: %w", e.apiError(err))
 	}
 	cc, err := cons.Consume(func(m jetstream.Msg) {
+		defer observability.Crash("mq_delivery", slog.String("consumer", consumerName))
 		msg := e.wrapMsg(observability.ExtractHeaders(ctx, m.Headers()), m, false)
 		if err := handler(msg); err != nil {
 			slog.Warn("mq: subscriber could not handle an event", "component", "nats", "consumer", consumerName, "topic", msg.TopicKey(), "error", err)
@@ -759,6 +763,7 @@ func (e *ExternalNATS) Subscribe(ctx context.Context, consumerName string, handl
 	}
 	untrack := e.track(cc.Stop)
 	go func() {
+		defer observability.Crash("mq_external")
 		select {
 		case <-ctx.Done():
 		case <-cc.Closed():

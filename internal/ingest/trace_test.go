@@ -222,7 +222,7 @@ func TestIngestTraceContinuity_EndToEnd(t *testing.T) {
 		maxWait:  200 * time.Millisecond,
 	}
 	worker.wg.Add(1)
-	go worker.dispatchLoop(ctx, cons)
+	go func() { worker.dispatchLoop(ctx, cons); worker.wg.Done() }()
 	t.Cleanup(func() {
 		cancel()
 		worker.wg.Wait()

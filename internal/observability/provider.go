@@ -97,6 +97,7 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 		var wg sync.WaitGroup
 		for i, fn := range shutdownFuncs {
 			wg.Go(func() {
+				defer Crash("otel_shutdown")
 				errs[i] = fn(ctx)
 			})
 		}
@@ -116,6 +117,7 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 		// goroutines returned).
 		done := make(chan struct{})
 		go func() {
+			defer Crash("otel_shutdown")
 			wg.Wait()
 			close(done)
 		}()
@@ -198,7 +200,6 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 			promHandler = promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 		}
 
-		processTenants.off.Store(cfg.AggregateTenants)
 		mpOpts := []metric.Option{metric.WithResource(res), metric.WithView(metricsView(viewOptions{
 			aggregateTables: cfg.AggregateTables, tableThreshold: TableWarnThreshold,
 			aggregateTenants: cfg.AggregateTenants, httpBodySize: cfg.HTTPBodySizeMetrics,
@@ -252,5 +253,24 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 		otel.SetLoggerProvider(loggerProvider)
 	}
 
+	// The label policy goes with the meter provider, so it is set only once
+	// nothing can fail: a failed init restores the previous provider in
+	// handleErr and must leave the previous policy with it.
+	if cfg.MetricsEnabled || cfg.PrometheusEnabled {
+		processTenants.off.Store(cfg.AggregateTenants)
+		labelsDropped.Store(uint32(droppedLabels(cfg)))
+	}
 	return shutdown, promHandler, nil
+}
+
+// droppedLabels is which of table and tenant cfg aggregates away.
+func droppedLabels(cfg ProviderConfig) Carries {
+	var dropped Carries
+	if cfg.AggregateTables {
+		dropped |= CarriesTable
+	}
+	if cfg.AggregateTenants {
+		dropped |= CarriesTenant
+	}
+	return dropped
 }

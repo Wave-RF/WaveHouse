@@ -17,6 +17,7 @@ import (
 
 	"github.com/redis/rueidis"
 
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
@@ -251,10 +252,18 @@ func NewRedis(cfg RedisConfig) (*RedisCache, error) {
 		return nil, fmt.Errorf("cache: metrics: %w", err)
 	}
 	r.wg.Add(1)
-	go r.drainLoop()
+	go func() {
+		defer observability.Crash("cache_redis")
+		r.drainLoop()
+		r.wg.Done()
+	}()
 	if err := r.dial(); err != nil {
 		r.wg.Add(1)
-		go r.dialLoop()
+		go func() {
+			defer observability.Crash("cache_redis")
+			r.dialLoop()
+			r.wg.Done()
+		}()
 	}
 	return r, nil
 }
@@ -280,7 +289,6 @@ func (r *RedisCache) dial() error {
 }
 
 func (r *RedisCache) dialLoop() {
-	defer r.wg.Done()
 	backoff := time.Second
 	for {
 		select {
@@ -311,7 +319,10 @@ func (r *RedisCache) conn() rueidis.Client {
 	}
 	ok, probe := r.breaker.allow()
 	if probe && r.ctx.Err() == nil {
-		go r.probe(*cp)
+		go func() {
+			defer observability.Crash("cache_redis")
+			r.probe(*cp)
+		}()
 	}
 	if !ok {
 		return nil
@@ -738,7 +749,6 @@ func (r *RedisCache) nudge() {
 }
 
 func (r *RedisCache) drainLoop() {
-	defer r.wg.Done()
 	backoff := drainMinBackoff
 	timer := time.NewTimer(drainIdle)
 	defer timer.Stop()
