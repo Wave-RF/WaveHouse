@@ -255,12 +255,14 @@ func NewRedis(cfg RedisConfig) (*RedisCache, error) {
 	go func() {
 		defer observability.Crash("cache_redis")
 		r.drainLoop()
+		r.wg.Done()
 	}()
 	if err := r.dial(); err != nil {
 		r.wg.Add(1)
 		go func() {
 			defer observability.Crash("cache_redis")
 			r.dialLoop()
+			r.wg.Done()
 		}()
 	}
 	return r, nil
@@ -287,7 +289,6 @@ func (r *RedisCache) dial() error {
 }
 
 func (r *RedisCache) dialLoop() {
-	defer r.wg.Done()
 	backoff := time.Second
 	for {
 		select {
@@ -748,7 +749,6 @@ func (r *RedisCache) nudge() {
 }
 
 func (r *RedisCache) drainLoop() {
-	defer r.wg.Done()
 	backoff := drainMinBackoff
 	timer := time.NewTimer(drainIdle)
 	defer timer.Stop()

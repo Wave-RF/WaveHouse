@@ -218,6 +218,7 @@ func (c *claimingConsumer) Consume(handler func(*mq.Message), prefetch int) (fun
 	go func() {
 		defer observability.Crash("shard_claims")
 		l.run()
+		close(l.done)
 	}()
 	return l.stop, l.failed, nil
 }
@@ -308,7 +309,6 @@ func (cl *claim) stop() {
 }
 
 func (l *claimLoop) run() {
-	defer close(l.done)
 	t := time.NewTicker(l.q.cfg.Every)
 	defer t.Stop()
 	for {

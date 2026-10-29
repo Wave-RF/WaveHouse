@@ -109,7 +109,9 @@ func TestCrash_NoPanicDoesNothing(t *testing.T) {
 // function is not a literal whose first statement is
 // defer observability.Crash(...), so a panic in any of them leaves a
 // structured record before the process exits (#902). A named function is
-// wrapped in a literal at the call, where the component is named.
+// wrapped in a literal at the call, where the component is named. It also
+// fails on a deferred done signal in any function, which would let a waiter
+// go on before the goroutine's Crash has run.
 func TestGoroutinesAreCrashGuarded(t *testing.T) {
 	t.Parallel()
 
@@ -132,6 +134,20 @@ func TestGoroutinesAreCrashGuarded(t *testing.T) {
 				return err
 			}
 			ast.Inspect(file, func(n ast.Node) bool {
+				// A done signal in a defer runs as a panic unwinds, before
+				// the goroutine's Crash, so a waiter could go on, and the
+				// process exit 0, while the panic is being recorded.
+				var body *ast.BlockStmt
+				switch n := n.(type) {
+				case *ast.FuncDecl:
+					body = n.Body
+				case *ast.FuncLit:
+					body = n.Body
+				}
+				if pos, ok := defersDoneSignal(body); ok {
+					assert.Failf(t, "deferred done signal",
+						"%s: signal done (close a channel, or a WaitGroup's Done) after the work returns, never in a defer", fset.Position(pos))
+				}
 				var fn ast.Expr
 				switch n := n.(type) {
 				case *ast.GoStmt:
@@ -172,6 +188,31 @@ func jetstreamFile(file *ast.File) bool {
 		}
 	}
 	return false
+}
+
+// defersDoneSignal reports the first top-level defer in body that closes a
+// channel or calls a Done method.
+func defersDoneSignal(body *ast.BlockStmt) (token.Pos, bool) {
+	if body == nil {
+		return 0, false
+	}
+	for _, st := range body.List {
+		d, ok := st.(*ast.DeferStmt)
+		if !ok {
+			continue
+		}
+		switch f := d.Call.Fun.(type) {
+		case *ast.Ident:
+			if f.Name == "close" {
+				return d.Pos(), true
+			}
+		case *ast.SelectorExpr:
+			if f.Sel.Name == "Done" {
+				return d.Pos(), true
+			}
+		}
+	}
+	return 0, false
 }
 
 // crashGuarded reports whether fn is a func literal whose first statement

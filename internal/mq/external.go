@@ -250,6 +250,7 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 	go func() {
 		defer observability.Crash("mq_external")
 		e.watch(orDefault(cfg.recheckEvery, topologyRecheck), orDefault(cfg.historyEvery, historyPoll))
+		close(e.loopDone)
 	}()
 	return e, nil
 }
@@ -422,7 +423,6 @@ func (e *ExternalNATS) readExtras(ctx context.Context) error {
 
 // watch re-checks the topology and polls the history until Close.
 func (e *ExternalNATS) watch(recheck, poll time.Duration) {
-	defer close(e.loopDone)
 	topology := time.NewTicker(recheck)
 	defer topology.Stop()
 	history := time.NewTicker(poll)

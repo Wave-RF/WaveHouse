@@ -208,6 +208,7 @@ func StartIngestWorker(
 	go func() {
 		defer observability.Crash("ingest_worker")
 		worker.dispatchLoop(workerCtx, cons)
+		worker.wg.Done()
 	}()
 
 	stopFunc := func(shutdownCtx context.Context) error {
@@ -271,8 +272,6 @@ func waitOrDeadline(ctx context.Context, wg *sync.WaitGroup) error {
 // before that stop, so it comes back ahead of anything newer rather than
 // after ack_wait.
 func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
-	defer w.wg.Done()
-
 	msgChan := make(chan *mq.Message, w.maxBatch*2)
 	abandon := make(chan struct{})
 
@@ -507,8 +506,8 @@ func (b *tableBatcher) requestFlush(ctx context.Context) {
 	b.flushing = done
 	go func() {
 		defer observability.Crash("ingest_worker", slog.String("tenant", rows[0].tenant.String()), slog.String("table", b.table))
-		defer close(done)
 		b.w.flushTable(ctx, b.table, rows)
+		close(done)
 	}()
 }
 

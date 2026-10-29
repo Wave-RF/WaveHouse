@@ -108,8 +108,8 @@ func (k *keepalives) turn(id tenant.ID, tw *tenantWheel) *tenantWheel {
 	turning := &tenantWheel{wheel: tw.wheel, cancel: cancel, done: make(chan struct{})}
 	go func() {
 		defer observability.Crash("stream_keepalive", slog.String("tenant", id.String()))
-		defer close(turning.done)
 		turning.wheel.Run(ctx)
+		close(turning.done)
 	}()
 	return turning
 }

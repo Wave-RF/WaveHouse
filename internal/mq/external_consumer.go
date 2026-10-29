@@ -291,6 +291,7 @@ func (c *externalConsumer) Consume(handler func(msg *Message), prefetch int) (fu
 		go func() {
 			defer observability.Crash("mq_consumer", slog.String("unit", part.unit.id()))
 			c.deliver(part, handler)
+			close(part.drained)
 		}()
 	}
 	untrack := c.e.track(c.shutdown)
@@ -560,7 +561,6 @@ func (c *externalConsumer) end(part *consumerPart, reason error) {
 // deliver hands part's fetched rows to handler, in order, each counted
 // against the unit's cap until it settles or its ack_wait passes.
 func (c *externalConsumer) deliver(part *consumerPart, handler func(*Message)) {
-	defer close(part.drained)
 	for {
 		m, ok := part.next()
 		if !ok {

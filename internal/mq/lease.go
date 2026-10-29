@@ -218,6 +218,7 @@ func (l *natsLeases) TryAcquire(ctx context.Context, name string) (coord.Term, e
 	go func() {
 		defer observability.Crash("mq_lease", slog.String("lease", name))
 		t.renew(sent)
+		close(t.stopped)
 	}()
 	return t, nil
 }
@@ -372,7 +373,6 @@ func (t *natsTerm) Err() error {
 // that fails is counted and logged, the first of a streak at WARN, so an
 // operator sees the term heading for its deadline before it ends.
 func (t *natsTerm) renew(last time.Time) {
-	defer close(t.stopped)
 	tm := t.owner.timings
 	deadline := time.NewTimer(time.Until(last.Add(tm.renewDeadline)))
 	defer deadline.Stop()
