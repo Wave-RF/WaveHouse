@@ -17,6 +17,7 @@ import (
 
 	"github.com/MicahParks/jwkset"
 	"github.com/MicahParks/keyfunc/v3"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	"github.com/golang-jwt/jwt/v5"
@@ -158,7 +159,10 @@ func newVerifier(w Wiring) *verifier {
 	v.validMethods = asymmetricMethods
 	ctx, cancel := context.WithCancel(context.Background())
 	v.cancel = cancel
-	go v.fetch(ctx)
+	go func() {
+		defer observability.Crash("jwks_fetch")
+		v.fetch(ctx)
+	}()
 	return v
 }
 

@@ -308,6 +308,7 @@ func jsonRecoverer(next http.Handler) http.Handler {
 			if err, ok := rvr.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 				panic(rvr)
 			}
+			panicsRecovered.Add(1)
 			// slog's structured key-value API and its built-in handlers
 			// escape control characters in string values, so path/method/
 			// err carry no log-injection risk despite the linter's taint

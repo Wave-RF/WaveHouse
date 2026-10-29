@@ -732,6 +732,7 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, consumerName string, handl
 	}
 
 	go func() {
+		defer observability.Crash("mq_embedded")
 		<-ctx.Done()
 		stop()
 	}()
@@ -925,7 +926,13 @@ func (f *fanIn) run(id tenant.ID) error {
 	if n := f.share(); n > 0 {
 		opts = append(opts, jetstream.PullMaxMessages(n))
 	}
-	cctx, err := f.handles[id].Consume(f.deliver, opts...)
+	// JetStream calls deliver on a goroutine of its own, so it is guarded
+	// here like any goroutine WaveHouse starts (#902).
+	deliver := f.deliver
+	cctx, err := f.handles[id].Consume(func(m jetstream.Msg) {
+		defer observability.Crash("mq_delivery", slog.String("tenant", id.String()))
+		deliver(m)
+	}, opts...)
 	if err != nil {
 		return err
 	}
@@ -934,6 +941,7 @@ func (f *fanIn) run(id tenant.ID) error {
 		return nil
 	}
 	go func() {
+		defer observability.Crash("mq_embedded")
 		<-cctx.Closed()
 		if f.stopped.Load() || !f.delivering(id, cctx) {
 			return

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -49,6 +50,28 @@ func httpMetricsOn(meter metric.Meter) *httpMetrics {
 		metric.WithDescription("HTTP request latency by route (the matched route pattern), method and status_class (2xx, 3xx, 4xx, 5xx); SSE streams on /v1/stream are not counted"),
 		metric.WithUnit("s"), metric.WithExplicitBucketBoundaries(latencyBuckets...))
 	return &httpMetrics{duration: duration}
+}
+
+// panicsRecovered counts the handler panics jsonRecoverer recovered (#902).
+var panicsRecovered atomic.Int64
+
+// panicCounter exports panicsRecovered. It is observable, so it reads 0 from
+// registration on: a counter added to before the provider is set would lose
+// its zero. The registration is kept so a test can see it was made.
+var panicCounter, panicCounterErr = newPanicCounter(otel.Meter(meterName), &panicsRecovered)
+
+// newPanicCounter registers wavehouse_http_panics_recovered_total on meter,
+// read from n on every collection.
+func newPanicCounter(meter metric.Meter, n *atomic.Int64) (metric.Registration, error) {
+	counter, err := meter.Int64ObservableCounter("wavehouse_http_panics_recovered_total",
+		metric.WithDescription("HTTP handler panics recovered, whatever the response; each also logs \"panic recovered in handler\" at ERROR"))
+	if err != nil {
+		return nil, err
+	}
+	return meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		o.ObserveInt64(counter, n.Load())
+		return nil
+	}, counter)
 }
 
 // middleware times every request but the SSE streams, whose lifetime is
