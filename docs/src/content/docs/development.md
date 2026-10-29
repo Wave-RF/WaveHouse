@@ -497,7 +497,7 @@ WaveHouse/
 │   ├── stream/             # SSE fan-out: Hub, Subscriber queue, Bucket, keepalive wheel
 │   └── testutil/           # Shared test helpers and mocks (cachetest suite)
 ├── pkg/                    # Public packages: importable at a release tag, no internal/ or runtime dependency
-│   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
+│   ├── chsql/              # Shared ClickHouse SQL helpers (quoting, bind-safety, SQL scanning, write classifier)
 │   ├── pipes/              # Named query pipes (types + parameter and claim binding)
 │   ├── policy/             # Access control policies (types + evaluation + claim resolution)
 │   ├── settings/           # Settings model: document types, Finding, the validator (on disk and over bytes), embedded seed

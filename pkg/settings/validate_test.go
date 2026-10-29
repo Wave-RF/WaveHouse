@@ -281,6 +281,8 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"reserved jwt placeholder", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT {{jwt}}"}]}`, `pipes[0].sql: placeholder "{{jwt}}" names the reserved parameter "jwt"`},
 		{"malformed claim template", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1 WHERE t = {{ jwt.tenant-id }}"}]}`, `unrecognized placeholder "{{ jwt.tenant-id }}"`},
 		{"spaced parameter placeholder", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1 LIMIT {{ limit }}"}]}`, `unrecognized placeholder "{{ limit }}"`},
+		{"placeholder inside quotes", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1 WHERE id = '{{id}}'"}]}`, `pipes[0].sql: placeholder "{{id}}" inside quotes`},
+		{"placeholder inside a comment", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1 -- {{ jwt.tenant_id }}"}]}`, `pipes[0].sql: placeholder "{{ jwt.tenant_id }}" inside a comment`},
 		{"empty dedupe id_field", FileConfig, `{"dedupe": {"id_field": ""}}`, "dedupe.id_field: must not be empty"},
 		{"whitespace-only dedupe id_field", FileConfig, `{"dedupe": {"id_field": "  "}}`, "dedupe.id_field: must not be empty"},
 		{"padded dedupe id_field", FileConfig, `{"dedupe": {"id_field": " click_id"}}`, "surrounding whitespace"},

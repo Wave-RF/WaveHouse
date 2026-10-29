@@ -13,6 +13,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/chsql"
 	"github.com/Wave-RF/WaveHouse/pkg/pipes"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
 	"github.com/go-chi/chi/v5"
@@ -171,7 +172,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if IsMutation(sql) {
+	if chsql.IsMutation(sql) {
 		h.executeWrite(w, r, store, q.Name, sql, params)
 		return
 	}
@@ -246,7 +247,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 // template's Skeleton, every placeholder bound to an empty string literal,
 // since the bound SQL does not exist: on the raw template a placeholder in
 // the `EXECUTE AS <user>` slot, or a quoted inline default ahead of an
-// INSERT, would hide the verb from IsMutation and answer a write's unresolved
+// INSERT, would hide the verb from chsql.IsMutation and answer a write's unresolved
 // claim with a success-looking `[]`.
 func writeClaimUnresolved(w http.ResponseWriter, r *http.Request, q *pipes.NamedQuery, role string, err *pipes.UnresolvedClaimError) {
 	attrs := []slog.Attr{
@@ -258,7 +259,7 @@ func writeClaimUnresolved(w http.ResponseWriter, r *http.Request, q *pipes.Named
 	case authErr != nil:
 		logAuthzDenied(r, authErr.Error(), role, q.AllowedRoles, http.StatusUnauthorized, attrs...)
 		writeJSONError(w, http.StatusUnauthorized, authErr.Error())
-	case IsMutation(q.Skeleton()):
+	case chsql.IsMutation(q.Skeleton()):
 		logAuthzDenied(r, err.Error(), role, q.AllowedRoles, http.StatusForbidden, attrs...)
 		writeJSONError(w, http.StatusForbidden, "forbidden: "+err.Error())
 	default:
@@ -274,7 +275,7 @@ func writeClaimUnresolved(w http.ResponseWriter, r *http.Request, q *pipes.Named
 
 // executeWrite runs a pipe that writes, on every call: a cached or coalesced
 // response would answer a repeat without executing it, silently dropping the
-// write (#386) — on every instance once the cache is shared. IsMutation is the
+// write (#386) — on every instance once the cache is shared. chsql.IsMutation is the
 // classifier executeCHQuery routes Exec by, so what bypasses here is exactly
 // what runs as a write. no-store keeps an HTTP cache in front of a GET from
 // answering a repeat the same way.

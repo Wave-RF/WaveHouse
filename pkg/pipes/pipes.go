@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Wave-RF/WaveHouse/pkg/chsql"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
 )
 
@@ -136,9 +137,13 @@ func (q *NamedQuery) Skeleton() string {
 
 // CheckTemplate reports the first thing wrong with the SQL template's
 // placeholders, nil when there is none: an inline placeholder naming the
-// reserved parameter (`{{jwt}}`), or a `{{` that starts like a placeholder
-// but is neither a parameter placeholder nor a well-formed claim reference —
-// a claim path outside the grammar (`{{ jwt.tenant-id }}`), a space around a
+// reserved parameter (`{{jwt}}`); a placeholder inside a comment or a quoted
+// token, where ClickHouse reads text but BindParams binds — in a comment the
+// value is bound, and a claim gates the pipe, while nothing that runs uses
+// it; inside quotes the bound value's own quotes close the template's and
+// the value runs as SQL; or a `{{` that starts like a placeholder but is
+// neither a parameter placeholder nor a well-formed claim reference — a
+// claim path outside the grammar (`{{ jwt.tenant-id }}`), a space around a
 // parameter's name, an unterminated `{{`. BindParams would send such a
 // fragment to ClickHouse as literal text, so validation rejects it on every
 // adoption instead. A declared parameter named ReservedParam is the settings
@@ -147,6 +152,31 @@ func (q *NamedQuery) CheckTemplate() error {
 	for _, m := range paramRe.FindAllStringSubmatch(q.SQL, -1) {
 		if m[1] == ReservedParam {
 			return fmt.Errorf("placeholder %q names the reserved parameter %q — {{ jwt.<path> }} reads a claim of the caller's token", m[0], ReservedParam)
+		}
+	}
+	// Where ClickHouse reads text, BindParams still binds: chsql.Opaque finds
+	// the comments and quoted tokens. Every placeholder is masked by spaces of
+	// its own length first, so a quote in an inline default opens no token in
+	// the scan, and the positions hold.
+	locs := placeholderRe.FindAllStringIndex(q.SQL, -1)
+	if len(locs) > 0 {
+		masked := []byte(q.SQL)
+		for _, loc := range locs {
+			for k := loc[0]; k < loc[1]; k++ {
+				masked[k] = ' '
+			}
+		}
+		spans := chsql.Opaque(string(masked))
+		for _, loc := range locs {
+			for _, span := range spans {
+				if loc[0] < span.Start || loc[0] >= span.End {
+					continue
+				}
+				if span.Comment {
+					return fmt.Errorf("placeholder %q inside a comment — it is bound, and a claim gates the pipe, while nothing that runs uses it; delete the line or move the placeholder into the statement", q.SQL[loc[0]:loc[1]])
+				}
+				return fmt.Errorf("placeholder %q inside quotes — write it bare: a bound value brings its own quotes, and inside the template's it would run as SQL", q.SQL[loc[0]:loc[1]])
+			}
 		}
 	}
 	// Strip every well-formed placeholder; a surviving placeholder-like "{{"

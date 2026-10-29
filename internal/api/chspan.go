@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
+	"github.com/Wave-RF/WaveHouse/pkg/chsql"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
@@ -72,13 +73,13 @@ var sqlVerbs = map[string]bool{
 // `EXECUTE AS` prefix as IsMutation reads it, or OTHER when it is no
 // statement keyword. A WITH-led statement is the SELECT or INSERT it runs.
 func sqlVerb(sql string) string {
-	s := stripLeadingSQLComments(sql)
-	if rest, ok := skipExecuteAs(s); ok {
+	s := chsql.StripLeadingComments(sql)
+	if rest, ok := chsql.SkipExecuteAs(s); ok {
 		s = rest
 	}
-	verb := strings.ToUpper(s[:skipWord(s, 0)])
+	verb := strings.ToUpper(s[:chsql.SkipWord(s, 0)])
 	switch {
-	case verb == "WITH" && IsMutation(s):
+	case verb == "WITH" && chsql.IsMutation(s):
 		return "INSERT"
 	case verb == "WITH":
 		return "SELECT"
