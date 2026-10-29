@@ -97,6 +97,7 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 		var wg sync.WaitGroup
 		for i, fn := range shutdownFuncs {
 			wg.Go(func() {
+				defer Crash("otel_shutdown")
 				errs[i] = fn(ctx)
 			})
 		}
@@ -116,6 +117,7 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 		// goroutines returned).
 		done := make(chan struct{})
 		go func() {
+			defer Crash("otel_shutdown")
 			wg.Wait()
 			close(done)
 		}()

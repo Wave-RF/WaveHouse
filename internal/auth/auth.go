@@ -159,7 +159,10 @@ func newVerifier(w Wiring) *verifier {
 	v.validMethods = asymmetricMethods
 	ctx, cancel := context.WithCancel(context.Background())
 	v.cancel = cancel
-	go v.fetch(ctx)
+	go func() {
+		defer observability.Crash("jwks_fetch")
+		v.fetch(ctx)
+	}()
 	return v
 }
 

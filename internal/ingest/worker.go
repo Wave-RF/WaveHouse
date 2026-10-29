@@ -207,7 +207,11 @@ func StartIngestWorker(
 	worker.wg.Add(1)
 
 	// Dispatch loop: one consumer, fanned out to a goroutine per tenant table.
-	go worker.dispatchLoop(workerCtx, cons)
+	go func() {
+		defer observability.Crash("ingest_worker")
+		worker.dispatchLoop(workerCtx, cons)
+		worker.wg.Done()
+	}()
 
 	stopFunc := func(shutdownCtx context.Context) error {
 		workerCancel()
@@ -243,6 +247,7 @@ func ingestHTTPClient(tlsCfg *tls.Config) *http.Client {
 func waitOrDeadline(ctx context.Context, wg *sync.WaitGroup) error {
 	done := make(chan struct{})
 	go func() {
+		defer observability.Crash("ingest_worker")
 		wg.Wait()
 		close(done)
 	}()
@@ -269,8 +274,6 @@ func waitOrDeadline(ctx context.Context, wg *sync.WaitGroup) error {
 // before that stop, so it comes back ahead of anything newer rather than
 // after ack_wait.
 func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
-	defer w.wg.Done()
-
 	msgChan := make(chan *mq.Message, w.maxBatch*2)
 	abandon := make(chan struct{})
 
@@ -359,8 +362,11 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 			// tenant, schema-validated tables, in-process publishers only,
 			// DontListen:true). Add idle-reaping + route/teardown coordination
 			// before remote/untrusted publishers can create unbounded cardinality.
-			table, in := pm.tableName, ch
-			tableWg.Go(func() { w.tableLoop(flushCtx, table, in) })
+			id, table, in := pm.tenant, pm.tableName, ch
+			tableWg.Go(func() {
+				defer observability.Crash("ingest_worker", slog.String("tenant", id.String()), slog.String("table", table))
+				w.tableLoop(flushCtx, table, in)
+			})
 		}
 		ch <- pm
 	}
@@ -393,6 +399,7 @@ func haltRouting(cons mq.Consumer, msgChan <-chan *mq.Message, route func(*mq.Me
 	if h, ok := cons.(mq.Halter); ok {
 		halted := make(chan struct{})
 		go func() {
+			defer observability.Crash("ingest_worker")
 			h.Halt()
 			close(halted)
 		}()
@@ -500,8 +507,9 @@ func (b *tableBatcher) requestFlush(ctx context.Context) {
 	done := make(chan struct{})
 	b.flushing = done
 	go func() {
-		defer close(done)
+		defer observability.Crash("ingest_worker", slog.String("tenant", rows[0].tenant.String()), slog.String("table", b.table))
 		b.w.flushTable(ctx, b.table, rows)
+		close(done)
 	}()
 }
 
@@ -961,9 +969,11 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 	// drains ackWg only after every tableLoop has returned, so each Add here
 	// happens-before that Wait — no race, no reliance on synchronous flushing.
 	w.ackWg.Go(func() {
+		defer observability.Crash("ingest_worker", slog.String("tenant", msgs[0].tenant.String()), slog.String("table", tableName))
 		var acks sync.WaitGroup
 		for _, pm := range msgs {
 			acks.Go(func() {
+				defer observability.Crash("ingest_worker", slog.String("tenant", pm.tenant.String()), slog.String("table", tableName))
 				if err := pm.msg.DoubleAck(context.WithoutCancel(ctx)); err != nil {
 					slog.ErrorContext(context.WithoutCancel(ctx), "double ack failed for processed message", "error", err, "tenant", pm.tenant, "table", tableName)
 				}
@@ -1042,6 +1052,7 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, id tenan
 		// in series, with intake stalled behind it. dispatchLoop adds and
 		// waits on the same goroutine, so each Add still happens-before the Wait.
 		w.ackWg.Go(func() {
+			defer observability.Crash("ingest_worker", slog.String("tenant", id.String()), slog.String("table", tableName))
 			if w.parkOnDLQ(ctx, m, tableName, detail) {
 				countPoison(ctx, tableName, reason, "parked")
 			}
@@ -1056,6 +1067,7 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, id tenan
 	// a row that no longer exists anywhere. Counting before the ack would report
 	// that about a row still sitting in the queue, once per redelivery.
 	w.ackWg.Go(func() {
+		defer observability.Crash("ingest_worker", slog.String("tenant", id.String()), slog.String("table", tableName))
 		if err := m.DoubleAck(ctx); err != nil {
 			slog.ErrorContext(ctx, "ack of a dropped unreadable envelope failed, so it stays in the stream and will be refused again",
 				"tenant", id, "table", tableName, "reason", reason, "error", err)

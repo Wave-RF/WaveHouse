@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"time"
+
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // resignTimeout bounds the resign that hands the lease on when fn returns,
@@ -54,6 +56,7 @@ func serve(ctx context.Context, term Term, fn func(context.Context, Term) error)
 	defer cancel()
 	stop := make(chan struct{})
 	go func() {
+		defer observability.Crash("coord_election")
 		select {
 		case <-term.Done():
 			cancel()

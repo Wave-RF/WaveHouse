@@ -56,27 +56,34 @@ func (e *Embedded) startSweep(db *pebble.DB) (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		defer close(done)
-		wait := e.sweepFirst
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(wait):
-			}
-			wait = e.sweepEvery
-			res, err := e.sweep(ctx, db)
-			switch {
-			case err != nil && ctx.Err() == nil:
-				slog.WarnContext(ctx, "dedupe sweep failed; retrying next interval", "error", err, "expired", res.Expired, "version_0", res.Version0)
-			case res.Expired+res.Version0 > 0:
-				slog.InfoContext(ctx, "dedupe sweep deleted keys", "expired", res.Expired, "version_0", res.Version0)
-			}
-		}
+		defer observability.Crash("dedupe_sweep")
+		e.sweepLoop(ctx, db)
+		close(done)
 	}()
 	return func() {
 		cancel()
 		<-done
+	}
+}
+
+// sweepLoop sweeps db every sweepEvery, the first time after sweepFirst,
+// until ctx ends.
+func (e *Embedded) sweepLoop(ctx context.Context, db *pebble.DB) {
+	wait := e.sweepFirst
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		wait = e.sweepEvery
+		res, err := e.sweep(ctx, db)
+		switch {
+		case err != nil && ctx.Err() == nil:
+			slog.WarnContext(ctx, "dedupe sweep failed; retrying next interval", "error", err, "expired", res.Expired, "version_0", res.Version0)
+		case res.Expired+res.Version0 > 0:
+			slog.InfoContext(ctx, "dedupe sweep deleted keys", "expired", res.Expired, "version_0", res.Version0)
+		}
 	}
 }
 
