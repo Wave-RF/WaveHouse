@@ -58,26 +58,30 @@ func TestIngest_Windows_OneReserveAndCommitPerWindow(t *testing.T) {
 
 // A publish failing at record k settles its window: the records before k are
 // committed, k is released when the queue refused it and left to lapse when
-// the outcome is unknown, the rest of the window is released, and later
-// windows are never reserved. A whole-batch retry after a refusal publishes
+// the outcome is unknown (a client that went away mid-publish included, whose
+// 499 settles the window as any uncertain failure does, #947), the rest of
+// the window is released, and later windows are never reserved. A whole-batch retry after a refusal publishes
 // every record exactly once.
 func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 	t.Parallel()
 	const n = 600
 	refused := fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull)
 	tests := []struct {
-		name   string
-		k      int
-		err    error
-		status int
+		name       string
+		k          int
+		err        error
+		status     int
+		clientGone bool // the request context canceled before the failing publish
 	}{
-		{"refused first record", 1, refused, http.StatusServiceUnavailable},
-		{"refused mid first window", 100, refused, http.StatusServiceUnavailable},
-		{"refused last of first window", 256, refused, http.StatusServiceUnavailable},
-		{"refused first of second window", 257, refused, http.StatusServiceUnavailable},
-		{"refused mid last window", 590, refused, http.StatusServiceUnavailable},
-		{"uncertain mid first window", 100, context.DeadlineExceeded, http.StatusInternalServerError},
-		{"uncertain mid second window", 400, context.DeadlineExceeded, http.StatusInternalServerError},
+		{"refused first record", 1, refused, http.StatusServiceUnavailable, false},
+		{"refused mid first window", 100, refused, http.StatusServiceUnavailable, false},
+		{"refused last of first window", 256, refused, http.StatusServiceUnavailable, false},
+		{"refused first of second window", 257, refused, http.StatusServiceUnavailable, false},
+		{"refused mid last window", 590, refused, http.StatusServiceUnavailable, false},
+		{"uncertain mid first window", 100, context.DeadlineExceeded, http.StatusInternalServerError, false},
+		{"uncertain mid second window", 400, context.DeadlineExceeded, http.StatusInternalServerError, false},
+		{"client gone mid first window", 100, errors.New("publish: context canceled"), statusClientClosedRequest, true},
+		{"client gone mid second window", 400, errors.New("publish: context canceled"), statusClientClosedRequest, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -87,8 +91,14 @@ func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 			h := dedupHandler(t, pub, dedup, false)
 			lines := eventLines(t, n)
 
+			req := ndjsonRequest(t, "clicks", lines...)
+			if tt.clientGone {
+				ctx, cancel := context.WithCancel(req.Context())
+				cancel()
+				req = req.WithContext(ctx)
+			}
 			w := httptest.NewRecorder()
-			h.Handle(w, withTenant(ndjsonRequest(t, "clicks", lines...)))
+			h.Handle(w, withTenant(req))
 			require.Equal(t, tt.status, w.Code)
 			assert.Len(t, pub.Published(), tt.k-1)
 

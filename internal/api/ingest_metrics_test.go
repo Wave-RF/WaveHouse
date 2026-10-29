@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -139,6 +140,11 @@ func TestIngestRecords_EveryResult(t *testing.T) {
 			cancel()
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a"}).WithContext(c)
 		}, map[string]int64{resultRecordsCanceled: 1}},
+		{"deadline passed before the publish failed", plain, errors.New("nats: timeout"), 0, func(t *testing.T) *http.Request {
+			c, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			t.Cleanup(cancel)
+			return ingestRequest(t, "clicks", map[string]any{"page": "/a"}).WithContext(c)
+		}, map[string]int64{resultPublishFailed: 1}},
 		{"unknown table counts nothing", plain, nil, 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "nope", map[string]any{"page": "/a"})
 		}, map[string]int64{}},
