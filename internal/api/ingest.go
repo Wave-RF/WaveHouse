@@ -162,6 +162,10 @@ type requestAbort struct {
 	Message    string
 	RetryAfter string // non-empty → emit a Retry-After header
 	Result     string // the result on wavehouse_ingest_records_total of each record it refuses
+	// Final marks a Result already decided with the client's state when the
+	// call failed, which countRecords keeps rather than reading the context
+	// again (#947).
+	Final bool
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -963,10 +967,22 @@ func (h *IngestHandler) publishFailed(ctx context.Context, dd dedupe.Deduplicato
 		after = k
 	}
 	releaseClaims(ctx, dd, claimedIn(recs[after:]))
+	abort := h.publishFailure(ctx, topic, recs[k], err, definite, gone)
+	abort.Final = true
+	return abort
+}
+
+// publishFailure classifies a failed publish by its error and by gone, the
+// client's state when it failed; publishFailed has settled the claims.
+func (h *IngestHandler) publishFailure(ctx context.Context, topic mq.Topic, rec pendingRecord, err error, definite, gone bool) *requestAbort {
 	switch {
 	case definite:
 		slog.WarnContext(ctx, "ingest queue is full", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
-		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30", Result: resultQueueFull}
+		result := resultQueueFull
+		if gone {
+			result = resultRecordsCanceled
+		}
+		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30", Result: result}
 	case gone:
 		// The client went away while the publish was in flight, which is
 		// likely why it failed, however the broker reports it: nobody
@@ -976,7 +992,7 @@ func (h *IngestHandler) publishFailed(ctx context.Context, dd dedupe.Deduplicato
 		return clientClosedAbort()
 	case errors.Is(err, mq.ErrUnavailable):
 		retryAfter := "5"
-		if recs[k].claim.Status == dedupe.Claimed {
+		if rec.claim.Status == dedupe.Claimed {
 			retryAfter = strconv.Itoa(int(math.Ceil(h.lease().Seconds())))
 		}
 		slog.WarnContext(ctx, "ingest queue unavailable", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
