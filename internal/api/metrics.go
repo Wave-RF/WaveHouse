@@ -64,7 +64,7 @@ var panicCounter, panicCounterErr = newPanicCounter(otel.Meter(meterName), &pani
 // read from n on every collection.
 func newPanicCounter(meter metric.Meter, n *atomic.Int64) (metric.Registration, error) {
 	counter, err := meter.Int64ObservableCounter("wavehouse_http_panics_recovered_total",
-		metric.WithDescription("HTTP handler panics recovered and answered 500; each also logs \"panic recovered in handler\" at ERROR"))
+		metric.WithDescription("HTTP handler panics recovered, whatever the response; each also logs \"panic recovered in handler\" at ERROR"))
 	if err != nil {
 		return nil, err
 	}

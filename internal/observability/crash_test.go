@@ -2,6 +2,7 @@ package observability
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"go/ast"
 	"go/parser"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/log/noop"
 )
 
 // captureDefault routes the default logger to the returned buffer as JSON.
@@ -53,6 +56,42 @@ func TestCrash_LogsThenPanicsAgain(t *testing.T) {
 	assert.Equal(t, "boom", rec["error"])
 	assert.Equal(t, "clicks", rec["table"])
 	assert.Contains(t, rec["stack"], "crash_test.go", "the stack names where the panic happened")
+}
+
+// flushRecorder is a logger provider that records its ForceFlush calls.
+type flushRecorder struct {
+	noop.LoggerProvider
+	calls       int
+	hadDeadline bool
+}
+
+func (f *flushRecorder) ForceFlush(ctx context.Context) error {
+	f.calls++
+	_, f.hadDeadline = ctx.Deadline()
+	return nil
+}
+
+// TestCrash_FlushesLogsBeforePanickingAgain: Crash flushes the global logger
+// provider once, under a deadline, before the panic goes on, so the record
+// can reach OTLP (#902). Not parallel: it sets the global logger provider.
+func TestCrash_FlushesLogsBeforePanickingAgain(t *testing.T) {
+	captureDefault(t)
+	saved := otel.GetLoggerProvider()
+	t.Cleanup(func() { otel.SetLoggerProvider(saved) })
+	rec := &flushRecorder{}
+	otel.SetLoggerProvider(rec)
+
+	var repanicked any
+	func() {
+		defer func() { repanicked = recover() }()
+		func() {
+			defer Crash("shard_claims")
+			panic("boom")
+		}()
+	}()
+	assert.Equal(t, "boom", repanicked)
+	assert.Equal(t, 1, rec.calls, "Crash must flush the logger provider")
+	assert.True(t, rec.hadDeadline, "the flush must be bounded")
 }
 
 // TestCrash_NoPanicDoesNothing: without a panic Crash neither logs nor
