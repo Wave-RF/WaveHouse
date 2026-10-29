@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -155,8 +156,17 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	sql, params, err := pipes.BindParams(q, supplied)
+	// The verified token's claims bind the SQL's {{ jwt.<path> }} references;
+	// a request with no valid token has none, so every such reference fails
+	// closed below. The request's parameters never reach a claim reference.
+	claims, _ := auth.ClaimsFromContext(r.Context())
+	sql, params, err := pipes.BindParams(q, supplied, claims)
 	if err != nil {
+		var unresolved *pipes.UnresolvedClaimError
+		if errors.As(err, &unresolved) {
+			writeClaimUnresolved(w, r, q, role, unresolved)
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -216,6 +226,50 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
 	_, _ = w.Write(v.([]byte)) //nolint:gosec // G705: the tenant id on the key only selects the entry; the bytes are JSON the handler marshalled from ClickHouse rows
+}
+
+// writeClaimUnresolved answers a pipe whose SQL reads a claim the caller's
+// token cannot bind (pipes.UnresolvedClaimError). The pipe fails closed the
+// way a policy filter on the same claim does (#385): nothing runs, and no
+// stand-in is bound. A read answers 200 with no rows and no X-Cache header,
+// as a structured query's row read does under an unresolvable filter (a
+// global aggregate gets no row here where a structured query gets one row of
+// zeros, since no stand-in value is safe to bind); a write is refused with
+// 403, as an insert under an unresolvable _in check is, since "no rows" means
+// nothing for a write. A present-but-invalid token fails loud instead, a 401
+// naming the token problem, so a caller whose expired token fell back to the
+// default role learns why its rows are gone (mirrors writeAuthzDenied). Admin
+// is no exception: the reference is the pipe author's SQL, not policy, so an
+// admin token binds what it carries, and one without the claim — the operator
+// key carries none — gets the same answer; a see-everything pipe is a
+// separate pipe with no allowed_roles. The write classification reads the
+// template's Skeleton, every placeholder bound to an empty string literal,
+// since the bound SQL does not exist: on the raw template a placeholder in
+// the `EXECUTE AS <user>` slot, or a quoted inline default ahead of an
+// INSERT, would hide the verb from IsMutation and answer a write's unresolved
+// claim with a success-looking `[]`.
+func writeClaimUnresolved(w http.ResponseWriter, r *http.Request, q *pipes.NamedQuery, role string, err *pipes.UnresolvedClaimError) {
+	attrs := []slog.Attr{
+		slog.String("gate", "pipe"),
+		slog.String("pipe", q.Name),
+		slog.String("claim", err.Path),
+	}
+	switch authErr := auth.AuthErrorFromContext(r.Context()); {
+	case authErr != nil:
+		logAuthzDenied(r, authErr.Error(), role, q.AllowedRoles, http.StatusUnauthorized, attrs...)
+		writeJSONError(w, http.StatusUnauthorized, authErr.Error())
+	case IsMutation(q.Skeleton()):
+		logAuthzDenied(r, err.Error(), role, q.AllowedRoles, http.StatusForbidden, attrs...)
+		writeJSONError(w, http.StatusForbidden, "forbidden: "+err.Error())
+	default:
+		// Not a denial: a public pipe reading a claim answers every anonymous
+		// caller this way by design, so the line is DEBUG, there for an
+		// operator asking why a pipe returns nothing.
+		slog.LogAttrs(r.Context(), slog.LevelDebug, "pipe claim unresolved; answering no rows",
+			append([]slog.Attr{slog.String("role_resolved", role)}, attrs...)...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}
 }
 
 // executeWrite runs a pipe that writes, on every call: a cached or coalesced

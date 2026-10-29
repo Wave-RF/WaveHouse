@@ -412,7 +412,12 @@ export interface PolicyFilter {
 
 /** One validation finding from the server's settings directory. */
 export interface SettingsFinding {
-  severity: "error" | "warning";
+  /**
+   * `error` rejects the directory, `warning` flags legal config worth a
+   * look, and `info` tells a reviewer something about legal config (the
+   * token claims a pipe binds); an info is neither.
+   */
+  severity: "error" | "warning" | "info";
   /**
    * Settings file the finding is about; absent for directory-level findings.
    * In a directory of tenant folders it leads with the folder

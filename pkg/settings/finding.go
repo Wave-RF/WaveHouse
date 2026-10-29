@@ -4,12 +4,15 @@ import "strings"
 
 // Severity classifies a finding. Errors make the directory invalid; warnings
 // flag config that is legal but almost certainly not what the author meant
-// (e.g. a grant scoping the admin role, which is an unconditional bypass).
+// (e.g. a grant scoping the admin role, which is an unconditional bypass);
+// infos report what a reviewer of legal config should know (e.g. the token
+// claims a pipe binds), and count as neither.
 type Severity string
 
 const (
 	SeverityError   Severity = "error"
 	SeverityWarning Severity = "warning"
+	SeverityInfo    Severity = "info"
 )
 
 // Finding is one validation result, located as precisely as the failure
