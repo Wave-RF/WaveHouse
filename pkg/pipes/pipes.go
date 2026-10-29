@@ -260,8 +260,8 @@ func BindParams(q *NamedQuery, supplied, claims map[string]any) (string, []any, 
 }
 
 // formatParamValue converts a Go value to a safe SQL literal for inline
-// substitution. Scalars are escaped (strings single-quoted with `'` and `\`
-// doubled, numbers emitted bare). A JSON array becomes a parenthesized,
+// substitution. Scalars are escaped (strings single-quoted, see quoteLiteral;
+// numbers emitted bare). A JSON array becomes a parenthesized,
 // comma-separated list of recursively formatted elements — the `(v1, v2, …)`
 // shape ClickHouse expects on the right of `IN`, matching how the
 // structured-query builder renders an IN clause. Because every scalar leaf is
@@ -281,27 +281,27 @@ func formatParamValue(v any) (string, error) {
 		// A numeric-looking string renders bare (so `?limit=100` from a query
 		// string works as a number); any other string is quoted and escaped.
 		if isNumericLiteral(val) {
-			return val, nil
+			return bareNumber(val), nil
 		}
 		return quoteLiteral(val), nil
 	case float64:
 		// JSON numbers are float64; if it's a whole number, format as integer.
 		if val == float64(int64(val)) {
-			return strconv.FormatInt(int64(val), 10), nil
+			return bareNumber(strconv.FormatInt(int64(val), 10)), nil
 		}
-		return fmt.Sprintf("%g", val), nil
+		return bareNumber(fmt.Sprintf("%g", val)), nil
 	case float32:
 		if val == float32(int32(val)) {
-			return fmt.Sprintf("%d", int32(val)), nil
+			return bareNumber(fmt.Sprintf("%d", int32(val))), nil
 		}
-		return fmt.Sprintf("%g", val), nil
+		return bareNumber(fmt.Sprintf("%g", val)), nil
 	case bool:
 		if val {
 			return "1", nil
 		}
 		return "0", nil
 	case int, int8, int16, int32, int64:
-		return fmt.Sprintf("%d", val), nil
+		return bareNumber(fmt.Sprintf("%d", val)), nil
 	case uint, uint8, uint16, uint32, uint64:
 		return fmt.Sprintf("%d", val), nil
 	case []any:
@@ -322,12 +322,30 @@ func formatParamValue(v any) (string, error) {
 	}
 }
 
-// quoteLiteral renders s as a single-quoted SQL string literal with `'` and
-// `\` doubled, so s can't close the literal.
+// quoteLiteral renders s as a single-quoted SQL string literal: `'` and `\`
+// doubled, a newline or carriage return written as ClickHouse's `\n` or `\r`
+// escape, and every `*` as its `\x2A` hex escape — each the same value — so s
+// can neither close the literal nor end a `--` comment a placeholder sits in,
+// nor close or open (ClickHouse nests them) a `/* */` comment: no `*` is
+// left for either sequence.
 func quoteLiteral(s string) string {
-	escaped := strings.ReplaceAll(s, `\`, `\\`)
-	escaped = strings.ReplaceAll(escaped, `'`, `''`)
-	return "'" + escaped + "'"
+	return "'" + literalEscaper.Replace(s) + "'"
+}
+
+// literalEscaper is quoteLiteral's one-pass escaping, so the backslash of an
+// escaped newline or star is never doubled in turn.
+var literalEscaper = strings.NewReplacer(`\`, `\\`, `'`, `''`, "\n", `\n`, "\r", `\r`, `*`, `\x2A`)
+
+// bareNumber renders a numeric literal for inline substitution: a negative
+// one with a leading space, so that bound right after a `-` in the template
+// (`0-{{n}}`, `now()-{{secs}}`) it reads `0- -5`, never `0--5`, which
+// ClickHouse would read as the start of a `--` line comment that drops the
+// rest of the statement, a claim predicate included.
+func bareNumber(s string) string {
+	if strings.HasPrefix(s, "-") {
+		return " " + s
+	}
+	return s
 }
 
 // claimLiteral renders a resolved claim (policy.ResolveClaim) for inline

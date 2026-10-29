@@ -418,6 +418,44 @@ func TestBindParams_ClaimSpacingForms(t *testing.T) {
 	}
 }
 
+// TestBindParams_ValueCannotEndComment: a bound value's newline, carriage
+// return or `*` is written as its escape, so it binds the same value but can
+// neither end a `--` comment a placeholder sits in nor close or open a
+// `/* */` one — for a claim or a parameter.
+func TestBindParams_ValueCannotEndComment(t *testing.T) {
+	t.Parallel()
+	q := &NamedQuery{SQL: "SELECT 1 FROM t WHERE a IN {{ jwt.ids }} /* AND b = {{ jwt.region }} */ -- AND c = {{c}}"}
+	claims := map[string]any{"ids": []any{"1"}, "region": "*/ OR 1=1 /*"}
+	sql, _, err := BindParams(q, map[string]any{"c": "y\r\nOR 1=1"}, claims)
+	require.NoError(t, err)
+	assert.Equal(t, `SELECT 1 FROM t WHERE a IN ('1') /* AND b = '\x2A/ OR 1=1 /\x2A' */ -- AND c = 'y\r\nOR 1=1'`, sql)
+	assert.NotContains(t, sql, "\n")
+	// A backslash ahead of the star is doubled and the star still escaped.
+	assert.Equal(t, `'\\\x2A/'`, quoteLiteral(`\*/`))
+}
+
+// TestBindParams_NegativeNumberCannotStartComment: a negative bare number
+// renders with a leading space, so bound after a `-` in the template it is
+// arithmetic, never the `--` that would comment out the rest of the line and
+// the claim predicate with it.
+func TestBindParams_NegativeNumberCannotStartComment(t *testing.T) {
+	t.Parallel()
+	for name, min := range map[string]any{"numeric string": "-5", "float64": float64(-5), "int": -5, "fraction": -2.5} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			q := &NamedQuery{SQL: "SELECT 1 FROM t WHERE n > 0-{{min}} AND tenant_id IN {{ jwt.ids }}"}
+			sql, _, err := BindParams(q, map[string]any{"min": min}, map[string]any{"ids": []any{"acme"}})
+			require.NoError(t, err)
+			assert.NotContains(t, sql, "--")
+			assert.Contains(t, sql, "n > 0- -")
+			assert.Contains(t, sql, "tenant_id IN ('acme')")
+		})
+	}
+	sql, _, err := BindParams(&NamedQuery{SQL: "SELECT {{n}}"}, map[string]any{"n": 5}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT 5", sql, "a non-negative number renders as before")
+}
+
 func TestNamedQuery_Claims(t *testing.T) {
 	t.Parallel()
 	q := &NamedQuery{SQL: "SELECT {{a}} WHERE t IN {{ jwt.app_metadata.tenant_ids }} AND u = {{jwt.sub}} AND t2 IN {{ jwt.app_metadata.tenant_ids }}"}

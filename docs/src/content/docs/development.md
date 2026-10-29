@@ -216,6 +216,8 @@ curl -X POST -H "Authorization: Operator dev-operator-key" http://localhost:8080
 curl -H "X-Operator-Key: dev-operator-key" http://localhost:8080/v1/ops/pipes
 ```
 
+The exception is a pipe whose SQL binds a `{{ jwt.<path> }}` claim: the key carries no claims, so such a pipe answers it `[]` (a write pipe, `403`). Trial those with a token that carries the claim ([Binding token claims](/pipes#binding-token-claims)).
+
 Then mint a token (role == the policy `admin_role`) and call an admin endpoint:
 
 ```bash
@@ -496,8 +498,8 @@ WaveHouse/
 │   └── testutil/           # Shared test helpers and mocks (cachetest suite)
 ├── pkg/                    # Public packages: importable at a release tag, no internal/ or runtime dependency
 │   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
-│   ├── pipes/              # Named query pipes (types + parameter binding)
-│   ├── policy/             # Access control policies (types + evaluation)
+│   ├── pipes/              # Named query pipes (types + parameter and claim binding)
+│   ├── policy/             # Access control policies (types + evaluation + claim resolution)
 │   ├── settings/           # Settings model: document types, Finding, the validator (on disk and over bytes), embedded seed
 │   ├── shard/              # Placement hashing: Jump consistent hash, Mix finalizer
 │   └── tenant/             # Tenant id: type, grammar, reserved default, request header name

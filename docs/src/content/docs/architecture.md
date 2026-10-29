@@ -71,8 +71,8 @@ internal/
 └── stream/      SSE fan-out: event Hub (project once per role), Subscriber queue, Bucket fan-out, keepalive Heartbeater wheel
 pkg/
 ├── chsql/       Shared ClickHouse SQL helpers (identifier quoting, bind-safety)
-├── pipes/       Named query pipes (NamedQuery type, parameter binding, Source)
-├── policy/      Hasura-style access control (policy types, evaluation, Source)
+├── pipes/       Named query pipes (NamedQuery type, parameter and token-claim binding, template checks, Source)
+├── policy/      Hasura-style access control (policy types, evaluation, claim resolution, Source)
 ├── settings/    Settings model: the document types, Finding, the validator (on disk and over bytes), the embedded seed
 ├── shard/       Placement hashing: Jump consistent hash and Mix finalizer, for partitions, shards and dedupe buckets
 └── tenant/      Tenant id: the type, its grammar, the reserved default, the request header name
@@ -224,7 +224,7 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 
 ### `pipes/` — Named Query Pipes
 
-- **pipes.go** — `NamedQuery` type with SQL template and parameter definitions, and `Source` (`Pipe(name)` / `Pipes()`), read per request — `settings.Store` in production (`pipes.json`), `Static(q...)` in tests. `BindParams(q, supplied, claims)` resolves `{{param}}` / `{{param:default}}` placeholders by inlining escaped literal values into the SQL (strings single-quote-escaped; arrays rendered as escaped `(…)` `IN`-lists), and `{{ jwt.<path> }}` references from the verified token's claims alone, through `policy.ResolveClaim`, always as a quoted literal (an array claim as an `IN` set) — in one pass over the template, so bound text is never rescanned; a claim the token cannot bind is `*UnresolvedClaimError`, which the handler fails closed on. A non-scalar value with no SQL form (a JSON object, or an empty array) is rejected rather than emitted raw. `CheckTemplate()` — an inline `{{jwt}}`, or a `{{` that starts like a placeholder but is neither a parameter placeholder nor a well-formed claim reference — and `Claims()`, the claim paths the SQL binds, run from `settings.Validate` on every adoption; `Skeleton()`, the template with every placeholder bound to `''`, is what the handler classifies with `IsMutation` when a claim cannot bind.
+- **pipes.go** — `NamedQuery` type with SQL template and parameter definitions, and `Source` (`Pipe(name)` / `Pipes()`), read per request — `settings.Store` in production (`pipes.json`), `Static(q...)` in tests. `BindParams(q, supplied, claims)` resolves `{{param}}` / `{{param:default}}` placeholders by inlining escaped literal values into the SQL (strings single-quote-escaped; arrays rendered as escaped `(…)` `IN`-lists), and `{{ jwt.<path> }}` references from the verified token's claims alone, through `policy.ResolveClaim`, always as a quoted literal (an array claim as an `IN` set) — in one pass over the template, so bound text is never rescanned; a claim the token cannot bind is `*UnresolvedClaimError`, which the handler fails closed on. A non-scalar value with no SQL form (a JSON object, or an empty array) is rejected rather than emitted raw. `CheckTemplate()`, which rejects an inline `{{jwt}}` or a `{{` that starts like a placeholder but is neither a parameter placeholder nor a well-formed claim reference, and `Claims()`, the claim paths the SQL binds, run from `settings.Validate` on every adoption; `Skeleton()`, the template with every placeholder bound to `''`, is what the handler classifies with `IsMutation` when a claim cannot bind.
 
 ### `query/` — Structured Query Engine
 
