@@ -135,7 +135,10 @@ type MockDeduplicator struct {
 	// BeforeErr, if set, runs as Err applies, before Reserve returns it,
 	// under the mock's lock: it must not call back into the mock.
 	BeforeErr func()
-	Released  []dedupe.Claim // every claim Release was given
+	// OnCommit, if set, runs as each Commit starts, under the same lock: it
+	// must not call back into the mock either.
+	OnCommit func()
+	Released []dedupe.Claim // every claim Release was given
 	// Calls to each phase, for tests that count round trips.
 	Reserves, Commits int
 }
@@ -181,6 +184,9 @@ func (m *MockDeduplicator) Commit(_ context.Context, claims []dedupe.Claim, rete
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Commits++
+	if m.OnCommit != nil {
+		m.OnCommit()
+	}
 	if m.CommitErr != nil {
 		return m.CommitErr
 	}

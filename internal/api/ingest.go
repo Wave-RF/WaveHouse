@@ -953,6 +953,10 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 // out, so Retry-After is the flat 5 seconds main's per-record path used.
 func (h *IngestHandler) publishFailed(ctx context.Context, dd dedupe.Deduplicator, topic mq.Topic, recs []pendingRecord, k int, err error) *requestAbort {
 	definite := errors.Is(err, mq.ErrQueueFull)
+	// Whether the client was gone when the publish failed, read before the
+	// claims are settled: a client that leaves during the commit or release
+	// does not turn a failure of the queue into its 499.
+	gone := clientGone(ctx)
 	commitClaims(ctx, dd, recs[:k], topic.Table)
 	after := k + 1
 	if definite {
@@ -963,7 +967,7 @@ func (h *IngestHandler) publishFailed(ctx context.Context, dd dedupe.Deduplicato
 	case definite:
 		slog.WarnContext(ctx, "ingest queue is full", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
 		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30", Result: resultQueueFull}
-	case clientGone(ctx):
+	case gone:
 		// The client went away while the publish was in flight, which is
 		// likely why it failed, however the broker reports it: nobody
 		// reads the answer, and the queue is not the one that failed

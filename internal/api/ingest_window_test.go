@@ -172,6 +172,29 @@ func TestIngest_Windows_ReserveClientGoneMidBatch(t *testing.T) {
 	assert.False(t, dedup.Pending(clickKey(ingestWindow+1)), "the second window was never reserved")
 }
 
+// A publish that fails while the client is still there is the queue's 500,
+// even when the client leaves while the window's claims are being settled:
+// the 499 is decided by the state when the publish failed (#947).
+// Not parallel: it captures the default logger.
+func TestIngest_Windows_ClientGoneDuringSettlement(t *testing.T) {
+	buf := logtest.Capture(t, slog.LevelDebug)
+	pub := &testutil.MockPublisher{Err: errors.New("nats: bad subject"), ErrAfter: 1}
+	dedup := testutil.NewMockDeduplicator()
+	h := dedupHandler(t, pub, dedup, false)
+
+	req := ndjsonRequest(t, "clicks", eventLines(t, 3)...)
+	ctx, cancel := context.WithCancel(req.Context())
+	t.Cleanup(cancel)
+	dedup.OnCommit = cancel
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(req.WithContext(ctx)))
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, buf.String(), `"level":"ERROR","msg":"failed to publish to the ingest queue"`)
+	assert.NotContains(t, buf.String(), "client closed the request")
+	assert.True(t, dedup.Committed(clickKey(1)), "the record before the failure is committed")
+}
+
 // A dedupe store that cannot answer now fails the request with 503 and a
 // short Retry-After, which the SDK retries — not the 500 of a broken store.
 // Earlier windows stay published and committed.
