@@ -82,6 +82,14 @@ func NewMetrics() *Metrics {
 		metric.WithDescription("Event rows withheld from a subscriber by the role's row-level-security filter (including fail-closed evaluations)"))
 	queuePeak, _ := meter.Int64ObservableGauge("wavehouse_sse_queue_peak_frames",
 		metric.WithDescription("Deepest any open SSE stream's outbound queue has been since the stream opened, in frames"))
+	// The counters carry the tenant, and dropped the table too, so their
+	// closed sets are exported at 0 only while those labels are dropped
+	// (#905).
+	kinds := observability.Values("kind", KindEvent, KindReplay, KindSchema, KindKeepalive)
+	observability.ZeroCounter(frames, observability.CarriesTenant, observability.LabelSets(kinds)...)
+	observability.ZeroCounter(bytes, observability.CarriesTenant, observability.LabelSets(kinds)...)
+	observability.ZeroCounter(dropped, observability.CarriesTable|observability.CarriesTenant, observability.LabelSets(
+		observability.Values("reason", DropBufferFull, DropClientGone, DropStreamClosed), kinds)...)
 	return &Metrics{
 		active: active, duration: duration, frames: frames, bytes: bytes, dropped: dropped, withheld: withheld,
 		meter: meter, queuePeak: queuePeak,

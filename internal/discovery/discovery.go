@@ -245,6 +245,9 @@ type Source func() (driver.Conn, string)
 // schemas from system.columns over the connection and database source
 // yields.
 func NewSchemaRegistry(source Source, id tenant.ID, refreshInterval func(tenant.ID) time.Duration) *SchemaRegistry {
+	// It carries the tenant, so it reads 0 only where that label is dropped
+	// (#905).
+	observability.ZeroCounter(refreshFailures, observability.CarriesTenant)
 	return &SchemaRegistry{
 		source:          source,
 		tenant:          id,

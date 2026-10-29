@@ -75,6 +75,22 @@ func newWriteMetrics(m metric.Meter) (writeMetrics, error) {
 	return writeMetrics{insertSeconds, batchRows, isolations, rows}, errors.Join(err1, err2, err3, err4)
 }
 
+// zeroWorkerCounters exports the worker's counters at 0 for every closed
+// label set, so the first poison row, retry or isolation is an increase a
+// rate() or increase() alert sees (#905). They carry table and tenant, so
+// observability.ZeroCounter does this only where both labels are dropped.
+func zeroWorkerCounters() {
+	const carries = observability.CarriesTable | observability.CarriesTenant
+	observability.ZeroCounter(workerMetrics.isolations, carries)
+	observability.ZeroCounter(workerMetrics.rows, carries, observability.LabelSets(
+		observability.Values("outcome", rowsInserted, rowsDeadLettered, rowsLeftUnacked))...)
+	observability.ZeroCounter(poisonCounter, carries, observability.LabelSets(
+		observability.Values("reason", "malformed", "unknown_format", "unpairable"),
+		observability.Values("disposition", "parked", "dropped"))...)
+	observability.ZeroCounter(retryCounter, carries, observability.LabelSets(
+		observability.Values("reason", "backoff", chconn.Unavailable.String(), chconn.Denied.String(), chconn.Unknown.String()))...)
+}
+
 // insert sends one INSERT and records it: its duration and result, and for a
 // bulk INSERT its row count. A tenant with no ClickHouse connection makes no
 // request, so it records nothing.

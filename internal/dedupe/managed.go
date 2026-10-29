@@ -53,6 +53,9 @@ type Managed struct {
 // NewManaged returns a closed Managed store over open. Nothing is opened
 // until Apply(true).
 func NewManaged(open func() (Deduplicator, error)) *Managed {
+	// It carries table and tenant, so it reads 0 only where both are dropped
+	// (#905).
+	observability.ZeroCounter(hashedIDCounter, observability.CarriesTable|observability.CarriesTenant)
 	return &Managed{open: open}
 }
 

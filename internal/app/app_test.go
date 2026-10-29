@@ -2440,3 +2440,26 @@ func TestClose_StopsTheDiscoveryLoops(t *testing.T) {
 
 // eventKey is the one dedupe key the tenant-lifecycle tests mark.
 var eventKey = dedupe.Key{Table: "events", ID: "e1"}
+
+// TestNew_ZeroPublishesClosedCounters boots with both labels aggregated and
+// checks that the SSE counters New builds are exported at 0 before any
+// stream opened, so an increase() alert sees the first drop (#905). Only
+// instruments New builds can be checked here: a package-level counter binds
+// to the first meter provider of the test binary, which an earlier test owns.
+func TestNew_ZeroPublishesClosedCounters(t *testing.T) {
+	guardGlobals(t)
+	cfg := testConfig(t, writeSettings(t, nil))
+	cfg.Prometheus = config.Prometheus{Enabled: true, Path: "/metrics"}
+	a := newApp(t, cfg, Options{})
+
+	body := get(t, a.Handler(), "/metrics").Body.String()
+	for _, series := range []string{
+		`wavehouse_sse_frames_sent_total\{[^}]*kind="keepalive"[^}]*\} 0`,
+		`wavehouse_sse_bytes_sent_total\{[^}]*kind="event"[^}]*\} 0`,
+		`wavehouse_sse_dropped_frames_total\{[^}]*kind="event"[^}]*reason="buffer_full"[^}]*\} 0`,
+	} {
+		assert.Regexp(t, `(?m)^`+series+`$`, body)
+	}
+	assert.NotContains(t, body, `tenant="`)
+	assert.NotContains(t, body, `table="`)
+}
