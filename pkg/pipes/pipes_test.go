@@ -434,6 +434,20 @@ func TestBindParams_ValueCannotEndComment(t *testing.T) {
 	assert.Equal(t, `'\\\x2A/'`, quoteLiteral(`\*/`))
 }
 
+// TestBindParams_ValueCannotCloseHeredoc: a `$tag$` the template opens with
+// no closer is a bareword, to ClickHouse and to CheckTemplate alike, so a
+// value carrying the closer would end the heredoc at its own quote and run
+// the rest of the value as SQL. Every `$` in a value is escaped instead.
+func TestBindParams_ValueCannotCloseHeredoc(t *testing.T) {
+	t.Parallel()
+	q := &NamedQuery{SQL: "SELECT $t$ AS label FROM t WHERE a IN {{ jwt.ids }} AND b = {{b}}"}
+	require.NoError(t, q.CheckTemplate())
+	sql, _, err := BindParams(q, map[string]any{"b": "$t$, x FROM t -- "}, map[string]any{"ids": []any{"1"}})
+	require.NoError(t, err)
+	assert.Equal(t, `SELECT $t$ AS label FROM t WHERE a IN ('1') AND b = '\x24t\x24, x FROM t -- '`, sql)
+	assert.Equal(t, `'\x24'`, quoteLiteral("$"))
+}
+
 // TestBindParams_NegativeNumberCannotStartComment: a negative bare number
 // renders with a leading space, so bound after a `-` in the template it is
 // arithmetic, never the `--` that would comment out the rest of the line and

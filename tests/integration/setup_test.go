@@ -233,9 +233,10 @@ func setup() (int, func()) {
 // requests exercise functionality as a privileged caller and can hit
 // admin-gated endpoints without minting JWTs; one that does mint one
 // (testutil.MakeJWT) is verified, which TestPipe_ClaimBindsOnNumericColumn
-// uses with the member role and the claim-scoped pipe written here. The pipe
-// is here, not written by the test, because the flat directory is shared and
-// watched: one test rewriting it would reload every test's settings mid-run.
+// and TestPipe_ValueCannotCloseHeredoc use with the member role and the
+// claim-scoped pipes written here. The pipes are here, not written by the
+// tests, because the flat directory is shared and watched: one test
+// rewriting it would reload every test's settings mid-run.
 // Auth enforcement is otherwise covered by the internal/auth unit tests and
 // the e2e SDK suite. The stream budget is shrunk to 1 GiB like the e2e
 // fixture so the scratch directory stays small.
@@ -245,7 +246,10 @@ func writeTestSettings(ch *chInstance) (string, error) {
 		return "", err
 	}
 	files[settings.FileRoles] = []byte(`{"roles": ["admin", "member"]}`)
-	files[settings.FilePipes] = []byte(`{"pipes": [{"name": "tenant_totals", "sql": "SELECT tenant_id, sum(amount) AS total FROM ` + pipeClaimsTable + ` WHERE tenant_id IN {{ jwt.app_metadata.tenant_ids }} GROUP BY tenant_id ORDER BY tenant_id", "allowed_roles": ["member"]}]}`)
+	files[settings.FilePipes] = []byte(`{"pipes": [` +
+		`{"name": "tenant_totals", "sql": "SELECT tenant_id, sum(amount) AS total FROM ` + pipeClaimsTable + ` WHERE tenant_id IN {{ jwt.app_metadata.tenant_ids }} GROUP BY tenant_id ORDER BY tenant_id", "allowed_roles": ["member"]}, ` +
+		`{"name": "tenant_labels", "sql": "SELECT tenant_id, $t$ AS label, region FROM ` + pipeHeredocTable + ` WHERE tenant_id IN {{ jwt.app_metadata.tenant_ids }} AND region = {{region}} ORDER BY tenant_id", "allowed_roles": ["member"]}` +
+		`]}`)
 	dir := mustTempDir()
 	if err := writeSettingsFiles(dir, files); err != nil {
 		return "", err

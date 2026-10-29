@@ -25,7 +25,7 @@ func TestIsMutation_ClickHouseWhitespace(t *testing.T) {
 		assert.True(t, IsMutation("WITH 1 AS x INSERT"+ws+"INTO t SELECT x"), "U+%04X between a WITH's INSERT and INTO", r)
 	}
 	// Not whitespace to ClickHouse (it rejects the statement), so not skipped.
-	assert.False(t, IsMutation(" INSERT INTO t VALUES (1)"))
+	assert.False(t, IsMutation("\u1680INSERT INTO t VALUES (1)"))
 }
 
 // TestOpaque pins the byte ranges ClickHouse reads as text: every comment

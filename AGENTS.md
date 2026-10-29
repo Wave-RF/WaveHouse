@@ -454,7 +454,7 @@ internal/settings/      → Settings directory runtime (adopted snapshot + reloa
 internal/stream/        → SSE fan-out (event Hub: project once per role, Subscriber outbound queue, Bucket fan-out, keepalive Heartbeater wheel)
 internal/testutil/      → Shared test helpers (mocks, JWT + schema helpers; logtest/ captures or silences the default logger; cachetest/ is the conformance suite every cache.Cache backend runs; mutationtest/ holds the shared write-classifier cases; storedir/ is the embedded broker's store directory in tests, removed once late consumer-state writes land)
 pkg/                    → Public packages: importable from outside the module at a release tag, no internal/ or runtime dependency
-pkg/chsql/              → Shared ClickHouse SQL helpers (identifier quoting + bind-safety)
+pkg/chsql/              → Shared ClickHouse SQL helpers (identifier quoting, bind-safety, SQL text scanning, the write classifier)
 pkg/pipes/              → Named query pipes (types, parameter and token-claim binding, template checks, Source)
 pkg/policy/             → Access control policies (types, evaluation, claim resolution, Source)
 pkg/settings/           → Settings model (document types, Finding, Validate/ValidateDir/ValidateFiles, embedded seed)

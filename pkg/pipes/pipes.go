@@ -354,17 +354,21 @@ func formatParamValue(v any) (string, error) {
 
 // quoteLiteral renders s as a single-quoted SQL string literal: `'` and `\`
 // doubled, a newline or carriage return written as ClickHouse's `\n` or `\r`
-// escape, and every `*` as its `\x2A` hex escape — each the same value — so s
-// can neither close the literal nor end a `--` comment a placeholder sits in,
-// nor close or open (ClickHouse nests them) a `/* */` comment: no `*` is
-// left for either sequence.
+// escape, and every `*` or `$` as its `\x2A` or `\x24` hex escape — each the
+// same value — so s can neither close the literal nor end a `--` comment a
+// placeholder sits in, nor close or open (ClickHouse nests them) a `/* */`
+// comment, nor close a `$tag$` heredoc the template opened: no `*` or `$` is
+// left for any of those sequences. A `$tag$` with no closer is a bareword, to
+// ClickHouse and to CheckTemplate alike, so the closer must never come from
+// a value: it would end the heredoc at the value's own quote and run the rest
+// of the value as SQL.
 func quoteLiteral(s string) string {
 	return "'" + literalEscaper.Replace(s) + "'"
 }
 
 // literalEscaper is quoteLiteral's one-pass escaping, so the backslash of an
-// escaped newline or star is never doubled in turn.
-var literalEscaper = strings.NewReplacer(`\`, `\\`, `'`, `''`, "\n", `\n`, "\r", `\r`, `*`, `\x2A`)
+// escaped newline, star or dollar is never doubled in turn.
+var literalEscaper = strings.NewReplacer(`\`, `\\`, `'`, `''`, "\n", `\n`, "\r", `\r`, `*`, `\x2A`, `$`, `\x24`)
 
 // bareNumber renders a numeric literal for inline substitution: a negative
 // one with a leading space, so that bound right after a `-` in the template

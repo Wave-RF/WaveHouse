@@ -1,9 +1,9 @@
-// Package mutationtest holds the statements api.IsMutation is tested on,
+// Package mutationtest holds the statements chsql.IsMutation is tested on,
 // shared by its unit test and by the integration test that checks each one
 // against ClickHouse's own parser. Add a case here, not to either test.
 package mutationtest
 
-// Case is a statement and how api.IsMutation classifies it.
+// Case is a statement and how chsql.IsMutation classifies it.
 type Case struct {
 	Name string
 	SQL  string
@@ -15,7 +15,7 @@ type Case struct {
 	Unparsed bool
 }
 
-// Cases is every statement api.IsMutation is tested on.
+// Cases is every statement chsql.IsMutation is tested on.
 var Cases = []Case{
 	{"select", "SELECT 1", false, false},
 	{"select lower", "select 1", false, false},
