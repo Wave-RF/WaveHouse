@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"go.opentelemetry.io/otel"
 
 	"github.com/Wave-RF/WaveHouse/internal/api"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
@@ -1053,7 +1054,22 @@ func (a *App) healthHandler() *api.HealthHandler {
 	}
 	h := api.NewHealthHandler(append(checks, a.readiness...)...)
 	h.Boot = a.bootState
+	a.wireReadinessMetrics(h)
 	return h
+}
+
+// wireReadinessMetrics exports what h's readiness checks last found (#901),
+// so a replica that left rotation says afterwards which dependency failed.
+func (a *App) wireReadinessMetrics(h *api.HealthHandler) {
+	if !a.cfg.OTel.Enabled && !a.cfg.Prometheus.Enabled {
+		return
+	}
+	reg, err := h.RegisterReadinessMetrics(otel.Meter("wavehouse-api"))
+	if err != nil {
+		slog.Error("failed to register readiness metrics", "error", err)
+		return
+	}
+	a.add(component{name: "readiness metrics", close: withoutContext(reg.Unregister)})
 }
 
 // inlineMetrics is the metrics endpoint to mount on the main router: with
