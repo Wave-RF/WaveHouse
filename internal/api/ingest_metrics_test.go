@@ -79,37 +79,40 @@ func TestIngestRecords_EveryResult(t *testing.T) {
 		after   int // publishes that succeed before pubErr
 		req     func(*testing.T) *http.Request
 		want    map[string]int64
+		// cancelMidPublish cancels the request's context in the failing
+		// publish, as a client that goes away mid-batch does.
+		cancelMidPublish bool
 	}{
 		{"queued", plain, nil, 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a"})
-		}, map[string]int64{resultQueued: 1}},
+		}, map[string]int64{resultQueued: 1}, false},
 		{"unparsable single", plain, nil, 0, func(t *testing.T) *http.Request {
 			return rawIngestRequest(t, "clicks", "application/json", `{"page":`)
-		}, map[string]int64{resultInvalidBody: 1}},
+		}, map[string]int64{resultInvalidBody: 1}, false},
 		{"schema", plain, nil, 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a", "nope": 1})
-		}, map[string]int64{resultSchema: 1}},
+		}, map[string]int64{resultSchema: 1}, false},
 		{"forbidden column", writer, nil, 0, func(t *testing.T) *http.Request {
 			return asWriter(ingestRequest(t, "clicks", map[string]any{"page": "/a", "button": "b"}))
-		}, map[string]int64{resultForbidden: 1}},
+		}, map[string]int64{resultForbidden: 1}, false},
 		{"missing id", deduped(testutil.NewMockDeduplicator(), true), nil, 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a"})
-		}, map[string]int64{resultMissingID: 1}},
+		}, map[string]int64{resultMissingID: 1}, false},
 		{"in flight", deduped(held, false), nil, 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a", "event_id": "e1"})
-		}, map[string]int64{resultInFlight: 1}},
+		}, map[string]int64{resultInFlight: 1}, false},
 		{"dedupe unavailable", deduped(down, false), nil, 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a", "event_id": "e2"})
-		}, map[string]int64{resultDedupeUnavailable: 1}},
+		}, map[string]int64{resultDedupeUnavailable: 1}, false},
 		{"queue full", plain, fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull), 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a"})
-		}, map[string]int64{resultQueueFull: 1}},
+		}, map[string]int64{resultQueueFull: 1}, false},
 		{"queue unavailable", plain, fmt.Errorf("%w: no answer", mq.ErrUnavailable), 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a"})
-		}, map[string]int64{resultQueueUnavailable: 1}},
+		}, map[string]int64{resultQueueUnavailable: 1}, false},
 		{"publish failed", plain, errors.New("nats: bad subject"), 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a"})
-		}, map[string]int64{resultPublishFailed: 1}},
+		}, map[string]int64{resultPublishFailed: 1}, false},
 		{"mixed batch", deduped(testutil.NewMockDeduplicator(), false), nil, 0, func(t *testing.T) *http.Request {
 			return ndjsonRequest(t, "clicks",
 				jsonLine(t, map[string]any{"page": "/a", "event_id": "b1"}),
@@ -118,42 +121,57 @@ func TestIngestRecords_EveryResult(t *testing.T) {
 				"{ not json",
 				jsonLine(t, map[string]any{"page": "/b"}),
 			)
-		}, map[string]int64{resultQueued: 2, resultDuplicate: 1, resultSchema: 1, resultInvalidBody: 1}},
+		}, map[string]int64{resultQueued: 2, resultDuplicate: 1, resultSchema: 1, resultInvalidBody: 1}, false},
 		{"batch cut short by a full queue", plain, fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull), 1, func(t *testing.T) *http.Request {
 			return ndjsonRequest(t, "clicks",
 				jsonLine(t, map[string]any{"page": "/a"}),
 				jsonLine(t, map[string]any{"page": "/b"}),
 				jsonLine(t, map[string]any{"page": "/c"}),
 			)
-		}, map[string]int64{resultQueued: 1, resultQueueFull: 2}},
+		}, map[string]int64{resultQueued: 1, resultQueueFull: 2}, false},
 		{"array that breaks off", plain, nil, 0, func(t *testing.T) *http.Request {
 			return rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"}, {bad]`)
-		}, map[string]int64{resultInvalidBody: 2}},
+		}, map[string]int64{resultInvalidBody: 2}, false},
 		{"array whose first element breaks it", plain, nil, 0, func(t *testing.T) *http.Request {
 			return rawIngestRequest(t, "clicks", "application/json", `[{bad]`)
-		}, map[string]int64{resultInvalidBody: 1}},
+		}, map[string]int64{resultInvalidBody: 1}, false},
 		{"array cut off before its end", plain, nil, 0, func(t *testing.T) *http.Request {
 			return rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"}`)
-		}, map[string]int64{resultInvalidBody: 1}},
+		}, map[string]int64{resultInvalidBody: 1}, false},
 		{"client gone before the publish failed", plain, errors.New("nats: connection closed"), 0, func(t *testing.T) *http.Request {
 			c, cancel := context.WithCancel(context.Background())
 			cancel()
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a"}).WithContext(c)
-		}, map[string]int64{resultRecordsCanceled: 1}},
+		}, map[string]int64{resultRecordsCanceled: 1}, false},
 		{"deadline passed before the publish failed", plain, errors.New("nats: timeout"), 0, func(t *testing.T) *http.Request {
 			c, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 			t.Cleanup(cancel)
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a"}).WithContext(c)
-		}, map[string]int64{resultPublishFailed: 1}},
+		}, map[string]int64{resultPublishFailed: 1}, false},
 		{"unknown table counts nothing", plain, nil, 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "nope", map[string]any{"page": "/a"})
-		}, map[string]int64{}},
+		}, map[string]int64{}, false},
+		{"client gone mid-batch", plain, errors.New("nats: context canceled"), 1, func(t *testing.T) *http.Request {
+			return ndjsonRequest(t, "clicks",
+				jsonLine(t, map[string]any{"page": "/a"}),
+				jsonLine(t, map[string]any{"page": "/a", "nope": 1}),
+				jsonLine(t, map[string]any{"page": "/b"}),
+				jsonLine(t, map[string]any{"page": "/c"}),
+			)
+		}, map[string]int64{resultQueued: 1, resultSchema: 1, resultRecordsCanceled: 2}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			before := totals()
 			pub := &testutil.MockPublisher{Err: tt.pubErr, ErrAfter: tt.after}
-			tt.handler(t, pub).Handle(httptest.NewRecorder(), withTenant(tt.req(t)))
+			req := tt.req(t)
+			if tt.cancelMidPublish {
+				ctx, cancel := context.WithCancel(req.Context())
+				t.Cleanup(cancel)
+				pub.BeforeErr = cancel
+				req = req.WithContext(ctx)
+			}
+			tt.handler(t, pub).Handle(httptest.NewRecorder(), withTenant(req))
 			added := map[string]int64{}
 			for result, n := range totals() {
 				if d := n - before[result]; d != 0 {

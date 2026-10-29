@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,7 +73,7 @@ func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 		k          int
 		err        error
 		status     int
-		clientGone bool // the request context canceled before the failing publish
+		clientGone bool // the request context canceled during the failing publish
 	}{
 		{"refused first record", 1, refused, http.StatusServiceUnavailable, false},
 		{"refused mid first window", 100, refused, http.StatusServiceUnavailable, false},
@@ -93,8 +95,10 @@ func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 
 			req := ndjsonRequest(t, "clicks", lines...)
 			if tt.clientGone {
+				// Live for the k-1 publishes that land, canceled in the k-th.
 				ctx, cancel := context.WithCancel(req.Context())
-				cancel()
+				t.Cleanup(cancel)
+				pub.BeforeErr = cancel
 				req = req.WithContext(ctx)
 			}
 			w := httptest.NewRecorder()
@@ -138,6 +142,34 @@ func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 			assert.Len(t, pub.Published(), n, "every record exactly once")
 		})
 	}
+}
+
+// A client that goes away while the second window's reserve is in flight
+// gets the 499, not the store's 500: the first window stays published and
+// committed, and the second is never published (#947).
+// Not parallel: it captures the default logger.
+func TestIngest_Windows_ReserveClientGoneMidBatch(t *testing.T) {
+	const n = ingestWindow + 44
+	buf := logtest.Capture(t, slog.LevelDebug)
+	pub := &testutil.MockPublisher{}
+	dedup := testutil.NewMockDeduplicator()
+	dedup.Err = errors.New("pebble: context canceled")
+	dedup.ErrAfter = 1
+	h := dedupHandler(t, pub, dedup, false)
+
+	req := ndjsonRequest(t, "clicks", eventLines(t, n)...)
+	ctx, cancel := context.WithCancel(req.Context())
+	t.Cleanup(cancel)
+	dedup.BeforeErr = cancel
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(req.WithContext(ctx)))
+
+	require.Equal(t, statusClientClosedRequest, w.Code)
+	assert.Contains(t, buf.String(), `"level":"DEBUG","msg":"dedupe reserve failed: client closed the request"`)
+	assert.NotContains(t, buf.String(), `"level":"ERROR"`)
+	assert.Len(t, pub.Published(), ingestWindow)
+	assert.True(t, dedup.Committed(clickKey(ingestWindow)), "the first window keeps its ids")
+	assert.False(t, dedup.Pending(clickKey(ingestWindow+1)), "the second window was never reserved")
 }
 
 // A dedupe store that cannot answer now fails the request with 503 and a
