@@ -163,13 +163,13 @@ func (r *readinessResults) record(ctx context.Context, name string, started time
 	}
 }
 
-// run runs c to completion even if the prober hangs up, bounded by
+// run runs c to completion even if the probe client disconnects, bounded by
 // CheckTimeout. Under the request's context, a ClickHouse that stops
 // answering without refusing the connection would be cut off by the probe's
 // own timeout (kubelet's is 1s by default) as context.Canceled: recorded,
 // that reads as a failure for every client that merely went away; skipped, a
 // hung dependency never reads 0. Its own deadline makes a hang a recorded
-// failure and a hangup irrelevant (#901).
+// failure and a disconnect irrelevant (#901).
 func (h *HealthHandler) run(ctx context.Context, c Check) error {
 	timeout := h.CheckTimeout
 	if timeout <= 0 {

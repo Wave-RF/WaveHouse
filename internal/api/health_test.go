@@ -409,7 +409,7 @@ func TestHealth_Readiness_DropsOlderOutcome(t *testing.T) {
 }
 
 // TestHealth_Readiness_CheckOutlivesProber: a check runs to completion even
-// when the prober has hung up, so a dependency that is fine is recorded as
+// when the probe client has disconnected, so a dependency that is fine is recorded as
 // passing and logs nothing, not as a failure (#901).
 func TestHealth_Readiness_CheckOutlivesProber(t *testing.T) {
 	buf := logtest.Capture(t, slog.LevelInfo)
