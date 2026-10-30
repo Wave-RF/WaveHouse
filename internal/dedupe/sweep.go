@@ -50,6 +50,9 @@ type sweepResult struct {
 // startSweep runs the sweep over db until the returned stop is called; stop
 // waits for a chunk in progress to finish. Callers hold e.mu.
 func (e *Embedded) startSweep(db *pebble.DB) (stop func()) {
+	// Both reasons read 0 from the first sweep on (#905).
+	observability.ZeroCounter(sweptKeysCounter, 0, observability.LabelSets(
+		observability.Values(sweptAttribute, sweptExpired, sweptVersion0))...)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {

@@ -215,6 +215,7 @@ func (l *natsLeases) TryAcquire(ctx context.Context, name string) (coord.Term, e
 	}
 	l.held[name] = t
 	l.mu.Unlock()
+	observability.ZeroCounter(l.renewalFailures, 0, attribute.NewSet(leaseAttr(name)))
 	go func() {
 		defer observability.Crash("mq_lease", slog.String("lease", name))
 		t.renew(sent)

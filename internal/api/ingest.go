@@ -79,7 +79,23 @@ type IngestHandler struct {
 }
 
 func NewIngestHandler(registry RegistrySource, pub mq.Publisher) *IngestHandler {
+	zeroIngestCounters()
 	return &IngestHandler{Registry: registry, Publisher: pub}
+}
+
+// zeroIngestCounters exports the handler's counters at 0 for every closed
+// label set, so the first refused or failed record is an increase a rate()
+// or increase() alert sees (#905). They carry table and tenant, so
+// observability.ZeroCounter does this only where both labels are dropped.
+func zeroIngestCounters() {
+	const carries = observability.CarriesTable | observability.CarriesTenant
+	observability.ZeroCounter(ingestRecords, carries, observability.LabelSets(observability.Values("result",
+		resultQueued, resultDuplicate, resultInFlight, resultInvalidBody, resultSchema, resultForbidden,
+		resultMissingID, resultDedupeUnavailable, resultQueueFull, resultQueueUnavailable,
+		resultPublishFailed, resultRecordsCanceled))...)
+	observability.ZeroCounter(dedupeMissingIDCounter, carries)
+	observability.ZeroCounter(dedupeCommitFailedCounter, carries)
+	observability.ZeroCounter(dedupeDisabledCounter, carries)
 }
 
 var dedupeMissingIDCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
