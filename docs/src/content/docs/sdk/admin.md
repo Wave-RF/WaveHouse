@@ -39,7 +39,7 @@ Trigger a reload of the server's [settings directory](/settings-directory) — `
 ```ts
 // Re-validate and adopt the settings directory
 const { data, error } = await wh.settings.reload();
-// data: { adopted: true, findings: [...] } — warnings are included on success
+// data: { adopted: true, findings: [...] } — warnings and `info` findings (such as the claims a pipe binds) are included on success
 // error: a 422 when the directory was rejected; error.details carries
 //        { adopted: false, findings } and the previous settings stay in effect
 ```

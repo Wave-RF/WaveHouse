@@ -33,7 +33,7 @@ Prefer the header wherever you can. The TypeScript SDK streams over `fetch` and 
 
 **Public (unauthenticated) access is driven by the policy.** Define a usable `default_role` and no-token requests are evaluated as that role (see [Roles & Access Control](#roles--access-control)); remove it and roleless requests are denied. Setting `default_role` equal to the `admin_role` is allowed — it makes every unauthenticated request admin (including `/v1/ops/*`), handy for local/dev — but it is logged loudly on every node that loads such a policy and must not be used in production. `/v1/ops/*` (raw SQL, pipe inspection, settings reload, schema, DLQ) is admin-only, and a pipe with **no `allowed_roles` authorizes nobody but the admin role** — but a pipe *can* be reached by the public when its `allowed_roles` lists the role the `default_role` resolves to (pipe access is plain allowlist membership, the same as any other role).
 
-**Operator key (non-JWT, break-glass).** A separate, role-free credential — `auth.operator_key` — authorizes a caller as a **full-access platform operator**: the entire data plane *and* the `/v1/ops/*` surface, without a JWT and independently of the token verifier. Present it in the standard `Authorization` header with the `Operator` scheme (forwarded verbatim by proxies, no collision with Bearer JWTs), or via the `X-Operator-Key` alias:
+**Operator key (non-JWT, break-glass).** A separate, role-free credential — `auth.operator_key` — authorizes a caller as a **full-access platform operator**: the entire data plane *and* the `/v1/ops/*` surface, without a JWT and independently of the token verifier. It carries no token claims, so a pipe whose SQL binds a `{{ jwt.<path> }}` claim answers it `[]` (a write pipe, `403`) — see [Binding token claims](/pipes#binding-token-claims). Present it in the standard `Authorization` header with the `Operator` scheme (forwarded verbatim by proxies, no collision with Bearer JWTs), or via the `X-Operator-Key` alias:
 
 ```text
 Authorization: Operator <operator-key>
@@ -618,7 +618,7 @@ The inbound request body is capped at 1 MiB; a body over the cap is rejected wit
 
 ### `GET/POST /v1/pipes/{name}` — Execute Named Pipe
 
-Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. A read's results are cached in the query cache ([`cache.backend`](/configuration#backends): in-process, or a Redis shared by every instance) with singleflight coalescing — same machinery as the structured query endpoint, keyed by [tenant](/deployment#multi-tenant-deployments) like it, and again, unlike `/v1/ops/query`; a [pipe that writes](/pipes#pipes-that-write) is neither cached nor coalesced (see Response).
+Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. A `{{ jwt.<path> }}` reference in the pipe's SQL binds a claim of the caller's verified token, never a request value ([Binding token claims](/pipes#binding-token-claims)). A read's results are cached in the query cache ([`cache.backend`](/configuration#backends): in-process, or a Redis shared by every instance) with singleflight coalescing — same machinery as the structured query endpoint, keyed by [tenant](/deployment#multi-tenant-deployments) like it, and again, unlike `/v1/ops/query`; a [pipe that writes](/pipes#pipes-that-write) is neither cached nor coalesced (see Response).
 
 **Query Parameters:** Any key matching a pipe parameter name.
 
@@ -633,7 +633,7 @@ Executes a pre-defined named query (pipe) with parameter binding. Parameters can
 
 **Response:**
 
-JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whether the rows came from the query cache. A pipe whose SQL is a write (`INSERT`, `ALTER`, `WITH … INSERT`, …) bypasses the cache and singleflight: it executes on every call, identical calls in flight are not coalesced, and the response is `[]` with `X-Cache: BYPASS` and `Cache-Control: no-store` (so an HTTP cache in front of a `GET` cannot answer a repeat) — see [Pipes that write](/pipes#pipes-that-write).
+JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whether the rows came from the query cache. A read pipe that reads a claim the token cannot bind answers `200` with `[]` and no `X-Cache` header, without running ([Binding token claims](/pipes#binding-token-claims)). A pipe whose SQL is a write (`INSERT`, `ALTER`, `WITH … INSERT`, …) bypasses the cache and singleflight: it executes on every call, identical calls in flight are not coalesced, and the response is `[]` with `X-Cache: BYPASS` and `Cache-Control: no-store` (so an HTTP cache in front of a `GET` cannot answer a repeat) — see [Pipes that write](/pipes#pipes-that-write).
 
 The POST parameter body is capped at 1 MiB; a body over the cap is rejected with `413` (the same 1 MiB parameter/AST-body cap as [`POST /v1/query`](#post-v1querytabletable--structured-query) — see [reverse proxy → body limits](/reverse-proxy#request-body-size-limits)). A malformed-but-within-cap body is ignored rather than rejected, since parameters may legitimately come from the query string alone.
 
@@ -647,6 +647,8 @@ The POST parameter body is capped at 1 MiB; a body over the cap is rejected with
 | 400 | `{"error":"missing required parameter: x"}` | Required parameter not supplied |
 | 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar value with no SQL literal form — a JSON object, whether supplied directly or nested as an array element. A JSON **array** is valid and renders as an `IN`-style `(…)` list. |
 | 400 | `{"error":"parameter \"x\": array parameter must not be empty"}` | An empty array — it would render as the invalid `IN ()`. |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid or expired token was supplied and the request then failed: its resolved role is not in `allowed_roles`, or the pipe, read or write, reads a `{{ jwt.<path> }}` claim, which such a token cannot bind ([Binding token claims](/pipes#binding-token-claims)) |
+| 403 | `{"error":"forbidden: claim \"x\" cannot be resolved from the token"}` | A [pipe that writes](/pipes#pipes-that-write) reads a claim the caller's token cannot bind — absent, `null`, an object, an empty array, an array with a non-scalar element, or a number with no canonical form — so the write is refused before anything is sent ([Binding token claims](/pipes#binding-token-claims)) |
 | 413 | `{"error":"request body exceeded 1048576 bytes"}` | POST body over the 1 MiB cap |
 | 400 / 403 / 500 / 502 / 503 | `{"error":"clickhouse query: …","code":"clickhouse.…","retryable":…}` | ClickHouse failed the pipe's query — for instance a parameter value it cannot use (`400 clickhouse.rejected`), or ClickHouse down (`503 clickhouse.unavailable`, `Retry-After: 5`); see [ClickHouse errors on the query paths](#clickhouse-errors-on-the-query-paths). A [pipe that writes](/pipes#pipes-that-write) answers `retryable: false` with no `Retry-After`, its message led by `clickhouse exec:` |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
@@ -873,7 +875,7 @@ Returns a specific named pipe definition:
 }
 ```
 
-**`allowed_roles`** restricts execution: the caller's role (a tokenless or roleless request is first resolved to the policy `default_role`) must appear in the list. The admin role (`admin_role`) always passes. Matching is exact — there is no `"*"` wildcard — and empty-string entries are ignored. An empty or omitted list authorizes **nobody but the admin role**, and a request whose role is absent or unlisted is denied (fails closed).
+**`allowed_roles`** restricts execution: the caller's role (a tokenless or roleless request is first resolved to the policy `default_role`) must appear in the list. The admin role (`admin_role`) always passes. Matching is exact — there is no `"*"` wildcard — and empty-string entries are ignored. An empty or omitted list authorizes **nobody but the admin role**, and a request whose role is absent or unlisted is denied (fails closed). A `{{ jwt.<path> }}` reference in `sql` binds a claim of the caller's verified token ([Binding token claims](/pipes#binding-token-claims)).
 
 #### `POST /v1/ops/settings/reload` — Reload Settings Directory
 
@@ -888,7 +890,7 @@ Re-validates the [settings directory](/settings-directory) — `roles.json`, `po
 }
 ```
 
-`200` when adopted (warnings allowed); `422` when validation rejected the directory — the previous settings stay in effect, and `findings` says why.
+`200` when adopted (warnings allowed); `422` when validation rejected the directory — the previous settings stay in effect, and `findings` says why. A finding's `severity` is `error` (the directory is rejected), `warning` (legal config worth a look), or `info` (something a reviewer of legal config should know, such as the token claims a pipe binds — [Binding token claims](/pipes#binding-token-claims)); only an `error` blocks adoption.
 
 An optional `?tenant=<id>` reloads that tenant's folder of a [nested settings directory](/deployment#the-nested-settings-directory) and nothing else; it is parsed as strictly as on the [pipe reads](#get-v1opspipes--list-named-pipes) (`400`), and an unknown tenant is a `404`. A token sent with no valid operator key while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`) is refused with `503` + `Retry-After: 30`. Over a nested directory a rejected folder is not kept on its previous settings, and a `422` for the whole directory can mean adopted in part — see that section.
 

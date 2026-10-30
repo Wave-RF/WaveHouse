@@ -7,7 +7,7 @@ sidebar:
 
 A **named pipe** is a saved SQL query, registered under a name, that callers run by name with parameters — without ever sending raw SQL. They turn an ad-hoc query into a stable, cached, access-controlled endpoint: you write the SQL once as an operator in the settings directory's [`pipes.json`](/settings-directory#pipesjson), expose it at `GET/POST /v1/pipes/{name}`, and clients supply only the declared parameters.
 
-Pipes are the right tool when a query is reusable and shouldn't live in client code — dashboards, reports, public APIs over curated slices of data. They sit on the **cached read path** (the query cache + singleflight, same as structured queries; a [pipe that writes](#pipes-that-write) bypasses both), and authorize through a simple per-pipe allowlist rather than the full [policy engine](/access-control).
+Pipes are the right tool when a query is reusable and shouldn't live in client code — dashboards, reports, public APIs over curated slices of data. They sit on the **cached read path** (the query cache + singleflight, same as structured queries; a [pipe that writes](#pipes-that-write) bypasses both), and authorize through a simple per-pipe allowlist rather than the full [policy engine](/access-control). A pipe's SQL can scope its rows by the caller's verified token — `{{ jwt.<path> }}` binds a claim where `{{param}}` binds a request value ([Binding token claims](#binding-token-claims)) — so `allowed_roles` says who may run it and the claims say over which rows, the split the table policy makes between roles and row filters.
 
 ## Anatomy of a pipe
 
@@ -16,7 +16,7 @@ A pipe is defined by five fields:
 | Field | Type | Required | Description |
 | ----- | ---- | -------- | ----------- |
 | `name` | string | yes | The pipe's identifier; the last path segment of `/v1/pipes/{name}`. Unique within `pipes.json`. |
-| `sql` | string | yes | A SQL template with `{{param}}` placeholders. Sent verbatim to ClickHouse after binding. |
+| `sql` | string | yes | A SQL template with `{{param}}` placeholders and `{{ jwt.<path> }}` claim references. Sent verbatim to ClickHouse after binding. |
 | `parameters` | object[] | no | Formal parameter declarations (see [Parameters](#parameters)). |
 | `description` | string | no | Human-readable note shown in the admin listing. |
 | `allowed_roles` | string[] | no | Roles permitted to execute the pipe. Empty = admin role only (see [Authorization](#authorizing-a-pipe)). |
@@ -40,7 +40,7 @@ Anyone who can write a pipe can run arbitrary SQL, so pipe definitions live only
 
 ## Parameters
 
-Pipes use `{{...}}` placeholders in the SQL template. There are two complementary ways to describe a parameter, and you can mix them freely.
+Pipes use `{{...}}` placeholders in the SQL template. There are two complementary ways to describe a parameter, and you can mix them freely. A `{{ jwt.<path> }}` reference is not a parameter: it binds a claim of the caller's token, and no request value can stand in for it — see [Binding token claims](#binding-token-claims).
 
 ### Declared parameters
 
@@ -82,14 +82,14 @@ Bound values are **inlined directly into the SQL string** (not sent as positiona
 
 | Supplied value | Rendered as | Note |
 | -------------- | ----------- | ---- |
-| string | `'escaped'` | single-quoted; `'` and `\` are escaped |
-| numeric string (e.g. `"100"`) | `100` | emitted bare, so `?limit=100` from a query string works as a number |
-| number | `42` / `42.5` | whole floats render as integers |
+| string | `'escaped'` | single-quoted; `'` and `\` are escaped, and a newline, a carriage return, `*` or `$` is written as its `\n`, `\r`, `\x2A` or `\x24` escape (the same value) |
+| numeric string (e.g. `"100"`) | `100` | emitted bare, so `?limit=100` from a query string works as a number; a negative one gets a leading space, so `0-{{n}}` with `-5` binds `0- -5`, arithmetic rather than a `--` comment |
+| number | `42` / `42.5` | whole floats render as integers; a negative number gets a leading space, so `0-{{n}}` binds `0- -5` |
 | boolean | `1` / `0` | ClickHouse-style |
 | array | `('a', 'b')` | parenthesized list of escaped elements — for `IN` clauses (see below) |
 | null | `NULL` | |
 
-Every leaf value is escaped the same way — including each element of an array — so a value bound to a bare placeholder can't break out of its literal and inject SQL, and the SQL *structure* comes only from the operator-authored template. A quoted placeholder gives that up: the value's own quotes close the template's, so in `WHERE id = '{{id}}'` the body `{"id": " OR 1=1 OR id = "}` binds to `WHERE id = '' OR 1=1 OR id = ''`, which matches every row. Values with no safe scalar form are **rejected** with a `400`: a JSON object, and an empty array (which would render as the invalid `IN ()`).
+Every leaf value is escaped the same way — including each element of an array — so a value bound to a bare placeholder can't break out of its literal and inject SQL, and the SQL *structure* comes only from the operator-authored template. A quoted placeholder would give that up: the value's own quotes close the template's, so `WHERE id = '{{id}}'` with the body `{"id": " OR 1=1 OR id = "}` would bind to `WHERE id = '' OR 1=1 OR id = ''`, which matches every row. Validation therefore refuses a placeholder inside quotes — a string literal, a quoted identifier or a heredoc. It refuses one inside a comment too: ClickHouse reads a comment as text, but the binder still binds it, so a parameter there must still be supplied or defaulted and an unresolvable claim there still fails the pipe closed, though nothing that runs uses the value ([Binding token claims](#binding-token-claims)). A newline, a carriage return, `*` or `$` in a value is escaped as well, so a value can neither end a comment, open one, nor close a `$tag$` heredoc the template left open: an unclosed one is a bareword, to ClickHouse and to validation alike, so the closer must never come from a value. Values with no safe scalar form are **rejected** with a `400`: a JSON object, and an empty array (which would render as the invalid `IN ()`).
 
 #### Array parameters and `IN` lists
 
@@ -108,6 +108,33 @@ curl -X POST http://localhost:8080/v1/pipes/by_pages \
 
 Array values must come from a **JSON body** (`POST`) — query-string parameters are always scalar strings, so `GET …?pages=a&pages=b` binds only the first occurrence (`a`) as a string, ignoring the rest.
 
+## Binding token claims
+
+A pipe's SQL may reference a claim of the caller's verified token with `{{ jwt.<dot.path> }}` — the template a policy [row filter](/access-control#jwt-claim-templating) uses, resolved as a bare-claim `_in` value is. Where a `{{param}}` takes whatever the request sends, a claim reference binds only what the token carries, so a predicate written over it is a boundary the caller cannot move: a tenant-scoped aggregate can be handed to a tenant's role without a proxy that injects the tenant and without a pipe per tenant. A tenant here is a row-scoping value carried in the token, as in the policy's [row-level security](/access-control#row-level-security), not an [`X-Tenant-ID` tenant](/deployment#multi-tenant-deployments).
+
+```json
+{
+  "name": "daily_totals",
+  "sql": "SELECT toDate(ts) AS day, sum(amount) AS total FROM orders WHERE tenant_id IN {{ jwt.app_metadata.tenant_ids }} AND ts >= {{start}} GROUP BY day ORDER BY day",
+  "parameters": [{ "name": "start", "type": "string", "required": true }],
+  "allowed_roles": ["member"]
+}
+```
+
+A `member` token carrying `app_metadata.tenant_ids: ["acme", "globex"]` runs `… WHERE tenant_id IN ('acme', 'globex') AND ts >= '2026-01-01' …`; the caller supplies only `start`.
+
+**How a claim binds.** The claim resolves as a bare-claim policy `_in` value does ([JWT claim templating](/access-control#jwt-claim-templating)): a scalar binds in canonical form — a numeric claim keeps every digit, and `1.0` binds as `'1'` — and an array claim binds as a set, `('a', 'b')`, wherever the reference sits, so write it after `IN` without its own parentheses, like an [array parameter](#array-parameters-and-in-lists); after `=`, a set of two or more is a tuple ClickHouse refuses (`400 clickhouse.rejected`), not an empty result. A claim always binds as a **quoted** literal, whatever it spells (a request parameter renders a numeric-looking string bare), because that is how a policy filter binds the same claim: ClickHouse reads a quoted constant as the column's type, so `tenant_id = '42'` holds on a `UInt64` column and on a `String` one. A present-but-empty string claim binds as `''`. A reference inside quotes or a comment fails validation, as a parameter placeholder does: a claim some identity providers let the user edit is a value the caller controls.
+
+**Failing closed.** A claim the token cannot bind — absent or `null`, a JSON object (usually a dropped path segment), an empty array, an array with a non-scalar element, or a number with no canonical form — fails the pipe closed, and nothing is sent to ClickHouse: a **read** answers `200` with `[]` and no `X-Cache` header — the empty result a structured query's row read returns under an unresolvable filter, though that query does run with its filter as `1 = 0`, which is why an aggregate with no `GROUP BY` answers one row of zeros there and no row here, since no stand-in value is safe to bind — and a **write** is refused with `403 forbidden: claim "…" cannot be resolved from the token`, as an insert is under an unresolvable `_in` check, since "no rows" means nothing for a write. A present-but-invalid token fails loud instead: `401` with the token problem, so a caller whose expired token fell back to the `default_role` learns why its rows are gone. A request with no token has no claims, so a public pipe (one whose `allowed_roles` lists the role that `default_role` resolves to) answers every anonymous caller `[]` (a write pipe, `403`) — reference a claim only in a pipe whose callers carry a token. The server logs the unresolved claim at `DEBUG` on a read that answers `[]`, and as an authorization denial (`WARN`) on a write's `403` and on any `401`.
+
+**Admin is no exception.** The reference is the pipe author's SQL, not policy, so an admin token binds what it carries, and one without the claim gets the same answer — the [operator key](/access-control#operator-key) carries no claims at all, so a claim-scoped read pipe answers it `[]`, and a write pipe `403`. A see-everything pipe is a separate pipe with no `allowed_roles` (admin-only), not an admin bypass in this one.
+
+**Never from the request.** A request parameter cannot shadow a claim: the two placeholders have different grammars — a parameter name is word characters, a claim reference needs the `jwt.` prefix — and every placeholder is resolved in one pass over the template, so a bound value that spells a placeholder is inert text. The parameter name `jwt` is reserved: declaring it, or writing `{{jwt}}`, fails validation.
+
+**Validation.** A claim path is letters, digits, `_` and `.`. Validation rejects a `{{` that starts like a placeholder (optional spaces, then a letter, digit, `_` or `.`) but is neither a parameter placeholder nor a well-formed claim reference — for example `{{ jwt.tenant-id }}` (flatten hyphenated or namespaced claims at the identity provider), `{{ limit }}` (a space around a parameter's name), or an unterminated `{{`. The binder would send it to ClickHouse as literal text, so it is refused, as a [malformed policy template](/access-control#jwt-claim-templating) is. A `{{` that starts any other way, such as `format()`'s own brace escape or a `'{{'` literal, is left to ClickHouse. A placeholder of either kind inside a comment (`--`, `#` or `//` to the end of the line, `/* */`) or inside quotes (a `'…'` string literal, a double-quoted or backtick-quoted identifier, a `$tag$…$tag$` heredoc) is refused too, with the placeholder named: ClickHouse reads text there, and the binder would still bind. Validation also reports the claims each pipe binds as an `info` finding (for the `daily_totals` pipe above, listed first: `info: pipes.json: pipes[0].sql: binds token claims jwt.app_metadata.tenant_ids`) in `wavehouse validate`, at boot, and on every reload, so a reviewer sees that a pipe is claim-scoped.
+
+Results are cached per bound SQL, so two tokens scoping a pipe differently never share an entry while one token's repeats do ([Executing a pipe](#executing-a-pipe)).
+
 ## Authorizing a pipe
 
 Pipe execution is gated by `allowed_roles` — a plain allowlist, evaluated independently of the table policy:
@@ -118,11 +145,11 @@ Pipe execution is gated by `allowed_roles` — a plain allowlist, evaluated inde
 
 To make a pipe public, list the role that `default_role` resolves to. For example, with `default_role: viewer`, a pipe with `"allowed_roles": ["viewer"]` is reachable with no token at all.
 
-This is the *only* authorization check on the execute path — pipes deliberately sit outside the `/v1/ops/*` gate so non-admin callers can run them. The pipe's SQL is not re-checked against the table policy's column or row rules, so **scope the data in the pipe's SQL itself** rather than assuming policy column masking applies. A pipe's `{{param}}` template parameters interpolate values from the request — or a parameter's configured default when the caller omits one ([resolution order](#how-a-value-is-resolved)) — inlined as escaped SQL literals, never token claims; a parameterized predicate is a convenience for the caller, not an authorization boundary.
+This is the *only* authorization check on the execute path — pipes deliberately sit outside the `/v1/ops/*` gate so non-admin callers can run them. The pipe's SQL is not re-checked against the table policy's column or row rules, so **scope the data in the pipe's SQL itself** rather than assuming policy column masking applies. A pipe's `{{param}}` template parameters interpolate values from the request — or a parameter's configured default when the caller omits one ([resolution order](#how-a-value-is-resolved)) — inlined as escaped SQL literals, so a parameterized predicate is a convenience for the caller, not an authorization boundary; a predicate over a `{{ jwt.<path> }}` claim reference is one, since the caller's verified token alone binds it ([Binding token claims](#binding-token-claims)).
 
 ## Creating and managing pipes
 
-Pipes are defined in the settings directory's `pipes.json` — a `{"pipes": [...]}` list of the definitions above — and the files are the only way to define or change one: edit the file (standalone: on the host; on WaveHouse Cloud the control plane writes it) and the running server re-validates and adopts it on file change, `SIGHUP`, or `POST /v1/ops/settings/reload`, so a create, update, or delete applies without a restart. Validation (`wavehouse validate`, boot, and every reload) rejects an unknown key, a duplicate or empty name, empty SQL, an unknown parameter `type`, and an `allowed_roles` entry not declared in `roles.json`; a rejected reload keeps the previous pipes in effect. See [Settings Directory — `pipes.json`](/settings-directory#pipesjson) for the full rules.
+Pipes are defined in the settings directory's `pipes.json` — a `{"pipes": [...]}` list of the definitions above — and the files are the only way to define or change one: edit the file (standalone: on the host; on WaveHouse Cloud the control plane writes it) and the running server re-validates and adopts it on file change, `SIGHUP`, or `POST /v1/ops/settings/reload`, so a create, update, or delete applies without a restart. Validation (`wavehouse validate`, boot, and every reload) rejects an unknown key, a duplicate or empty name, empty SQL, an unknown parameter `type`, a parameter named `jwt`, a `{{` that starts like a placeholder but is neither a parameter nor a well-formed claim reference, a placeholder inside a comment or inside quotes, and an `allowed_roles` entry not declared in `roles.json`, and reports the token claims each pipe binds; a rejected reload keeps the previous pipes in effect. See [Settings Directory — `pipes.json`](/settings-directory#pipesjson) for the full rules.
 
 ```json
 {
@@ -177,6 +204,9 @@ The response is a JSON array of rows. Results flow through the query cache (in-p
 | 403 | `{"error":"forbidden"}` | Caller's role isn't in `allowed_roles` (and isn't admin) |
 | 400 | `{"error":"missing required parameter: x"}` | A required parameter wasn't supplied |
 | 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar value with no SQL form — a JSON object (directly, or nested in an array). An empty array is likewise rejected (`array parameter must not be empty`). |
+| 403 | `{"error":"forbidden: claim \"x\" cannot be resolved from the token"}` | A [pipe that writes](#pipes-that-write) reads a claim the caller's token cannot bind |
+
+A read pipe that reads a claim the token cannot bind is not an error: it answers `200` with `[]` and no `X-Cache` header, and runs nothing; a present-but-invalid token is a `401` naming the token problem on either kind ([Binding token claims](#binding-token-claims)).
 
 ### Pipes that write
 
@@ -184,7 +214,7 @@ A pipe's SQL may be a write: a statement led by a write verb WaveHouse recognize
 
 A failed write is not retried automatically, because it may have run. It answers with the status and `code` a failed read would ([ClickHouse errors on the query paths](/api#clickhouse-errors-on-the-query-paths)), but always with `retryable: false` and no `Retry-After`, `503 clickhouse.unavailable` included: once the statement is on its way to ClickHouse, WaveHouse cannot tell whether it ran. The [SDK](/sdk/pipes) does not retry such an answer, so check whether the write landed before you send it again. A call refused before anything is sent — the tenant on no ClickHouse pool, `503` with `Retry-After: 30` — cannot have run, and the SDK retries it. The SDK also retries when WaveHouse's own answer never reaches it — a dropped connection, or a `502`/`503`/`504` from a proxy in front of WaveHouse that gave up waiting — so a write can still run twice that way; give a client that runs write pipes [`options.maxRetries`](/sdk#clientconfigdb) `0` if that matters.
 
-`allowed_roles` is a write pipe's only gate: the [policy engine](/access-control)'s insert rules do not apply to it, so any role you list — including a [`default_role`](/access-control#default_role--public-unauthenticated-access) that anonymous callers resolve to — can run the write. The operator fixes the statement and its predicate when authoring the pipe; callers supply only literal values, provided every placeholder is written bare ([how a value becomes SQL](#how-a-value-becomes-sql)).
+`allowed_roles` is a write pipe's only gate: the [policy engine](/access-control)'s insert rules do not apply to it, so any role you list — including a [`default_role`](/access-control#default_role--public-unauthenticated-access) that anonymous callers resolve to — can run the write. The operator fixes the statement and its predicate when authoring the pipe; callers supply only literal values, provided every placeholder is written bare ([how a value becomes SQL](#how-a-value-becomes-sql)). A write pipe that reads a claim the caller's token cannot bind ([Binding token claims](#binding-token-claims)) is refused with `403` before anything is sent.
 
 Two things a write pipe does not do yet: it does not invalidate cached reads of the table it writes — a structured query over that table can serve pre-write rows until its TTL ([#394](https://github.com/Wave-RF/WaveHouse/issues/394)); a read pipe's cached result expires only with its TTL whatever writes the table, ingest included ([#343](https://github.com/Wave-RF/WaveHouse/issues/343)) — and its rows do not reach [`/v1/stream`](/api#get-v1stream--server-sent-events-stream) subscribers, which only the [ingest pipeline](/ingest-pipeline) feeds ([#362](https://github.com/Wave-RF/WaveHouse/issues/362)). For writes that stream subscribers and structured queries should see at once, use [`POST /v1/ingest`](/api#post-v1ingesttabletable--ingest-data).
 

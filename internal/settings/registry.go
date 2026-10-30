@@ -364,15 +364,19 @@ func (r *Registry) adopted(ids []tenant.ID) (unreconciled bool) {
 	return r.stats.endHooks()
 }
 
-// logFindings logs each finding under its trigger and counts them by severity.
+// logFindings logs each finding under its trigger at its severity and counts
+// the errors and warnings; an info is logged and counted as neither.
 func logFindings(trigger string, findings []settings.Finding) (errs, warns int) {
 	for _, f := range findings {
-		if f.Severity == settings.SeverityError {
+		switch f.Severity {
+		case settings.SeverityError:
 			errs++
 			slog.Error("settings finding", "trigger", trigger, "finding", f.String())
-		} else {
+		case settings.SeverityWarning:
 			warns++
 			slog.Warn("settings finding", "trigger", trigger, "finding", f.String())
+		case settings.SeverityInfo:
+			slog.Info("settings finding", "trigger", trigger, "finding", f.String())
 		}
 	}
 	return errs, warns

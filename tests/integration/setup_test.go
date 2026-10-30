@@ -36,6 +36,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/mq/natstest"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/pkg/settings"
 )
 
@@ -227,17 +228,28 @@ func setup() (int, func()) {
 }
 
 // writeTestSettings materializes the embedded seed with the ClickHouse block
-// pointed at the testcontainer and a dev-style policy: default_role is the
-// admin role, so the suite's plain unauthenticated requests exercise
-// functionality as a privileged caller and can hit admin-gated endpoints
-// without minting JWTs. Auth enforcement is covered by the internal/auth
-// unit tests and the e2e SDK suite. The stream budget is shrunk to 1 GiB
-// like the e2e fixture so the scratch directory stays small.
+// pointed at the testcontainer (tenantSettings) and a dev-style policy:
+// default_role is the admin role, so the suite's plain unauthenticated
+// requests exercise functionality as a privileged caller and can hit
+// admin-gated endpoints without minting JWTs; one that does mint one
+// (testutil.MakeJWT) is verified, which TestPipe_ClaimBindsOnNumericColumn
+// and TestPipe_ValueCannotCloseHeredoc use with the member role and the
+// claim-scoped pipes written here. The pipes are here, not written by the
+// tests, because the flat directory is shared and watched: one test
+// rewriting it would reload every test's settings mid-run.
+// Auth enforcement is otherwise covered by the internal/auth unit tests and
+// the e2e SDK suite. The stream budget is shrunk to 1 GiB like the e2e
+// fixture so the scratch directory stays small.
 func writeTestSettings(ch *chInstance) (string, error) {
 	files, err := tenantSettings(ch, testCHDatabase)
 	if err != nil {
 		return "", err
 	}
+	files[settings.FileRoles] = []byte(`{"roles": ["admin", "member"]}`)
+	files[settings.FilePipes] = []byte(`{"pipes": [` +
+		`{"name": "tenant_totals", "sql": "SELECT tenant_id, sum(amount) AS total FROM ` + pipeClaimsTable + ` WHERE tenant_id IN {{ jwt.app_metadata.tenant_ids }} GROUP BY tenant_id ORDER BY tenant_id", "allowed_roles": ["member"]}, ` +
+		`{"name": "tenant_labels", "sql": "SELECT tenant_id, $t$ AS label, region FROM ` + pipeHeredocTable + ` WHERE tenant_id IN {{ jwt.app_metadata.tenant_ids }} AND region = {{region}} ORDER BY tenant_id", "allowed_roles": ["member"]}` +
+		`]}`)
 	dir := mustTempDir()
 	if err := writeSettingsFiles(dir, files); err != nil {
 		return "", err
@@ -246,7 +258,9 @@ func writeTestSettings(ch *chInstance) (string, error) {
 }
 
 // tenantSettings is one tenant's four files: the seed with the ClickHouse
-// block pointed at the testcontainer's database, and the dev-style policy.
+// block pointed at the testcontainer's database, tokens verified with the
+// testutil.MakeJWT secret (a request without one is still the default_role),
+// and the dev-style policy.
 func tenantSettings(ch *chInstance, database string) (map[string][]byte, error) {
 	files, err := settings.Seed()
 	if err != nil {
@@ -263,7 +277,8 @@ func tenantSettings(ch *chInstance, database string) (map[string][]byte, error) 
 			"tls":     map[string]any{"enabled": false, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": false, "server_name": ""},
 			"headers": map[string]any{}, "max_open_conns": 10, "max_idle_conns": 5,
 		},
-		"mq": map[string]any{"max_bytes_gb": 1},
+		"mq":   map[string]any{"max_bytes_gb": 1},
+		"auth": map[string]any{"jwks_url": "", "jwt_secret": testutil.TestJWTSecret, "role_claim": "role"},
 	}
 	for key, val := range patch {
 		if doc[key], err = json.Marshal(val); err != nil {

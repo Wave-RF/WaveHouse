@@ -277,6 +277,12 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"empty pipe sql", FilePipes, `{"pipes": [{"name": "a", "sql": "  "}]}`, "pipe SQL must not be empty"},
 		{"bad param type", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x", "type": "float"}]}]}`, "unknown type"},
 		{"duplicate param", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "x"}, {"name": "x"}]}]}`, "duplicate parameter"},
+		{"reserved jwt parameter", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1", "parameters": [{"name": "jwt"}]}]}`, `pipes[0].parameters[0]: parameter name "jwt" is reserved`},
+		{"reserved jwt placeholder", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT {{jwt}}"}]}`, `pipes[0].sql: placeholder "{{jwt}}" names the reserved parameter "jwt"`},
+		{"malformed claim template", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1 WHERE t = {{ jwt.tenant-id }}"}]}`, `unrecognized placeholder "{{ jwt.tenant-id }}"`},
+		{"spaced parameter placeholder", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1 LIMIT {{ limit }}"}]}`, `unrecognized placeholder "{{ limit }}"`},
+		{"placeholder inside quotes", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1 WHERE id = '{{id}}'"}]}`, `pipes[0].sql: placeholder "{{id}}" inside quotes`},
+		{"placeholder inside a comment", FilePipes, `{"pipes": [{"name": "a", "sql": "SELECT 1 -- {{ jwt.tenant_id }}"}]}`, `pipes[0].sql: placeholder "{{ jwt.tenant_id }}" inside a comment`},
 		{"empty dedupe id_field", FileConfig, `{"dedupe": {"id_field": ""}}`, "dedupe.id_field: must not be empty"},
 		{"whitespace-only dedupe id_field", FileConfig, `{"dedupe": {"id_field": "  "}}`, "dedupe.id_field: must not be empty"},
 		{"padded dedupe id_field", FileConfig, `{"dedupe": {"id_field": " click_id"}}`, "surrounding whitespace"},
@@ -809,4 +815,22 @@ func TestReportLegacyPolicyLayout_RoleNamedAfterAnOperation(t *testing.T) {
 		require.True(t, v.reportLegacyPolicyLayout([]byte(doc)), "%s", name)
 		assert.Contains(t, findingStrings(v.findings), "pre-v2 operation-first layout", "%s", name)
 	}
+}
+
+// TestValidate_PipeClaimsReported (#938): the token claims a pipe binds are an
+// info finding — neither an error nor a warning, so the directory stays valid
+// and HasErrors is false — and a pipe reading none reports nothing.
+func TestValidate_PipeClaimsReported(t *testing.T) {
+	t.Parallel()
+	files := validFiles()
+	files[FilePipes] = `{"pipes": [
+		{"name": "daily_totals", "sql": "SELECT day FROM orders WHERE tenant_id IN {{ jwt.app_metadata.tenant_ids }} AND owner = {{jwt.sub}} AND day >= {{start}}", "parameters": [{"name": "start", "type": "string", "required": true}], "allowed_roles": ["analyst"]},
+		{"name": "plain", "sql": "SELECT 1 LIMIT {{limit:10}}"}
+	]}`
+	doc, findings := validateBoth(t, files)
+	require.NotNil(t, doc, findingStrings(findings))
+	assert.False(t, HasErrors(findings))
+	require.Len(t, findings, 1, findingStrings(findings))
+	assert.Equal(t, Finding{Severity: SeverityInfo, File: FilePipes, Path: "pipes[0].sql", Message: "binds token claims jwt.app_metadata.tenant_ids, jwt.sub"}, findings[0])
+	assert.Equal(t, "info: pipes.json: pipes[0].sql: binds token claims jwt.app_metadata.tenant_ids, jwt.sub", findings[0].String())
 }

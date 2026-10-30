@@ -56,11 +56,14 @@ Exit codes: 0 valid (warnings allowed), 1 invalid, 2 usage.
 	configErrs := false
 	for _, f := range findings {
 		fmt.Println(f)
-		if f.Severity == settings.SeverityError {
+		switch f.Severity {
+		case settings.SeverityError:
 			errs++
 			configErrs = configErrs || path.Base(f.File) == settings.FileConfig
-		} else {
+		case settings.SeverityWarning:
 			warns++
+		case settings.SeverityInfo:
+			// Printed above; counts as neither.
 		}
 	}
 	// The findings say what is wrong; the fix is this binary's to suggest.

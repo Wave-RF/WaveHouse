@@ -6,7 +6,6 @@ package policy
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/Wave-RF/WaveHouse/pkg/chsql"
@@ -142,15 +141,6 @@ type ResolvedInsert struct {
 	// enforces and auto-injects from. A []any value marks an _in set.
 	CheckClauses map[string]any
 }
-
-// claimTemplateRe matches {{ jwt.claim.path }} templates.
-var claimTemplateRe = regexp.MustCompile(`\{\{\s*jwt\.([a-zA-Z0-9_.]+)\s*\}\}`)
-
-// wholeClaimRe matches a value that is EXACTLY one {{ jwt.path }} reference with
-// no surrounding text (anchored, unlike claimTemplateRe). It lets the _in
-// resolver pull an array-valued claim through whole — col IN (its elements) —
-// rather than stringifying it as resolveTemplate would.
-var wholeClaimRe = regexp.MustCompile(`^\{\{\s*jwt\.([a-zA-Z0-9_.]+)\s*\}\}$`)
 
 // ResolveRole maps an empty/absent role to the policy's default_role, so a
 // request with no role — a token without a role claim, or no token at all when
@@ -496,26 +486,19 @@ func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
 // no canonical form, so the caller can fail the predicate closed.
 func resolveInValues(tmpl string, claims map[string]any) []any {
 	if m := wholeClaimRe.FindStringSubmatch(strings.TrimSpace(tmpl)); m != nil {
-		switch v := navigateClaims(claims, strings.Split(m[1], ".")).(type) {
-		case []any:
-			out := make([]any, 0, len(v))
-			for _, e := range v {
-				s, ok := CanonicalScalar(e)
-				if !ok {
-					return nil
-				}
-				out = append(out, s)
-			}
-			return out
-		default:
-			// Everything CanonicalScalar rejects — an absent/null claim, a
-			// JSON-object claim (never a membership set), a number with no
-			// canonical form — fails closed rather than bind as a one-element set.
-			if s, ok := CanonicalScalar(v); ok {
-				return []any{s}
-			}
+		// ResolveClaim fails the whole set closed (nil) on everything
+		// CanonicalScalar rejects — an absent/null claim, a JSON-object claim
+		// (never a membership set), an empty array, a number with no canonical
+		// form — rather than bind a one-element or partial set.
+		vals, _, ok := ResolveClaim(claims, m[1])
+		if !ok {
 			return nil
 		}
+		out := make([]any, len(vals))
+		for i, v := range vals {
+			out[i] = v
+		}
+		return out
 	}
 	if v, ok := resolveTemplate(tmpl, claims); ok {
 		return []any{v}
