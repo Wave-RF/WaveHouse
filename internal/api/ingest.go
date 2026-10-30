@@ -178,6 +178,10 @@ type requestAbort struct {
 	Message    string
 	RetryAfter string // non-empty → emit a Retry-After header
 	Result     string // the result on wavehouse_ingest_records_total of each record it refuses
+	// Final marks a Result already decided with the client's state when the
+	// call failed, which countRecords keeps rather than reading the context
+	// again (#947).
+	Final bool
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -903,16 +907,20 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 		dedupeDisabledCounter.Add(ctx, int64(len(keys)), observability.MetricAttrs(ctx, attribute.String("table", table)))
 		slog.DebugContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "records", len(keys), "table", table)
 		return nil
+	case err != nil && clientGone(ctx):
+		// The client went away while Reserve was in flight, which is
+		// likely why it failed, however the store reports it (#947).
+		slog.DebugContext(ctx, "dedupe reserve failed: client closed the request", "error", err, "table", table)
+		return clientClosedAbort()
 	case errors.Is(err, dedupe.ErrUnavailable):
 		slog.WarnContext(ctx, "dedupe store unavailable", "error", err, "table", table)
 		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "dedupe store unavailable", RetryAfter: "5", Result: resultDedupeUnavailable}
 	case err != nil:
 		if ctx.Err() != nil {
-			// The request's own context ended — the client is gone, or its
-			// deadline passed — while Reserve was in flight. Reserve wraps
-			// that as an ordinary error, but it is not a backend problem
-			// worth an operator's attention, and the response status below
-			// is moot: nothing is listening for it.
+			// The request's deadline passed while Reserve was in flight.
+			// Reserve wraps that as an ordinary error, but it is not a
+			// backend problem worth an operator's attention. The deadline
+			// is the server's, so the request still counts as its failure.
 			slog.DebugContext(ctx, "dedupe reserve failed: request context ended", "error", err, "table", table)
 		} else {
 			slog.ErrorContext(ctx, "dedupe reserve failed", "error", err, "table", table)
@@ -965,19 +973,42 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 // out, so Retry-After is the flat 5 seconds main's per-record path used.
 func (h *IngestHandler) publishFailed(ctx context.Context, dd dedupe.Deduplicator, topic mq.Topic, recs []pendingRecord, k int, err error) *requestAbort {
 	definite := errors.Is(err, mq.ErrQueueFull)
+	// Whether the client was gone when the publish failed, read before the
+	// claims are settled: a client that leaves during the commit or release
+	// does not turn a failure of the queue into its 499.
+	gone := clientGone(ctx)
 	commitClaims(ctx, dd, recs[:k], topic.Table)
 	after := k + 1
 	if definite {
 		after = k
 	}
 	releaseClaims(ctx, dd, claimedIn(recs[after:]))
+	abort := h.publishFailure(ctx, topic, recs[k], err, definite, gone)
+	abort.Final = true
+	return abort
+}
+
+// publishFailure classifies a failed publish by its error and by gone, the
+// client's state when it failed; publishFailed has settled the claims.
+func (h *IngestHandler) publishFailure(ctx context.Context, topic mq.Topic, rec pendingRecord, err error, definite, gone bool) *requestAbort {
 	switch {
 	case definite:
 		slog.WarnContext(ctx, "ingest queue is full", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
-		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30", Result: resultQueueFull}
+		result := resultQueueFull
+		if gone {
+			result = resultRecordsCanceled
+		}
+		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30", Result: result}
+	case gone:
+		// The client went away while the publish was in flight, which is
+		// likely why it failed, however the broker reports it: nobody
+		// reads the answer, and the queue is not the one that failed
+		// (#947). k's claim is left to lapse, as for any uncertain failure.
+		slog.DebugContext(ctx, "publish to the ingest queue failed: client closed the request", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
+		return clientClosedAbort()
 	case errors.Is(err, mq.ErrUnavailable):
 		retryAfter := "5"
-		if recs[k].claim.Status == dedupe.Claimed {
+		if rec.claim.Status == dedupe.Claimed {
 			retryAfter = strconv.Itoa(int(math.Ceil(h.lease().Seconds())))
 		}
 		slog.WarnContext(ctx, "ingest queue unavailable", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
@@ -985,6 +1016,25 @@ func (h *IngestHandler) publishFailed(ctx context.Context, dd dedupe.Deduplicato
 	}
 	slog.ErrorContext(ctx, "failed to publish to the ingest queue", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
 	return &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed", Result: resultPublishFailed}
+}
+
+// statusClientClosedRequest is the status recorded for a request whose
+// client went away before it was answered, nginx's 499 by convention. It
+// is a 4xx, so the request counts as the client's doing rather than the
+// engine's failure; nothing reads the response written with it.
+const statusClientClosedRequest = 499
+
+// clientGone reports whether the request's context was canceled: the client
+// disconnected, timed out on its side, or was stopped. A deadline the server
+// set is not that, and stays the server's failure.
+func clientGone(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.Canceled)
+}
+
+// clientClosedAbort is the abort for a request its client abandoned while a
+// dedupe reserve or a publish was in flight (#947).
+func clientClosedAbort() *requestAbort {
+	return &requestAbort{Status: statusClientClosedRequest, Message: "client closed request", Result: resultRecordsCanceled}
 }
 
 // claimedIn is the Claimed claims among recs.

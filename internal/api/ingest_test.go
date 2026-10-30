@@ -3007,28 +3007,59 @@ func TestIngest_Dedup_ReserveError(t *testing.T) {
 	assert.Empty(t, pub.Published())
 }
 
-// A Reserve error's log level depends on why it failed. A real backend
-// failure (a live request context) stays ERROR, so an operator is paged. One
-// caused by the request's own context ending (the client gone, or its
-// deadline past) is not a backend problem and must log at DEBUG instead — an
-// operator paging on ERROR logs would otherwise be woken by clients that
-// simply went away. Not t.Parallel: it captures the process-wide default
+// A Reserve error's status and log level depend on why it failed. A real
+// backend failure (a live request context) is a 500 at ERROR, so an operator
+// is paged. One caused by the client going away (the request context
+// canceled) is the client's doing: 499 at DEBUG, so neither a 5xx alert nor
+// an ERROR page fires for clients that simply left (#947). A deadline on the
+// request is the server's, so it stays a 500, though at DEBUG since the
+// backend did not fail. Not t.Parallel: it captures the process-wide default
 // logger (logtest.Capture). Matched on the exact "level":"…","msg":"…" pair
 // slog's JSON handler emits adjacently, not on the level alone, so an
 // unrelated DEBUG line from the same request cannot satisfy the check whether
 // or not the Reserve line itself is DEBUG.
 func TestIngest_Dedup_ReserveError_LogLevel(t *testing.T) {
 	tests := []struct {
-		name          string
-		cancelContext bool
-		wantLine      string
+		name       string
+		ctx        func(t *testing.T) context.Context
+		storeErr   error
+		wantStatus int
+		wantLine   string
 	}{
 		{
-			"live context: a real backend failure pages at ERROR", false,
+			"live context: a real backend failure pages at ERROR",
+			func(*testing.T) context.Context { return context.Background() },
+			nil, http.StatusInternalServerError,
 			`"level":"ERROR","msg":"dedupe reserve failed"`,
 		},
 		{
-			"context ended: a client gone must not page, logs at DEBUG", true,
+			"client gone: 499 at DEBUG",
+			func(*testing.T) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			nil, statusClientClosedRequest,
+			`"level":"DEBUG","msg":"dedupe reserve failed: client closed the request"`,
+		},
+		{
+			"store reports unavailable, client gone: 499 at DEBUG",
+			func(*testing.T) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			fmt.Errorf("%w: context canceled", dedupe.ErrUnavailable), statusClientClosedRequest,
+			`"level":"DEBUG","msg":"dedupe reserve failed: client closed the request"`,
+		},
+		{
+			"deadline passed: still the server's 500, at DEBUG",
+			func(t *testing.T) context.Context {
+				ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				t.Cleanup(cancel)
+				return ctx
+			},
+			nil, http.StatusInternalServerError,
 			`"level":"DEBUG","msg":"dedupe reserve failed: request context ended"`,
 		},
 	}
@@ -3037,22 +3068,103 @@ func TestIngest_Dedup_ReserveError_LogLevel(t *testing.T) {
 			buf := logtest.Capture(t, slog.LevelDebug)
 			pub := &testutil.MockPublisher{}
 			dedup := testutil.NewMockDeduplicator()
-			dedup.Err = errors.New("backend down")
-			h := dedupHandler(t, pub, dedup, false)
-
-			ctx := context.Background()
-			if tt.cancelContext {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
-				cancel()
+			dedup.Err = tt.storeErr
+			if dedup.Err == nil {
+				dedup.Err = errors.New("backend down")
 			}
-			req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"}).WithContext(ctx)
+			h := dedupHandler(t, pub, dedup, false)
+			req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"}).WithContext(tt.ctx(t))
 
 			w := httptest.NewRecorder()
 			h.Handle(w, withTenant(req))
 
+			assert.Equal(t, tt.wantStatus, w.Code)
 			assert.Contains(t, buf.String(), tt.wantLine)
 			assert.Empty(t, pub.Published())
+		})
+	}
+}
+
+// A publish that fails because the client went away is answered and counted
+// as the client's 499, logged at DEBUG, in the single and the batch path
+// alike: the failure is the canceled request context, not the queue (#947).
+// A publish failure with the request context live, or past a deadline, stays
+// the engine's 500 at ERROR. Not t.Parallel: it captures the process-wide
+// default logger.
+func TestIngest_PublishFailure_ClientGone(t *testing.T) {
+	canceled := func(*testing.T) context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+	tests := []struct {
+		name       string
+		ctx        func(t *testing.T) context.Context
+		req        func(t *testing.T) *http.Request
+		pubErr     error
+		wantStatus int
+		wantLine   string
+		noLine     string
+	}{
+		{
+			"single record, client gone", canceled,
+			func(t *testing.T) *http.Request { return ingestRequest(t, "clicks", map[string]any{"page": "/a"}) },
+			nil, statusClientClosedRequest,
+			`"level":"DEBUG","msg":"publish to the ingest queue failed: client closed the request"`,
+			`"level":"ERROR"`,
+		},
+		{
+			"batch, client gone", canceled,
+			func(t *testing.T) *http.Request {
+				return ndjsonRequest(t, "clicks", jsonLine(t, map[string]any{"page": "/a"}), jsonLine(t, map[string]any{"page": "/b"}))
+			},
+			nil, statusClientClosedRequest,
+			`"level":"DEBUG","msg":"publish to the ingest queue failed: client closed the request"`,
+			`"level":"ERROR"`,
+		},
+		{
+			"broker reports unavailable, client gone", canceled,
+			func(t *testing.T) *http.Request { return ingestRequest(t, "clicks", map[string]any{"page": "/a"}) },
+			fmt.Errorf("%w: context canceled", mq.ErrUnavailable), statusClientClosedRequest,
+			`"level":"DEBUG","msg":"publish to the ingest queue failed: client closed the request"`,
+			`"level":"WARN"`,
+		},
+		{
+			"live context", func(*testing.T) context.Context { return context.Background() },
+			func(t *testing.T) *http.Request { return ingestRequest(t, "clicks", map[string]any{"page": "/a"}) },
+			nil, http.StatusInternalServerError,
+			`"level":"ERROR","msg":"failed to publish to the ingest queue"`,
+			`client closed the request`,
+		},
+		{
+			"deadline passed",
+			func(t *testing.T) context.Context {
+				ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				t.Cleanup(cancel)
+				return ctx
+			},
+			func(t *testing.T) *http.Request { return ingestRequest(t, "clicks", map[string]any{"page": "/a"}) },
+			nil, http.StatusInternalServerError,
+			`"level":"ERROR","msg":"failed to publish to the ingest queue"`,
+			`client closed the request`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := logtest.Capture(t, slog.LevelDebug)
+			err := tt.pubErr
+			if err == nil {
+				err = errors.New("publish: context canceled")
+			}
+			pub := &testutil.MockPublisher{Err: err}
+			h := NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
+
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(tt.req(t).WithContext(tt.ctx(t))))
+
+			assert.Equal(t, tt.wantStatus, w.Code)
+			assert.Contains(t, buf.String(), tt.wantLine)
+			assert.NotContains(t, buf.String(), tt.noLine)
 		})
 	}
 }
