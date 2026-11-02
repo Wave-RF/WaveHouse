@@ -60,7 +60,7 @@ func runMQManifests(args []string, stdout, stderr io.Writer) int {
 	fileStore := fs.String("file-store", mq.FormatStoreSize(mq.DefaultNATSFileStore), "every server's JetStream max_file_store (the Helm chart's fileStore.maxSize, else its PVC size), which the streams' maxBytes must fit in")
 	partitionBytes := fs.String("partition-max-bytes", "", "each ingest partition's maxBytes; empty is 15% of --file-store")
 	fs.Usage = func() {
-		_, _ = fmt.Fprint(fs.Output(), `usage: wavehouse mq manifests [--partitions N] [--shards V] [--prefix wh] [--replicas 3] [--ingest-consumer wh-ingest] [--history-stream S] [--publish-timeout 5s] [--ack-wait 60s] [--max-ack-pending 10000] [--coord-bucket B] [--dedupe-lease 30s] [--file-store 100Gi] [--partition-max-bytes 15Gi]
+		_, _ = fmt.Fprint(fs.Output(), `usage: wavehouse mq manifests [--partitions N] [--shards V] [--prefix wh] [--replicas 3] [--ingest-consumer wh-ingest] [--history-stream S] [--publish-timeout 5s] [--ack-wait 60s] [--max-ack-pending 100000] [--coord-bucket B] [--dedupe-lease 30s] [--file-store 100Gi] [--partition-max-bytes 15Gi]
 
 Print the nack (jetstream.nats.io/v1beta2) Stream, Consumer and KeyValue
 resources for the JetStream topology WaveHouse needs under mq.backend: nats
