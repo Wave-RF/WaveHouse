@@ -301,5 +301,5 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
-	_, _ = w.Write(v.([]byte)) //nolint:gosec // G705: the tenant id on the key only selects the entry; the bytes are ClickHouse's JSONEachRow rows framed as an array
+	_, _ = w.Write(v.([]byte)) //nolint:gosec,nolintlint // G705 (reported on darwin and linux-amd64, not on linux-arm64, hence nolintlint): the tenant id on the key only selects the entry; the bytes are ClickHouse's JSONEachRow rows framed as an array
 }
