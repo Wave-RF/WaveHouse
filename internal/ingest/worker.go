@@ -511,7 +511,7 @@ func nakAbandoned(m *mq.Message) {
 // rows, never on these fields, so there is no shared mutable state.
 //
 // Coalescing: at most one flush runs per tenant table at a time. A size or timer
-// trigger that fires while a flush is in flight is deferred (flushQueued) and
+// trigger that fires while a flush is in flight is deferred (queued) and
 // runs the moment the slot frees. A flush *completing* is not itself a trigger,
 // so a partial batch left behind keeps waiting for its own size/timer.
 type tableBatcher struct {
@@ -534,9 +534,11 @@ type tableBatcher struct {
 	// "case <-b.flushing" arm in tableLoop is automatically inert while idle.
 	flushing chan struct{}
 
-	// flushQueued records that a size/timer trigger fired while a flush was in
-	// flight, so the deferred flush runs as soon as that flush completes.
-	flushQueued bool
+	// queued is the trigger of a flush asked for while another was in
+	// flight, latched so onFlushDone starts it as soon as that flush
+	// completes, and empty while none is due. The first trigger to fire is
+	// the one kept, and the one the flush is counted under (countFlush).
+	queued string
 }
 
 func newTableBatcher(w *IngestWorker, table string) *tableBatcher {
@@ -593,32 +595,39 @@ func (b *tableBatcher) add(ctx context.Context, pm parsedMsg) {
 	b.batch = append(b.batch, pm)
 	b.bytes += len(pm.row)
 	if b.bytes >= b.limits.MaxBatchBytes {
-		b.requestFlush(ctx)
+		trigger := triggerSize
+		if !b.ok {
+			trigger = triggerNone // zero limits: flushed at once to be parked, not sized
+		}
+		b.requestFlush(ctx, trigger)
 	}
 }
 
-// requestFlush is the single entry point for the size (add) and timer triggers.
-// If the table is idle it starts a flush immediately; if a flush is already
-// running it records that another is due (flushQueued) so onFlushDone starts it
-// when the slot frees. The rows/`b.batch = nil` split hands the goroutine a
-// private snapshot that never aliases the live batch.
-func (b *tableBatcher) requestFlush(ctx context.Context) {
+// requestFlush is the single entry point for the size (add) and timer
+// triggers, each naming itself (write_metrics.go). If the table is idle it
+// starts a flush immediately; if a flush is already running it records that
+// another is due, under the first trigger to ask (queued), so onFlushDone
+// starts it when the slot frees. The rows/`b.batch = nil` split hands the
+// goroutine a private snapshot that never aliases the live batch.
+func (b *tableBatcher) requestFlush(ctx context.Context, trigger string) {
 	if len(b.batch) == 0 {
 		return
 	}
 	if b.flushing != nil {
-		b.flushQueued = true
+		if b.queued == "" {
+			b.queued = trigger
+		}
 		return
 	}
 	rows, lim, ok := b.batch, b.limits, b.ok
 	b.batch, b.bytes = nil, 0
-	b.flushQueued = false
+	b.queued = ""
 	b.timer.Stop() // this batch is leaving, so drop its deadline
 	done := make(chan struct{})
 	b.flushing = done
 	go func() {
 		defer observability.Crash("ingest_worker", slog.String("tenant", rows[0].tenant.String()), slog.String("table", b.table))
-		b.w.flushTable(ctx, b.table, rows, lim, ok)
+		b.w.flushTable(ctx, b.table, rows, lim, ok, trigger)
 		close(done)
 	}()
 }
@@ -630,8 +639,8 @@ func (b *tableBatcher) requestFlush(ctx context.Context) {
 // itself a trigger.
 func (b *tableBatcher) onFlushDone(ctx context.Context) {
 	b.flushing = nil
-	if b.flushQueued {
-		b.requestFlush(ctx)
+	if b.queued != "" {
+		b.requestFlush(ctx, b.queued)
 	}
 }
 
@@ -643,7 +652,7 @@ func (b *tableBatcher) drainAndExit(ctx context.Context) {
 		<-b.flushing
 	}
 	if len(b.batch) > 0 {
-		b.w.flushTable(ctx, b.table, b.batch, b.limits, b.ok)
+		b.w.flushTable(ctx, b.table, b.batch, b.limits, b.ok, triggerShutdown)
 	}
 }
 
@@ -667,7 +676,7 @@ func (w *IngestWorker) tableLoop(ctx context.Context, table string, in <-chan pa
 			}
 			b.add(ctx, pm)
 		case <-b.timer.C:
-			b.requestFlush(ctx)
+			b.requestFlush(ctx, triggerTimer)
 		case <-b.flushing:
 			b.onFlushDone(ctx)
 		}
@@ -784,8 +793,8 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 // that timed the batch, never from one a reload adopted meanwhile; ok false
 // is a batch begun with none, which is never inserted. tableLoop guarantees
 // at most one concurrent flushTable per tenant table; different tables — two
-// tenants' tables of one name included — may flush concurrently.
-func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []parsedMsg, lim Limits, ok bool) {
+// tenants' tables of one name included — may flush concurrently.// trigger is what asked for the flush, counted per table (countFlush).
+func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []parsedMsg, lim Limits, ok bool, trigger string) {
 	if len(msgs) == 0 {
 		return
 	}
@@ -794,6 +803,7 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 	// with it when it has a target (#891).
 	t := w.target(id)
 	ctx = withMetricTenant(ctx, id, t)
+	countFlush(ctx, tableName, trigger)
 	if t.URL == "" {
 		w.parkBatch(ctx, tableName, msgs, noTargetError(id))
 		return
@@ -933,7 +943,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 			return group[i:], singleErr
 		case w.dlqEnabled != nil && !w.dlqEnabled(pm.tenant, tableName):
 			slog.ErrorContext(ctx, "isolated bad row, DLQ disabled for table — left unacked, NATS will redeliver it until it inserts or dlq is enabled", "tenant", pm.tenant, "table", tableName, "error", singleErr)
-			countRows(ctx, tableName, rowsLeftUnacked, 1)
+			countRows(ctx, tableName, rowsLeftUnacked, pm)
 		default:
 			slog.ErrorContext(ctx, "isolated bad row, sending to DLQ", "tenant", pm.tenant, "table", tableName, "error", singleErr)
 			w.sendToDLQ(ctx, tableName, pm, singleErr.Error())
@@ -1073,7 +1083,7 @@ func (w *IngestWorker) parkBatch(ctx context.Context, tableName string, msgs []p
 	id := msgs[0].tenant
 	if w.dlqEnabled != nil && !w.dlqEnabled(id, tableName) {
 		slog.ErrorContext(ctx, "batch cannot be inserted, DLQ disabled for table — left unacked, NATS will redeliver it until it can be or dlq is enabled", "tenant", id, "table", tableName, "rows", len(msgs), "cause", cause)
-		countRows(ctx, tableName, rowsLeftUnacked, len(msgs))
+		countRows(ctx, tableName, rowsLeftUnacked, msgs...)
 		return
 	}
 	slog.ErrorContext(ctx, "batch cannot be inserted, parking it on the DLQ", "tenant", id, "table", tableName, "rows", len(msgs), "cause", cause)
@@ -1089,7 +1099,7 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 	// Counted here, not after each ack: the rows are in ClickHouse whatever
 	// the ack does. One whose ack fails can be redelivered, and is then
 	// written and counted again, as every INSERT that succeeds is.
-	countRows(ctx, tableName, rowsInserted, len(msgs))
+	countRows(ctx, tableName, rowsInserted, msgs...)
 	// A batch is one tenant's (dispatchLoop keys its loops by tenant table),
 	// so the first row names whose namespaces the insert changed.
 	w.invalidate(ctx, msgs[0].tenant, tableName, msgs)
@@ -1216,7 +1226,7 @@ func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parse
 	if w.parkOnDLQ(ctx, pm.msg, tableName, errMsg) {
 		outcome = rowsDeadLettered
 	}
-	countRows(ctx, tableName, outcome, 1)
+	countRows(ctx, tableName, outcome, pm)
 }
 
 // parkOnDLQ parks one message on the dead-letter queue (under the topic it

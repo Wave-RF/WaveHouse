@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,13 +28,17 @@ import (
 // writeReading is what one collection of the worker's write metrics shows,
 // each instrument summed by the attribute that tells its series apart.
 type writeReading struct {
-	rows       map[string]int64 // by outcome
-	retries    int64
-	poison     int64
-	isolations int64
-	inserts    map[string]uint64 // by "mode/result"
-	batchRows  int64             // rows summed over every bulk INSERT
-	batchCount uint64
+	rows            map[string]int64 // by outcome
+	retries         int64
+	poison          int64
+	isolations      int64
+	inserts         map[string]uint64 // by "mode/result"
+	batchRows       int64             // rows summed over every bulk INSERT
+	batchCount      uint64
+	batchBytes      int64 // bytes summed over every bulk INSERT
+	batchBytesCount uint64
+	bytes           map[string]int64 // by outcome
+	flushes         map[string]int64 // by trigger
 	// untenanted and untenantedSamples sum what was recorded with no tenant
 	// label, because the batch's tenant resolved to no ClickHouse target
 	// (#891): the counters' counts, and the histograms' samples.
@@ -62,7 +67,7 @@ func swapWriteMetrics(t *testing.T) func() writeReading {
 	return func() writeReading {
 		var rm metricdata.ResourceMetrics
 		require.NoError(t, reader.Collect(context.Background(), &rm))
-		r := writeReading{rows: map[string]int64{}, inserts: map[string]uint64{}}
+		r := writeReading{rows: map[string]int64{}, inserts: map[string]uint64{}, bytes: map[string]int64{}, flushes: map[string]int64{}}
 		attr := func(set attribute.Set, key string) string {
 			v, _ := set.Value(attribute.Key(key))
 			return v.AsString()
@@ -72,8 +77,21 @@ func swapWriteMetrics(t *testing.T) func() writeReading {
 				switch data := md.Data.(type) {
 				case metricdata.Sum[int64]:
 					for _, dp := range data.DataPoints {
-						// Every measurement is about its batch's tenant, unless
-						// that tenant has no ClickHouse target (#891).
+						switch md.Name {
+						case "wavehouse_ingest_bytes_total":
+							tenantOf(t, md.Name, dp.Attributes)
+							assert.Equal(t, "events", attr(dp.Attributes, "table"))
+							r.bytes[attr(dp.Attributes, "outcome")] += dp.Value
+							continue
+						case "wavehouse_ingest_flushes_total":
+							tenantOf(t, md.Name, dp.Attributes)
+							assert.Equal(t, "events", attr(dp.Attributes, "table"))
+							r.flushes[attr(dp.Attributes, "trigger")] += dp.Value
+							continue
+						}
+						// Every delivery's measurement is about its batch's
+						// tenant, unless that tenant has no ClickHouse target
+						// (#891); untenanted sums the delivery counts alone.
 						if !tenantOf(t, md.Name, dp.Attributes) {
 							r.untenanted += dp.Value
 						}
@@ -101,8 +119,14 @@ func swapWriteMetrics(t *testing.T) func() writeReading {
 						if !tenantOf(t, md.Name, dp.Attributes) {
 							r.untenantedSamples += dp.Count
 						}
-						r.batchRows += dp.Sum
-						r.batchCount += dp.Count
+						switch md.Name {
+						case "wavehouse_ingest_batch_rows":
+							r.batchRows += dp.Sum
+							r.batchCount += dp.Count
+						case "wavehouse_ingest_batch_bytes":
+							r.batchBytes += dp.Sum
+							r.batchBytesCount += dp.Count
+						}
 					}
 				}
 			}
@@ -141,7 +165,8 @@ func poisonRowRT() *testutil.MockRoundTripper {
 // delivery and checks the write metrics record it (#895). Every delivery is
 // counted exactly once across wavehouse_ingest_rows_total,
 // wavehouse_ingest_retries_total and wavehouse_ingest_poison_total, so the
-// three reconcile against what the worker received.
+// three reconcile against what the worker received, and the bytes of every
+// settled row land in wavehouse_ingest_bytes_total under its outcome (#933).
 func TestWriteMetrics_RecordedAndReconciled(t *testing.T) {
 	read := swapWriteMetrics(t)
 	ctx := context.Background()
@@ -150,24 +175,34 @@ func TestWriteMetrics_RecordedAndReconciled(t *testing.T) {
 		delivered++
 		return newIngestMsg(t, "events", "", row)
 	}
+	settledBytes := 0 // of every row rows_total counts
 
 	// A successful batch: one bulk INSERT of two rows, both inserted.
 	w, _, _, wait := newTestWorker(okRoundTripper())
-	flush(ctx, w, "events", parseAll(t, w, msg(map[string]any{"id": 1}), msg(map[string]any{"id": 2})))
+	first := parseAll(t, w, msg(map[string]any{"id": 1}), msg(map[string]any{"id": 2}))
+	settledBytes += bodyBytes(first)
+	flush(ctx, w, "events", first)
 	wait()
 	got := read()
 	assert.Equal(t, map[string]int64{rowsInserted: 2}, got.rows)
 	assert.Equal(t, map[string]uint64{"batch/ok": 1}, got.inserts)
 	assert.Equal(t, uint64(1), got.batchCount)
 	assert.Equal(t, int64(2), got.batchRows)
+	// The bulk INSERT's body, and the same bytes settled as inserted.
+	assert.Equal(t, uint64(1), got.batchBytesCount)
+	assert.Equal(t, int64(bodyBytes(first)), got.batchBytes)
+	assert.Equal(t, map[string]int64{rowsInserted: int64(bodyBytes(first))}, got.bytes)
+	assert.Equal(t, map[string]int64{triggerSize: 1}, got.flushes, "flush names a batch at its target")
 
 	// An isolation fallback that parks one row: the bulk INSERT is rejected,
 	// two rows insert alone and the third is dead-lettered.
 	w, _, _, wait = newTestWorker(poisonRowRT())
-	flush(ctx, w, "events", parseAll(t, w,
+	isolated := parseAll(t, w,
 		msg(map[string]any{"id": 3, "poison": false}),
 		msg(map[string]any{"id": 4, "poison": true}),
-		msg(map[string]any{"id": 5, "poison": false})))
+		msg(map[string]any{"id": 5, "poison": false}))
+	settledBytes += bodyBytes(isolated)
+	flush(ctx, w, "events", isolated)
 	wait()
 	got = read()
 	assert.Equal(t, int64(1), got.isolations)
@@ -175,13 +210,17 @@ func TestWriteMetrics_RecordedAndReconciled(t *testing.T) {
 	assert.Equal(t, map[string]uint64{"batch/ok": 1, "batch/rejected": 1, "isolated/ok": 2, "isolated/rejected": 1}, got.inserts)
 	assert.Equal(t, uint64(2), got.batchCount, "an isolated INSERT is not a batch")
 	assert.Equal(t, int64(5), got.batchRows)
+	assert.Equal(t, uint64(2), got.batchBytesCount, "nor is it sized as one")
+	assert.Equal(t, int64(lineBytes(isolated[1])), got.bytes[rowsDeadLettered], "the parked row's bytes, under its outcome")
 
 	// A rejected row with the DLQ off for the table: left unacked.
 	w, _, _, wait = newTestWorker(poisonRowRT())
 	w.dlqEnabled = func(tenant.ID, string) bool { return false }
-	flush(ctx, w, "events", parseAll(t, w,
+	unacked := parseAll(t, w,
 		msg(map[string]any{"id": 6, "poison": false}),
-		msg(map[string]any{"id": 7, "poison": true})))
+		msg(map[string]any{"id": 7, "poison": true}))
+	settledBytes += bodyBytes(unacked)
+	flush(ctx, w, "events", unacked)
 	wait()
 	got = read()
 	assert.Equal(t, int64(2), got.isolations)
@@ -213,12 +252,17 @@ func TestWriteMetrics_RecordedAndReconciled(t *testing.T) {
 	w.ackWg.Wait()
 
 	got = read()
-	var settled int64
+	var settled, settledSize int64
 	for _, n := range got.rows {
 		settled += n
 	}
+	for _, n := range got.bytes {
+		settledSize += n
+	}
 	assert.Equal(t, int64(delivered), settled+got.retries+got.poison,
 		"every delivery is counted once across rows, retries and poison")
+	assert.Equal(t, int64(settledBytes), settledSize, "and every settled row's bytes once across the outcomes")
+	assert.Equal(t, int64(4), got.flushes[triggerSize], "one flush per batch, the retried one included")
 	// Every tenant here has a target, so every measurement is labeled.
 	assert.Zero(t, got.untenanted)
 	assert.Zero(t, got.untenantedSamples)
@@ -332,4 +376,80 @@ func TestWriteMetrics_FailedDLQAck(t *testing.T) {
 	assert.Equal(t, map[string]int64{rowsLeftUnacked: 1, rowsDeadLettered: 1}, got.rows)
 	assert.Zero(t, got.untenanted)
 	assert.Zero(t, got.untenantedSamples)
+}
+
+// TestWriteMetrics_FlushTriggers drives each way a batch leaves the batcher
+// and checks wavehouse_ingest_flushes_total names what asked for it (#960):
+// the size target, the deadline, the shutdown drain, and the batch of a
+// tenant no longer served, which no trigger sized and must not read as a
+// size flush. A flush asked for while another is in flight keeps the trigger
+// that fired first.
+func TestWriteMetrics_FlushTriggers(t *testing.T) {
+	read := swapWriteMetrics(t)
+	ctx := context.Background()
+	row := func(id int) *testutil.MockMessage { return newIngestMsg(t, "events", "", map[string]any{"id": id}) }
+
+	// Size: the third row reaches the target newTestBatcher sets.
+	b, w, wait := newTestBatcher(t, okRoundTripper())
+	for _, pm := range parseAll(t, w, row(1), row(2), row(3)) {
+		b.add(ctx, pm)
+	}
+	require.NotNil(t, b.flushing, "the size trigger started a flush")
+	<-b.flushing
+	wait()
+	assert.Equal(t, map[string]int64{triggerSize: 1}, read().flushes)
+
+	// Timer: one row under a short wait, driven by the table loop as the
+	// worker drives it, is written when its deadline passes.
+	w, _, _, wait = newTestWorker(okRoundTripper())
+	w.limits = limitsOf(Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: 20 * time.Millisecond})
+	in := make(chan parsedMsg, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.tableLoop(ctx, "events", in)
+	}()
+	in <- parseAll(t, w, row(4))[0]
+	require.Eventually(t, func() bool { return read().flushes[triggerTimer] == 1 }, 2*time.Second, 5*time.Millisecond, "the deadline flushed the row")
+	close(in)
+	<-done
+	wait()
+
+	// Shutdown: a row left in a batch is flushed by the drain.
+	b, w, wait = newTestBatcher(t, okRoundTripper())
+	b.batch = parseAll(t, w, row(5))
+	b.drainAndExit(ctx)
+	wait()
+	assert.Equal(t, int64(1), read().flushes[triggerShutdown])
+
+	// Latched: the size trigger fires behind an in-flight flush, then the
+	// deadline; the flush onFlushDone starts is counted as the size one.
+	b, w, wait = newTestBatcher(t, okRoundTripper())
+	inflight := make(chan struct{})
+	b.flushing = inflight
+	for _, pm := range parseAll(t, w, row(6), row(7), row(8)) {
+		b.add(ctx, pm)
+	}
+	require.Equal(t, triggerSize, b.queued)
+	b.requestFlush(ctx, triggerTimer)
+	assert.Equal(t, triggerSize, b.queued, "the first trigger to fire is kept")
+	close(inflight)
+	b.onFlushDone(ctx)
+	require.NotNil(t, b.flushing)
+	<-b.flushing
+	wait()
+	assert.Equal(t, int64(2), read().flushes[triggerSize])
+
+	// None: a tenant with no limits and no pool has its row flushed at once
+	// to be parked, through a target of 0 that is no size trigger.
+	b, w, wait = newTestBatcher(t, okRoundTripper())
+	w.limits = func(tenant.ID) (Limits, bool) { return Limits{}, false }
+	w.target = func(tenant.ID) chconn.Target { return chconn.Target{} }
+	b.add(ctx, parseAll(t, w, row(9))[0])
+	require.NotNil(t, b.flushing, "flushed at its first row")
+	<-b.flushing
+	wait()
+	got := read()
+	assert.Equal(t, map[string]int64{triggerSize: 2, triggerTimer: 1, triggerShutdown: 1, triggerNone: 1}, got.flushes)
+	assert.Equal(t, int64(1), got.rows[rowsDeadLettered], "parked")
 }

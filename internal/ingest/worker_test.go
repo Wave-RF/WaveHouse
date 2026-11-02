@@ -61,14 +61,15 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockPublisher
 }
 
 // flush is flushTable under the worker's own limits for the batch's tenant,
-// read as the batcher reads them at a batch's first row.
+// read as the batcher reads them at a batch's first row, as a batch at its
+// byte target.
 func flush(ctx context.Context, w *IngestWorker, table string, msgs []parsedMsg) {
 	var id tenant.ID
 	if len(msgs) > 0 {
 		id = msgs[0].tenant
 	}
 	lim, ok := w.limits(id)
-	w.flushTable(ctx, table, msgs, lim, ok)
+	w.flushTable(ctx, table, msgs, lim, ok, triggerSize)
 }
 
 // limitsOf is a limits getter that answers lim for every tenant.
@@ -1108,11 +1109,11 @@ func TestFlushTable_BadRow_DLQDisabledForTable_LeftUnacked(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// tableBatcher — coalescing, the flushQueued latch, and drain.
+// tableBatcher — coalescing, the queued latch, and drain.
 
 //
 // These are white-box: they drive the per-table state machine's methods
-// directly (the way tableLoop's select does), setting `flushing`/`flushQueued`
+// directly (the way tableLoop's select does), setting `flushing`/`queued`
 // to simulate "a flush is in flight" so the coalesce/latch/drain branches are
 // exercised deterministically without timing races.
 // ---------------------------------------------------------------------------
@@ -1152,11 +1153,11 @@ func TestTableBatcher_RequestFlush_EmptyBatchNoOp(t *testing.T) {
 	rt := okRoundTripper()
 	b, _, _ := newTestBatcher(t, rt)
 
-	b.requestFlush(context.Background()) // nothing buffered
+	b.requestFlush(context.Background(), triggerSize) // nothing buffered
 
 	assert.Equal(t, int32(0), rt.Hits(), "no insert for an empty batch")
 	assert.Nil(t, b.flushing)
-	assert.False(t, b.flushQueued)
+	assert.Empty(t, b.queued)
 }
 
 func TestTableBatcher_RequestFlush_LatchesWhileFlushing(t *testing.T) {
@@ -1168,9 +1169,9 @@ func TestTableBatcher_RequestFlush_LatchesWhileFlushing(t *testing.T) {
 	b.flushing = make(chan struct{})
 	b.batch = parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1}))
 
-	b.requestFlush(context.Background())
+	b.requestFlush(context.Background(), triggerSize)
 
-	assert.True(t, b.flushQueued, "a trigger during an in-flight flush must latch, not start a 2nd flush")
+	assert.Equal(t, triggerSize, b.queued, "a trigger during an in-flight flush must latch, not start a 2nd flush")
 	assert.Len(t, b.batch, 1, "rows stay buffered for the deferred flush")
 	assert.Equal(t, int32(0), rt.Hits(), "at most one concurrent insert per table")
 }
@@ -1185,7 +1186,7 @@ func TestTableBatcher_OnFlushDone(t *testing.T) {
 
 		// A flush just finished (closed channel), another was latched, rows wait.
 		b.flushing = closedChan()
-		b.flushQueued = true
+		b.queued = triggerSize
 		b.batch = parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1}))
 
 		b.onFlushDone(context.Background())
@@ -1194,7 +1195,7 @@ func TestTableBatcher_OnFlushDone(t *testing.T) {
 		wait()       // drain background acks
 
 		assert.Equal(t, int32(1), rt.Hits())
-		assert.False(t, b.flushQueued)
+		assert.Empty(t, b.queued)
 		assert.Empty(t, b.batch)
 	})
 
@@ -1204,7 +1205,7 @@ func TestTableBatcher_OnFlushDone(t *testing.T) {
 		b, w, _ := newTestBatcher(t, rt)
 
 		b.flushing = closedChan()
-		b.flushQueued = false
+		b.queued = ""
 		b.batch = parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1}))
 
 		b.onFlushDone(context.Background())
@@ -2215,7 +2216,7 @@ func TestTableBatcher_BatchBegunWithoutLimitsIsHandedBackOnceThePoolReturns(t *t
 	row := newIngestMsg(t, "events", "", map[string]any{"id": 1})
 	b.add(context.Background(), parseAll(t, w, row)[0])
 	require.Len(t, b.batch, 1, "latched behind the flush in flight")
-	require.True(t, b.flushQueued)
+	require.Equal(t, triggerNone, b.queued, "no limits sized it: not a size flush")
 
 	onPool.Store(true) // a reload serves the tenant again meanwhile
 	close(inflight)
@@ -2815,13 +2816,13 @@ func TestTableBatcher_HandsRowsBackUnderTheTenantsOwnCap(t *testing.T) {
 
 	openUnder2m(pool)
 	m, pm = row(4)
-	w.flushTable(ctx, "events", []parsedMsg{pm}, own, true)
+	w.flushTable(ctx, "events", []parsedMsg{pm}, own, true, triggerSize)
 	handedBackUnderOwnCap(m, "a flush under the pool's window")
 	pool.succeed(clock)
 
 	openUnder2m(table)
 	m, pm = row(5)
-	w.flushTable(ctx, "events", []parsedMsg{pm}, own, true)
+	w.flushTable(ctx, "events", []parsedMsg{pm}, own, true, triggerSize)
 	handedBackUnderOwnCap(m, "a flush under the table's own window")
 	table.succeed(clock)
 
@@ -2848,7 +2849,7 @@ func TestFlushTable_EscalatesToTheTenantsCap(t *testing.T) {
 	var delays []time.Duration
 	for i := range 8 {
 		m := newIngestMsg(t, "events", "", map[string]any{"id": i})
-		w.flushTable(context.Background(), "events", parseAll(t, w, m), own, true)
+		w.flushTable(context.Background(), "events", parseAll(t, w, m), own, true, triggerSize)
 		require.True(t, m.Naked.Load())
 		d := time.Duration(m.NakDelay.Load())
 		delays = append(delays, d)
