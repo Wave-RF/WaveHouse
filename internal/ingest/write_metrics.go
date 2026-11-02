@@ -96,7 +96,7 @@ func zeroWorkerCounters() {
 // request, so it records nothing.
 func (w *IngestWorker) insert(ctx context.Context, tableName string, columns []string, msgs []parsedMsg, mode string) error {
 	start := time.Now()
-	err := w.writeInsert(ctx, tableName, columns, msgs, mode == modeIsolated)
+	err := w.insertToClickHouse(ctx, tableName, columns, msgs, mode == modeIsolated)
 	if errors.Is(err, errNoTarget) {
 		return err
 	}

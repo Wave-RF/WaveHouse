@@ -332,6 +332,12 @@ func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // insertToClickHouse — HTTP request shape
+
+// insertBatch is one bulk INSERT, as flushGroup's first attempt makes it.
+func (w *IngestWorker) insertBatch(ctx context.Context, table string, cols []string, msgs []parsedMsg) error {
+	return w.insertToClickHouse(ctx, table, cols, msgs, false)
+}
+
 // ---------------------------------------------------------------------------
 
 func TestInsertToClickHouse_BuildsCorrectRequest(t *testing.T) {
@@ -378,7 +384,7 @@ func TestInsertToClickHouse_BuildsCorrectRequest(t *testing.T) {
 	}
 	w, _, _, _ := newTestWorker(rt)
 
-	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{
+	err := w.insertBatch(context.Background(), "events", []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
 	})
 	require.NoError(t, err)
@@ -398,7 +404,7 @@ func TestInsertToClickHouse_MultipleMessages_JSONCompactEachRow(t *testing.T) {
 	}
 	w, _, _, _ := newTestWorker(rt)
 
-	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{
+	err := w.insertBatch(context.Background(), "events", []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
 		{row: []byte(`[2]`)},
 		{row: []byte(`[3]`)},
@@ -422,7 +428,7 @@ func TestInsertToClickHouse_SafelyParameterizesTableName(t *testing.T) {
 	}
 	w, _, _, _ := newTestWorker(rt)
 
-	err := w.insertToClickHouse(context.Background(), malicious, []string{"id"}, []parsedMsg{
+	err := w.insertBatch(context.Background(), malicious, []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
 	})
 	require.NoError(t, err)
@@ -440,7 +446,7 @@ func TestInsertToClickHouse_HTTPError_ReturnsBody(t *testing.T) {
 	}
 	w, _, _, _ := newTestWorker(rt)
 
-	err := w.insertToClickHouse(context.Background(), "missing_table", []string{"id"}, []parsedMsg{
+	err := w.insertBatch(context.Background(), "missing_table", []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
 	})
 	require.Error(t, err)
@@ -460,7 +466,7 @@ func TestInsertToClickHouse_500Error(t *testing.T) {
 	}
 	w, _, _, _ := newTestWorker(rt)
 
-	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{
+	err := w.insertBatch(context.Background(), "events", []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
 	})
 	require.Error(t, err)
@@ -476,7 +482,7 @@ func TestInsertToClickHouse_NetworkError(t *testing.T) {
 	}
 	w, _, _, _ := newTestWorker(rt)
 
-	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{
+	err := w.insertBatch(context.Background(), "events", []string{"id"}, []parsedMsg{
 		{row: []byte(`[1]`)},
 	})
 	require.Error(t, err)
@@ -1989,7 +1995,7 @@ func TestInsertToClickHouse_SetsConfiguredHeaders(t *testing.T) {
 			Headers: map[string]string{"X-Proxy-Token": "abc", "Content-Type": "text/plain", "X-ClickHouse-User": "someone-else"},
 		}
 	}
-	require.NoError(t, w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}}))
+	require.NoError(t, w.insertBatch(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}}))
 	assert.Equal(t, "abc", got.Get("X-Proxy-Token"))
 	assert.Equal(t, "application/json", got.Get("Content-Type"))
 	assert.Equal(t, "test_user", got.Get("X-ClickHouse-User"))
@@ -2012,7 +2018,7 @@ func TestInsertToClickHouse_UsesTargetTLS(t *testing.T) {
 	w, _, _, _ := newTestWorker(nil)
 	w.clients = chconn.NewHTTPClients(ingestHTTPClient)
 	insert := func() error {
-		return w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}})
+		return w.insertBatch(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`)}})
 	}
 
 	w.target = target(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12})
@@ -2038,7 +2044,7 @@ func TestInsertToClickHouse_NoTargetIsAnError(t *testing.T) {
 		asked = append(asked, id)
 		return chconn.Target{}
 	}
-	err := w.insertToClickHouse(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`), tenant: "acme"}})
+	err := w.insertBatch(context.Background(), "events", []string{"id"}, []parsedMsg{{row: []byte(`[1]`), tenant: "acme"}})
 	require.ErrorContains(t, err, "no ClickHouse connection is open for tenant acme")
 	assert.Equal(t, []tenant.ID{"acme"}, asked, "the target is the batch's own tenant's")
 	assert.Zero(t, rt.Hits())

@@ -845,17 +845,12 @@ func (w *IngestWorker) retryLater(ctx context.Context, tableName string, msgs []
 // insertToClickHouse writes one group as a single INSERT naming columns
 // explicitly, so the positional rows land in the right slots. Callers group by
 // column list first: a batch spanning two lists cannot share one statement.
-func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, columns []string, msgs []parsedMsg) error {
-	return w.writeInsert(ctx, tableName, columns, msgs, false)
-}
-
-// writeInsert is insertToClickHouse, or with isolated one row of a batch
-// being isolated, synchronously. An async flush merges concurrent INSERTs of
-// the same statement into one block, and a CHECK constraint one row violates
-// fails every INSERT in it: a good row isolated beside another writer's bad
-// one would be parked with it. Sync skips the async flush wait too, about
-// 55 ms per isolated row on 26.8.
-func (w *IngestWorker) writeInsert(ctx context.Context, tableName string, columns []string, msgs []parsedMsg, isolated bool) (err error) {
+// With isolated it writes one row of a batch being isolated, synchronously:
+// an async flush merges concurrent INSERTs of the same statement into one
+// block, and a CHECK constraint one row violates fails every INSERT in it, so
+// a good row isolated beside another writer's bad one would be parked with it.
+// Sync skips the async flush wait too, about 55 ms per isolated row on 26.8.
+func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, columns []string, msgs []parsedMsg, isolated bool) (err error) {
 	var buf bytes.Buffer
 	for _, m := range msgs {
 		buf.Write(m.row)
