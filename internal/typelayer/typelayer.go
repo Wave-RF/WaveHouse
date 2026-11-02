@@ -152,9 +152,9 @@ type tenantSet struct {
 // filter and no network (measured with the chtypes maintainers: another
 // fingerprint's build is ARTIFACT_MISSING). It checks a record only, not that
 // the library loads: a truncated library still surfaces at its first Bind. A
-// line holding no build for this SDK takes about a second to refuse offline
-// on a typical cache, more on a larger one (the SDK reads every cached build
-// per miss), so the distinct lines are checked at once and the
+// line holding no build for this SDK is refused offline in a few
+// milliseconds (about 2 ms on an 11-build cache, SDK 2.0.0-dev.12,
+// darwin-arm64); the distinct lines are still checked at once, and the
 // first that resolves answers: a boot with a usable line waits for that line,
 // one being refused for the slowest miss. It returns nil when a line
 // resolves, else each line's error, chtypes' own.

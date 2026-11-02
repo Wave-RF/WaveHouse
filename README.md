@@ -132,7 +132,7 @@ go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 `go install` compiles from source with cgo enabled (requires a C toolchain — Linux amd64/arm64 or macOS arm64; on Linux it links against the build host's glibc, where the prebuilt binaries need 2.34 or later) and carries no [chtypes artifact](https://wavehouse.dev/deployment#chtypes-artifacts): the server fetches the one for your ClickHouse line when it first binds a tenant on it. To fetch it ahead (for an air-gapped host, see [Air-gapped deployments](https://wavehouse.dev/deployment#air-gapped-deployments)):
 
 ```bash
-go run github.com/wave-rf/chtypes/go/v2/cmd/chtypes@v2.0.0-dev.11 fetch <your-clickhouse-minor-version>
+go run github.com/wave-rf/chtypes/go/v2/cmd/chtypes@v2.0.0-dev.12 fetch <your-clickhouse-minor-version>
 ```
 
 (From a checkout, `scripts/fetch-chtypes.sh` fetches the line of the ClickHouse the repository tests against.) Either way it is roughly a 45–60 MB download that unpacks to roughly 300–370 MB (varying by build) in the default local cache (`${XDG_CACHE_HOME:-~/.cache}/chtypes/v2-dev`, or `$CHTYPES_CACHE/v2-dev`); point `WH_CHTYPES_CACHE` at the cache root if you keep it somewhere else.
