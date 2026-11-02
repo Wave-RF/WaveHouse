@@ -45,13 +45,15 @@ func newIngestRecordsCounter(m metric.Meter) (metric.Int64Counter, error) {
 // countRecords counts recs under their results. A record that was neither
 // rejected, a duplicate nor published takes the result of abort, the
 // whole-request failure that stopped it, or canceled when the client went
-// away first: that is not the dedupe store's or the queue's failure. With no
-// abort, every such record was published.
+// away first (its request context canceled, not a deadline the server set):
+// that is not the dedupe store's or the queue's failure. A Final abort was
+// classified when its call failed, so a client that left only after that
+// leaves its Result. With no abort, every such record was published.
 func countRecords(ctx context.Context, table string, recs []pendingRecord, abort *requestAbort) {
 	stopped := ""
 	if abort != nil {
 		stopped = abort.Result
-		if ctx.Err() != nil {
+		if !abort.Final && clientGone(ctx) {
 			stopped = resultRecordsCanceled
 		}
 	}
