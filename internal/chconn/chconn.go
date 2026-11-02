@@ -777,6 +777,12 @@ func (p *Pools) Close() error {
 	return errors.Join(errs...)
 }
 
+// IdleConnTimeout is how long every client of the ClickHouse HTTP interface
+// keeps an idle connection: under ClickHouse's keep_alive_timeout (10 s on
+// 24.8, 30 s on 26.8), so the server never closes a connection the client is
+// about to reuse. A POST that loses that race is not replayed.
+const IdleConnTimeout = 5 * time.Second
+
 // HTTPClients hands an HTTP-interface consumer the client for a target: one
 // per TLS config, made by the consumer's own factory (the worker's tuned
 // transport, the proxy's redirect policy) and kept for the process lifetime.

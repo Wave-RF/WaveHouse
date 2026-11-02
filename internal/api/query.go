@@ -143,6 +143,7 @@ func NewQueryHandler(target func(*settings.Store) chconn.Target, queryTimeout fu
 func proxyHTTPClient(tlsCfg *tls.Config) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = tlsCfg
+	transport.IdleConnTimeout = chconn.IdleConnTimeout
 	return &http.Client{
 		Transport: transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {

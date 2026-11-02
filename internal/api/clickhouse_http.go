@@ -184,11 +184,7 @@ func readerHTTPClient(tlsCfg *tls.Config, conns int) *http.Client {
 	transport.TLSClientConfig = tlsCfg
 	transport.MaxConnsPerHost = conns
 	transport.MaxIdleConnsPerHost = conns
-	// Under ClickHouse's keep_alive_timeout (10 s on 24.8.14.39, 30 s on
-	// 26.8.15.10), so the server never closes a connection the client is about
-	// to reuse: a POST that loses that race is not replayed, and a write
-	// pipe's would fail.
-	transport.IdleConnTimeout = 5 * time.Second
+	transport.IdleConnTimeout = chconn.IdleConnTimeout
 	return &http.Client{
 		Transport: transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {

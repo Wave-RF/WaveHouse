@@ -233,7 +233,7 @@ func ingestHTTPClient(tlsCfg *tls.Config) *http.Client {
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
+		IdleConnTimeout:       chconn.IdleConnTimeout,
 		TLSHandshakeTimeout:   10 * time.Second,
 		TLSClientConfig:       tlsCfg,
 		ExpectContinueTimeout: 1 * time.Second,
