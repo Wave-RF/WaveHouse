@@ -254,7 +254,7 @@ Several layers throttle the pipeline, inner to outer:
 | `ingest.retry_backoff_max` | 30 s (seed) | cap of that backoff, per tenant; it doubles from 1 s |
 | `mq.ack_wait` | 60s | server redelivery timeout (boot config); **must exceed `ingest.max_batch_wait_ms` + `clickhouse.insert_timeout`** or in-flight rows get redelivered → duplicate inserts, which the ingest process checks when it adopts a tenant's settings. The rule bounds a batch's own wait plus one `INSERT`: a batch queued behind an in-flight flush, several column lists and row-by-row isolation add deadlines on top, so keep the sum well under it, as the seeds do |
 | `mq.prefetch` | 500 | client prefetch (boot config), shared by the tenants' streams; at most `mq.max_ack_pending` |
-| `mq.max_ack_pending` | 10,000 | server cap on a tenant's unacked messages (boot config; backpressure) |
+| `mq.max_ack_pending` | 100,000 | server cap on a tenant's unacked messages (boot config; backpressure) |
 
 `DoubleAck` is used (not fire-and-forget `Ack`) because acking is what records "this data is durably in ClickHouse." With the embedded server's `SyncAlways`, every ack is an fsync and therefore *slow*, which is exactly why acks run in the background (`ackWg`) off the insert path.
 

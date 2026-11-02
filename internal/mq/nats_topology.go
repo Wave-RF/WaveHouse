@@ -74,7 +74,7 @@ const (
 	// them, since it cannot import this package, and a test there pins the
 	// two together; `wavehouse mq manifests` defaults its flags from them.
 	DefaultAckWait       = 60 * time.Second
-	DefaultMaxAckPending = 10_000
+	DefaultMaxAckPending = 100_000
 	DefaultPrefetch      = 500
 )
 

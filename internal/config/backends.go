@@ -239,7 +239,7 @@ func checkBackend[T ~string](key, env string, got T, valid []T) error {
 // which config must not import; window_test.go pins the two.
 const (
 	defaultAckWait       = 60 * time.Second
-	defaultMaxAckPending = 10_000
+	defaultMaxAckPending = 100_000
 	defaultPrefetch      = 500
 )
 

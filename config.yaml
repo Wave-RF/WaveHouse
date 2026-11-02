@@ -82,7 +82,7 @@ mq:
   # manifests --ack-wait --max-ack-pending), and with it the worker's
   # memory; prefetch is what the consumer fetches ahead, at most max_ack_pending.
   ack_wait: 60s
-  max_ack_pending: 10000
+  max_ack_pending: 100000
   prefetch: 500
   # backend: nats reads this block instead: the operator's NATS JetStream
   # (see the deployment guide's "External NATS" section).
