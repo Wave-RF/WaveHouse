@@ -203,7 +203,8 @@ func TestTablesKey(t *testing.T) {
 	otherUser.Username = "v"
 	otherPort.Addr = "ch:9440"
 	otherDB.Database = "db2"
-	pools, err := chconn.NewPools(100, []chconn.Member{
+	pools := chconn.NewPools(100)
+	_, err := pools.Reconcile([]chconn.Member{
 		{Tenant: "a", Params: base},
 		{Tenant: "b", Params: otherHTTP},
 		{Tenant: "c", Params: otherUser},

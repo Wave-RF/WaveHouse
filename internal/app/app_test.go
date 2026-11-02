@@ -1943,19 +1943,50 @@ func TestNew_NestedPoolsFollowEachTenantsTuple(t *testing.T) {
 	assert.Equal(t, []tenant.ID{"acme", "globex"}, a.pools.SharingTables("acme"), "same address and database: still the same tables")
 }
 
-// A nested directory's pools must fit the ceiling together: boot is refused
-// naming the sum and the ceiling, like a flat directory's one pool.
-func TestNew_NestedRefusesPoolsAboveTheCeiling(t *testing.T) {
+// A nested directory's pools must fit the ceiling together, and at boot the
+// tenant whose pool would cross it is served on none — the registry's rule
+// for the shape, as the ingest limits, the queue budget and the dedupe
+// stores follow it (#955) — logged and counted, failing closed on its
+// ClickHouse side as after a reload's refusal, while every other tenant
+// boots on its pool; the next reload that frees the budget opens it. A flat
+// directory's one pool refuses boot (TestNew_RefusesAPoolAboveTheCeiling).
+func TestNew_NestedPoolAboveTheCeilingServesTheTenantOnNone(t *testing.T) {
 	t.Parallel()
+	a1, a2 := closedAddr(t), closedAddr(t)
 	root := writeNestedSettings(t, map[string]map[string]any{
-		"acme":   chSettings(closedAddr(t), "default", 10),
-		"globex": chSettings(closedAddr(t), "default", 10),
+		"acme":   chSettings(a1, "default", 10),
+		"globex": chSettings(a2, "default", 10),
 	})
 	cfg := testConfig(t, root)
 	cfg.ClickHouse.MaxTotalConns = 15
-	_, err := New(t.Context(), Options{Config: cfg})
-	require.ErrorContains(t, err, "clickhouse.max_open_conns 10")
-	require.ErrorContains(t, err, "at 20, above clickhouse.max_total_conns 15")
+	a := newApp(t, cfg, Options{})
+	acme := a.pools.For("acme")
+	require.NotNil(t, acme, "placed first, in id order, it fits")
+	assert.Nil(t, a.pools.For("globex"), "at 20 it would cross the ceiling: on no pool")
+	stats := a.tenants.Stats()
+	assert.Equal(t, int64(1), stats.ReconcileFailures["clickhouse"])
+	assert.False(t, stats.LastSuccessful, "the boot adoption is partial")
+
+	rewriteSettings(t, filepath.Join(root, "acme"), chSettings(a1, "default", 5))
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	require.NotNil(t, a.pools.For("globex"), "opened once a sharer made room")
+	assert.Same(t, acme, a.pools.For("acme"), "resized, not reopened")
+	assert.True(t, a.tenants.Stats().LastSuccessful)
+}
+
+// A nested directory none of whose pools fits — the ceiling under every
+// tenant's ask — still boots, as it does for the ingest limits and for
+// discovery when no tenant is usable: every tenant is on no pool, and the
+// next reload retries.
+func TestNew_NestedPoolsAllAboveTheCeilingStillBoot(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig(t, writeNestedSettings(t, map[string]map[string]any{"acme": nil, "globex": nil}))
+	cfg.ClickHouse.MaxTotalConns = 5 // under the seed's max_open_conns 10
+	a := newApp(t, cfg, Options{})
+	assert.Nil(t, a.pools.For("acme"))
+	assert.Nil(t, a.pools.For("globex"))
+	assert.Equal(t, int64(1), a.tenants.Stats().ReconcileFailures["clickhouse"])
 }
 
 // A reload whose new tenant's pool would put the pools over the ceiling

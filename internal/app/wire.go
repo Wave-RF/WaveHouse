@@ -259,17 +259,21 @@ func (a *App) wireObservability(ctx context.Context) {
 // wireClickHouse opens the ClickHouse pools: one per distinct address,
 // database, user, password and tls tuple among the served tenants' clickhouse
 // blocks, shared by the tenants naming it and
-// sized to their largest ask (#583 story 6). Every reload reconciles them —
-// a new tuple opens (no dial), a tenant whose tuple changed is repointed, a
-// tuple no tenant names is released after its grace — under the boot
-// config's clickhouse.max_total_conns, the ceiling on the open pools' sizes
-// together: capacity is sized once, per process, so pools above it refuse
-// boot like the rest of an impossible boot config (#530), and at a reload a
-// resize above it is refused with the pool kept at its size, and a tuple
-// that cannot be opened — the ceiling, a certificate file that cannot be
-// read, or options the driver refuses — leaves its tenants on the pool they
-// had, or on none when they had none; both logged, and retried by the next
-// reload. Reachability surfaces
+// sized to their largest ask (#583 story 6). Boot and every reload reconcile
+// them — a new tuple opens (no dial), a tenant whose tuple changed is
+// repointed, a tuple no tenant names is released after its grace — under the
+// boot config's clickhouse.max_total_conns, the ceiling on the open pools'
+// sizes together (capacity is sized once, per process): a resize above it
+// is refused with the pool kept at its size, and a tuple that cannot be
+// opened — the ceiling, a certificate file that cannot be read, or options
+// the driver refuses — leaves its tenants on the pool they had, or on none
+// when they had none; logged, and retried by the next reload. At boot a
+// refusal follows the registry's rule for the shape, as the ingest limits,
+// the queue budget and the dedupe stores do: over a flat directory it
+// refuses boot like the rest of an impossible boot config (#530), naming
+// the sum and the ceiling; over a nested one the tenant is served on no
+// pool, logged and counted as on a reload, and the other tenants boot
+// (#955). Reachability surfaces
 // where it already does (schema discovery retries, /readyz, query errors).
 // Every consumer resolves its tenant's pool per call (chConn, chTargetFor).
 func (a *App) wireClickHouse() error {
@@ -288,12 +292,19 @@ func (a *App) wireClickHouse() error {
 		}
 		return ms
 	}
-	pools, err := chconn.NewPools(a.cfg.ClickHouse.MaxTotalConns, members())
-	if err != nil {
-		return fmt.Errorf("clickhouse open: %w", err)
-	}
+	pools := chconn.NewPools(a.cfg.ClickHouse.MaxTotalConns)
 	a.pools = pools
 	a.add(component{name: "clickhouse", close: withoutContext(pools.Close)})
+	// No tenant has a cache or a schema yet, so the tenants the boot
+	// reconcile reports stale are nothing to orphan.
+	_, err := pools.Reconcile(members())
+	a.tenants.Reconciled("clickhouse", err)
+	if err != nil {
+		if !a.tenants.Nested() {
+			return fmt.Errorf("clickhouse open: %w", err)
+		}
+		slog.Error("clickhouse pools opened in part; each tenant named is on no pool until a reload opens one", "error", err)
+	}
 	a.tenants.AfterAdopt(func([]tenant.ID) {
 		stale, err := pools.Reconcile(members())
 		if err != nil {

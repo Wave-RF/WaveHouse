@@ -388,17 +388,18 @@ func (s *snapshot) clone() *snapshot {
 	return next
 }
 
-// Pools holds one Manager per tuple the served tenants name, reconciled
-// after every settings reload: a new tuple opens a pool (no dial), a tenant
-// whose tuple changed is repointed, a tuple no tenant names any more is
-// released after its grace, and a pool shared by several tenants is sized to
-// their largest ask. The ceiling — the boot config's
+// Pools holds one Manager per tuple the served tenants name, reconciled at
+// boot and after every settings reload: a new tuple opens a pool (no dial),
+// a tenant whose tuple changed is repointed, a tuple no tenant names any
+// more is released after its grace, and a pool shared by several tenants is
+// sized to their largest ask. The ceiling — the boot config's
 // clickhouse.max_total_conns, 0 for none — bounds the sum of the open pools'
-// MaxOpenConns: at boot it refuses to open, and at a reload a resize above it
-// is refused with the pool kept at its size, and a tuple that cannot be
-// opened leaves its tenants where they were, on their previous pool, or with
-// none when they had none. Both are logged by the caller and retried by the
-// next reload. Resolution is per tenant: For, Target, SharingTables.
+// MaxOpenConns: a resize above it is refused with the pool kept at its size,
+// and a tuple that cannot be opened leaves its tenants where they were, on
+// their previous pool, or with none when they had none. Reconcile returns
+// every refusal for the caller, which refuses boot on one over a flat
+// settings directory and otherwise logs it, and the next reload retries.
+// Resolution is per tenant: For, Target, SharingTables.
 type Pools struct {
 	ceiling int
 	dial    dialer
@@ -407,18 +408,13 @@ type Pools struct {
 	cur atomic.Pointer[snapshot]
 }
 
-// NewPools opens the pools want names, under ceiling. Any refusal — a
+// NewPools returns the pools under ceiling, open on none; the caller's first
+// Reconcile opens what the served tenants name. A refusal there — a
 // certificate file that cannot be read, options the driver refuses, or pools
-// that would add up to more than the ceiling, named with the sum — refuses
-// boot: nothing is left open.
-func NewPools(ceiling int, want []Member) (*Pools, error) {
-	p := newPools(ceiling, dial)
-	if _, err := p.Reconcile(want); err != nil {
-		_ = p.Close()
-		return nil, err
-	}
-	return p, nil
-}
+// that would add up to more than the ceiling, named with the sum — is the
+// caller's to act on: what one means at boot depends on the settings
+// directory's shape, which only the wiring knows.
+func NewPools(ceiling int) *Pools { return newPools(ceiling, dial) }
 
 func newPools(ceiling int, d dialer) *Pools {
 	p := &Pools{ceiling: ceiling, dial: d}
