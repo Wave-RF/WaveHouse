@@ -19,11 +19,13 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -77,7 +79,23 @@ type IngestHandler struct {
 }
 
 func NewIngestHandler(registry RegistrySource, pub mq.Publisher) *IngestHandler {
+	zeroIngestCounters()
 	return &IngestHandler{Registry: registry, Publisher: pub}
+}
+
+// zeroIngestCounters exports the handler's counters at 0 for every closed
+// label set, so the first refused or failed record is an increase a rate()
+// or increase() alert sees (#905). They carry table and tenant, so
+// observability.ZeroCounter does this only where both labels are dropped.
+func zeroIngestCounters() {
+	const carries = observability.CarriesTable | observability.CarriesTenant
+	observability.ZeroCounter(ingestRecords, carries, observability.LabelSets(observability.Values("result",
+		resultQueued, resultDuplicate, resultInFlight, resultInvalidBody, resultSchema, resultForbidden,
+		resultMissingID, resultDedupeUnavailable, resultQueueFull, resultQueueUnavailable,
+		resultPublishFailed, resultRecordsCanceled))...)
+	observability.ZeroCounter(dedupeMissingIDCounter, carries)
+	observability.ZeroCounter(dedupeCommitFailedCounter, carries)
+	observability.ZeroCounter(dedupeDisabledCounter, carries)
 }
 
 var dedupeMissingIDCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
@@ -135,6 +153,7 @@ type recordResult struct {
 type recordReject struct {
 	Status  int
 	Message string
+	Result  string // its result on wavehouse_ingest_records_total
 }
 
 // requestAbort is a whole-request failure: this record and every one that
@@ -158,6 +177,11 @@ type requestAbort struct {
 	Status     int
 	Message    string
 	RetryAfter string // non-empty → emit a Retry-After header
+	Result     string // the result on wavehouse_ingest_records_total of each record it refuses
+	// Final marks a Result already decided with the client's state when the
+	// call failed, which countRecords keeps rather than reading the context
+	// again (#947).
+	Final bool
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -168,23 +192,22 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	table := r.URL.Query().Get("table")
 
-	// Force the use of the GLOBAL provider
-	tracer := otel.GetTracerProvider().Tracer("internal/api")
+	// Force the use of the GLOBAL provider. The scope is wavehouse-api, as
+	// the package's meter and the other components' wavehouse-<component>
+	// tracers are named (#899).
+	tracer := otel.GetTracerProvider().Tracer("wavehouse-api")
 
 	ctx, span := tracer.Start(r.Context(), "IngestHandler.Handle",
 		trace.WithAttributes(attribute.String("table", table)),
 	)
 	defer span.End()
 
-	// Add a standard log to prove we are inside the span logic
-	slog.DebugContext(ctx, "debug: span started for ingest", "table", table)
-
 	r = r.WithContext(ctx)
 
 	// TODO: what should the order of these be to maximize speed + limit risk of data leakage or DoS/resource exhaustion?
 
 	if table == "" {
-		slog.ErrorContext(ctx, "missing table parameter in request")
+		slog.WarnContext(ctx, "missing table parameter in request")
 		writeJSONError(w, http.StatusBadRequest, "missing table")
 		return
 	}
@@ -192,8 +215,11 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// TODO: prevent table-enumeration...
 	schema, err := lookupSchema(w, h.Registry, store, table, "unknown table: "+table)
 	if err != nil {
-		if errors.Is(err, discovery.ErrUnknownTable) {
+		switch {
+		case errors.Is(err, discovery.ErrUnknownTable):
 			slog.WarnContext(ctx, "unknown table requested", "table", table)
+		case errors.Is(err, discovery.ErrNotLoaded):
+			failSpan(ctx, schemaNotLoadedMessage)
 		}
 		return
 	}
@@ -291,7 +317,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// only error left is an empty body.
 	rr, batch, err := newRecordReader(format, body.Bytes())
 	if err != nil {
-		slog.ErrorContext(ctx, "empty ingest body", "table", table, "format", format.String())
+		slog.WarnContext(ctx, "empty ingest body", "table", table, "format", format.String())
 		writeJSONError(w, http.StatusBadRequest, emptyBodyMessage(format))
 		return
 	}
@@ -327,7 +353,8 @@ func (h *IngestHandler) handleSingle(
 		if writeMaxBytesError(w, err, reqCap) {
 			return
 		}
-		slog.ErrorContext(ctx, "invalid json payload", "error", err, "table", table)
+		slog.WarnContext(ctx, "invalid json payload", "error", err, "table", table)
+		countRecords(ctx, table, []pendingRecord{{reject: &recordReject{Result: resultInvalidBody}}}, nil)
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -338,8 +365,9 @@ func (h *IngestHandler) handleSingle(
 		abort = h.ingestWindow(ctx, store, table, scope, window)
 		rec = window[0]
 	}
+	countRecords(ctx, table, []pendingRecord{rec}, abort)
 	if abort != nil {
-		writeAbort(w, abort)
+		writeAbort(ctx, w, abort)
 		return
 	}
 	if rec.reject != nil {
@@ -352,7 +380,7 @@ func (h *IngestHandler) handleSingle(
 		return
 	}
 
-	slog.InfoContext(ctx, "event successfully ingested", "table", table)
+	slog.DebugContext(ctx, "event successfully ingested", "table", table)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
@@ -386,8 +414,10 @@ func (h *IngestHandler) handleBatch(
 	// flush runs the window's records through reserve → publish → commit and
 	// reports them in order; false when it aborted the request.
 	flush := func() bool {
-		if abort := h.ingestWindow(ctx, store, table, scope, window); abort != nil {
-			writeAbort(w, abort)
+		abort := h.ingestWindow(ctx, store, table, scope, window)
+		countRecords(ctx, table, window, abort)
+		if abort != nil {
+			writeAbort(ctx, w, abort)
 			return false
 		}
 		for i := range window {
@@ -405,7 +435,7 @@ func (h *IngestHandler) handleBatch(
 		if err != nil {
 			if rse, ok := errors.AsType[*recordSyntaxError](err); ok {
 				result.Total++
-				window = append(window, pendingRecord{index: result.Total, reject: &recordReject{Message: rse.Error()}})
+				window = append(window, pendingRecord{index: result.Total, reject: &recordReject{Message: rse.Error(), Result: resultInvalidBody}})
 				if len(window) == size && !flush() {
 					return
 				}
@@ -422,6 +452,13 @@ func (h *IngestHandler) handleBatch(
 			// than report a misleading partial summary. Not a body read error:
 			// the readers run over an in-memory slice now.
 			slog.WarnContext(ctx, "ingest read error", "error", err, "table", table)
+			// The open window is never published: the body it came in is refused.
+			// The element that broke the stream is a record too, unless the
+			// array merely ended early.
+			if !errors.Is(err, errUnterminatedArray) {
+				window = append(window, pendingRecord{reject: &recordReject{Result: resultInvalidBody}})
+			}
+			countRecords(ctx, table, window, &requestAbort{Result: resultInvalidBody})
 			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
 		}
@@ -432,7 +469,8 @@ func (h *IngestHandler) handleBatch(
 			// Whole-request failure: surface the status rather than recording a
 			// request-scoped condition as per-record loss (see requestAbort).
 			// Nothing in the open window has been published.
-			writeAbort(w, abort)
+			countRecords(ctx, table, append(window, rec), abort)
+			writeAbort(ctx, w, abort)
 			return
 		}
 		rec.index = result.Total
@@ -445,7 +483,7 @@ func (h *IngestHandler) handleBatch(
 		return
 	}
 
-	slog.InfoContext(ctx, "batch ingested", "table", table,
+	slog.DebugContext(ctx, "batch ingested", "table", table,
 		"total", result.Total, "succeeded", result.Succeeded,
 		"failed", result.Failed, "duplicates", result.Duplicates)
 	w.Header().Set("Content-Type", "application/json")
@@ -475,12 +513,23 @@ func (r *batchResult) add(rec *pendingRecord) {
 
 // writeAbort emits a whole-request failure response: the status and message,
 // plus a Retry-After header when one is set (503 backpressure). Shared by the
-// single-object and batch paths.
-func writeAbort(w http.ResponseWriter, abort *requestAbort) {
+// single-object and batch paths. A 5xx is the engine's failure, so it marks
+// the handler's span, the one whose context rides into the queue headers, as
+// failed; a 4xx is the client's, and the span stays unset, as the server
+// span's does (#899).
+func writeAbort(ctx context.Context, w http.ResponseWriter, abort *requestAbort) {
+	if abort.Status >= http.StatusInternalServerError {
+		failSpan(ctx, abort.Message)
+	}
 	if abort.RetryAfter != "" {
 		w.Header().Set("Retry-After", abort.RetryAfter)
 	}
 	writeJSONError(w, abort.Status, abort.Message)
+}
+
+// failSpan marks the span in ctx as failed, described by msg.
+func failSpan(ctx context.Context, msg string) {
+	trace.SpanFromContext(ctx).SetStatus(codes.Error, msg)
 }
 
 // writeMaxBytesError writes a 413 if err is the inbound body-cap overflow and
@@ -563,6 +612,7 @@ func (h *IngestHandler) policyCheckGuard(
 	return &recordReject{
 		Status:  http.StatusForbidden,
 		Message: "policy check references column " + strings.Join(reasons, "; and column "),
+		Result:  resultForbidden,
 	}
 }
 
@@ -578,6 +628,7 @@ type pendingRecord struct {
 	retention time.Duration
 	claim     dedupe.Claim
 	duplicate bool
+	queued    bool // published
 }
 
 // prepareRecord runs the per-record half of the pipeline shared by the
@@ -604,7 +655,7 @@ func (h *IngestHandler) prepareRecord(
 ) (rec pendingRecord, abort *requestAbort) {
 	if err := h.validator().Validate(schema, data); err != nil {
 		slog.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
-		return pendingRecord{reject: &recordReject{Status: http.StatusBadRequest, Message: err.Error()}}, nil
+		return pendingRecord{reject: &recordReject{Status: http.StatusBadRequest, Message: err.Error(), Result: resultSchema}}, nil
 	}
 
 	// DEEP AUTH: column-level allow/deny + check clauses.
@@ -615,6 +666,7 @@ func (h *IngestHandler) prepareRecord(
 				return pendingRecord{reject: &recordReject{
 					Status:  http.StatusForbidden,
 					Message: fmt.Sprintf("column %q not allowed for insert", col),
+					Result:  resultForbidden,
 				}}, nil
 			}
 		}
@@ -639,6 +691,7 @@ func (h *IngestHandler) prepareRecord(
 			return pendingRecord{}, &requestAbort{
 				Status:  http.StatusForbidden,
 				Message: "insert permissions were not resolved for this request",
+				Result:  resultForbidden,
 			}
 		}
 		for col, requiredVal := range checks {
@@ -663,6 +716,7 @@ func (h *IngestHandler) prepareRecord(
 					return pendingRecord{reject: &recordReject{
 						Status:  http.StatusForbidden,
 						Message: fmt.Sprintf("check failed for column %q", col),
+						Result:  resultForbidden,
 					}}, nil
 				}
 				continue
@@ -683,6 +737,7 @@ func (h *IngestHandler) prepareRecord(
 					return pendingRecord{reject: &recordReject{
 						Status:  http.StatusForbidden,
 						Message: fmt.Sprintf("check failed for column %q", col),
+						Result:  resultForbidden,
 					}}, nil
 				}
 			} else {
@@ -719,12 +774,13 @@ func (h *IngestHandler) prepareRecord(
 				rec.key = &dedupe.Key{Table: table, ID: fmt.Sprint(idVal)}
 				rec.retention = dd.Retention
 			} else {
-				dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
+				dedupeMissingIDCounter.Add(ctx, 1, observability.MetricAttrs(ctx, attribute.String("table", table)))
 				if dd.RequireID {
 					slog.WarnContext(ctx, "dedupe id_field missing or null; rejecting", "id_field", idField, "table", table)
 					return pendingRecord{reject: &recordReject{
 						Status:  http.StatusBadRequest,
 						Message: fmt.Sprintf("missing dedupe id field %q", idField),
+						Result:  resultMissingID,
 					}}, nil
 				}
 				slog.WarnContext(ctx, "dedupe id_field missing or null; publishing without idempotency", "id_field", idField, "table", table)
@@ -740,7 +796,7 @@ func (h *IngestHandler) prepareRecord(
 	row, err := ingest.EncodeCompactRow(cols, data)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to encode compact row", "error", err, "table", table)
-		return pendingRecord{}, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
+		return pendingRecord{}, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed", Result: resultPublishFailed}
 	}
 
 	evt := ingest.EventMessage{
@@ -755,7 +811,7 @@ func (h *IngestHandler) prepareRecord(
 	rec.payload, err = json.Marshal(evt)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to marshal event message", "error", err)
-		return pendingRecord{}, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
+		return pendingRecord{}, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed", Result: resultPublishFailed}
 	}
 	return rec, nil
 }
@@ -766,6 +822,7 @@ func (h *IngestHandler) prepareRecord(
 // duplicate records are skipped. It sets each record's outcome and returns an
 // abort when the request must stop; what the window published before a failure
 // is committed first, so the retry reports it as duplicates (see publishFailed).
+// The window's publishes are one mq.publish span.
 func (h *IngestHandler) ingestWindow(ctx context.Context, store *settings.Store, table, scope string, recs []pendingRecord) *requestAbort {
 	var dd dedupe.Deduplicator
 	var keyed []int
@@ -782,6 +839,18 @@ func (h *IngestHandler) ingestWindow(ctx context.Context, store *settings.Store,
 	}
 
 	topic := mq.Topic{Tenant: store.Tenant(), Table: table, Scope: scope}
+	publishing := 0
+	for i := range recs {
+		if recs[i].reject == nil && !recs[i].duplicate {
+			publishing++
+		}
+	}
+	// One span for the window's publishes, not one per row.
+	pubCtx, endPublish := ctx, func(int, error) {}
+	if publishing > 0 {
+		pubCtx, endPublish = mq.StartPublishBatch(ctx)
+	}
+	sent := 0
 	for i := range recs {
 		rec := &recs[i]
 		if rec.reject != nil || rec.duplicate {
@@ -793,10 +862,14 @@ func (h *IngestHandler) ingestWindow(ctx context.Context, store *settings.Store,
 			// queue drops its copy if the first one landed.
 			opts = append(opts, mq.WithIdempotencyKey(dedupe.IdempotencyKey(store.Tenant(), rec.claim.Key)))
 		}
-		if err := h.Publisher.Publish(ctx, topic, rec.payload, opts...); err != nil {
+		sent++
+		if err := h.Publisher.Publish(pubCtx, topic, rec.payload, opts...); err != nil {
+			endPublish(sent, err)
 			return h.publishFailed(ctx, dd, topic, recs, i, err)
 		}
+		rec.queued = true
 	}
+	endPublish(sent, nil)
 	commitClaims(ctx, dd, recs, table)
 	return nil
 }
@@ -831,24 +904,28 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 		// The counter carries the signal (a burst is a reload; a steady rate
 		// is the store and settings out of step), so the line is Debug rather
 		// than a WARN per record.
-		dedupeDisabledCounter.Add(ctx, int64(len(keys)), metric.WithAttributes(attribute.String("table", table)))
+		dedupeDisabledCounter.Add(ctx, int64(len(keys)), observability.MetricAttrs(ctx, attribute.String("table", table)))
 		slog.DebugContext(ctx, "dedupe switched off mid-reload; publishing without idempotency", "records", len(keys), "table", table)
 		return nil
+	case err != nil && clientGone(ctx):
+		// The client went away while Reserve was in flight, which is
+		// likely why it failed, however the store reports it (#947).
+		slog.DebugContext(ctx, "dedupe reserve failed: client closed the request", "error", err, "table", table)
+		return clientClosedAbort()
 	case errors.Is(err, dedupe.ErrUnavailable):
 		slog.WarnContext(ctx, "dedupe store unavailable", "error", err, "table", table)
-		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "dedupe store unavailable", RetryAfter: "5"}
+		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "dedupe store unavailable", RetryAfter: "5", Result: resultDedupeUnavailable}
 	case err != nil:
 		if ctx.Err() != nil {
-			// The request's own context ended — the client is gone, or its
-			// deadline passed — while Reserve was in flight. Reserve wraps
-			// that as an ordinary error, but it is not a backend problem
-			// worth an operator's attention, and the response status below
-			// is moot: nothing is listening for it.
+			// The request's deadline passed while Reserve was in flight.
+			// Reserve wraps that as an ordinary error, but it is not a
+			// backend problem worth an operator's attention. The deadline
+			// is the server's, so the request still counts as its failure.
 			slog.DebugContext(ctx, "dedupe reserve failed: request context ended", "error", err, "table", table)
 		} else {
 			slog.ErrorContext(ctx, "dedupe reserve failed", "error", err, "table", table)
 		}
-		return &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}
+		return &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed", Result: resultDedupeUnavailable}
 	}
 	var held *dedupe.Key
 	for j, i := range keyed {
@@ -856,7 +933,7 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 		switch claims[j].Status {
 		case dedupe.Duplicate:
 			recs[i].duplicate = true
-			slog.InfoContext(ctx, "duplicate event skipped", "event_id", keys[j].ID, "table", table)
+			slog.DebugContext(ctx, "duplicate event skipped", "event_id", keys[j].ID, "table", table)
 		case dedupe.InFlight:
 			if held == nil {
 				held = &keys[j]
@@ -866,11 +943,12 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 	}
 	if held != nil {
 		releaseClaims(ctx, dd, claimedIn(recs))
-		slog.InfoContext(ctx, "event id in flight in another request", "event_id", held.ID, "table", table)
+		slog.DebugContext(ctx, "event id in flight in another request", "event_id", held.ID, "table", table)
 		return &requestAbort{
 			Status:     http.StatusServiceUnavailable,
 			Message:    "a request with the same dedupe id is in flight",
 			RetryAfter: strconv.Itoa(int(math.Ceil(lease.Seconds()))),
+			Result:     resultInFlight,
 		}
 	}
 	return nil
@@ -895,26 +973,68 @@ func (h *IngestHandler) reserve(ctx context.Context, dd dedupe.Deduplicator, tab
 // out, so Retry-After is the flat 5 seconds main's per-record path used.
 func (h *IngestHandler) publishFailed(ctx context.Context, dd dedupe.Deduplicator, topic mq.Topic, recs []pendingRecord, k int, err error) *requestAbort {
 	definite := errors.Is(err, mq.ErrQueueFull)
+	// Whether the client was gone when the publish failed, read before the
+	// claims are settled: a client that leaves during the commit or release
+	// does not turn a failure of the queue into its 499.
+	gone := clientGone(ctx)
 	commitClaims(ctx, dd, recs[:k], topic.Table)
 	after := k + 1
 	if definite {
 		after = k
 	}
 	releaseClaims(ctx, dd, claimedIn(recs[after:]))
+	abort := h.publishFailure(ctx, topic, recs[k], err, definite, gone)
+	abort.Final = true
+	return abort
+}
+
+// publishFailure classifies a failed publish by its error and by gone, the
+// client's state when it failed; publishFailed has settled the claims.
+func (h *IngestHandler) publishFailure(ctx context.Context, topic mq.Topic, rec pendingRecord, err error, definite, gone bool) *requestAbort {
 	switch {
 	case definite:
 		slog.WarnContext(ctx, "ingest queue is full", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
-		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30"}
+		result := resultQueueFull
+		if gone {
+			result = resultRecordsCanceled
+		}
+		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: "30", Result: result}
+	case gone:
+		// The client went away while the publish was in flight, which is
+		// likely why it failed, however the broker reports it: nobody
+		// reads the answer, and the queue is not the one that failed
+		// (#947). k's claim is left to lapse, as for any uncertain failure.
+		slog.DebugContext(ctx, "publish to the ingest queue failed: client closed the request", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
+		return clientClosedAbort()
 	case errors.Is(err, mq.ErrUnavailable):
 		retryAfter := "5"
-		if recs[k].claim.Status == dedupe.Claimed {
+		if rec.claim.Status == dedupe.Claimed {
 			retryAfter = strconv.Itoa(int(math.Ceil(h.lease().Seconds())))
 		}
 		slog.WarnContext(ctx, "ingest queue unavailable", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
-		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: retryAfter}
+		return &requestAbort{Status: http.StatusServiceUnavailable, Message: "service unavailable", RetryAfter: retryAfter, Result: resultQueueUnavailable}
 	}
 	slog.ErrorContext(ctx, "failed to publish to the ingest queue", "tenant", topic.Tenant, "error", err, "table", topic.Table, "scope", topic.Scope)
-	return &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed"}
+	return &requestAbort{Status: http.StatusInternalServerError, Message: "publish failed", Result: resultPublishFailed}
+}
+
+// statusClientClosedRequest is the status recorded for a request whose
+// client went away before it was answered, nginx's 499 by convention. It
+// is a 4xx, so the request counts as the client's doing rather than the
+// engine's failure; nothing reads the response written with it.
+const statusClientClosedRequest = 499
+
+// clientGone reports whether the request's context was canceled: the client
+// disconnected, timed out on its side, or was stopped. A deadline the server
+// set is not that, and stays the server's failure.
+func clientGone(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.Canceled)
+}
+
+// clientClosedAbort is the abort for a request its client abandoned while a
+// dedupe reserve or a publish was in flight (#947).
+func clientClosedAbort() *requestAbort {
+	return &requestAbort{Status: statusClientClosedRequest, Message: "client closed request", Result: resultRecordsCanceled}
 }
 
 // claimedIn is the Claimed claims among recs.
@@ -952,7 +1072,7 @@ func commitClaims(ctx context.Context, dd dedupe.Deduplicator, recs []pendingRec
 		switch {
 		case err == nil, errors.Is(err, dedupe.ErrDisabled):
 		default:
-			dedupeCommitFailedCounter.Add(ctx, int64(len(claims)), metric.WithAttributes(attribute.String("table", table)))
+			dedupeCommitFailedCounter.Add(ctx, int64(len(claims)), observability.MetricAttrs(ctx, attribute.String("table", table)))
 			slog.ErrorContext(ctx, "dedupe commit failed after publish; the ids lapse with their lease", "error", err, "table", table, "records", len(claims))
 		}
 	}

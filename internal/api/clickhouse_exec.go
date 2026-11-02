@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/google/uuid"
 )
@@ -21,6 +22,15 @@ func connOf(conn func(*settings.Store) driver.Conn, store *settings.Store) drive
 		return nil
 	}
 	return conn(store)
+}
+
+// targetOf is target's answer for store, the zero Target for an unwired
+// source.
+func targetOf(target func(*settings.Store) chconn.Target, store *settings.Store) chconn.Target {
+	if target == nil {
+		return chconn.Target{}
+	}
+	return target(store)
 }
 
 // timeoutOf is timeout's answer for store, zero for an unwired source.
@@ -43,6 +53,7 @@ func timeoutOf(timeout func(*settings.Store) time.Duration, store *settings.Stor
 // The raw-SQL endpoint (/v1/ops/query) proxies straight to ClickHouse
 // over HTTP and never calls this; see internal/api/query.go.
 func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []any) ([]map[string]any, error) {
+	ctx = chconn.WithTraceContext(ctx)
 	if IsMutation(sql) {
 		if err := conn.Exec(ctx, sql, params...); err != nil {
 			return nil, fmt.Errorf("clickhouse exec: %w", err)

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
@@ -35,7 +37,7 @@ type discoveries struct {
 	build func(tenant.ID, *settings.Store) *discovery.SchemaRegistry
 	// onAttempt reports a loop's failed attempt before its first success,
 	// and onLoaded the first success: what /livez is driven by.
-	onAttempt func(tenant.ID, error)
+	onAttempt func(context.Context, tenant.ID, error)
 	onLoaded  func(tenant.ID)
 	// backoff is the boot retry's first backoff, doubling up to 60s; tests
 	// shorten it.
@@ -57,7 +59,7 @@ type tenantDiscovery struct {
 	done     chan struct{}
 }
 
-func newDiscoveries(ctx context.Context, build func(tenant.ID, *settings.Store) *discovery.SchemaRegistry, onAttempt func(tenant.ID, error), onLoaded func(tenant.ID)) *discoveries {
+func newDiscoveries(ctx context.Context, build func(tenant.ID, *settings.Store) *discovery.SchemaRegistry, onAttempt func(context.Context, tenant.ID, error), onLoaded func(tenant.ID)) *discoveries {
 	d := &discoveries{ctx: ctx, build: build, onAttempt: onAttempt, onLoaded: onLoaded, backoff: 2 * time.Second}
 	d.cur.Store(&map[tenant.ID]*tenantDiscovery{})
 	return d
@@ -144,17 +146,20 @@ func (d *discoveries) start(id tenant.ID, reg *discovery.SchemaRegistry) *tenant
 	td := &tenantDiscovery{id: id, registry: reg, cancel: cancel, done: make(chan struct{})}
 	backoff := d.backoff
 	go func() {
-		defer close(td.done)
-		if !reg.Loaded() {
-			err := reg.RetryRefresh(ctx, backoff, 60*time.Second, func(err error) { d.onAttempt(id, err) })
-			if err != nil {
-				// ctx cancelled before success — the process is stopping, or
-				// the tenant is no longer served.
-				return
+		defer observability.Crash("schema_refresh", slog.String("tenant", id.String()))
+		loaded := reg.Loaded()
+		if !loaded {
+			// An error is ctx cancelled before success: the process is
+			// stopping, or the tenant is no longer served.
+			loaded = reg.RetryRefresh(ctx, backoff, 60*time.Second, func(ctx context.Context, err error) { d.onAttempt(ctx, id, err) }) == nil
+			if loaded {
+				d.onLoaded(id)
 			}
-			d.onLoaded(id)
 		}
-		reg.StartAutoRefresh(ctx)
+		if loaded {
+			reg.StartAutoRefresh(ctx)
+		}
+		close(td.done)
 	}()
 	return td
 }

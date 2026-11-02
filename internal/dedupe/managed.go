@@ -10,6 +10,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // ErrDisabled is returned by Managed's calls while dedupe is switched off.
@@ -51,6 +53,9 @@ type Managed struct {
 // NewManaged returns a closed Managed store over open. Nothing is opened
 // until Apply(true).
 func NewManaged(open func() (Deduplicator, error)) *Managed {
+	// It carries table and tenant, so it reads 0 only where both are dropped
+	// (#905).
+	observability.ZeroCounter(hashedIDCounter, observability.CarriesTable|observability.CarriesTenant)
 	return &Managed{open: open}
 }
 
@@ -122,7 +127,7 @@ func (m *Managed) Open() bool {
 func (m *Managed) Reserve(ctx context.Context, keys []Key, lease time.Duration) ([]Claim, error) {
 	for _, k := range keys {
 		if k.Hashed() {
-			hashedIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", k.Table)))
+			hashedIDCounter.Add(ctx, 1, observability.MetricAttrs(ctx, attribute.String("table", k.Table)))
 		}
 	}
 	if lease <= 0 {

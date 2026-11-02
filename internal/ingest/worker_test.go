@@ -318,7 +318,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	worker.wg.Add(1)
-	go worker.dispatchLoop(ctx, cons)
+	go func() { worker.dispatchLoop(ctx, cons); worker.wg.Done() }()
 	t.Cleanup(func() {
 		cancel()
 		worker.wg.Wait()
@@ -1305,7 +1305,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	worker.wg.Add(1)
-	go worker.dispatchLoop(ctx, cons)
+	go func() { worker.dispatchLoop(ctx, cons); worker.wg.Done() }()
 	t.Cleanup(func() {
 		cancel()
 		worker.wg.Wait()
@@ -1399,7 +1399,7 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	worker.wg.Add(1)
-	go worker.dispatchLoop(ctx, cons)
+	go func() { worker.dispatchLoop(ctx, cons); worker.wg.Done() }()
 	t.Cleanup(func() {
 		cancel()
 		worker.wg.Wait()
@@ -1819,7 +1819,7 @@ func TestDispatchLoop_DeliveryEndedFailsLoud(t *testing.T) {
 	cons := &failingFakeConsumer{msgs: []*testutil.MockMessage{held}, sentinel: sentinel, endWith: ended}
 
 	w.wg.Add(1)
-	go w.dispatchLoop(context.Background(), cons)
+	go func() { w.dispatchLoop(context.Background(), cons); w.wg.Done() }()
 
 	select {
 	case err := <-w.failed:
@@ -1842,7 +1842,10 @@ func TestDispatchLoop_ConsumerStartFailureFailsLoud(t *testing.T) {
 
 	w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
 	w.wg.Add(1)
-	go w.dispatchLoop(context.Background(), &failingFakeConsumer{startErr: errors.New("consume refused")})
+	go func() {
+		w.dispatchLoop(context.Background(), &failingFakeConsumer{startErr: errors.New("consume refused")})
+		w.wg.Done()
+	}()
 
 	select {
 	case err := <-w.failed:
@@ -1870,7 +1873,7 @@ func TestDispatchLoop_HandoffReturnsOnCancel(t *testing.T) {
 
 	cons := &blockingFakeConsumer{n: 64, done: make(chan struct{})}
 	w.wg.Add(1)
-	go w.dispatchLoop(ctx, cons)
+	go func() { w.dispatchLoop(ctx, cons); w.wg.Done() }()
 	w.wg.Wait()
 
 	select {
@@ -1999,7 +2002,7 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	worker.wg.Add(1)
-	go worker.dispatchLoop(ctx, cons)
+	go func() { worker.dispatchLoop(ctx, cons); worker.wg.Done() }()
 	t.Cleanup(func() {
 		cancel()
 		worker.wg.Wait()
@@ -2967,7 +2970,7 @@ func scriptedWorker(t *testing.T, cons mq.Consumer, rec func(string), gate func(
 	ctx, stop := context.WithCancel(context.Background())
 	finished := make(chan struct{})
 	w.wg.Add(1)
-	go func() { w.dispatchLoop(ctx, cons); close(finished) }()
+	go func() { w.dispatchLoop(ctx, cons); w.wg.Done(); close(finished) }()
 	t.Cleanup(func() { stop(); <-finished })
 	return stop, finished
 }

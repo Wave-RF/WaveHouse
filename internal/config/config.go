@@ -117,6 +117,13 @@ type Prometheus struct {
 	// output (the MeterProvider is shared), so a schema with thousands of
 	// tables does not become thousands of series per metric.
 	PerTableMetrics bool `yaml:"per_table_metrics" env:"WH_METRICS_PER_TABLE"`
+	// PerTenantMetrics keeps the tenant label on the metrics tied to a
+	// tenant, capped per process (#891). Off, each reports one series summed
+	// over every tenant, for deployments with many tenants.
+	PerTenantMetrics bool `yaml:"per_tenant_metrics" env:"WH_METRICS_PER_TENANT"`
+	// HTTPBodySizeMetrics keeps the HTTP server's request and response body
+	// size histograms, the largest families a replica exports; off by default.
+	HTTPBodySizeMetrics bool `yaml:"http_body_size_metrics" env:"WH_METRICS_HTTP_BODY_SIZE"`
 }
 
 // OTelLogs sample rate applies to OTLP export of DEBUG/INFO only.
@@ -287,7 +294,7 @@ func defaults() Config {
 			Metrics: OTelMetrics{Enabled: true},
 			Logs:    OTelLogs{Enabled: true, SampleRate: 1.0},
 		},
-		Prometheus: Prometheus{Path: "/metrics", PerTableMetrics: true},
+		Prometheus: Prometheus{Path: "/metrics", PerTableMetrics: true, PerTenantMetrics: true},
 		Profiling:  Profiling{Addr: "127.0.0.1:6060"},
 	}
 }

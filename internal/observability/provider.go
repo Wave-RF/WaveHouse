@@ -87,6 +87,12 @@ type ProviderConfig struct {
 	// AggregateTables drops the table attribute from every metric, reporting
 	// one series summed over all tables (prometheus.per_table_metrics: false).
 	AggregateTables bool
+	// AggregateTenants does the same for the tenant attribute
+	// (prometheus.per_tenant_metrics: false).
+	AggregateTenants bool
+	// HTTPBodySizeMetrics keeps otelhttp's request and response body size
+	// histograms (prometheus.http_body_size_metrics), dropped otherwise.
+	HTTPBodySizeMetrics bool
 }
 
 // InitProvider sets up the OpenTelemetry pipeline, registering only the
@@ -124,6 +130,7 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 		var wg sync.WaitGroup
 		for i, fn := range shutdownFuncs {
 			wg.Go(func() {
+				defer Crash("otel_shutdown")
 				errs[i] = fn(ctx)
 			})
 		}
@@ -143,6 +150,7 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 		// goroutines returned).
 		done := make(chan struct{})
 		go func() {
+			defer Crash("otel_shutdown")
 			wg.Wait()
 			close(done)
 		}()
@@ -225,7 +233,10 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 			promHandler = promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 		}
 
-		mpOpts := []metric.Option{metric.WithResource(res), metric.WithView(tableView(cfg.AggregateTables, TableWarnThreshold))}
+		mpOpts := []metric.Option{metric.WithResource(res), metric.WithView(metricsView(viewOptions{
+			aggregateTables: cfg.AggregateTables, tableThreshold: TableWarnThreshold,
+			aggregateTenants: cfg.AggregateTenants, httpBodySize: cfg.HTTPBodySizeMetrics,
+		}))}
 		for _, r := range readers {
 			mpOpts = append(mpOpts, metric.WithReader(r))
 		}
@@ -275,5 +286,24 @@ func InitProvider(ctx context.Context, id Identity, cfg ProviderConfig) (func(co
 		otel.SetLoggerProvider(loggerProvider)
 	}
 
+	// The label policy goes with the meter provider, so it is set only once
+	// nothing can fail: a failed init restores the previous provider in
+	// handleErr and must leave the previous policy with it.
+	if cfg.MetricsEnabled || cfg.PrometheusEnabled {
+		processTenants.off.Store(cfg.AggregateTenants)
+		labelsDropped.Store(uint32(droppedLabels(cfg)))
+	}
 	return shutdown, promHandler, nil
+}
+
+// droppedLabels is which of table and tenant cfg aggregates away.
+func droppedLabels(cfg ProviderConfig) Carries {
+	var dropped Carries
+	if cfg.AggregateTables {
+		dropped |= CarriesTable
+	}
+	if cfg.AggregateTenants {
+		dropped |= CarriesTenant
+	}
+	return dropped
 }

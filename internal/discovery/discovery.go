@@ -6,16 +6,21 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -223,6 +228,10 @@ type SchemaRegistry struct {
 	// serverVersion is the ClickHouse version string from the last successful
 	// Refresh, guarded by mu alongside tables.
 	serverVersion string
+	// serverTZ is the server's default time zone name from the last successful
+	// Refresh, guarded by mu; kept to report a change, which moves how
+	// zone-less timestamps are canonicalized.
+	serverTZ string
 }
 
 // Source yields a tenant's connection and the database it discovers from,
@@ -236,6 +245,9 @@ type Source func() (driver.Conn, string)
 // schemas from system.columns over the connection and database source
 // yields.
 func NewSchemaRegistry(source Source, id tenant.ID, refreshInterval func(tenant.ID) time.Duration) *SchemaRegistry {
+	// It carries the tenant, so it reads 0 only where that label is dropped
+	// (#905).
+	observability.ZeroCounter(refreshFailures, observability.CarriesTenant)
 	return &SchemaRegistry{
 		source:          source,
 		tenant:          id,
@@ -250,10 +262,36 @@ func NewSchemaRegistry(source Source, id tenant.ID, refreshInterval func(tenant.
 // time zone and version, queries system.columns, attaches each table's DDL from
 // system.tables, and precomputes timestamp column specs.
 func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
+	return sr.refreshThen(ctx, nil)
+}
+
+// refreshThen hands a failure to onFail inside the still-open span, so its log
+// line carries the span's trace_id (#899). A canceled ctx (shutdown, tenant
+// dropped, caller gone) is not a failure: it is returned but neither recorded
+// nor handed to onFail.
+func (sr *SchemaRegistry) refreshThen(ctx context.Context, onFail func(context.Context, error)) error {
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
-	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")
+	spanCtx, span := tracer.Start(ctx, "SchemaRegistry.Refresh",
+		trace.WithAttributes(attribute.String(observability.TenantKey, string(sr.tenant))))
 	defer span.End()
 
+	err := sr.refresh(spanCtx)
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return err
+	}
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
+	if onFail != nil {
+		onFail(spanCtx, err)
+	}
+	return err
+}
+
+// refresh is Refresh's work, run in the span refreshThen opened.
+func (sr *SchemaRegistry) refresh(ctx context.Context) error {
 	// One connection and one database per refresh, read together: a reload
 	// that moves the tenant to another pool or database applies to the NEXT
 	// refresh, so every query of this one runs against the same server and
@@ -266,6 +304,8 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	if conn == nil {
 		return fmt.Errorf("%w for tenant %s", ErrNoConnection, sr.tenant)
 	}
+	// Every query of the refresh carries the refresh span's trace context.
+	ctx = chconn.WithTraceContext(ctx)
 
 	// ClickHouse interprets zone-less timestamp strings in the server's default
 	// zone; canonicalization applies the same rule so the instant never changes (#372).
@@ -348,13 +388,77 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	}
 
 	sr.mu.Lock()
+	prev, prevVersion, prevTZ := sr.tables, sr.serverVersion, sr.serverTZ
 	sr.tables = tables
 	sr.serverVersion = serverVersion
+	sr.serverTZ = tzName
 	sr.mu.Unlock()
-	sr.loaded.Store(true)
-	slog.InfoContext(ctx, "schema registry refreshed", "tenant", sr.tenant, "tables", len(tables), "server_tz", tzName, "server_version", serverVersion)
+	first := !sr.loaded.Swap(true)
+
+	// A refresh that found nothing new runs once per tenant per interval on
+	// every replica, so it logs at DEBUG; INFO is kept for the first load and
+	// for a change, naming what changed (#888).
+	attrs := []slog.Attr{
+		slog.Any("tenant", sr.tenant), slog.Int("tables", len(tables)),
+		slog.String("server_tz", tzName), slog.String("server_version", serverVersion),
+	}
+	level := slog.LevelDebug
+	if first {
+		level = slog.LevelInfo
+	} else if added, removed, changed := schemaChanges(prev, tables); len(added)+len(removed)+len(changed) > 0 || serverVersion != prevVersion || tzName != prevTZ {
+		level = slog.LevelInfo
+		for _, a := range []struct {
+			key   string
+			names []string
+		}{{"tables_added", added}, {"tables_removed", removed}, {"tables_changed", changed}} {
+			if len(a.names) > 0 {
+				attrs = append(attrs, slog.Any(a.key, a.names))
+			}
+		}
+		if serverVersion != prevVersion {
+			attrs = append(attrs, slog.String("previous_server_version", prevVersion))
+		}
+		if tzName != prevTZ {
+			attrs = append(attrs, slog.String("previous_server_tz", prevTZ))
+		}
+	}
+	slog.LogAttrs(ctx, level, "schema registry refreshed", attrs...)
 
 	return nil
+}
+
+// schemaChanges names, each sorted, the tables next has that prev lacks, the
+// tables prev had that next lacks, and the tables in both whose columns or DDL
+// (a TTL, engine setting or index) differ.
+func schemaChanges(prev, next map[string]*TableSchema) (added, removed, changed []string) {
+	for name, ts := range next {
+		old, ok := prev[name]
+		switch {
+		case !ok:
+			added = append(added, name)
+		case !slices.EqualFunc(old.Columns, ts.Columns, sameColumn),
+			// An empty DDL is a table gone from system.tables between the two
+			// scans (see TableSchema.DDL), not a change to it.
+			old.DDL != "" && ts.DDL != "" && old.DDL != ts.DDL:
+			changed = append(changed, name)
+		}
+	}
+	for name := range prev {
+		if _, ok := next[name]; !ok {
+			removed = append(removed, name)
+		}
+	}
+	slices.Sort(added)
+	slices.Sort(removed)
+	slices.Sort(changed)
+	return added, removed, changed
+}
+
+// sameColumn compares the discovered fields. The derived ones follow from them
+// and the server time zone, which Refresh compares on its own.
+func sameColumn(a, b Column) bool {
+	return a.Name == b.Name && a.Type == b.Type && a.DefaultKind == b.DefaultKind &&
+		a.DefaultExpression == b.DefaultExpression && a.Position == b.Position
 }
 
 // attachDDL fills each discovered table's DDL from system.tables. A table listed
@@ -457,7 +561,9 @@ func clampBackoff(initialBackoff, maxBackoff time.Duration) (time.Duration, time
 // RetryRefresh repeatedly calls Refresh with exponential backoff until it
 // succeeds or ctx is cancelled. onAttempt is invoked after each failed
 // attempt with the resulting error, letting callers surface the latest
-// diagnostic (e.g. via /livez) while the registry is still degraded.
+// diagnostic (e.g. via /livez) while the registry is still degraded. It runs
+// under the failed attempt's span context, so a line it logs carries that
+// attempt's trace_id.
 //
 // The first attempt fires immediately. After a failure the loop sleeps a
 // uniformly random time below the backoff ("full jitter"), which starts at
@@ -465,25 +571,20 @@ func clampBackoff(initialBackoff, maxBackoff time.Duration) (time.Duration, time
 // one recovering ClickHouse spread over the whole window rather than firing
 // in lockstep (#141). Returns nil on success or ctx.Err() on cancellation.
 // Zero/negative bounds are clamped via clampBackoff rather than busy-looping.
-func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxBackoff time.Duration, onAttempt func(err error)) error {
+func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxBackoff time.Duration, onAttempt func(ctx context.Context, err error)) error {
 	initialBackoff, maxBackoff = clampBackoff(initialBackoff, maxBackoff)
 	backoff := initialBackoff
 	for {
-		if err := sr.Refresh(ctx); err == nil {
-			return nil
-		} else if ctx.Err() == nil {
-			// Skip the callback when Refresh's error is just a downstream
-			// reflection of ctx cancellation — that's a shutdown signal,
-			// not a real diagnostic. Without this guard, a clean shutdown
-			// fires onAttempt with `context.Canceled`, which the wavehouse
-			// boot path then writes into BootState as
-			//   "schema discovery: context canceled"
-			// — visible to anyone curl'ing /livez during the shutdown
-			// window. Not wrong, just noise.
-			sr.countFailure(ctx)
+		// refreshThen skips canceled attempts, so a shutdown does not write
+		// "schema discovery: context canceled" into BootState (/livez).
+		err := sr.refreshThen(ctx, func(spanCtx context.Context, err error) {
+			sr.countFailure(spanCtx)
 			if onAttempt != nil {
-				onAttempt(err)
+				onAttempt(spanCtx, err)
 			}
+		})
+		if err == nil {
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -533,10 +634,10 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 			ticker.Reset(interval)
 		case <-ticker.C:
 		}
-		if err := sr.Refresh(ctx); err != nil {
+		_ = sr.refreshThen(ctx, func(ctx context.Context, err error) {
 			sr.countFailure(ctx)
 			slog.ErrorContext(ctx, "schema auto-refresh failed", "tenant", sr.tenant, "error", err)
-		}
+		})
 		if next := sr.refreshInterval(sr.tenant); next > 0 && next != interval {
 			interval = next
 			ticker.Reset(interval)
@@ -546,7 +647,7 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 
 // countFailure bumps the tenant's refresh-failure counter.
 func (sr *SchemaRegistry) countFailure(ctx context.Context) {
-	refreshFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("tenant", sr.tenant.String())))
+	refreshFailures.Add(ctx, 1, metric.WithAttributes(observability.TenantLabel(sr.tenant.String())))
 }
 
 // isNullable checks if a ClickHouse type string is Nullable.

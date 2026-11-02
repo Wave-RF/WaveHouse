@@ -594,22 +594,27 @@ func (e *EmbeddedNATS) reopen(ctx context.Context, id tenant.ID) error {
 // could not join it — and a queue at its byte budget (DiscardNew) are
 // reported as ErrQueueFull: either way the tenant's queue takes nothing now,
 // and a retry is the caller's answer.
-func (e *EmbeddedNATS) Publish(ctx context.Context, topic Topic, data []byte, opts ...PublishOpt) error {
+func (e *EmbeddedNATS) Publish(ctx context.Context, topic Topic, data []byte, opts ...PublishOpt) (err error) {
 	subj, err := subject(ingestPrefix, topic)
 	if err != nil {
 		return err
 	}
+	spanCtx, end := beginPublish(ctx, publishKindIngest)
+	attempts := 0
+	defer func() { end(attempts, err) }()
 	if _, ok := e.opened.Load(topic.Tenant); !ok {
-		if openErr := e.reopenPaced(ctx, topic.Tenant); openErr != nil {
+		if openErr := e.reopenPaced(spanCtx, topic.Tenant); openErr != nil {
 			return fmt.Errorf("%w: %w", ErrQueueFull, openErr)
 		}
 	}
-	err = e.publish(ctx, subj, data, opts)
+	attempts++
+	err = e.publish(spanCtx, subj, data, opts)
 	if errors.Is(err, jetstream.ErrNoStreamResponse) {
-		if openErr := e.reopenPaced(ctx, topic.Tenant); openErr != nil {
+		if openErr := e.reopenPaced(spanCtx, topic.Tenant); openErr != nil {
 			return fmt.Errorf("%w: %w", ErrQueueFull, openErr)
 		}
-		err = e.publish(ctx, subj, data, opts)
+		attempts++
+		err = e.publish(spanCtx, subj, data, opts)
 	}
 	if err != nil && strings.Contains(err.Error(), "maximum bytes exceeded") {
 		// The server reports a full store as a generic store failure whose
@@ -650,13 +655,17 @@ func (e *EmbeddedNATS) reopenPaced(ctx context.Context, id tenant.ID) error {
 // refusing. A dead-letter stream found missing is opened again with its
 // tenant's queue, paced as Publish's is (reopenPaced); a park refused leaves
 // its row unacked, to be redelivered.
-func (e *EmbeddedNATS) DeadLetter(ctx context.Context, msg *Message, opts ...PublishOpt) error {
+func (e *EmbeddedNATS) DeadLetter(ctx context.Context, msg *Message, opts ...PublishOpt) (err error) {
+	spanCtx, end := beginPublish(ctx, publishKindDLQ)
+	attempts := 1
+	defer func() { end(attempts, err) }()
 	subj := dlqPrefix + msg.topicKey
-	err := e.publish(ctx, subj, msg.Data, opts)
+	err = e.publish(spanCtx, subj, msg.Data, opts)
 	if errors.Is(err, jetstream.ErrNoStreamResponse) {
 		if id, ok := keyTenant(msg.topicKey); ok {
-			if err = e.reopenPaced(ctx, id); err == nil {
-				err = e.publish(ctx, subj, msg.Data, opts)
+			if err = e.reopenPaced(spanCtx, id); err == nil {
+				attempts++
+				err = e.publish(spanCtx, subj, msg.Data, opts)
 			}
 		}
 	}
@@ -723,6 +732,7 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, consumerName string, handl
 	}
 
 	go func() {
+		defer observability.Crash("mq_embedded")
 		<-ctx.Done()
 		stop()
 	}()
@@ -916,7 +926,13 @@ func (f *fanIn) run(id tenant.ID) error {
 	if n := f.share(); n > 0 {
 		opts = append(opts, jetstream.PullMaxMessages(n))
 	}
-	cctx, err := f.handles[id].Consume(f.deliver, opts...)
+	// JetStream calls deliver on a goroutine of its own, so it is guarded
+	// here like any goroutine WaveHouse starts (#902).
+	deliver := f.deliver
+	cctx, err := f.handles[id].Consume(func(m jetstream.Msg) {
+		defer observability.Crash("mq_delivery", slog.String("tenant", id.String()))
+		deliver(m)
+	}, opts...)
 	if err != nil {
 		return err
 	}
@@ -925,6 +941,7 @@ func (f *fanIn) run(id tenant.ID) error {
 		return nil
 	}
 	go func() {
+		defer observability.Crash("mq_embedded")
 		<-cctx.Closed()
 		if f.stopped.Load() || !f.delivering(id, cctx) {
 			return
@@ -1171,14 +1188,19 @@ func (e *EmbeddedNATS) ReplaySince(ctx context.Context, topic Topic, since time.
 	}
 }
 
-// Stats reports the embedded server's connection and inbound-message counters
-// for observability.RegisterSystemMetrics.
+// Stats reports the embedded server's client connections and its cumulative
+// message counts, across every client connected to it.
 func (e *EmbeddedNATS) Stats() (observability.MQStats, error) {
 	varz, err := e.server.Varz(nil)
 	if err != nil {
 		return observability.MQStats{}, err
 	}
-	return observability.MQStats{Connections: int64(varz.Connections), InMsgs: varz.InMsgs}, nil
+	return observability.MQStats{
+		Embedded:    true,
+		Connections: int64(varz.Connections),
+		InMsgs:      varz.InMsgs,
+		OutMsgs:     varz.OutMsgs,
+	}, nil
 }
 
 func (e *EmbeddedNATS) Close() error {

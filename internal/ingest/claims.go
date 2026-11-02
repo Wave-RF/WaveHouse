@@ -18,6 +18,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // Shard claims: over a sharded queue (mq.Sharded), each unit — one shard of
@@ -211,8 +212,13 @@ func (c *claimingConsumer) Consume(handler func(*mq.Message), prefetch int) (fun
 	if l.gauges, err = registerClaimGauges(l); err != nil {
 		slog.Warn("ingest: shard claim gauges not registered", "error", err)
 	}
+	observability.ZeroCounter(claimEvents, 0, observability.LabelSets(observability.Values("event", claimEventNames...))...)
 	c.loop.Store(l)
-	go l.run()
+	go func() {
+		defer observability.Crash("shard_claims")
+		l.run()
+		close(l.done)
+	}()
 	return l.stop, l.failed, nil
 }
 
@@ -302,7 +308,6 @@ func (cl *claim) stop() {
 }
 
 func (l *claimLoop) run() {
-	defer close(l.done)
 	t := time.NewTicker(l.q.cfg.Every)
 	defer t.Stop()
 	for {
@@ -381,6 +386,7 @@ func (l *claimLoop) readMembers(ctx context.Context) ([]int, error) {
 	for j := range l.slots {
 		sem <- struct{}{}
 		wg.Go(func() {
+			defer observability.Crash("shard_claims")
 			defer func() { <-sem }()
 			held[j], errs[j] = l.q.obs.Held(ctx, memberLease(j))
 		})
@@ -450,7 +456,10 @@ func (l *claimLoop) giveUp(targets map[string]bool) {
 		l.mu.Lock()
 		l.releasing[u] = cl
 		l.mu.Unlock()
-		l.handovers.Go(func() { l.handOver(cl) })
+		l.handovers.Go(func() {
+			defer observability.Crash("shard_claims", slog.String("unit", cl.unit))
+			l.handOver(cl)
+		})
 	}
 }
 
@@ -575,6 +584,7 @@ func (l *claimLoop) open(u string, count int) error {
 // ending is the operator deleting it once drained.
 func (l *claimLoop) watch(cl *claim, failed <-chan error) {
 	go func() {
+		defer observability.Crash("shard_claims", slog.String("unit", cl.unit))
 		select {
 		case err := <-failed:
 			if !l.configured[cl.unit] {
@@ -679,11 +689,17 @@ func (l *claimLoop) halt() {
 		<-l.done
 		var halts sync.WaitGroup
 		for _, cl := range l.owned {
-			halts.Go(cl.stop)
+			halts.Go(func() {
+				defer observability.Crash("shard_claims", slog.String("unit", cl.unit))
+				cl.stop()
+			})
 		}
 		l.mu.Lock()
 		for _, cl := range l.releasing {
-			halts.Go(cl.stop)
+			halts.Go(func() {
+				defer observability.Crash("shard_claims", slog.String("unit", cl.unit))
+				cl.stop()
+			})
 		}
 		l.mu.Unlock()
 		halts.Wait()
@@ -705,7 +721,10 @@ func (l *claimLoop) stop() {
 		// wait, not one per unit.
 		var releases sync.WaitGroup
 		for _, cl := range l.owned {
-			releases.Go(func() { l.release(cl) })
+			releases.Go(func() {
+				defer observability.Crash("shard_claims", slog.String("unit", cl.unit))
+				l.release(cl)
+			})
 			claimEvents.Add(context.Background(), 1, eventAttr("released"))
 		}
 		releases.Wait()
@@ -733,12 +752,18 @@ var (
 		"wavehouse_ingest_shard_handover_seconds",
 		metric.WithDescription("Time from giving a shard up to releasing it: the drain of what it had delivered"),
 		metric.WithUnit("s"),
+		// One 50 ms poll up to twice the one-minute handover bound.
+		metric.WithExplicitBucketBoundaries(.05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120),
 	)
 )
 
 // claimMeter is the meter the claim gauges register on (tests substitute
 // their own rather than the global provider, which binds only once).
 var claimMeter = func() metric.Meter { return otel.Meter("wavehouse-ingest") }
+
+// claimEventNames are wavehouse_ingest_shard_events_total's events, all
+// exported at 0 once a process claims shards (#905).
+var claimEventNames = []string{"taken", "released", "reset", "handover_timeout", "lost", "bind_failed"}
 
 func eventAttr(event string) metric.AddOption {
 	return metric.WithAttributes(attribute.String("event", event))

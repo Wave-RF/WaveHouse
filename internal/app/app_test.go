@@ -2086,7 +2086,7 @@ func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 
 	// Adopted in part from here on: globex's folder stays rejected. No
 	// tenant has completed a first discovery, and the diagnostic names acme.
-	a.discoveries.onAttempt("acme", errors.New("connection refused"))
+	a.discoveries.onAttempt(t.Context(), "acme", errors.New("connection refused"))
 	require.Contains(t, get(t, a.Handler(), "/livez").Body.String(), "tenant acme")
 	require.NoError(t, os.RemoveAll(filepath.Join(root, "acme")))
 	a.tenants.Reload("test")
@@ -2095,7 +2095,7 @@ func TestReload_TenantGoneReleasesItsPoolAndRegistry(t *testing.T) {
 	assert.True(t, stopped("acme"))
 	// A stopped loop's last attempt can land after the reload: its line must
 	// not come back.
-	a.discoveries.onAttempt("acme", errors.New("connection refused"))
+	a.discoveries.onAttempt(t.Context(), "acme", errors.New("connection refused"))
 	assert.False(t, acmeDedup.Open(), "its dedupe store is closed")
 	assert.Contains(t, pipe("acme"), "404 {\"error\":\"unknown tenant: acme\"}")
 	assert.Empty(t, a.pools.Target("acme").URL, "the worker has no ClickHouse to insert its queued rows into")
@@ -2142,7 +2142,7 @@ func TestNew_NestedProbesFollowTheFirstTenantToLoad(t *testing.T) {
 	// The first success anywhere, as the loops report it.
 	a.discoveries.onLoaded("acme")
 	assert.Equal(t, http.StatusOK, get(t, a.Handler(), "/livez").Code)
-	a.discoveries.onAttempt("globex", errors.New("connection refused"))
+	a.discoveries.onAttempt(t.Context(), "globex", errors.New("connection refused"))
 	assert.Equal(t, http.StatusOK, get(t, a.Handler(), "/livez").Code, "sticky: another tenant's outage is not a probe failure")
 	online := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/health", nil)
 	online.Header.Set(tenant.Header, "globex")
@@ -2427,7 +2427,7 @@ func TestClose_WaitsForALoopAReloadStopped(t *testing.T) {
 	// Released on every way out, so a failed assertion leaves no loop stuck.
 	release := sync.OnceFunc(func() { close(conn.release) })
 	defer release()
-	d := newDiscoveries(t.Context(), nil, func(tenant.ID, error) {}, func(tenant.ID) {})
+	d := newDiscoveries(t.Context(), nil, func(context.Context, tenant.ID, error) {}, func(tenant.ID) {})
 	d.adopt("acme", discovery.NewSchemaRegistry(func() (driver.Conn, string) { return conn, "default" }, "acme",
 		func(tenant.ID) time.Duration { return time.Hour }))
 	loop := (*d.cur.Load())["acme"]
@@ -2471,3 +2471,26 @@ func TestClose_StopsTheDiscoveryLoops(t *testing.T) {
 
 // eventKey is the one dedupe key the tenant-lifecycle tests mark.
 var eventKey = dedupe.Key{Table: "events", ID: "e1"}
+
+// TestNew_ZeroPublishesClosedCounters boots with both labels aggregated and
+// checks that the SSE counters New builds are exported at 0 before any
+// stream opened, so an increase() alert sees the first drop (#905). Only
+// instruments New builds can be checked here: a package-level counter binds
+// to the first meter provider of the test binary, which an earlier test owns.
+func TestNew_ZeroPublishesClosedCounters(t *testing.T) {
+	guardGlobals(t)
+	cfg := testConfig(t, writeSettings(t, nil))
+	cfg.Prometheus = config.Prometheus{Enabled: true, Path: "/metrics"}
+	a := newApp(t, cfg, Options{})
+
+	body := get(t, a.Handler(), "/metrics").Body.String()
+	for _, series := range []string{
+		`wavehouse_sse_frames_sent_total\{[^}]*kind="keepalive"[^}]*\} 0`,
+		`wavehouse_sse_bytes_sent_total\{[^}]*kind="event"[^}]*\} 0`,
+		`wavehouse_sse_dropped_frames_total\{[^}]*kind="event"[^}]*reason="buffer_full"[^}]*\} 0`,
+	} {
+		assert.Regexp(t, `(?m)^`+series+`$`, body)
+	}
+	assert.NotContains(t, body, `tenant="`)
+	assert.NotContains(t, body, `table="`)
+}

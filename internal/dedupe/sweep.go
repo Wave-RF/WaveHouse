@@ -12,6 +12,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // The sweep's cadence. Expired keys are already absent to Reserve, so the
@@ -48,30 +50,40 @@ type sweepResult struct {
 // startSweep runs the sweep over db until the returned stop is called; stop
 // waits for a chunk in progress to finish. Callers hold e.mu.
 func (e *Embedded) startSweep(db *pebble.DB) (stop func()) {
+	// Both reasons read 0 from the first sweep on (#905).
+	observability.ZeroCounter(sweptKeysCounter, 0, observability.LabelSets(
+		observability.Values(sweptAttribute, sweptExpired, sweptVersion0))...)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		defer close(done)
-		wait := e.sweepFirst
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(wait):
-			}
-			wait = e.sweepEvery
-			res, err := e.sweep(ctx, db)
-			switch {
-			case err != nil && ctx.Err() == nil:
-				slog.WarnContext(ctx, "dedupe sweep failed; retrying next interval", "error", err, "expired", res.Expired, "version_0", res.Version0)
-			case res.Expired+res.Version0 > 0:
-				slog.InfoContext(ctx, "dedupe sweep deleted keys", "expired", res.Expired, "version_0", res.Version0)
-			}
-		}
+		defer observability.Crash("dedupe_sweep")
+		e.sweepLoop(ctx, db)
+		close(done)
 	}()
 	return func() {
 		cancel()
 		<-done
+	}
+}
+
+// sweepLoop sweeps db every sweepEvery, the first time after sweepFirst,
+// until ctx ends.
+func (e *Embedded) sweepLoop(ctx context.Context, db *pebble.DB) {
+	wait := e.sweepFirst
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		wait = e.sweepEvery
+		res, err := e.sweep(ctx, db)
+		switch {
+		case err != nil && ctx.Err() == nil:
+			slog.WarnContext(ctx, "dedupe sweep failed; retrying next interval", "error", err, "expired", res.Expired, "version_0", res.Version0)
+		case res.Expired+res.Version0 > 0:
+			slog.InfoContext(ctx, "dedupe sweep deleted keys", "expired", res.Expired, "version_0", res.Version0)
+		}
 	}
 }
 

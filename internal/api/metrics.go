@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -12,6 +13,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // latencyBuckets are the boundaries, in seconds, of the request and query
@@ -49,6 +52,28 @@ func httpMetricsOn(meter metric.Meter) *httpMetrics {
 	return &httpMetrics{duration: duration}
 }
 
+// panicsRecovered counts the handler panics jsonRecoverer recovered (#902).
+var panicsRecovered atomic.Int64
+
+// panicCounter exports panicsRecovered. It is observable, so it reads 0 from
+// registration on: a counter added to before the provider is set would lose
+// its zero. The registration is kept so a test can see it was made.
+var panicCounter, panicCounterErr = newPanicCounter(otel.Meter(meterName), &panicsRecovered)
+
+// newPanicCounter registers wavehouse_http_panics_recovered_total on meter,
+// read from n on every collection.
+func newPanicCounter(meter metric.Meter, n *atomic.Int64) (metric.Registration, error) {
+	counter, err := meter.Int64ObservableCounter("wavehouse_http_panics_recovered_total",
+		metric.WithDescription("HTTP handler panics recovered, whatever the response; each also logs \"panic recovered in handler\" at ERROR"))
+	if err != nil {
+		return nil, err
+	}
+	return meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		o.ObserveInt64(counter, n.Load())
+		return nil
+	}, counter)
+}
+
 // middleware times every request but the SSE streams, whose lifetime is
 // wavehouse_sse_stream_duration_seconds, not a latency. It runs outside
 // jsonRecoverer, so a recovered panic counts as the 500 it answers.
@@ -72,7 +97,10 @@ func (m *httpMetrics) middleware(next http.Handler) http.Handler {
 				route = p
 			}
 		}
-		m.duration.Record(context.Background(), time.Since(start).Seconds(), metric.WithAttributes(
+		// The request's tenant, once a served one is resolved, is read
+		// after the handler too: the scope it lives on is filled in place.
+		ctx := r.Context()
+		m.duration.Record(ctx, time.Since(start).Seconds(), observability.MetricAttrs(ctx,
 			attribute.String("route", route),
 			attribute.String("method", methodLabel(r.Method)),
 			attribute.String("status_class", statusClass(ww.Status())),
@@ -147,8 +175,9 @@ func queryMetricsOn(meter metric.Meter) *queryMetrics {
 // classed as the response classes it (chFailureOf, under caps); reqCtx is the
 // request's own context. A call cut short because the client went away is
 // resultCanceled, not the unavailable its response would read as: nobody
-// reads that response, and ClickHouse was not the one that failed.
-func (m *queryMetrics) observe(reqCtx context.Context, operation string, d time.Duration, err error, caps queryCaps) {
+// reads that response, and ClickHouse was not the one that failed. It returns
+// the result recorded, for the call's span.
+func (m *queryMetrics) observe(reqCtx context.Context, operation string, d time.Duration, err error, caps queryCaps) string {
 	result := resultOK
 	switch {
 	case err == nil:
@@ -157,15 +186,17 @@ func (m *queryMetrics) observe(reqCtx context.Context, operation string, d time.
 	default:
 		result = chResult(chFailureOf(err, http.StatusInternalServerError, caps).code)
 	}
-	m.record(operation, d, result)
+	m.record(reqCtx, operation, d, result)
+	return result
 }
 
-// record records one call of operation that took d, with result as given.
-func (m *queryMetrics) record(operation string, d time.Duration, result string) {
+// record records one call of operation that took d, with result as given,
+// labeled with the request's tenant (#891).
+func (m *queryMetrics) record(reqCtx context.Context, operation string, d time.Duration, result string) {
 	if m == nil {
 		return
 	}
-	m.duration.Record(context.Background(), d.Seconds(), metric.WithAttributes(
+	m.duration.Record(reqCtx, d.Seconds(), observability.MetricAttrs(reqCtx,
 		attribute.String("operation", operation), attribute.String("result", result)))
 }
 

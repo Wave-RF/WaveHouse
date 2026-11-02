@@ -95,7 +95,7 @@ func TestBootResilience_StickyHealthVsConditionalReady(t *testing.T) {
 
 	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer retryCancel()
-	require.NoError(t, registry.RetryRefresh(retryCtx, 250*time.Millisecond, 2*time.Second, func(e error) {
+	require.NoError(t, registry.RetryRefresh(retryCtx, 250*time.Millisecond, 2*time.Second, func(_ context.Context, e error) {
 		bootState.Set(fmt.Errorf("schema discovery: %w", e))
 	}), "RetryRefresh should succeed once CH is back")
 	bootState.Set(nil)

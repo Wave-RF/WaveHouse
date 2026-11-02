@@ -104,6 +104,9 @@ func Run(t *testing.T, h Harness) {
 		{"PurgeAcked", true, purgeAcked},
 		{"PurgeAckedUnknownConsumer", true, purgeAckedUnknownConsumer},
 	}
+	// Not parallel: it swaps the publish histogram, and runs before the
+	// parallel cases start, so no other case's publishes reach it.
+	t.Run("PublishIsTimed", func(t *testing.T) { publishIsTimed(t, h) })
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if !c.need {

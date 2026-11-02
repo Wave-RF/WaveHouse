@@ -9,6 +9,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
@@ -108,9 +109,11 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	flusher.Flush()
 
-	h.Metrics.ConnOpened()
+	// Every measurement of this stream carries its tenant (#891).
+	metrics := h.Metrics.Tenant(topic.Tenant)
+	metrics.ConnOpened()
 	connectedAt := time.Now()
-	defer func() { h.Metrics.ConnClosed(time.Since(connectedAt)) }()
+	defer func() { metrics.ConnClosed(time.Since(connectedAt)) }()
 	ctx := r.Context()
 	slog.InfoContext(ctx, "SSE stream opened", "component", "stream", "table", table, "role", role)
 
@@ -127,7 +130,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if h.SubscriberQueue != nil {
 		queue = h.SubscriberQueue(store)
 	}
-	sub := stream.NewTableSubscriber(label, claims, h.Metrics, queue)
+	sub := stream.NewTableSubscriber(label, claims, metrics, queue)
 	// Deferred ahead of the Hub and wheel removals so it runs after them: by
 	// then no producer can queue a frame Close would miss.
 	end := endClientGone
@@ -142,11 +145,11 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if f, ok := h.Hub.SubscribeSchemaFrame(topic.Tenant, table, role, sub); ok {
 		n, err := w.Write(f.Data)
 		if err != nil {
-			h.Metrics.FrameDropped(label, f.Kind, stream.DropClientGone)
+			metrics.FrameDropped(label, f.Kind, stream.DropClientGone)
 			return
 		}
 		flusher.Flush()
-		h.Metrics.FrameSent(f.Kind, n)
+		metrics.FrameSent(f.Kind, n)
 	}
 
 	h.Hub.Add(topic, role, sub)
@@ -181,12 +184,12 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 				n, err := w.Write(f.Data)
 				if err != nil {
 					for _, lost := range frames[i:] {
-						h.Metrics.FrameDropped(label, lost.Kind, stream.DropClientGone)
+						metrics.FrameDropped(label, lost.Kind, stream.DropClientGone)
 					}
 					return false
 				}
 				flusher.Flush()
-				h.Metrics.FrameSent(f.Kind, n)
+				metrics.FrameSent(f.Kind, n)
 			}
 			return true
 		}
@@ -242,11 +245,11 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			// means the client is gone (also a liveness probe on idle streams).
 			n, err := w.Write(f.Data)
 			if err != nil {
-				h.Metrics.FrameDropped(label, f.Kind, stream.DropClientGone)
+				metrics.FrameDropped(label, f.Kind, stream.DropClientGone)
 				return
 			}
 			flusher.Flush()
-			h.Metrics.FrameSent(f.Kind, n)
+			metrics.FrameSent(f.Kind, n)
 		}
 	}
 }
@@ -279,6 +282,7 @@ func (h *StreamHandler) closeStream(ctx context.Context, sub *stream.Subscriber,
 func (h *StreamHandler) replayContext(r *http.Request, sub *stream.Subscriber) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(r.Context())
 	go func() {
+		defer observability.Crash("sse_stream")
 		select {
 		case <-h.Closing:
 		case <-sub.Evicted():

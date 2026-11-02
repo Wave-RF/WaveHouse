@@ -115,7 +115,7 @@ func TestBoot_Chain_DegradedThenRecovers(t *testing.T) {
 	// actual backoff math.
 	retryCtx, retryCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer retryCancel()
-	retryErr := registry.RetryRefresh(retryCtx, time.Millisecond, 10*time.Millisecond, func(attemptErr error) {
+	retryErr := registry.RetryRefresh(retryCtx, time.Millisecond, 10*time.Millisecond, func(_ context.Context, attemptErr error) {
 		bootState.Set(fmt.Errorf("schema discovery: %w", attemptErr))
 	})
 	require.NoError(t, retryErr, "retry loop should succeed on the 4th attempt")

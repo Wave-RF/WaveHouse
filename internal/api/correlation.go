@@ -6,6 +6,10 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/go-chi/chi/v5"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
@@ -85,10 +89,26 @@ func opsRequestTenant(next http.Handler) http.Handler {
 }
 
 // annotateSpan copies the request scope onto the server span, which the
-// otelhttp middleware starts after requestID has run.
+// otelhttp middleware starts after requestID has run, and names the span by
+// the route the request matched.
+//
+// otelhttp takes the span name and the http.route of its metrics from
+// r.Pattern once the handler returns. chi sets r.Pattern on the request it
+// routes, but a sub-router whose middleware derives a request (r.WithContext,
+// as the /v1/ops gates do) sets it on that copy, so otelhttp would keep the
+// mount's pattern, /v1/ops/*, for every ops route (#892). The route context
+// is shared by every copy, so its pattern is complete after the handler, and
+// annotateSpan writes it back to r, the request otelhttp handed it: it must
+// run directly inside the otelhttp middleware.
 func annotateSpan(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		observability.AnnotateSpan(r.Context())
 		next.ServeHTTP(w, r)
+		if rctx := chi.RouteContext(r.Context()); rctx != nil {
+			if p := rctx.RoutePattern(); p != "" {
+				r.Pattern = p
+				trace.SpanFromContext(r.Context()).SetAttributes(semconv.HTTPRoute(p))
+			}
+		}
 	})
 }

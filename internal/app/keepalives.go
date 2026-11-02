@@ -2,10 +2,12 @@ package app
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
@@ -85,7 +87,7 @@ func (k *keepalives) reconcile() {
 		} else {
 			tw = &tenantWheel{wheel: stream.NewHeartbeater(period, buckets)}
 		}
-		next[id] = k.turn(tw)
+		next[id] = k.turn(id, tw)
 	}
 	k.cur.Store(&next)
 	for id, tw := range cur {
@@ -95,18 +97,19 @@ func (k *keepalives) reconcile() {
 	}
 }
 
-// turn returns tw with its loop running under run's context: tw itself when
-// it already turns, and when no loop may start — before Run, or once the
-// stop has begun. Under mu.
-func (k *keepalives) turn(tw *tenantWheel) *tenantWheel {
+// turn returns tenant id's tw with its loop running under run's context: tw
+// itself when it already turns, and when no loop may start — before Run, or
+// once the stop has begun. Under mu.
+func (k *keepalives) turn(id tenant.ID, tw *tenantWheel) *tenantWheel {
 	if tw.done != nil || k.ctx == nil || k.ctx.Err() != nil {
 		return tw
 	}
 	ctx, cancel := context.WithCancel(k.ctx)
 	turning := &tenantWheel{wheel: tw.wheel, cancel: cancel, done: make(chan struct{})}
 	go func() {
-		defer close(turning.done)
+		defer observability.Crash("stream_keepalive", slog.String("tenant", id.String()))
 		turning.wheel.Run(ctx)
+		close(turning.done)
 	}()
 	return turning
 }

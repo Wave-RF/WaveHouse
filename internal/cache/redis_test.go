@@ -360,10 +360,10 @@ func TestRedisMetrics(t *testing.T) {
 	ctx := context.Background()
 	_, _, _ = r.Lookup(ctx, "acme", "q", nil)
 	_, _ = r.Invalidate(ctx, []Namespace{{Tenant: "acme", Table: "events"}})
-	r.metrics.op("set", time.Now())
-	r.metrics.stored(10)
-	r.metrics.tooLarge()
-	r.metrics.setFailed("oom")
+	r.metrics.op("acme", "set", time.Now())
+	r.metrics.stored("acme", 10)
+	r.metrics.tooLarge("acme")
+	r.metrics.setFailed("acme", "oom")
 
 	got := collect(t, reader)
 	assert.Equal(t, int64(1), sumOf(t, got, "wavehouse_cache_lookups_total", "result", resultBypass))
@@ -374,4 +374,9 @@ func TestRedisMetrics(t *testing.T) {
 	assert.Equal(t, int64(1), sumOf(t, got, "wavehouse_cache_set_failures_total", "reason", "oom"))
 	assert.Contains(t, got, "wavehouse_cache_op_duration_seconds")
 	assert.Contains(t, got, "wavehouse_cache_value_bytes")
+	// A tenant's measurements carry its tenant label (#891).
+	assert.Equal(t, int64(1), sumOf(t, got, "wavehouse_cache_lookups_total", "tenant", "acme"))
+	assert.Equal(t, int64(1), sumOf(t, got, "wavehouse_cache_invalidations_total", "tenant", "acme"))
+	assert.Equal(t, int64(1), sumOf(t, got, "wavehouse_cache_oversize_total", "tenant", "acme"))
+	assert.Equal(t, int64(1), sumOf(t, got, "wavehouse_cache_set_failures_total", "tenant", "acme"))
 }

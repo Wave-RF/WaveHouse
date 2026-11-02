@@ -10,10 +10,13 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/pipes"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
 	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -31,8 +34,11 @@ type PipesHandler struct {
 	// CHConn yields the request tenant's connection (chconn.Pools.For in
 	// production); nil is a tenant on no pool, a 503.
 	CHConn func(*settings.Store) driver.Conn
-	Cache  cache.Cache
-	sf     singleflight.Group
+	// CHTarget names the tenant's ClickHouse on the clickhouse.query span
+	// (chconn.Pools.Target in production); nil leaves the server off it.
+	CHTarget func(*settings.Store) chconn.Target
+	Cache    cache.Cache
+	sf       singleflight.Group
 	// queryTimeout bounds each pipe execution, read per request off the
 	// tenant's settings ((*settings.Store).ClickHouse().QueryTimeout in
 	// production) so a settings reload applies without a restart.
@@ -156,7 +162,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if IsMutation(sql) {
-		h.executeWrite(w, r, store, sql, params)
+		h.executeWrite(w, r, store, q.Name, sql, params)
 		return
 	}
 
@@ -193,7 +199,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		data, queryDuration, err := h.run(r.Context(), store, conn, opPipe, sql, params)
+		data, queryDuration, err := h.run(r.Context(), store, conn, opPipe, q.Name, sql, params)
 		if err != nil {
 			return nil, err
 		}
@@ -218,13 +224,13 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 // classifier executeCHQuery routes Exec by, so what bypasses here is exactly
 // what runs as a write. no-store keeps an HTTP cache in front of a GET from
 // answering a repeat the same way.
-func (h *PipesHandler) executeWrite(w http.ResponseWriter, r *http.Request, store *settings.Store, sql string, params []any) {
+func (h *PipesHandler) executeWrite(w http.ResponseWriter, r *http.Request, store *settings.Store, name, sql string, params []any) {
 	conn := connOf(h.CHConn, store)
 	if conn == nil {
 		writeUnavailable(w, noConnectionMessage, retryAfterPool)
 		return
 	}
-	data, _, err := h.run(r.Context(), store, conn, opPipeWrite, sql, params)
+	data, _, err := h.run(r.Context(), store, conn, opPipeWrite, name, sql, params)
 	if err != nil {
 		writeCHWriteError(w, r, err, err.Error())
 		return
@@ -235,16 +241,19 @@ func (h *PipesHandler) executeWrite(w http.ResponseWriter, r *http.Request, stor
 	_, _ = w.Write(data) //nolint:gosec // G705: JSON the handler marshalled from the exec result
 }
 
-// run executes a pipe's bound SQL under the tenant's query timeout and
+// run executes pipe name's bound SQL under the tenant's query timeout and
 // returns the rows as JSON with how long ClickHouse took, recording the call
 // as operation (opPipe or opPipeWrite).
-func (h *PipesHandler) run(ctx context.Context, store *settings.Store, conn driver.Conn, operation, sql string, params []any) ([]byte, time.Duration, error) {
+func (h *PipesHandler) run(ctx context.Context, store *settings.Store, conn driver.Conn, operation, name, sql string, params []any) ([]byte, time.Duration, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, timeoutOf(h.queryTimeout, store))
 	defer cancel()
+	queryCtx, span := otel.Tracer(chTracerName).Start(queryCtx, chQuerySpanName,
+		chQuerySpanOptions(targetOf(h.CHTarget, store), false, operation, sql, attribute.String("pipe", name))...)
 	start := time.Now()
 	rows, err := executeCHQuery(queryCtx, conn, sql, params)
 	queryDuration := time.Since(start)
-	h.metrics.observe(ctx, operation, queryDuration, err, queryCaps{})
+	setCHQueryResult(span, h.metrics.observe(ctx, operation, queryDuration, err, queryCaps{}))
+	span.End()
 	if err != nil {
 		return nil, 0, err
 	}

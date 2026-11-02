@@ -247,7 +247,11 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 		return nil, fmt.Errorf("register mq gauges: %w", err)
 	}
 	e.stopping, e.stop = context.WithCancel(context.Background()) //nolint:gosec // G118: Close calls it
-	go e.watch(orDefault(cfg.recheckEvery, topologyRecheck), orDefault(cfg.historyEvery, historyPoll))
+	go func() {
+		defer observability.Crash("mq_external")
+		e.watch(orDefault(cfg.recheckEvery, topologyRecheck), orDefault(cfg.historyEvery, historyPoll))
+		close(e.loopDone)
+	}()
 	return e, nil
 }
 
@@ -419,7 +423,6 @@ func (e *ExternalNATS) readExtras(ctx context.Context) error {
 
 // watch re-checks the topology and polls the history until Close.
 func (e *ExternalNATS) watch(recheck, poll time.Duration) {
-	defer close(e.loopDone)
 	topology := time.NewTicker(recheck)
 	defer topology.Stop()
 	history := time.NewTicker(poll)
@@ -592,7 +595,7 @@ func (e *ExternalNATS) Publish(ctx context.Context, topic Topic, data []byte, op
 	if err != nil {
 		return err
 	}
-	return e.publish(ctx, subj, e.partitions[p], false, data, opts)
+	return e.publish(ctx, publishKindIngest, subj, e.partitions[p], false, data, opts)
 }
 
 // DuplicateWindow is the shortest duplicate_window among the partitions: how
@@ -614,7 +617,7 @@ func (e *ExternalNATS) DuplicateWindow(ctx context.Context) (time.Duration, erro
 // DeadLetter parks msg's data on the shared dead-letter stream under its
 // topic, with a fresh Nats-Msg-Id. It does not ack msg.
 func (e *ExternalNATS) DeadLetter(ctx context.Context, msg *Message, opts ...PublishOpt) error {
-	return e.publish(ctx, e.topo.Prefix+".dlq."+msg.topicKey, e.dlq, true, msg.Data, opts)
+	return e.publish(ctx, publishKindDLQ, e.topo.Prefix+".dlq."+msg.topicKey, e.dlq, true, msg.Data, opts)
 }
 
 // publish stores data on subj, which stream should hold. With expect the
@@ -623,15 +626,18 @@ func (e *ExternalNATS) DeadLetter(ctx context.Context, msg *Message, opts ...Pub
 // reported as a topology fault and ErrUnavailable, the row left on the other
 // stream. An ingest publish goes without: the partition republishes each row
 // with its headers, and the history would refuse a copy expecting the
-// partition.
-func (e *ExternalNATS) publish(ctx context.Context, subj, stream string, expect bool, data []byte, opts []PublishOpt) error {
+// partition. The publish, retries included, is one mq.publish span of kind.
+func (e *ExternalNATS) publish(ctx context.Context, kind, subj, stream string, expect bool, data []byte, opts []PublishOpt) (err error) {
+	spanCtx, end := beginPublish(ctx, kind)
+	attempts := 0
+	defer func() { end(attempts, err) }()
 	msg := nats.NewMsg(subj)
 	msg.Data = data
 	headers := Headers{}
 	for _, opt := range opts {
 		opt(headers)
 	}
-	observability.InjectHeaders(ctx, headers)
+	observability.InjectHeaders(spanCtx, headers)
 	msg.Header = nats.Header(headers)
 	// WithMsgID overwrites the header, so a caller's idempotency key must be
 	// the id itself; otherwise a fresh one keeps this publish's retries one.
@@ -647,9 +653,9 @@ func (e *ExternalNATS) publish(ctx context.Context, subj, stream string, expect 
 		pubOpts = append(pubOpts, jetstream.WithExpectStream(stream))
 	}
 
-	var err error
 	for attempt := 0; ; attempt++ {
-		actx, cancel := context.WithTimeout(ctx, e.topo.PublishTimeout)
+		attempts++
+		actx, cancel := context.WithTimeout(spanCtx, e.topo.PublishTimeout)
 		var ack *jetstream.PubAck
 		ack, err = e.js.PublishMsg(actx, msg, pubOpts...)
 		cancel()
@@ -744,6 +750,7 @@ func (e *ExternalNATS) Subscribe(ctx context.Context, consumerName string, handl
 		return fmt.Errorf("history consumer: %w", e.apiError(err))
 	}
 	cc, err := cons.Consume(func(m jetstream.Msg) {
+		defer observability.Crash("mq_delivery", slog.String("consumer", consumerName))
 		msg := e.wrapMsg(observability.ExtractHeaders(ctx, m.Headers()), m, false)
 		if err := handler(msg); err != nil {
 			slog.Warn("mq: subscriber could not handle an event", "component", "nats", "consumer", consumerName, "topic", msg.TopicKey(), "error", err)
@@ -756,6 +763,7 @@ func (e *ExternalNATS) Subscribe(ctx context.Context, consumerName string, handl
 	}
 	untrack := e.track(cc.Stop)
 	go func() {
+		defer observability.Crash("mq_external")
 		select {
 		case <-ctx.Done():
 		case <-cc.Closed():
@@ -1072,13 +1080,24 @@ func (e *ExternalNATS) MaxBytes(id tenant.ID) int64 {
 	return 0
 }
 
-// Stats reports this process's connection and its inbound message count.
+// Stats reports this process's client connection: whether it is connected,
+// and its cumulative message, byte and reconnect counts.
 func (e *ExternalNATS) Stats() (observability.MQStats, error) {
 	s := e.nc.Stats()
 	return observability.MQStats{
 		Connections: boolGauge(e.nc.IsConnected()),
-		InMsgs:      int64(min(s.InMsgs, uint64(1<<62))), //nolint:gosec // capped
+		InMsgs:      capInt64(s.InMsgs),
+		OutMsgs:     capInt64(s.OutMsgs),
+		InBytes:     capInt64(s.InBytes),
+		OutBytes:    capInt64(s.OutBytes),
+		Reconnects:  capInt64(s.Reconnects),
 	}, nil
+}
+
+// capInt64 converts a cumulative count for an int64 instrument, capped far
+// above anything a process reaches.
+func capInt64(n uint64) int64 {
+	return int64(min(n, uint64(1<<62))) //nolint:gosec // capped
 }
 
 // Close stops every consumer, so none reports failed, then drains the
