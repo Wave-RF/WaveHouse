@@ -91,8 +91,8 @@ importers:
         specifier: ^0.3.2
         version: 0.3.2(@astrojs/starlight@0.42.6(@astrojs/markdown-remark@7.3.2(supports-color@10.2.2))(astro@7.3.8(@astrojs/markdown-remark@7.3.2(supports-color@10.2.2))(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1))(supports-color@10.2.2)(typescript@6.0.3))(astro@7.3.8(@astrojs/markdown-remark@7.3.2(supports-color@10.2.2))(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1))
       '@wavehouse/sdk':
-        specifier: ^0.1.1
-        version: 0.1.1
+        specifier: ^0.2.0
+        version: 0.2.0
       astro:
         specifier: ^7.3.8
         version: 7.3.8(@astrojs/markdown-remark@7.3.2(supports-color@10.2.2))(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1)
@@ -1873,8 +1873,8 @@ packages:
       starlight-glossary:
         optional: true
 
-  '@wavehouse/sdk@0.1.1':
-    resolution: {integrity: sha512-Xr1hoaWyNmDqUQetBHIL1zYCs9SU2mH9A/aJEBrmB5dIHs/ogLFzaV1t+Fh7ZMVEpEajGTEWUXfBnRsi3UxioA==}
+  '@wavehouse/sdk@0.2.0':
+    resolution: {integrity: sha512-okYDhCYRfVwSyjiEG5ODaV0eaWOHETUj8/n/WnR57XtTtaB1O/QgwlrlzNEA53/dYulVeChTLl9nf+neK/qb8g==}
     engines: {node: '>=22'}
     hasBin: true
 
@@ -6090,7 +6090,7 @@ snapshots:
       '@astrojs/starlight': 0.42.6(@astrojs/markdown-remark@7.3.2(supports-color@10.2.2))(astro@7.3.8(@astrojs/markdown-remark@7.3.2(supports-color@10.2.2))(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1))(supports-color@10.2.2)(typescript@6.0.3)
       astro: 7.3.8(@astrojs/markdown-remark@7.3.2(supports-color@10.2.2))(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1)
 
-  '@wavehouse/sdk@0.1.1':
+  '@wavehouse/sdk@0.2.0':
     dependencies:
       eventsource-parser: 3.1.1
 

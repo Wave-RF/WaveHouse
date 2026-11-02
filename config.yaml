@@ -50,6 +50,8 @@ prometheus:
   path: /metrics
   port: 0                # 0 = mount on server.port; non-zero = sidecar listener
   per_table_metrics: true # false = no table label, one series over all tables (OTLP too)
+  per_tenant_metrics: true # false = no tenant label, one series over all tenants (OTLP too)
+  http_body_size_metrics: false # true = keep otelhttp's request/response body size histograms
 
 # Go's net/http/pprof under /debug/pprof/, on a listener of its own (never
 # server.port). Unauthenticated, so the address defaults to loopback.

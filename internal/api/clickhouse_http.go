@@ -275,6 +275,7 @@ func (c *chReader) do(ctx context.Context, target chconn.Target, conns int, req 
 	if target.Password != "" {
 		httpReq.Header.Set("X-ClickHouse-Key", target.Password)
 	}
+	chconn.InjectTraceContext(ctx, httpReq.Header)
 
 	// #nosec G704 -- the destination is operator config, not caller input:
 	// the scheme, host and path come from chconn.Target and only RawQuery is

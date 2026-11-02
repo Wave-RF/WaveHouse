@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -58,26 +60,30 @@ func TestIngest_Windows_OneReserveAndCommitPerWindow(t *testing.T) {
 
 // A publish failing at record k settles its window: the records before k are
 // committed, k is released when the queue refused it and left to lapse when
-// the outcome is unknown, the rest of the window is released, and later
-// windows are never reserved. A whole-batch retry after a refusal publishes
+// the outcome is unknown (a client that went away mid-publish included, whose
+// 499 settles the window as any uncertain failure does, #947), the rest of
+// the window is released, and later windows are never reserved. A whole-batch retry after a refusal publishes
 // every record exactly once.
 func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 	t.Parallel()
 	const n = 600
 	refused := fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull)
 	tests := []struct {
-		name   string
-		k      int
-		err    error
-		status int
+		name       string
+		k          int
+		err        error
+		status     int
+		clientGone bool // the request context canceled during the failing publish
 	}{
-		{"refused first record", 1, refused, http.StatusServiceUnavailable},
-		{"refused mid first window", 100, refused, http.StatusServiceUnavailable},
-		{"refused last of first window", 256, refused, http.StatusServiceUnavailable},
-		{"refused first of second window", 257, refused, http.StatusServiceUnavailable},
-		{"refused mid last window", 590, refused, http.StatusServiceUnavailable},
-		{"uncertain mid first window", 100, context.DeadlineExceeded, http.StatusInternalServerError},
-		{"uncertain mid second window", 400, context.DeadlineExceeded, http.StatusInternalServerError},
+		{"refused first record", 1, refused, http.StatusServiceUnavailable, false},
+		{"refused mid first window", 100, refused, http.StatusServiceUnavailable, false},
+		{"refused last of first window", 256, refused, http.StatusServiceUnavailable, false},
+		{"refused first of second window", 257, refused, http.StatusServiceUnavailable, false},
+		{"refused mid last window", 590, refused, http.StatusServiceUnavailable, false},
+		{"uncertain mid first window", 100, context.DeadlineExceeded, http.StatusInternalServerError, false},
+		{"uncertain mid second window", 400, context.DeadlineExceeded, http.StatusInternalServerError, false},
+		{"client gone mid first window", 100, errors.New("publish: context canceled"), statusClientClosedRequest, true},
+		{"client gone mid second window", 400, errors.New("publish: context canceled"), statusClientClosedRequest, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -87,8 +93,16 @@ func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 			h := dedupHandler(t, pub, dedup, false)
 			lines := eventLines(t, n)
 
+			req := ndjsonRequest(t, "clicks", lines...)
+			if tt.clientGone {
+				// Live for the k-1 publishes that land, canceled in the k-th.
+				ctx, cancel := context.WithCancel(req.Context())
+				t.Cleanup(cancel)
+				pub.BeforeErr = cancel
+				req = req.WithContext(ctx)
+			}
 			w := httptest.NewRecorder()
-			h.Handle(w, withTenant(ndjsonRequest(t, "clicks", lines...)))
+			h.Handle(w, withTenant(req))
 			require.Equal(t, tt.status, w.Code)
 			assert.Len(t, pub.Published(), tt.k-1)
 
@@ -128,6 +142,57 @@ func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 			assert.Len(t, pub.Published(), n, "every record exactly once")
 		})
 	}
+}
+
+// A client that goes away while the second window's reserve is in flight
+// gets the 499, not the store's 500: the first window stays published and
+// committed, and the second is never published (#947).
+// Not parallel: it captures the default logger.
+func TestIngest_Windows_ReserveClientGoneMidBatch(t *testing.T) {
+	const n = ingestWindow + 44
+	buf := logtest.Capture(t, slog.LevelDebug)
+	pub := &testutil.MockPublisher{}
+	dedup := testutil.NewMockDeduplicator()
+	dedup.Err = errors.New("pebble: context canceled")
+	dedup.ErrAfter = 1
+	h := dedupHandler(t, pub, dedup, false)
+
+	req := ndjsonRequest(t, "clicks", eventLines(t, n)...)
+	ctx, cancel := context.WithCancel(req.Context())
+	t.Cleanup(cancel)
+	dedup.BeforeErr = cancel
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(req.WithContext(ctx)))
+
+	require.Equal(t, statusClientClosedRequest, w.Code)
+	assert.Contains(t, buf.String(), `"level":"DEBUG","msg":"dedupe reserve failed: client closed the request"`)
+	assert.NotContains(t, buf.String(), `"level":"ERROR"`)
+	assert.Len(t, pub.Published(), ingestWindow)
+	assert.True(t, dedup.Committed(clickKey(ingestWindow)), "the first window keeps its ids")
+	assert.False(t, dedup.Pending(clickKey(ingestWindow+1)), "the second window was never reserved")
+}
+
+// A publish that fails while the client is still there is the queue's 500,
+// even when the client leaves while the window's claims are being settled:
+// the 499 is decided by the state when the publish failed (#947).
+// Not parallel: it captures the default logger.
+func TestIngest_Windows_ClientGoneDuringSettlement(t *testing.T) {
+	buf := logtest.Capture(t, slog.LevelDebug)
+	pub := &testutil.MockPublisher{Err: errors.New("nats: bad subject"), ErrAfter: 1}
+	dedup := testutil.NewMockDeduplicator()
+	h := dedupHandler(t, pub, dedup, false)
+
+	req := ndjsonRequest(t, "clicks", eventLines(t, 3)...)
+	ctx, cancel := context.WithCancel(req.Context())
+	t.Cleanup(cancel)
+	dedup.OnCommit = cancel
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(req.WithContext(ctx)))
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, buf.String(), `"level":"ERROR","msg":"failed to publish to the ingest queue"`)
+	assert.NotContains(t, buf.String(), "client closed the request")
+	assert.True(t, dedup.Committed(clickKey(1)), "the record before the failure is committed")
 }
 
 // A dedupe store that cannot answer now fails the request with 503 and a

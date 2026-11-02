@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"go.opentelemetry.io/otel"
 
 	"github.com/Wave-RF/WaveHouse/internal/api"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
@@ -217,12 +218,14 @@ func (a *App) wireObservability(ctx context.Context) {
 		return
 	}
 	shutdown, promHandler, err := observability.InitProvider(ctx, a.identity(), observability.ProviderConfig{
-		TracesEnabled:     cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
-		TracesSampleRate:  cfg.OTel.Traces.SampleRate,
-		MetricsEnabled:    cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
-		PrometheusEnabled: cfg.Prometheus.Enabled,
-		LogsEnabled:       cfg.OTel.Enabled && cfg.OTel.Logs.Enabled,
-		AggregateTables:   !cfg.Prometheus.PerTableMetrics,
+		TracesEnabled:       cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
+		TracesSampleRate:    cfg.OTel.Traces.SampleRate,
+		MetricsEnabled:      cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
+		PrometheusEnabled:   cfg.Prometheus.Enabled,
+		LogsEnabled:         cfg.OTel.Enabled && cfg.OTel.Logs.Enabled,
+		AggregateTables:     !cfg.Prometheus.PerTableMetrics,
+		AggregateTenants:    !cfg.Prometheus.PerTenantMetrics,
+		HTTPBodySizeMetrics: cfg.Prometheus.HTTPBodySizeMetrics,
 	})
 	if err != nil {
 		slog.Error("failed to initialize observability, falling back to stdout", "error", err)
@@ -445,8 +448,8 @@ func (a *App) wireDiscovery(ctx context.Context) {
 			a.bindings.attach(id, reg)
 			return reg
 		},
-		func(id tenant.ID, err error) {
-			slog.Warn("schema discovery retry failed", "tenant", id, "error", err)
+		func(ctx context.Context, id tenant.ID, err error) {
+			slog.WarnContext(ctx, "schema discovery retry failed", "tenant", id, "error", err)
 			mu.Lock()
 			defer mu.Unlock()
 			// A loop a reload stopped may report one last attempt after its
@@ -1095,7 +1098,22 @@ func (a *App) healthHandler() *api.HealthHandler {
 	}
 	h := api.NewHealthHandler(append(checks, a.readiness...)...)
 	h.Boot = a.bootState
+	a.wireReadinessMetrics(h)
 	return h
+}
+
+// wireReadinessMetrics exports what h's readiness checks last found (#901),
+// so a replica that left rotation says afterwards which dependency failed.
+func (a *App) wireReadinessMetrics(h *api.HealthHandler) {
+	if !a.cfg.OTel.Enabled && !a.cfg.Prometheus.Enabled {
+		return
+	}
+	reg, err := h.RegisterReadinessMetrics(otel.Meter("wavehouse-api"))
+	if err != nil {
+		slog.Error("failed to register readiness metrics", "error", err)
+		return
+	}
+	a.add(component{name: "readiness metrics", close: withoutContext(reg.Unregister)})
 }
 
 // inlineMetrics is the metrics endpoint to mount on the main router: with
@@ -1171,7 +1189,10 @@ func (a *App) serve(ctx context.Context, name string, srv *http.Server, ln net.L
 	}
 	slog.Info("starting "+name, "addr", ln.Addr().String())
 	served := make(chan error, 1)
-	go func() { served <- srv.Serve(ln) }()
+	go func() {
+		defer observability.Crash("http_server", slog.String("server", name))
+		served <- srv.Serve(ln)
+	}()
 	select {
 	case err := <-served:
 		if errors.Is(err, http.ErrServerClosed) {

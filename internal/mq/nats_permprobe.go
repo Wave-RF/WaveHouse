@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // natsPermissionWatch holds the subjects the server refused a connection's
@@ -162,6 +164,7 @@ func (v *topologyVerifier) probePermissions(ctx context.Context) error {
 		for _, p := range natsPermissionProbes {
 			subject := api + "CONSUMER." + p.verb + "." + u.stream + "." + u.durable
 			wg.Go(func() {
+				defer observability.Crash("mq_permission_probe")
 				slots <- struct{}{}
 				defer func() { <-slots }()
 				denied, err := v.probeOne(ctx, nc, subject, p.payload)
@@ -205,6 +208,7 @@ func (v *topologyVerifier) probeOne(ctx context.Context, nc *nats.Conn, subject 
 	defer cancel()
 	answered := make(chan error, 1)
 	go func() {
+		defer observability.Crash("mq_permission_probe")
 		_, err := nc.RequestWithContext(rctx, subject, payload)
 		answered <- err
 	}()

@@ -150,7 +150,7 @@ func TestDiscoveries_ReportEveryRetiredRegistry(t *testing.T) {
 		return discovery.NewSchemaRegistry(func() (driver.Conn, string) { return nil, "" }, id,
 			func(tenant.ID) time.Duration { return time.Hour })
 	}
-	d := newDiscoveries(t.Context(), build, func(tenant.ID, error) {}, func(tenant.ID) {},
+	d := newDiscoveries(t.Context(), build, func(context.Context, tenant.ID, error) {}, func(tenant.ID) {},
 		func(id tenant.ID, reg *discovery.SchemaRegistry) { got = append(got, retired{id, reg}) })
 	t.Cleanup(func() { assert.NoError(t, d.close(context.Background())) })
 

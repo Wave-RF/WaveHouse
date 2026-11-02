@@ -18,8 +18,8 @@ const tracerName = "wavehouse-ingest"
 // maxFlushLinks bounds how many producer spans one flush span links to. A
 // batch holds up to defaultMaxBatch rows and each may come from its own
 // request; a span carrying thousands of links is more than any backend
-// renders, so the first ones stand for the rest and `producers` counts them
-// all.
+// renders, so the first ones stand for the rest and `producers` counts every
+// distinct trace.
 const maxFlushLinks = 128
 
 // The worker's span names. Each span is started and ended at its call site
@@ -33,18 +33,15 @@ const (
 // flushSpanOptions describes the span of one group's flush — one (tenant,
 // table, column list) batch, written as one INSERT — started in the worker's
 // flush context, which carries no span of its own. The rows were published by
-// many requests, so the span is a root of its own, linked to each distinct
-// producer span the rows' queue headers carried (the handler's span of the
-// request that published the row, which internal/mq extracts onto the
-// delivered message's context): a request's trace reaches the flush that
-// wrote its rows, and a slow or failed insert reads back to every request it
-// held. A row published outside a span links nothing.
+// many requests, so the span is a root of its own, linked to the producer
+// span the rows' queue headers carried (the mq.publish span of the row's
+// publish, a child of its request's span, which internal/mq extracts onto
+// the delivered message's context), the first one of each trace: a request's
+// trace reaches the flush that wrote its rows, and a slow or failed insert
+// reads back to every request it held, without a request of many rows taking
+// every link. A row published outside a span links nothing.
 func flushSpanOptions(tableName string, group []parsedMsg) []trace.SpanStartOption {
-	type spanKey struct {
-		trace trace.TraceID
-		span  trace.SpanID
-	}
-	seen := make(map[spanKey]struct{}, min(len(group), maxFlushLinks))
+	seen := make(map[trace.TraceID]struct{}, min(len(group), maxFlushLinks))
 	links := make([]trace.Link, 0, min(len(group), maxFlushLinks))
 	for _, pm := range group {
 		if pm.msg == nil {
@@ -54,11 +51,10 @@ func flushSpanOptions(tableName string, group []parsedMsg) []trace.SpanStartOpti
 		if !sc.IsValid() {
 			continue
 		}
-		key := spanKey{trace: sc.TraceID(), span: sc.SpanID()}
-		if _, dup := seen[key]; dup {
+		if _, dup := seen[sc.TraceID()]; dup {
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[sc.TraceID()] = struct{}{}
 		if len(links) < maxFlushLinks {
 			links = append(links, trace.Link{SpanContext: sc})
 		}

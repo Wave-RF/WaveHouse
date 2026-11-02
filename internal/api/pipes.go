@@ -14,6 +14,8 @@ import (
 	"github.com/Wave-RF/WaveHouse/pkg/pipes"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
 	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -169,7 +171,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if IsMutation(sql) {
-		h.executeWrite(w, r, store, sql)
+		h.executeWrite(w, r, store, q.Name, sql)
 		return
 	}
 
@@ -207,7 +209,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
 		start := time.Now()
-		data, err := h.run(r.Context(), store, target, opPipe, chRequest{sql: sql})
+		data, err := h.run(r.Context(), store, target, opPipe, q.Name, chRequest{sql: sql})
 		if err != nil {
 			return nil, err
 		}
@@ -232,13 +234,13 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 // statement sent without readonly=2, so what bypasses here is exactly what
 // may write. no-store keeps an HTTP cache in front of a GET from answering a
 // repeat the same way.
-func (h *PipesHandler) executeWrite(w http.ResponseWriter, r *http.Request, store *settings.Store, sql string) {
+func (h *PipesHandler) executeWrite(w http.ResponseWriter, r *http.Request, store *settings.Store, name, sql string) {
 	target := targetOf(h.Target, store)
 	if target.URL == "" {
 		writeUnavailable(w, noConnectionMessage, retryAfterPool)
 		return
 	}
-	data, err := h.run(r.Context(), store, target, opPipeWrite, chRequest{sql: sql, write: true})
+	data, err := h.run(r.Context(), store, target, opPipeWrite, name, chRequest{sql: sql, write: true})
 	if err != nil {
 		writeCHWriteError(w, r, err, chErrorMessage(err))
 		return
@@ -249,21 +251,24 @@ func (h *PipesHandler) executeWrite(w http.ResponseWriter, r *http.Request, stor
 	_, _ = w.Write(data) //nolint:gosec // G705: ClickHouse's JSONEachRow rows framed as an array, [] for a write
 }
 
-// run executes a pipe's bound SQL under the tenant's query timeout and
+// run executes pipe name's bound SQL under the tenant's query timeout and
 // returns ClickHouse's rows as a JSON array, recording the call as operation
 // (opPipe or opPipeWrite). A pipe carries no per-role
 // resource caps (allowed_roles is its whole policy), so the query timeout is
 // the only limit it sends; the deadline outlasts it by capBackstop, as on
 // the structured query.
-func (h *PipesHandler) run(ctx context.Context, store *settings.Store, target chconn.Target, operation string, req chRequest) ([]byte, error) {
+func (h *PipesHandler) run(ctx context.Context, store *settings.Store, target chconn.Target, operation, name string, req chRequest) ([]byte, error) {
 	timeout := timeoutOf(h.queryTimeout, store)
 	queryCtx, cancel := context.WithTimeout(ctx, timeout+capBackstop)
 	defer cancel()
 	req.settings = chReadSettings(chQueryLimits{ExecutionTime: timeout})
+	queryCtx, span := otel.Tracer(chTracerName).Start(queryCtx, chQuerySpanName,
+		chQuerySpanOptions(target, operation, req.sql, attribute.String("pipe", name))...)
 	start := time.Now()
 	data, err := h.ch.do(queryCtx, target, connsOf(h.MaxConns, store), req)
 	// A read is sent under readonly=2, so its refusal classifies as the
 	// response's does; a write is not.
-	h.metrics.observe(ctx, operation, time.Since(start), err, queryCaps{readonly: !req.write})
+	setCHQueryResult(span, h.metrics.observe(ctx, operation, time.Since(start), err, queryCaps{readonly: !req.write}))
+	span.End()
 	return data, err
 }

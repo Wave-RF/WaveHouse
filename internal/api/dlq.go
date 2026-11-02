@@ -46,6 +46,9 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "stream info failed")
 		return
 	}
+	// A tenant with a dead-letter queue is or was served, so its id is not
+	// the client's to make up.
+	observability.SetRequestServed(r.Context())
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"tables": counts.Tables, "total": counts.Total})

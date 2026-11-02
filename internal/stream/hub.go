@@ -286,7 +286,7 @@ func (h *Hub) Broadcast(topic mq.Topic, raw []byte) {
 			prepared = true
 		}
 		for _, sub := range rb.bucket.Snapshot() {
-			if h.rowAdmitted(p, rb.role, ev, sub.claims, view, prepErr) {
+			if h.rowAdmitted(topic.Tenant, p, rb.role, ev, sub.claims, view, prepErr) {
 				deliver(sub, plan)
 			}
 		}
@@ -329,15 +329,15 @@ func deliver(sub *Subscriber, plan rolePlan) {
 // tenant's table, a column list the table cannot have — withholds from every
 // row-filtered subscriber, never from the unfiltered roles that never asked the
 // type layer anything.
-func (h *Hub) rowAdmitted(p *policy.Policy, role string, ev *eventView, claims map[string]any, view RowView, prepErr error) bool {
+func (h *Hub) rowAdmitted(id tenant.ID, p *policy.Policy, role string, ev *eventView, claims map[string]any, view RowView, prepErr error) bool {
 	if prepErr != nil || view == nil {
 		// view == nil with no error is a broken evaluator, not a verdict: withhold.
-		h.metric.RowWithheld(ev.evt.TableName, role, WithheldReason(prepErr))
+		h.metric.RowWithheld(id, ev.evt.TableName, role, WithheldReason(prepErr))
 		return false
 	}
 	perms := policy.Evaluate(p, role, ev.evt.TableName, "select", claims)
 	if visible, reason := view.Visible(perms); !visible {
-		h.metric.RowWithheld(ev.evt.TableName, role, reason)
+		h.metric.RowWithheld(id, ev.evt.TableName, role, reason)
 		return false
 	}
 	return true
@@ -512,7 +512,7 @@ func (h *Hub) ReplayProjector(id tenant.ID, role string, sub *Subscriber) func(r
 					// panic in rowAdmitted must not leave held.
 					defer view.Close()
 				}
-				return h.rowAdmitted(p, role, ev, sub.claims, view, err)
+				return h.rowAdmitted(id, p, role, ev, sub.claims, view, err)
 			}()
 			if !admitted {
 				return nil // this row is filtered out for these claims

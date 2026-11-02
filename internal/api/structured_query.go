@@ -14,6 +14,8 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
+	"go.opentelemetry.io/otel"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -276,11 +278,14 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		queryCtx, cancel := context.WithTimeout(r.Context(), timeout+capBackstop)
 		defer cancel()
 
+		spanCtx, span := otel.Tracer(chTracerName).Start(queryCtx, chQuerySpanName,
+			chQuerySpanOptions(target, opStructuredQuery, bound.SQL, semconv.DBSQLTable(table))...)
 		start := time.Now()
 		// ClickHouse's own JSON rendering of the rows, stored and served
 		// verbatim — no per-row scan, no re-marshal.
-		data, err := h.ch.do(queryCtx, target, conns, chRequest{sql: bound.SQL, params: bound.Params, tables: bound.Tables, settings: chSettings})
-		h.metrics.observe(r.Context(), opStructuredQuery, time.Since(start), err, caps)
+		data, err := h.ch.do(spanCtx, target, conns, chRequest{sql: bound.SQL, params: bound.Params, tables: bound.Tables, settings: chSettings})
+		setCHQueryResult(span, h.metrics.observe(r.Context(), opStructuredQuery, time.Since(start), err, caps))
+		span.End()
 		if err != nil {
 			return nil, err
 		}

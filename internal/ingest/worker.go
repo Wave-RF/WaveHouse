@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 	"github.com/Wave-RF/WaveHouse/pkg/chsql"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
@@ -122,10 +124,15 @@ func newPoisonCounter(m metric.Meter) (metric.Int64Counter, error) {
 // (unavailable, denied, unknown), or backoff for rows turned away without a
 // try while their pool was backing off. A sustained rate is an outage that
 // is holding rows in the queue — none of them reach the DLQ.
-var retryCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
-	"wavehouse_ingest_retries_total",
-	metric.WithDescription("Rows handed back to the ingest queue for a delayed retry because ClickHouse could not take them, by reason"),
-)
+var retryCounter, _ = newRetryCounter(otel.Meter("wavehouse-ingest"))
+
+// newRetryCounter builds the counter on m (a test builds it on its own meter).
+func newRetryCounter(m metric.Meter) (metric.Int64Counter, error) {
+	return m.Int64Counter(
+		"wavehouse_ingest_retries_total",
+		metric.WithDescription("Rows handed back to the ingest queue for a delayed retry because ClickHouse could not take them, by reason"),
+	)
+}
 
 // Batching defaults; overridable on the struct for tests.
 // TODO: eventually make this configurable not just in tests
@@ -195,11 +202,17 @@ func StartIngestWorker(
 		dlqEnabled: dlqEnabled,
 	}
 
+	zeroWorkerCounters()
+
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	worker.wg.Add(1)
 
 	// Dispatch loop: one consumer, fanned out to a goroutine per tenant table.
-	go worker.dispatchLoop(workerCtx, cons)
+	go func() {
+		defer observability.Crash("ingest_worker")
+		worker.dispatchLoop(workerCtx, cons)
+		worker.wg.Done()
+	}()
 
 	stopFunc := func(shutdownCtx context.Context) error {
 		workerCancel()
@@ -235,6 +248,7 @@ func ingestHTTPClient(tlsCfg *tls.Config) *http.Client {
 func waitOrDeadline(ctx context.Context, wg *sync.WaitGroup) error {
 	done := make(chan struct{})
 	go func() {
+		defer observability.Crash("ingest_worker")
 		wg.Wait()
 		close(done)
 	}()
@@ -261,8 +275,6 @@ func waitOrDeadline(ctx context.Context, wg *sync.WaitGroup) error {
 // before that stop, so it comes back ahead of anything newer rather than
 // after ack_wait.
 func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
-	defer w.wg.Done()
-
 	msgChan := make(chan *mq.Message, w.maxBatch*2)
 	abandon := make(chan struct{})
 
@@ -351,8 +363,11 @@ func (w *IngestWorker) dispatchLoop(ctx context.Context, cons mq.Consumer) {
 			// tenant, schema-validated tables, in-process publishers only,
 			// DontListen:true). Add idle-reaping + route/teardown coordination
 			// before remote/untrusted publishers can create unbounded cardinality.
-			table, in := pm.tableName, ch
-			tableWg.Go(func() { w.tableLoop(flushCtx, table, in) })
+			id, table, in := pm.tenant, pm.tableName, ch
+			tableWg.Go(func() {
+				defer observability.Crash("ingest_worker", slog.String("tenant", id.String()), slog.String("table", table))
+				w.tableLoop(flushCtx, table, in)
+			})
 		}
 		ch <- pm
 	}
@@ -385,6 +400,7 @@ func haltRouting(cons mq.Consumer, msgChan <-chan *mq.Message, route func(*mq.Me
 	if h, ok := cons.(mq.Halter); ok {
 		halted := make(chan struct{})
 		go func() {
+			defer observability.Crash("ingest_worker")
 			h.Halt()
 			close(halted)
 		}()
@@ -456,8 +472,11 @@ func newTableBatcher(w *IngestWorker, table string) *tableBatcher {
 // it here would only pin it in memory until a flush that is certain to hand
 // it back, so the backlog of an outage stays in the queue, not in the worker.
 func (b *tableBatcher) add(ctx context.Context, pm parsedMsg) {
-	if wait, ok := b.w.backoffs.waiting(func() chconn.Target { return b.w.target(pm.tenant) }, b.table, b.w.clock()); ok {
-		b.w.retryLater(ctx, b.table, []parsedMsg{pm}, wait, "backoff")
+	// waiting resolves the target only while a backoff is open, and the
+	// retry reuses it rather than resolving it again on this per-row path.
+	var t chconn.Target
+	if wait, ok := b.w.backoffs.waiting(func() chconn.Target { t = b.w.target(pm.tenant); return t }, b.table, b.w.clock()); ok {
+		b.w.retryLater(withMetricTenant(ctx, pm.tenant, t), b.table, []parsedMsg{pm}, wait, "backoff")
 		return
 	}
 	if len(b.batch) == 0 {
@@ -489,8 +508,9 @@ func (b *tableBatcher) requestFlush(ctx context.Context) {
 	done := make(chan struct{})
 	b.flushing = done
 	go func() {
-		defer close(done)
+		defer observability.Crash("ingest_worker", slog.String("tenant", rows[0].tenant.String()), slog.String("table", b.table))
 		b.w.flushTable(ctx, b.table, rows)
+		close(done)
 	}()
 }
 
@@ -657,7 +677,10 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 		return
 	}
 	id := msgs[0].tenant
+	// Every measurement of the batch is about its tenant, and is labeled
+	// with it when it has a target (#891).
 	t := w.target(id)
+	ctx = withMetricTenant(ctx, id, t)
 	if t.URL == "" {
 		w.parkBatch(ctx, tableName, msgs, noTargetError(id))
 		return
@@ -760,7 +783,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 	defer func() { recordSpanError(span, err) }()
 	cols := group[0].columns
 
-	err = w.insertToClickHouse(ctx, tableName, cols, group)
+	err = w.insert(ctx, tableName, cols, group, modeBatch)
 	if err == nil {
 		w.handleSuccess(ctx, tableName, group)
 		return nil, nil
@@ -770,12 +793,13 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 	}
 
 	slog.WarnContext(ctx, "bulk insert failed, falling back to 1-by-1 isolation", "tenant", group[0].tenant, "table", tableName, "error", err)
+	workerMetrics.isolations.Add(ctx, 1, observability.MetricAttrs(ctx, attribute.String("table", tableName)))
 
 	// ISOLATE & DLQ: re-insert one row at a time so a single poison row can't
 	// sink the whole batch.
 	// TODO: potentially could try a binary search or something eventually maybe? unclear if faster...
 	for i, pm := range group {
-		singleErr := w.insertIsolated(ctx, tableName, cols, pm)
+		singleErr := w.insert(ctx, tableName, cols, []parsedMsg{pm}, modeIsolated)
 		switch {
 		case singleErr == nil:
 			w.handleSuccess(ctx, tableName, []parsedMsg{pm})
@@ -786,6 +810,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 			return group[i:], singleErr
 		case w.dlqEnabled != nil && !w.dlqEnabled(pm.tenant, tableName):
 			slog.ErrorContext(ctx, "isolated bad row, DLQ disabled for table — left unacked, NATS will redeliver it until it inserts or dlq is enabled", "tenant", pm.tenant, "table", tableName, "error", singleErr)
+			countRows(ctx, tableName, rowsLeftUnacked, 1)
 		default:
 			slog.ErrorContext(ctx, "isolated bad row, sending to DLQ", "tenant", pm.tenant, "table", tableName, "error", singleErr)
 			w.sendToDLQ(ctx, tableName, pm, singleErr.Error())
@@ -811,7 +836,7 @@ func (w *IngestWorker) retryLater(ctx context.Context, tableName string, msgs []
 			slog.ErrorContext(ctx, "delayed nak failed; the row is redelivered after the ack wait instead", "tenant", pm.tenant, "table", tableName, "error", err)
 		}
 	}
-	retryCounter.Add(ctx, int64(len(msgs)), metric.WithAttributes(
+	retryCounter.Add(ctx, int64(len(msgs)), observability.MetricAttrs(ctx,
 		attribute.String("table", tableName),
 		attribute.String("reason", reason),
 	))
@@ -821,19 +846,16 @@ func (w *IngestWorker) retryLater(ctx context.Context, tableName string, msgs []
 // explicitly, so the positional rows land in the right slots. Callers group by
 // column list first: a batch spanning two lists cannot share one statement.
 func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, columns []string, msgs []parsedMsg) error {
-	return w.insert(ctx, tableName, columns, msgs, false)
+	return w.writeInsert(ctx, tableName, columns, msgs, false)
 }
 
-// insertIsolated inserts one row of a batch being isolated, synchronously. An
-// async flush merges concurrent INSERTs of the same statement into one block,
-// and a CHECK constraint one row violates fails every INSERT in it: a good row
-// isolated beside another writer's bad one would be parked with it. Sync skips
-// the async flush wait too, about 55 ms per isolated row on 26.8.
-func (w *IngestWorker) insertIsolated(ctx context.Context, tableName string, columns []string, pm parsedMsg) error {
-	return w.insert(ctx, tableName, columns, []parsedMsg{pm}, true)
-}
-
-func (w *IngestWorker) insert(ctx context.Context, tableName string, columns []string, msgs []parsedMsg, isolated bool) (err error) {
+// writeInsert is insertToClickHouse, or with isolated one row of a batch
+// being isolated, synchronously. An async flush merges concurrent INSERTs of
+// the same statement into one block, and a CHECK constraint one row violates
+// fails every INSERT in it: a good row isolated beside another writer's bad
+// one would be parked with it. Sync skips the async flush wait too, about
+// 55 ms per isolated row on 26.8.
+func (w *IngestWorker) writeInsert(ctx context.Context, tableName string, columns []string, msgs []parsedMsg, isolated bool) (err error) {
 	var buf bytes.Buffer
 	for _, m := range msgs {
 		buf.Write(m.row)
@@ -852,7 +874,10 @@ func (w *IngestWorker) insert(ctx context.Context, tableName string, columns []s
 	// A group is one (tenant, table) batch's, so its first row names the
 	// tenant whose ClickHouse takes the insert.
 	id := msgs[0].tenant
+	// Every measurement of the batch is about its tenant, and is labeled
+	// with it when it has a target (#891).
 	t := w.target(id)
+	ctx = withMetricTenant(ctx, id, t)
 	if t.URL == "" {
 		return noTargetError(id)
 	}
@@ -895,6 +920,7 @@ func (w *IngestWorker) insert(ctx context.Context, tableName string, columns []s
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-ClickHouse-User", t.Username)
 	req.Header.Set("X-ClickHouse-Key", t.Password)
+	chconn.InjectTraceContext(ctx, req.Header)
 
 	// TODO: future optimization: could build list for cache invalidation here while waiting on the network request
 	resp, err := w.clients.For(t).Do(req)
@@ -913,11 +939,14 @@ func (w *IngestWorker) insert(ctx context.Context, tableName string, columns []s
 	return nil
 }
 
+// errNoTarget marks noTargetError's failures.
+var errNoTarget = errors.New("no ClickHouse connection is open")
+
 // noTargetError is the failure of tenant id's inserts while it is on no pool:
 // no longer served, or refused one, such as by the connection ceiling. No
 // request is made.
 func noTargetError(id tenant.ID) error {
-	return fmt.Errorf("no ClickHouse connection is open for tenant %s", id)
+	return fmt.Errorf("%w for tenant %s", errNoTarget, id)
 }
 
 // parkBatch disposes of a batch whose tenant has no ClickHouse connection in
@@ -930,6 +959,7 @@ func (w *IngestWorker) parkBatch(ctx context.Context, tableName string, msgs []p
 	id := msgs[0].tenant
 	if w.dlqEnabled != nil && !w.dlqEnabled(id, tableName) {
 		slog.ErrorContext(ctx, "no ClickHouse connection for tenant, DLQ disabled for table — batch left unacked, NATS will redeliver it until the tenant has one or dlq is enabled", "tenant", id, "table", tableName, "rows", len(msgs))
+		countRows(ctx, tableName, rowsLeftUnacked, len(msgs))
 		return
 	}
 	slog.ErrorContext(ctx, "no ClickHouse connection for tenant, parking the batch on the DLQ", "tenant", id, "table", tableName, "rows", len(msgs))
@@ -942,6 +972,10 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 	if len(msgs) == 0 {
 		return
 	}
+	// Counted here, not after each ack: the rows are in ClickHouse whatever
+	// the ack does. One whose ack fails can be redelivered, and is then
+	// written and counted again, as every INSERT that succeeds is.
+	countRows(ctx, tableName, rowsInserted, len(msgs))
 	// A batch is one tenant's (dispatchLoop keys its loops by tenant table),
 	// so the first row names whose namespaces the insert changed.
 	w.invalidate(ctx, msgs[0].tenant, tableName, msgs)
@@ -951,9 +985,11 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 	// drains ackWg only after every tableLoop has returned, so each Add here
 	// happens-before that Wait — no race, no reliance on synchronous flushing.
 	w.ackWg.Go(func() {
+		defer observability.Crash("ingest_worker", slog.String("tenant", msgs[0].tenant.String()), slog.String("table", tableName))
 		var acks sync.WaitGroup
 		for _, pm := range msgs {
 			acks.Go(func() {
+				defer observability.Crash("ingest_worker", slog.String("tenant", pm.tenant.String()), slog.String("table", tableName))
 				if err := pm.msg.DoubleAck(context.WithoutCancel(ctx)); err != nil {
 					slog.ErrorContext(context.WithoutCancel(ctx), "double ack failed for processed message", "error", err, "tenant", pm.tenant, "table", tableName)
 				}
@@ -1002,6 +1038,19 @@ func (w *IngestWorker) invalidate(ctx context.Context, id tenant.ID, tableName s
 	}
 }
 
+// withMetricTenant labels ctx's measurements with tenant id while id resolves
+// to t, a ClickHouse target. A topic can name a tenant that was removed or
+// never existed, or one with no pool (refused at a reload, such as by the
+// connection ceiling), and its measurements are recorded unlabeled instead,
+// so such ids cannot take any of the process's tenant labels from the
+// tenants it writes for (#891).
+func withMetricTenant(ctx context.Context, id tenant.ID, t chconn.Target) context.Context {
+	if t.URL == "" {
+		return ctx
+	}
+	return observability.WithMetricTenant(ctx, id.String())
+}
+
 // rejectPoison disposes of a message the worker can never insert. The DLQ is
 // preferred — the row is preserved for inspection and replay — and dropping is
 // the fallback when the DLQ is off for the table of tenant id (the topic's),
@@ -1010,6 +1059,7 @@ func (w *IngestWorker) invalidate(ctx context.Context, id tenant.ID, tableName s
 // unacked, exactly as the isolation path does: that is a transient DLQ
 // outage, and retrying beats destroying the row.
 func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, id tenant.ID, tableName, reason, detail string) {
+	ctx = withMetricTenant(ctx, id, w.target(id))
 	if w.dlqEnabled == nil || w.dlqEnabled(id, tableName) {
 		// Backgrounded on ackWg for the same reason handleSuccess backgrounds its
 		// acks: parkOnDLQ does a DLQ publish AND an fsync-bound DoubleAck,
@@ -1018,6 +1068,7 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, id tenan
 		// in series, with intake stalled behind it. dispatchLoop adds and
 		// waits on the same goroutine, so each Add still happens-before the Wait.
 		w.ackWg.Go(func() {
+			defer observability.Crash("ingest_worker", slog.String("tenant", id.String()), slog.String("table", tableName))
 			if w.parkOnDLQ(ctx, m, tableName, detail) {
 				countPoison(ctx, tableName, reason, "parked")
 			}
@@ -1032,6 +1083,7 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, id tenan
 	// a row that no longer exists anywhere. Counting before the ack would report
 	// that about a row still sitting in the queue, once per redelivery.
 	w.ackWg.Go(func() {
+		defer observability.Crash("ingest_worker", slog.String("tenant", id.String()), slog.String("table", tableName))
 		if err := m.DoubleAck(ctx); err != nil {
 			slog.ErrorContext(ctx, "ack of a dropped unreadable envelope failed, so it stays in the stream and will be refused again",
 				"tenant", id, "table", tableName, "reason", reason, "error", err)
@@ -1041,10 +1093,16 @@ func (w *IngestWorker) rejectPoison(ctx context.Context, m *mq.Message, id tenan
 	})
 }
 
-// sendToDLQ parks a row that failed its own isolated INSERT. Distinct from
-// rejectPoison, which parks an envelope the worker could not read at all.
+// sendToDLQ parks a row that failed its own isolated INSERT, or whose tenant
+// has no ClickHouse connection. Distinct from rejectPoison, which parks an
+// envelope the worker could not read at all. A park that failed leaves the
+// row in the stream, so it is counted as left unacked, not dead-lettered.
 func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parsedMsg, errMsg string) {
-	_ = w.parkOnDLQ(ctx, pm.msg, tableName, errMsg)
+	outcome := rowsLeftUnacked
+	if w.parkOnDLQ(ctx, pm.msg, tableName, errMsg) {
+		outcome = rowsDeadLettered
+	}
+	countRows(ctx, tableName, outcome, 1)
 }
 
 // parkOnDLQ parks one message on the dead-letter queue (under the topic it
@@ -1083,7 +1141,7 @@ func (w *IngestWorker) parkOnDLQ(ctx context.Context, msg *mq.Message, tableName
 
 // countPoison records one unreadable envelope under its disposition.
 func countPoison(ctx context.Context, tableName, reason, disposition string) {
-	poisonCounter.Add(ctx, 1, metric.WithAttributes(
+	poisonCounter.Add(ctx, 1, observability.MetricAttrs(ctx,
 		attribute.String("table", tableName),
 		attribute.String("reason", reason),
 		attribute.String("disposition", disposition),

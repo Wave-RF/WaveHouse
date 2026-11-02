@@ -3410,29 +3410,59 @@ func TestIngest_Dedup_ReserveError(t *testing.T) {
 	assert.Empty(t, pub.Published())
 }
 
-// A Reserve error's log level depends on why it failed. A real backend
-// failure (a live request context) stays ERROR, so an operator is paged. One
-// caused by the request's own context ending (the client gone, or its
-// deadline past) is not a backend problem and must log at DEBUG instead — an
-// operator paging on ERROR logs would otherwise be woken by clients that
-// simply went away. Not t.Parallel: it captures the process-wide default
+// A Reserve error's status and log level depend on why it failed. A real
+// backend failure (a live request context) is a 500 at ERROR, so an operator
+// is paged. One caused by the client going away (the request context
+// canceled) is the client's doing: 499 at DEBUG, so neither a 5xx alert nor
+// an ERROR page fires for clients that simply left (#947). A deadline on the
+// request is the server's, so it stays a 500, though at DEBUG since the
+// backend did not fail. Not t.Parallel: it captures the process-wide default
 // logger (logtest.Capture). Matched on the exact "level":"…","msg":"…" pair
-// slog's JSON handler emits adjacently, not on the level alone — the package
-// also logs an unrelated "debug: span started for ingest" line per request,
-// which satisfies a bare `"level":"DEBUG"` check whether or not the Reserve
-// line itself is DEBUG.
+// slog's JSON handler emits adjacently, not on the level alone, so an
+// unrelated DEBUG line from the same request cannot satisfy the check whether
+// or not the Reserve line itself is DEBUG.
 func TestIngest_Dedup_ReserveError_LogLevel(t *testing.T) {
 	tests := []struct {
-		name          string
-		cancelContext bool
-		wantLine      string
+		name       string
+		ctx        func(t *testing.T) context.Context
+		storeErr   error
+		wantStatus int
+		wantLine   string
 	}{
 		{
-			"live context: a real backend failure pages at ERROR", false,
+			"live context: a real backend failure pages at ERROR",
+			func(*testing.T) context.Context { return context.Background() },
+			nil, http.StatusInternalServerError,
 			`"level":"ERROR","msg":"dedupe reserve failed"`,
 		},
 		{
-			"context ended: a client gone must not page, logs at DEBUG", true,
+			"client gone: 499 at DEBUG",
+			func(*testing.T) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			nil, statusClientClosedRequest,
+			`"level":"DEBUG","msg":"dedupe reserve failed: client closed the request"`,
+		},
+		{
+			"store reports unavailable, client gone: 499 at DEBUG",
+			func(*testing.T) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			fmt.Errorf("%w: context canceled", dedupe.ErrUnavailable), statusClientClosedRequest,
+			`"level":"DEBUG","msg":"dedupe reserve failed: client closed the request"`,
+		},
+		{
+			"deadline passed: still the server's 500, at DEBUG",
+			func(t *testing.T) context.Context {
+				ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				t.Cleanup(cancel)
+				return ctx
+			},
+			nil, http.StatusInternalServerError,
 			`"level":"DEBUG","msg":"dedupe reserve failed: request context ended"`,
 		},
 	}
@@ -3441,22 +3471,103 @@ func TestIngest_Dedup_ReserveError_LogLevel(t *testing.T) {
 			buf := logtest.Capture(t, slog.LevelDebug)
 			pub := &testutil.MockPublisher{}
 			dedup := testutil.NewMockDeduplicator()
-			dedup.Err = errors.New("backend down")
-			h := dedupHandler(t, pub, dedup, false)
-
-			ctx := context.Background()
-			if tt.cancelContext {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
-				cancel()
+			dedup.Err = tt.storeErr
+			if dedup.Err == nil {
+				dedup.Err = errors.New("backend down")
 			}
-			req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"}).WithContext(ctx)
+			h := dedupHandler(t, pub, dedup, false)
+			req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "e1"}).WithContext(tt.ctx(t))
 
 			w := httptest.NewRecorder()
 			h.Handle(w, withTenant(req))
 
+			assert.Equal(t, tt.wantStatus, w.Code)
 			assert.Contains(t, buf.String(), tt.wantLine)
 			assert.Empty(t, pub.Published())
+		})
+	}
+}
+
+// A publish that fails because the client went away is answered and counted
+// as the client's 499, logged at DEBUG, in the single and the batch path
+// alike: the failure is the canceled request context, not the queue (#947).
+// A publish failure with the request context live, or past a deadline, stays
+// the engine's 500 at ERROR. Not t.Parallel: it captures the process-wide
+// default logger.
+func TestIngest_PublishFailure_ClientGone(t *testing.T) {
+	canceled := func(*testing.T) context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+	tests := []struct {
+		name       string
+		ctx        func(t *testing.T) context.Context
+		req        func(t *testing.T) *http.Request
+		pubErr     error
+		wantStatus int
+		wantLine   string
+		noLine     string
+	}{
+		{
+			"single record, client gone", canceled,
+			func(t *testing.T) *http.Request { return ingestRequest(t, "clicks", map[string]any{"page": "/a"}) },
+			nil, statusClientClosedRequest,
+			`"level":"DEBUG","msg":"publish to the ingest queue failed: client closed the request"`,
+			`"level":"ERROR"`,
+		},
+		{
+			"batch, client gone", canceled,
+			func(t *testing.T) *http.Request {
+				return ndjsonRequest(t, "clicks", jsonLine(t, map[string]any{"page": "/a"}), jsonLine(t, map[string]any{"page": "/b"}))
+			},
+			nil, statusClientClosedRequest,
+			`"level":"DEBUG","msg":"publish to the ingest queue failed: client closed the request"`,
+			`"level":"ERROR"`,
+		},
+		{
+			"broker reports unavailable, client gone", canceled,
+			func(t *testing.T) *http.Request { return ingestRequest(t, "clicks", map[string]any{"page": "/a"}) },
+			fmt.Errorf("%w: context canceled", mq.ErrUnavailable), statusClientClosedRequest,
+			`"level":"DEBUG","msg":"publish to the ingest queue failed: client closed the request"`,
+			`"level":"WARN"`,
+		},
+		{
+			"live context", func(*testing.T) context.Context { return context.Background() },
+			func(t *testing.T) *http.Request { return ingestRequest(t, "clicks", map[string]any{"page": "/a"}) },
+			nil, http.StatusInternalServerError,
+			`"level":"ERROR","msg":"failed to publish to the ingest queue"`,
+			`client closed the request`,
+		},
+		{
+			"deadline passed",
+			func(t *testing.T) context.Context {
+				ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				t.Cleanup(cancel)
+				return ctx
+			},
+			func(t *testing.T) *http.Request { return ingestRequest(t, "clicks", map[string]any{"page": "/a"}) },
+			nil, http.StatusInternalServerError,
+			`"level":"ERROR","msg":"failed to publish to the ingest queue"`,
+			`client closed the request`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := logtest.Capture(t, slog.LevelDebug)
+			err := tt.pubErr
+			if err == nil {
+				err = errors.New("publish: context canceled")
+			}
+			pub := &testutil.MockPublisher{Err: err}
+			h := newTestIngestHandler(t, testRegistry(t), pub)
+
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(tt.req(t).WithContext(tt.ctx(t))))
+
+			assert.Equal(t, tt.wantStatus, w.Code)
+			assert.Contains(t, buf.String(), tt.wantLine)
+			assert.NotContains(t, buf.String(), tt.noLine)
 		})
 	}
 }
@@ -3532,5 +3643,217 @@ func TestIngest_Dedup_ConcurrentSameIDPublishesOnce(t *testing.T) {
 	assert.Len(t, pub.Published(), 1)
 	for _, c := range codes {
 		assert.Contains(t, []int{http.StatusOK, http.StatusServiceUnavailable}, c)
+	}
+}
+
+// TestIngest_LogLevels: ingest's log levels describe the engine's health, not
+// the request (#904). An accepted request or a duplicate record logs at DEBUG,
+// so the stream does not grow with traffic, and a client mistake is at most a
+// WARN, so an ERROR alert never fires on one producer's bad input.
+// Not parallel: it captures the default logger.
+func TestIngest_LogLevels(t *testing.T) {
+	dedupHandler := func(t *testing.T) *IngestHandler {
+		h := newTestIngestHandler(t, testRegistry(t), &testutil.MockPublisher{})
+		dd := testutil.NewMockDeduplicator()
+		dd.Hold(dedupe.Key{Table: "clicks", ID: "held-1"})
+		h.Dedup = staticDedup(dd)
+		h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
+			return settings.Dedupe{Enabled: true, IDField: "event_id", RequireID: true}
+		}
+		return h
+	}
+	orgTemplate := "{{ jwt.org_id }}"
+	policyHandler := func(t *testing.T) *IngestHandler {
+		h := newTestIngestHandler(t, testRegistry(t), &testutil.MockPublisher{})
+		h.PolicySource = staticPolicy(&policy.Policy{
+			Tables: map[string]policy.TablePolicy{
+				"clicks": {
+					"viewer": {Select: &policy.SelectPermissions{}},
+					"writer": {Insert: &policy.InsertPermissions{AllowColumns: []string{"page"}}},
+					"user": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{
+						"org_id": {Eq: &orgTemplate},
+					}}},
+				},
+			},
+		})
+		return h
+	}
+	asRole := func(req *http.Request, role string) *http.Request {
+		ctx := auth.WithRole(req.Context(), role)
+		ctx = auth.WithClaims(ctx, jwt.MapClaims{"org_id": "correct-org"})
+		return req.WithContext(ctx)
+	}
+	tests := []struct {
+		name      string
+		handler   func(t *testing.T) *IngestHandler
+		requests  func(t *testing.T) []*http.Request
+		wantMsg   string
+		wantLevel string
+	}{
+		{
+			name: "accepted record",
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{ingestRequest(t, "clicks", map[string]any{"page": "/home"})}
+			},
+			wantMsg: "event successfully ingested", wantLevel: "DEBUG",
+		},
+		{
+			name: "accepted batch",
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{ndjsonRequest(t, "clicks",
+					jsonLine(t, map[string]any{"page": "/a"}), jsonLine(t, map[string]any{"page": "/b"}))}
+			},
+			wantMsg: "batch ingested", wantLevel: "DEBUG",
+		},
+		{
+			name:    "duplicate record",
+			handler: dedupHandler,
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{
+					ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "dup-1"}),
+					ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "dup-1"}),
+				}
+			},
+			wantMsg: "duplicate event skipped", wantLevel: "DEBUG",
+		},
+		{
+			name:    "record id in flight in another request",
+			handler: dedupHandler,
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "held-1"})}
+			},
+			wantMsg: "event id in flight in another request", wantLevel: "DEBUG",
+		},
+		{
+			name:    "dedupe id missing under require_id",
+			handler: dedupHandler,
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{ingestRequest(t, "clicks", map[string]any{"page": "/home"})}
+			},
+			wantMsg: "dedupe id_field missing or null; rejecting", wantLevel: "WARN",
+		},
+		{
+			name: "conflicting content types",
+			requests: func(t *testing.T) []*http.Request {
+				req := rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)
+				req.Header.Add("Content-Type", "application/json")
+				req.Header.Add("Content-Type", "application/x-ndjson")
+				return []*http.Request{req}
+			},
+			wantMsg: "conflicting ingest content-type declarations", wantLevel: "WARN",
+		},
+		{
+			name: "body read failure",
+			requests: func(t *testing.T) []*http.Request {
+				req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+					"/v1/ingest?table=clicks", iotest.ErrReader(errors.New("connection reset by peer")))
+				req.Header.Set("Content-Type", "application/json")
+				return []*http.Request{req}
+			},
+			wantMsg: "ingest body read failed", wantLevel: "WARN",
+		},
+		{
+			name: "fatal array syntax error",
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"}, {bad]`)}
+			},
+			wantMsg: "ingest body refused by the parser", wantLevel: "WARN",
+		},
+		{
+			name:    "table insert denied by policy",
+			handler: policyHandler,
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{asRole(ingestRequest(t, "clicks", map[string]any{"page": "/a"}), "viewer")}
+			},
+			wantMsg: "authorization denied", wantLevel: "WARN",
+		},
+		{
+			name:    "column insert denied by policy",
+			handler: policyHandler,
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{asRole(ingestRequest(t, "clicks", map[string]any{"page": "/a", "button": "b"}), "writer")}
+			},
+			wantMsg: "ingest body refused by the parser", wantLevel: "WARN",
+		},
+		{
+			name:    "check clause failed",
+			handler: policyHandler,
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{asRole(ingestRequest(t, "clicks", map[string]any{"page": "/a", "org_id": "wrong-org"}), "user")}
+			},
+			wantMsg: "check clause failed", wantLevel: "WARN",
+		},
+		{
+			name: "missing table",
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{rawIngestRequest(t, "", "application/json", `{"page":"/a"}`)}
+			},
+			wantMsg: "missing table parameter in request", wantLevel: "WARN",
+		},
+		{
+			name: "unknown table",
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{rawIngestRequest(t, "nope", "application/json", `{"page":"/a"}`)}
+			},
+			wantMsg: "unknown table requested", wantLevel: "WARN",
+		},
+		{
+			name: "empty body",
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{rawIngestRequest(t, "clicks", "application/json", "")}
+			},
+			wantMsg: "empty ingest body", wantLevel: "WARN",
+		},
+		{
+			name: "invalid json",
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{rawIngestRequest(t, "clicks", "application/json", "not json")}
+			},
+			wantMsg: "ingest body refused by the parser", wantLevel: "WARN",
+		},
+		{
+			name: "undeclared content type",
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{rawIngestRequest(t, "clicks", "", `{"page":"/a"}`)}
+			},
+			wantMsg: "ingest content-type not declared or not supported", wantLevel: "WARN",
+		},
+		{
+			name: "schema validation failure",
+			requests: func(t *testing.T) []*http.Request {
+				return []*http.Request{ingestRequest(t, "clicks", map[string]any{"page": "/a", "nope": 1})}
+			},
+			wantMsg: "ingest body refused by the parser", wantLevel: "WARN",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var h *IngestHandler
+			if tt.handler != nil {
+				h = tt.handler(t)
+			} else {
+				h = newTestIngestHandler(t, testRegistry(t), &testutil.MockPublisher{})
+			}
+			// Captured after the registry's own load line.
+			buf := logtest.Capture(t, slog.LevelDebug)
+			for _, req := range tt.requests(t) {
+				h.Handle(httptest.NewRecorder(), withTenant(req))
+			}
+
+			var found bool
+			for _, raw := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+				var rec map[string]any
+				require.NoError(t, json.Unmarshal([]byte(raw), &rec), raw)
+				assert.NotEqual(t, "ERROR", rec["level"], "client input or success logged at ERROR: %s", raw)
+				if tt.wantLevel == "DEBUG" {
+					assert.Equal(t, "DEBUG", rec["level"], "an accepted request writes nothing at INFO: %s", raw)
+				}
+				if rec["msg"] == tt.wantMsg {
+					found = true
+					assert.Equal(t, tt.wantLevel, rec["level"], raw)
+				}
+			}
+			assert.True(t, found, "no %q record in:\n%s", tt.wantMsg, buf.String())
+		})
 	}
 }

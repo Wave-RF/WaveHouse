@@ -14,7 +14,16 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/Wave-RF/WaveHouse/internal/chconn/chconntest"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
@@ -266,20 +275,24 @@ type fakeConn struct {
 	driver.Conn
 	errsThenSuccess []error
 	calls           atomic.Int32
-	tz              string       // SELECT timezone() answer; "" ⇒ "UTC"
-	version         string       // SELECT version() answer; "" ⇒ "24.1.1.1"
-	versionErr      error        // non-nil ⇒ the version() probe fails
-	columns         []fakeColumn // system.columns rows served on success; nil ⇒ none
-	iterErr         error        // rows.Err() after the served rows; nil ⇒ clean iteration
-	tables          [][2]string  // system.tables rows: {name, create_table_query}
-	tablesErr       error        // non-nil ⇒ the system.tables query fails
-	onQueryArgs     func([]any)  // non-nil ⇒ observe each query's bound args
+	tz              string                // SELECT timezone() answer; "" ⇒ "UTC"
+	version         string                // SELECT version() answer; "" ⇒ "24.1.1.1"
+	versionErr      error                 // non-nil ⇒ the version() probe fails
+	columns         []fakeColumn          // system.columns rows served on success; nil ⇒ none
+	iterErr         error                 // rows.Err() after the served rows; nil ⇒ clean iteration
+	tables          [][2]string           // system.tables rows: {name, create_table_query}
+	tablesErr       error                 // non-nil ⇒ the system.tables query fails
+	onQueryArgs     func([]any)           // non-nil ⇒ observe each query's bound args
+	onCtx           func(context.Context) // non-nil ⇒ observe each statement's context
 }
 
 // Query serves both of Refresh's result sets. Only the system.columns call
 // advances errsThenSuccess and the calls counter, so the retry tests still count
 // refresh attempts rather than statements.
-func (c *fakeConn) Query(_ context.Context, q string, args ...any) (driver.Rows, error) {
+func (c *fakeConn) Query(ctx context.Context, q string, args ...any) (driver.Rows, error) {
+	if c.onCtx != nil {
+		c.onCtx(ctx)
+	}
 	if c.onQueryArgs != nil {
 		c.onQueryArgs(args)
 	}
@@ -305,7 +318,10 @@ func (c *fakeConn) Query(_ context.Context, q string, args ...any) (driver.Rows,
 // QueryRow answers the SELECT timezone() (#372) and SELECT version() probes
 // Refresh issues before the system.columns query; errsThenSuccess sequencing
 // stays keyed on Query.
-func (c *fakeConn) QueryRow(_ context.Context, q string, _ ...any) driver.Row {
+func (c *fakeConn) QueryRow(ctx context.Context, q string, _ ...any) driver.Row {
+	if c.onCtx != nil {
+		c.onCtx(ctx)
+	}
 	if strings.Contains(q, "version()") {
 		if c.versionErr != nil {
 			return scalarRow{err: c.versionErr}
@@ -702,7 +718,7 @@ func TestRetryRefresh_SucceedsOnFirstAttempt(t *testing.T) {
 
 	var attempts int32
 	start := time.Now()
-	err := sr.RetryRefresh(ctx, time.Hour, time.Hour, func(error) {
+	err := sr.RetryRefresh(ctx, time.Hour, time.Hour, func(context.Context, error) {
 		atomic.AddInt32(&attempts, 1)
 	})
 	require.NoError(t, err)
@@ -726,7 +742,7 @@ func TestRetryRefresh_RetriesUntilSuccess(t *testing.T) {
 	sr, conn := newFakeRegistry(t, []error{errFirst, errSecond})
 
 	var captured []error
-	err := sr.RetryRefresh(context.Background(), time.Millisecond, 10*time.Millisecond, func(e error) {
+	err := sr.RetryRefresh(context.Background(), time.Millisecond, 10*time.Millisecond, func(_ context.Context, e error) {
 		captured = append(captured, e)
 	})
 	require.NoError(t, err)
@@ -793,7 +809,7 @@ func TestRetryRefresh_DoesNotFireOnAttemptDuringCancel(t *testing.T) {
 	cancel() // already cancelled before RetryRefresh starts
 
 	var attempts atomic.Int32
-	err := sr.RetryRefresh(ctx, time.Second, time.Second, func(_ error) {
+	err := sr.RetryRefresh(ctx, time.Second, time.Second, func(context.Context, error) {
 		attempts.Add(1)
 	})
 
@@ -1133,4 +1149,311 @@ func TestRefresh_CapturesDefaultKind(t *testing.T) {
 	assert.Equal(t, "DEFAULT", ts.Columns[2].DefaultKind)
 	assert.False(t, ts.Columns[1].IsInsertable())
 	assert.True(t, ts.Columns[2].IsInsertable())
+}
+
+// refreshLines decodes the "schema registry refreshed" records in buf.
+func refreshLines(t *testing.T, buf *logtest.Buffer) []map[string]any {
+	t.Helper()
+	var lines []map[string]any
+	for _, raw := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if raw == "" {
+			continue
+		}
+		var rec map[string]any
+		require.NoError(t, json.Unmarshal([]byte(raw), &rec))
+		if rec["msg"] == "schema registry refreshed" {
+			lines = append(lines, rec)
+		}
+	}
+	return lines
+}
+
+// TestRefresh_LogsAtInfoOnlyOnLoadOrChange: the refresh line runs once per
+// tenant per interval on every replica, so an unchanged refresh is DEBUG; the
+// first load and a change are INFO, and a change names the tables (#888).
+// Not parallel: it captures the default logger.
+func TestRefresh_LogsAtInfoOnlyOnLoadOrChange(t *testing.T) {
+	buf := logtest.Capture(t, slog.LevelDebug)
+	conn := &fakeConn{
+		version: "25.3.1.1",
+		columns: []fakeColumn{
+			{table: "clicks", name: "id", chType: "String", position: 1},
+			{table: "users", name: "id", chType: "UInt64", position: 1},
+			{table: "orders", name: "id", chType: "UInt64", position: 1},
+		},
+	}
+	sr := NewSchemaRegistry(sourceOf(conn), tenant.Default, func(tenant.ID) time.Duration { return time.Hour })
+	ctx := context.Background()
+
+	require.NoError(t, sr.Refresh(ctx))
+	require.NoError(t, sr.Refresh(ctx))
+	conn.columns = []fakeColumn{
+		{table: "clicks", name: "id", chType: "String", position: 1},
+		{table: "clicks", name: "page", chType: "String", position: 2},
+		{table: "users", name: "id", chType: "UInt64", position: 1},
+		{table: "events", name: "id", chType: "UUID", position: 1},
+	}
+	require.NoError(t, sr.Refresh(ctx))
+	conn.version = "25.8.1.1"
+	require.NoError(t, sr.Refresh(ctx))
+	conn.tz = "Europe/Berlin"
+	require.NoError(t, sr.Refresh(ctx))
+
+	lines := refreshLines(t, buf)
+	require.Len(t, lines, 5)
+	assert.Equal(t, "INFO", lines[0]["level"], "first load")
+	assert.NotContains(t, lines[0], "tables_added", "a first load lists no tables")
+	assert.Equal(t, "DEBUG", lines[1]["level"], "nothing changed")
+
+	assert.Equal(t, "INFO", lines[2]["level"], "schema changed")
+	assert.Equal(t, []any{"events"}, lines[2]["tables_added"])
+	assert.Equal(t, []any{"orders"}, lines[2]["tables_removed"])
+	assert.Equal(t, []any{"clicks"}, lines[2]["tables_changed"])
+
+	assert.Equal(t, "INFO", lines[3]["level"], "server upgraded")
+	assert.Equal(t, "25.3.1.1", lines[3]["previous_server_version"])
+	assert.NotContains(t, lines[3], "tables_changed")
+
+	// The zone decides how zone-less timestamps are canonicalized (#372).
+	assert.Equal(t, "INFO", lines[4]["level"], "server time zone changed")
+	assert.Equal(t, "UTC", lines[4]["previous_server_tz"])
+	assert.Equal(t, "Europe/Berlin", lines[4]["server_tz"])
+}
+
+func TestSchemaChanges(t *testing.T) {
+	t.Parallel()
+	schema := func(cols ...Column) *TableSchema { return &TableSchema{Columns: cols} }
+	prev := map[string]*TableSchema{
+		"same":    schema(Column{Name: "id", Type: "String", Position: 1}),
+		"retyped": schema(Column{Name: "id", Type: "String", Position: 1}),
+		"default": schema(Column{Name: "id", Type: "String", Position: 1}),
+		"gone":    schema(Column{Name: "id", Type: "String", Position: 1}),
+	}
+	prev["ttl"] = &TableSchema{Columns: prev["same"].Columns, DDL: "CREATE TABLE t ENGINE = MergeTree"}
+	prev["raced"] = &TableSchema{Columns: prev["same"].Columns, DDL: "CREATE TABLE r ENGINE = MergeTree"}
+	next := map[string]*TableSchema{
+		"same":    schema(Column{Name: "id", Type: "String", Position: 1}),
+		"retyped": schema(Column{Name: "id", Type: "UInt64", Position: 1}),
+		"default": schema(Column{Name: "id", Type: "String", Position: 1, DefaultKind: "DEFAULT", DefaultExpression: "''"}),
+		"new":     schema(Column{Name: "id", Type: "String", Position: 1}),
+	}
+	next["ttl"] = &TableSchema{Columns: prev["same"].Columns, DDL: "CREATE TABLE t ENGINE = MergeTree TTL ts + INTERVAL 1 DAY"}
+	// Gone from system.tables between the two scans: no DDL, not a change.
+	next["raced"] = &TableSchema{Columns: prev["same"].Columns}
+	added, removed, changed := schemaChanges(prev, next)
+	assert.Equal(t, []string{"new"}, added)
+	assert.Equal(t, []string{"gone"}, removed)
+	assert.Equal(t, []string{"default", "retyped", "ttl"}, changed)
+
+	added, removed, changed = schemaChanges(next, next)
+	assert.Empty(t, added)
+	assert.Empty(t, removed)
+	assert.Empty(t, changed)
+}
+
+// TestRefresh_SpanCarriesTenant: the refresh span is per tenant, so it carries
+// the tenant attribute the request path's spans use (#888).
+// Not parallel: Refresh reads the global tracer provider. Cleanup installs a
+// no-op provider rather than restoring the saved one: the first
+// SetTracerProvider binds the default delegating provider to this test's
+// provider for good, so restoring it would keep feeding later tests' spans
+// into the recorder.
+func TestRefresh_SpanCarriesTenant(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(noop.NewTracerProvider())
+		_ = tp.Shutdown(context.Background())
+	})
+
+	conn := &fakeConn{columns: []fakeColumn{{table: "clicks", name: "id", chType: "String", position: 1}}}
+	sr := NewSchemaRegistry(sourceOf(conn), tenant.ID("acme"), func(tenant.ID) time.Duration { return time.Hour })
+	require.NoError(t, sr.Refresh(context.Background()))
+
+	spans := rec.Ended()
+	require.Len(t, spans, 1)
+	assert.Equal(t, "SchemaRegistry.Refresh", spans[0].Name())
+	assert.Contains(t, spans[0].Attributes(), attribute.String(observability.TenantKey, "acme"))
+}
+
+// recordSpans installs a span recorder as the global tracer provider until the
+// test ends. Like every test that calls it, the caller must not run in
+// parallel.
+func recordSpans(t *testing.T) *tracetest.SpanRecorder {
+	t.Helper()
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(noop.NewTracerProvider())
+		_ = tp.Shutdown(context.Background())
+	})
+	return rec
+}
+
+// A failed refresh marks its span failed and records the error on it, so a
+// trace search for errors finds it; one failing because its context was
+// canceled is not a failure and leaves the span unset (#899).
+func TestRefresh_SpanRecordsFailure(t *testing.T) {
+	rec := recordSpans(t)
+	sr := NewSchemaRegistry(sourceOf(nil), tenant.ID("acme"), func(tenant.ID) time.Duration { return time.Hour })
+
+	err := sr.Refresh(context.Background())
+	require.ErrorIs(t, err, ErrNoConnection)
+	spans := rec.Ended()
+	require.Len(t, spans, 1)
+	assert.Equal(t, codes.Error, spans[0].Status().Code)
+	assert.Equal(t, err.Error(), spans[0].Status().Description)
+	require.Len(t, spans[0].Events(), 1)
+	assert.Equal(t, "exception", spans[0].Events()[0].Name)
+
+	rec.Reset()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.Error(t, sr.Refresh(ctx))
+	spans = rec.Ended()
+	require.Len(t, spans, 1)
+	assert.Equal(t, codes.Unset, spans[0].Status().Code, "a canceled refresh is not a failure")
+	assert.Empty(t, spans[0].Events())
+}
+
+// Every statement of a refresh sends the refresh span to ClickHouse as its
+// trace context.
+func TestRefresh_SendsTraceContext(t *testing.T) {
+	rec := recordSpans(t)
+	var sent []trace.SpanContext
+	conn := &fakeConn{
+		columns: []fakeColumn{{table: "clicks", name: "id", chType: "String", position: 1}},
+		onCtx: func(ctx context.Context) {
+			span, _ := chconntest.QueryOptions(ctx, t)
+			sent = append(sent, span)
+		},
+	}
+	sr := NewSchemaRegistry(sourceOf(conn), tenant.ID("acme"), func(tenant.ID) time.Duration { return time.Hour })
+	require.NoError(t, sr.Refresh(context.Background()))
+
+	spans := rec.Ended()
+	require.Len(t, spans, 1)
+	require.Len(t, sent, 4, "timezone, version, system.columns, system.tables")
+	for _, sc := range sent {
+		assert.Equal(t, spans[0].SpanContext(), sc)
+	}
+}
+
+// RetryRefresh hands a failed attempt to onAttempt under that attempt's span,
+// still open, so the boot loop's line carries the failed span's trace_id.
+func TestRetryRefresh_AttemptRunsInTheFailedSpan(t *testing.T) {
+	rec := recordSpans(t)
+	conn := &fakeConn{columns: []fakeColumn{{table: "clicks", name: "id", chType: "String", position: 1}}}
+	var calls atomic.Int32
+	source := func() (driver.Conn, string) {
+		if calls.Add(1) == 1 {
+			return nil, "test"
+		}
+		return conn, "test"
+	}
+	sr := NewSchemaRegistry(source, tenant.ID("acme"), func(tenant.ID) time.Duration { return time.Hour })
+
+	var seen []trace.SpanContext
+	require.NoError(t, sr.RetryRefresh(context.Background(), time.Millisecond, time.Millisecond, func(ctx context.Context, err error) {
+		require.ErrorIs(t, err, ErrNoConnection)
+		span := trace.SpanFromContext(ctx)
+		assert.True(t, span.IsRecording(), "the attempt's span is still open")
+		seen = append(seen, span.SpanContext())
+	}))
+
+	spans := rec.Ended()
+	require.Len(t, spans, 2)
+	require.Len(t, seen, 1)
+	assert.Equal(t, spans[0].SpanContext(), seen[0])
+	assert.Equal(t, codes.Error, spans[0].Status().Code)
+	assert.Equal(t, codes.Unset, spans[1].Status().Code)
+}
+
+// The auto-refresh failure line is written inside the failed refresh's span,
+// so it carries that span's trace_id.
+func TestStartAutoRefresh_FailureLineCarriesTheSpan(t *testing.T) {
+	rec := recordSpans(t)
+	buf := &logtest.Buffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(&observability.TraceHandler{Handler: slog.NewJSONHandler(buf, nil)}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	sr := NewSchemaRegistry(sourceOf(nil), tenant.ID("acme"), func(tenant.ID) time.Duration { return time.Hour })
+	sr.firstTick = func(time.Duration) time.Duration { return 0 }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		sr.StartAutoRefresh(ctx)
+		close(done)
+	}()
+	require.Eventually(t, func() bool {
+		return strings.Contains(buf.String(), "schema auto-refresh failed")
+	}, 2*time.Second, 5*time.Millisecond)
+	cancel()
+	<-done
+
+	var line map[string]any
+	for raw := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		var entry map[string]any
+		require.NoError(t, json.Unmarshal([]byte(raw), &entry))
+		if entry["msg"] == "schema auto-refresh failed" {
+			line = entry
+			break
+		}
+	}
+	require.NotNil(t, line)
+	spans := rec.Ended()
+	require.NotEmpty(t, spans)
+	assert.Equal(t, spans[0].SpanContext().TraceID().String(), line["trace_id"])
+	assert.Equal(t, spans[0].SpanContext().SpanID().String(), line["span_id"])
+}
+
+// A refresh that fails because ctx was canceled mid-query is a shutdown, not a
+// failure: the auto-refresh loop neither logs nor counts it, and the span
+// stays unset.
+func TestStartAutoRefresh_CanceledRefreshIsNotAFailure(t *testing.T) {
+	rec := recordSpans(t)
+	buf := &logtest.Buffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	// stop cancels the context of the refresh under way, as a shutdown would.
+	var stop context.CancelFunc
+	source := func() (driver.Conn, string) {
+		stop()
+		return nil, "test"
+	}
+	sr := NewSchemaRegistry(source, tenant.ID("acme"), func(tenant.ID) time.Duration { return time.Hour })
+	sr.firstTick = func(time.Duration) time.Duration { return 0 }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop = cancel
+	var failed atomic.Int32
+	err := sr.refreshThen(ctx, func(context.Context, error) { failed.Add(1) })
+	require.ErrorIs(t, err, ErrNoConnection)
+	assert.Zero(t, failed.Load(), "a canceled refresh is not handed to onFail")
+
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	defer loopCancel()
+	stop = loopCancel
+	done := make(chan struct{})
+	go func() {
+		sr.StartAutoRefresh(loopCtx)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("auto-refresh did not exit after its context was canceled")
+	}
+
+	assert.NotContains(t, buf.String(), "schema auto-refresh failed")
+	spans := rec.Ended()
+	require.Len(t, spans, 2)
+	for _, span := range spans {
+		assert.Equal(t, codes.Unset, span.Status().Code)
+	}
 }

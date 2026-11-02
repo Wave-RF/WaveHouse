@@ -1,6 +1,7 @@
 package tenant
 
 import (
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -49,5 +50,12 @@ func TestParse(t *testing.T) {
 func TestDefaultSatisfiesTheGrammar(t *testing.T) {
 	if _, err := Parse(Default.String()); err != nil {
 		t.Errorf("Default %q fails its own grammar: %v", Default, err)
+	}
+}
+
+func TestLogValueIsAPlainString(t *testing.T) {
+	v := slog.AnyValue(ID("acme")).Resolve()
+	if v.Kind() != slog.KindString || v.String() != "acme" {
+		t.Errorf("ID(\"acme\") resolves to %v %q, want a string \"acme\"", v.Kind(), v.String())
 	}
 }
