@@ -178,7 +178,8 @@ func TestWriteMetrics_RecordedAndReconciled(t *testing.T) {
 	settledBytes := 0 // of every row rows_total counts
 
 	// A successful batch: one bulk INSERT of two rows, both inserted.
-	w, _, _, wait := newTestWorker(okRoundTripper())
+	rt := okRoundTripper()
+	w, _, _, wait := newTestWorker(rt)
 	first := parseAll(t, w, msg(map[string]any{"id": 1}), msg(map[string]any{"id": 2}))
 	settledBytes += bodyBytes(first)
 	flush(ctx, w, "events", first)
@@ -188,10 +189,13 @@ func TestWriteMetrics_RecordedAndReconciled(t *testing.T) {
 	assert.Equal(t, map[string]uint64{"batch/ok": 1}, got.inserts)
 	assert.Equal(t, uint64(1), got.batchCount)
 	assert.Equal(t, int64(2), got.batchRows)
-	// The bulk INSERT's body, and the same bytes settled as inserted.
+	// The bulk INSERT's body as ClickHouse received it, and the same bytes
+	// settled as inserted.
+	require.Len(t, rt.Captured(), 1)
+	body := int64(len(rt.Captured()[0].Body))
 	assert.Equal(t, uint64(1), got.batchBytesCount)
-	assert.Equal(t, int64(bodyBytes(first)), got.batchBytes)
-	assert.Equal(t, map[string]int64{rowsInserted: int64(bodyBytes(first))}, got.bytes)
+	assert.Equal(t, body, got.batchBytes, "the bytes sent")
+	assert.Equal(t, map[string]int64{rowsInserted: body}, got.bytes)
 	assert.Equal(t, map[string]int64{triggerSize: 1}, got.flushes, "flush names a batch at its target")
 
 	// An isolation fallback that parks one row: the bulk INSERT is rejected,
@@ -240,6 +244,18 @@ func TestWriteMetrics_RecordedAndReconciled(t *testing.T) {
 	assert.Equal(t, uint64(1), got.inserts["batch/unavailable"])
 	assert.Equal(t, map[string]int64{rowsInserted: 5, rowsDeadLettered: 1, rowsLeftUnacked: 1}, got.rows,
 		"a row handed back for a retry is counted there, not here")
+
+	// A served tenant whose limits were refused with none to keep: the
+	// batcher hands its row back for one ack wait, labeled with the tenant
+	// like every other hand-back (#891).
+	b, w, wait := newTestBatcher(t, okRoundTripper())
+	w.limits = func(tenant.ID) (Limits, bool) { return Limits{}, false }
+	b.add(ctx, parseAll(t, w, msg(map[string]any{"id": 11}))[0])
+	wait()
+	w.ackWg.Wait()
+	got = read()
+	assert.Equal(t, int64(4), got.retries, "the unconfigured hand-back")
+	assert.Zero(t, got.untenanted, "labeled with its tenant")
 
 	// An envelope the worker cannot read: parked and counted as poison.
 	w, _, _, _ = newTestWorker(okRoundTripper())

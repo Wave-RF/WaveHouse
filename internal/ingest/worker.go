@@ -574,16 +574,18 @@ func (b *tableBatcher) add(ctx context.Context, pm parsedMsg) {
 		// the batch; read once per batch, so a reload lands between
 		// batches, never inside one.
 		lim, ok := b.w.limits(pm.tenant)
-		if !ok && b.w.target(pm.tenant).URL != "" {
-			// Served and on a pool, but no limits adopted: its values were
-			// refused against the ack wait, with none to keep (internal/app).
-			// Nothing of its can be sized or timed, and its ingest keeps
-			// accepting rows, so each goes back to the queue for one ack
-			// wait — settled, so it holds no shard's share — to be written
-			// once a reload adopts valid limits. The reload's error and the
-			// retry counter say so; nothing is parked.
-			b.w.retryLater(ctx, b.table, []parsedMsg{pm}, b.w.consumer.AckWait, "unconfigured")
-			return
+		if !ok {
+			if t = b.w.target(pm.tenant); t.URL != "" {
+				// Served and on a pool, but no limits adopted: its values were
+				// refused against the ack wait, with none to keep (internal/app).
+				// Nothing of its can be sized or timed, and its ingest keeps
+				// accepting rows, so each goes back to the queue for one ack
+				// wait — settled, so it holds no shard's share — to be written
+				// once a reload adopts valid limits. The reload's error and the
+				// retry counter say so; nothing is parked.
+				b.w.retryLater(withMetricTenant(ctx, pm.tenant, t), b.table, []parsedMsg{pm}, b.w.consumer.AckWait, "unconfigured")
+				return
+			}
 		}
 		// A tenant with no limits and no pool is no longer served: its rows
 		// are flushed at once, zero limits, to be parked (flushTable).
@@ -793,7 +795,8 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 // that timed the batch, never from one a reload adopted meanwhile; ok false
 // is a batch begun with none, which is never inserted. tableLoop guarantees
 // at most one concurrent flushTable per tenant table; different tables — two
-// tenants' tables of one name included — may flush concurrently.// trigger is what asked for the flush, counted per table (countFlush).
+// tenants' tables of one name included — may flush concurrently.
+// trigger is what asked for the flush, counted per table (countFlush).
 func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []parsedMsg, lim Limits, ok bool, trigger string) {
 	if len(msgs) == 0 {
 		return
