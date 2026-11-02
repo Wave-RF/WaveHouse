@@ -30,6 +30,7 @@ import (
 	"github.com/wave-rf/chtypes/go/v2/chtypes"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/pkg/chsql"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
@@ -174,6 +175,7 @@ func opensAny(opts chtypes.FetchOptions, versions []string) []error {
 	resolved := make(chan error, len(lines))
 	for _, line := range lines {
 		go func() {
+			defer observability.Crash("chtypes_boot_check", slog.String("line", line))
 			_, err := offline.Fetch(ctx, line)
 			resolved <- err
 		}()
@@ -400,8 +402,9 @@ func (e *Engine) Forget(id tenant.ID) {
 		return
 	}
 	go func() {
-		defer e.retiring.Done()
+		defer observability.Crash("chtypes_retire", slog.String("tenant", id.String()))
 		set.retire(causeRetired)
+		e.retiring.Done()
 	}()
 }
 
