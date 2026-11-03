@@ -537,7 +537,9 @@ type tableBatcher struct {
 	// queued is the trigger of a flush asked for while another was in
 	// flight, latched so onFlushDone starts it as soon as that flush
 	// completes, and empty while none is due. The first trigger to fire is
-	// the one kept, and the one the flush is counted under (countFlush).
+	// the one kept, and the one the flush is counted under, as a flush that
+	// waited behind the table's previous one (countFlush's queued label,
+	// #960: that wait is one of the ways a row approaches the ack wait).
 	queued string
 }
 
@@ -601,7 +603,7 @@ func (b *tableBatcher) add(ctx context.Context, pm parsedMsg) {
 		if !b.ok {
 			trigger = triggerNone // zero limits: flushed at once to be parked, not sized
 		}
-		b.requestFlush(ctx, trigger)
+		b.requestFlush(ctx, trigger, false)
 	}
 }
 
@@ -609,9 +611,11 @@ func (b *tableBatcher) add(ctx context.Context, pm parsedMsg) {
 // triggers, each naming itself (write_metrics.go). If the table is idle it
 // starts a flush immediately; if a flush is already running it records that
 // another is due, under the first trigger to ask (queued), so onFlushDone
-// starts it when the slot frees. The rows/`b.batch = nil` split hands the
-// goroutine a private snapshot that never aliases the live batch.
-func (b *tableBatcher) requestFlush(ctx context.Context, trigger string) {
+// starts it when the slot frees, with waited true: that flush is counted as
+// one that waited behind the table's previous flush. The rows/`b.batch =
+// nil` split hands the goroutine a private snapshot that never aliases the
+// live batch.
+func (b *tableBatcher) requestFlush(ctx context.Context, trigger string, waited bool) {
 	if len(b.batch) == 0 {
 		return
 	}
@@ -629,7 +633,7 @@ func (b *tableBatcher) requestFlush(ctx context.Context, trigger string) {
 	b.flushing = done
 	go func() {
 		defer observability.Crash("ingest_worker", slog.String("tenant", rows[0].tenant.String()), slog.String("table", b.table))
-		b.w.flushTable(ctx, b.table, rows, lim, ok, trigger)
+		b.w.flushTable(ctx, b.table, rows, lim, ok, trigger, waited)
 		close(done)
 	}()
 }
@@ -642,19 +646,26 @@ func (b *tableBatcher) requestFlush(ctx context.Context, trigger string) {
 func (b *tableBatcher) onFlushDone(ctx context.Context) {
 	b.flushing = nil
 	if b.queued != "" {
-		b.requestFlush(ctx, b.queued)
+		b.requestFlush(ctx, b.queued, true)
 	}
 }
 
 // drainAndExit waits for the in-flight flush, then flushes any leftover rows
 // synchronously. Called when the input channel is closed (shutdown), so it
-// flushes the remainder regardless of size/timer.
+// flushes the remainder regardless of size/timer. A remainder whose trigger
+// fired while that flush ran keeps the trigger, as onFlushDone would have,
+// and is counted as a flush that waited; one no trigger asked for yet is a
+// shutdown flush.
 func (b *tableBatcher) drainAndExit(ctx context.Context) {
 	if b.flushing != nil {
 		<-b.flushing
 	}
 	if len(b.batch) > 0 {
-		b.w.flushTable(ctx, b.table, b.batch, b.limits, b.ok, triggerShutdown)
+		trigger, waited := triggerShutdown, false
+		if b.queued != "" {
+			trigger, waited = b.queued, true
+		}
+		b.w.flushTable(ctx, b.table, b.batch, b.limits, b.ok, trigger, waited)
 	}
 }
 
@@ -678,7 +689,7 @@ func (w *IngestWorker) tableLoop(ctx context.Context, table string, in <-chan pa
 			}
 			b.add(ctx, pm)
 		case <-b.timer.C:
-			b.requestFlush(ctx, triggerTimer)
+			b.requestFlush(ctx, triggerTimer, false)
 		case <-b.flushing:
 			b.onFlushDone(ctx)
 		}
@@ -796,8 +807,9 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 // is a batch begun with none, which is never inserted. tableLoop guarantees
 // at most one concurrent flushTable per tenant table; different tables — two
 // tenants' tables of one name included — may flush concurrently.
-// trigger is what asked for the flush, counted per table (countFlush).
-func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []parsedMsg, lim Limits, ok bool, trigger string) {
+// trigger is what asked for the flush and waited whether its batch waited
+// behind the table's previous flush, counted per table (countFlush).
+func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []parsedMsg, lim Limits, ok bool, trigger string, waited bool) {
 	if len(msgs) == 0 {
 		return
 	}
@@ -806,7 +818,7 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 	// with it when it has a target (#891).
 	t := w.target(id)
 	ctx = withMetricTenant(ctx, id, t)
-	countFlush(ctx, tableName, trigger)
+	countFlush(ctx, tableName, trigger, waited)
 	if t.URL == "" {
 		w.parkBatch(ctx, tableName, msgs, noTargetError(id))
 		return
@@ -1167,8 +1179,9 @@ func (w *IngestWorker) invalidate(ctx context.Context, id tenant.ID, tableName s
 
 // withMetricTenant labels ctx's measurements with tenant id while id resolves
 // to t, a ClickHouse target. A topic can name a tenant that was removed or
-// never existed, or one with no pool (refused at a reload, such as by the
-// connection ceiling), and its measurements are recorded unlabeled instead,
+// never existed, or one with no pool (refused at boot over a nested
+// directory, or at a reload, such as by the connection ceiling), and its
+// measurements are recorded unlabeled instead,
 // so such ids cannot take any of the process's tenant labels from the
 // tenants it writes for (#891).
 func withMetricTenant(ctx context.Context, id tenant.ID, t chconn.Target) context.Context {

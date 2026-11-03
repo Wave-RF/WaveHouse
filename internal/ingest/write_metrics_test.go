@@ -38,7 +38,8 @@ type writeReading struct {
 	batchBytes      int64 // bytes summed over every bulk INSERT
 	batchBytesCount uint64
 	bytes           map[string]int64 // by outcome
-	flushes         map[string]int64 // by trigger
+	flushes         map[string]int64 // by trigger, the flushes that did not wait
+	queuedFlushes   map[string]int64 // by trigger, those that waited behind the table's previous flush
 	// untenanted and untenantedSamples sum what was recorded with no tenant
 	// label, because the batch's tenant resolved to no ClickHouse target
 	// (#891): the counters' counts, and the histograms' samples.
@@ -67,7 +68,7 @@ func swapWriteMetrics(t *testing.T) func() writeReading {
 	return func() writeReading {
 		var rm metricdata.ResourceMetrics
 		require.NoError(t, reader.Collect(context.Background(), &rm))
-		r := writeReading{rows: map[string]int64{}, inserts: map[string]uint64{}, bytes: map[string]int64{}, flushes: map[string]int64{}}
+		r := writeReading{rows: map[string]int64{}, inserts: map[string]uint64{}, bytes: map[string]int64{}, flushes: map[string]int64{}, queuedFlushes: map[string]int64{}}
 		attr := func(set attribute.Set, key string) string {
 			v, _ := set.Value(attribute.Key(key))
 			return v.AsString()
@@ -86,7 +87,14 @@ func swapWriteMetrics(t *testing.T) func() writeReading {
 						case "wavehouse_ingest_flushes_total":
 							tenantOf(t, md.Name, dp.Attributes)
 							assert.Equal(t, "events", attr(dp.Attributes, "table"))
-							r.flushes[attr(dp.Attributes, "trigger")] += dp.Value
+							switch attr(dp.Attributes, "queued") {
+							case "false":
+								r.flushes[attr(dp.Attributes, "trigger")] += dp.Value
+							case "true":
+								r.queuedFlushes[attr(dp.Attributes, "trigger")] += dp.Value
+							default:
+								t.Errorf("%s: queued label %q", md.Name, attr(dp.Attributes, "queued"))
+							}
 							continue
 						}
 						// Every delivery's measurement is about its batch's
@@ -279,6 +287,7 @@ func TestWriteMetrics_RecordedAndReconciled(t *testing.T) {
 		"every delivery is counted once across rows, retries and poison")
 	assert.Equal(t, int64(settledBytes), settledSize, "and every settled row's bytes once across the outcomes")
 	assert.Equal(t, int64(4), got.flushes[triggerSize], "one flush per batch, the retried one included")
+	assert.Empty(t, got.queuedFlushes, "none waited behind another")
 	// Every tenant here has a target, so every measurement is labeled.
 	assert.Zero(t, got.untenanted)
 	assert.Zero(t, got.untenantedSamples)
@@ -439,7 +448,8 @@ func TestWriteMetrics_FlushTriggers(t *testing.T) {
 	assert.Equal(t, int64(1), read().flushes[triggerShutdown])
 
 	// Latched: the size trigger fires behind an in-flight flush, then the
-	// deadline; the flush onFlushDone starts is counted as the size one.
+	// deadline; the flush onFlushDone starts is counted as the size one, and
+	// as one that waited.
 	b, w, wait = newTestBatcher(t, okRoundTripper())
 	inflight := make(chan struct{})
 	b.flushing = inflight
@@ -447,14 +457,31 @@ func TestWriteMetrics_FlushTriggers(t *testing.T) {
 		b.add(ctx, pm)
 	}
 	require.Equal(t, triggerSize, b.queued)
-	b.requestFlush(ctx, triggerTimer)
+	b.requestFlush(ctx, triggerTimer, false)
 	assert.Equal(t, triggerSize, b.queued, "the first trigger to fire is kept")
 	close(inflight)
 	b.onFlushDone(ctx)
 	require.NotNil(t, b.flushing)
 	<-b.flushing
 	wait()
-	assert.Equal(t, int64(2), read().flushes[triggerSize])
+	got := read()
+	assert.Equal(t, int64(1), got.flushes[triggerSize], "the direct size flush alone")
+	assert.Equal(t, map[string]int64{triggerSize: 1}, got.queuedFlushes, "the latched one waited behind the in-flight flush")
+
+	// Latched at shutdown: the size trigger fires behind an in-flight flush
+	// and the drain runs before the slot frees; the remainder keeps its
+	// trigger and waited, as the flush onFlushDone would have started.
+	b, w, wait = newTestBatcher(t, okRoundTripper())
+	inflight = make(chan struct{})
+	b.flushing = inflight
+	for _, pm := range parseAll(t, w, row(10), row(11), row(12)) {
+		b.add(ctx, pm)
+	}
+	require.Equal(t, triggerSize, b.queued)
+	close(inflight)
+	b.drainAndExit(ctx)
+	wait()
+	assert.Equal(t, int64(2), read().queuedFlushes[triggerSize], "a size flush that waited, not a shutdown one")
 
 	// None: a tenant with no limits and no pool has its row flushed at once
 	// to be parked, through a target of 0 that is no size trigger.
@@ -465,7 +492,8 @@ func TestWriteMetrics_FlushTriggers(t *testing.T) {
 	require.NotNil(t, b.flushing, "flushed at its first row")
 	<-b.flushing
 	wait()
-	got := read()
-	assert.Equal(t, map[string]int64{triggerSize: 2, triggerTimer: 1, triggerShutdown: 1, triggerNone: 1}, got.flushes)
+	got = read()
+	assert.Equal(t, map[string]int64{triggerSize: 1, triggerTimer: 1, triggerShutdown: 1, triggerNone: 1}, got.flushes)
+	assert.Equal(t, map[string]int64{triggerSize: 2}, got.queuedFlushes)
 	assert.Equal(t, int64(1), got.rows[rowsDeadLettered], "parked")
 }

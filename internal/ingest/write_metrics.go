@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
@@ -55,13 +56,16 @@ const (
 
 // Flush triggers for wavehouse_ingest_flushes_total: what asked for a
 // batch's flush. A batch latched behind the table's in-flight flush keeps
-// the trigger that fired first (tableBatcher.queued).
+// the trigger that fired first (tableBatcher.queued), and the counter's
+// queued label says whether the batch waited so (#960): that wait puts the
+// previous flush's INSERT on the row's way to the ack wait.
 const (
 	// triggerSize: the batch's rows' JSON reached the tenant's byte target.
 	triggerSize = "size"
 	// triggerTimer: the tenant's batch wait passed since the batch's first row.
 	triggerTimer = "timer"
-	// triggerShutdown: what the table held when the worker stopped.
+	// triggerShutdown: what the table held when the worker stopped, with no
+	// trigger having asked for it yet (one that had keeps its trigger, queued).
 	triggerShutdown = "shutdown"
 	// triggerNone: no trigger sized or timed the batch. Its tenant had no
 	// limits and no pool, so it was flushed at its first row to be parked
@@ -101,7 +105,7 @@ func newWriteMetrics(m metric.Meter) (writeMetrics, error) {
 	)
 	flushes, err4 := m.Int64Counter(
 		"wavehouse_ingest_flushes_total",
-		metric.WithDescription("Batches the ingest worker flushed, by what asked for the flush: size (the rows' JSON reached ingest.max_batch_bytes), timer (ingest.max_batch_wait_ms passed since the first row), shutdown (what the table held when the worker stopped), or none (the batch of a tenant no longer served, flushed at its first row to be parked)"),
+		metric.WithDescription("Batches the ingest worker flushed, by what asked for the flush: size (the rows' JSON reached ingest.max_batch_bytes), timer (ingest.max_batch_wait_ms passed since the first row), shutdown (what the table held when the worker stopped), or none (the batch of a tenant no longer served, flushed at its first row to be parked); and by queued, whether the batch waited behind the table's previous flush before its own started"),
 	)
 	isolations, err5 := m.Int64Counter(
 		"wavehouse_ingest_isolations_total",
@@ -130,7 +134,8 @@ func zeroWorkerCounters() {
 	observability.ZeroCounter(workerMetrics.rows, carries, outcomes...)
 	observability.ZeroCounter(workerMetrics.bytes, carries, outcomes...)
 	observability.ZeroCounter(workerMetrics.flushes, carries, observability.LabelSets(
-		observability.Values("trigger", triggerSize, triggerTimer, triggerShutdown, triggerNone))...)
+		observability.Values("trigger", triggerSize, triggerTimer, triggerShutdown, triggerNone),
+		observability.Values("queued", "false", "true"))...)
 	observability.ZeroCounter(poisonCounter, carries, observability.LabelSets(
 		observability.Values("reason", "malformed", "unknown_format", "unpairable"),
 		observability.Values("disposition", "parked", "dropped"))...)
@@ -178,11 +183,13 @@ func (w *IngestWorker) insert(ctx context.Context, tableName string, columns []s
 }
 
 // countFlush records one batch of tableName flushed, by the trigger that
-// asked for it.
-func countFlush(ctx context.Context, tableName, trigger string) {
+// asked for it and by whether the batch waited behind the table's previous
+// flush (the queued label, "true" or "false").
+func countFlush(ctx context.Context, tableName, trigger string, waited bool) {
 	workerMetrics.flushes.Add(ctx, 1, observability.MetricAttrs(ctx,
 		attribute.String("table", tableName),
 		attribute.String("trigger", trigger),
+		attribute.String("queued", strconv.FormatBool(waited)),
 	))
 }
 

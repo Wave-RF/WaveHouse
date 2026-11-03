@@ -69,7 +69,7 @@ func flush(ctx context.Context, w *IngestWorker, table string, msgs []parsedMsg)
 		id = msgs[0].tenant
 	}
 	lim, ok := w.limits(id)
-	w.flushTable(ctx, table, msgs, lim, ok, triggerSize)
+	w.flushTable(ctx, table, msgs, lim, ok, triggerSize, false)
 }
 
 // limitsOf is a limits getter that answers lim for every tenant.
@@ -1153,7 +1153,7 @@ func TestTableBatcher_RequestFlush_EmptyBatchNoOp(t *testing.T) {
 	rt := okRoundTripper()
 	b, _, _ := newTestBatcher(t, rt)
 
-	b.requestFlush(context.Background(), triggerSize) // nothing buffered
+	b.requestFlush(context.Background(), triggerSize, false) // nothing buffered
 
 	assert.Equal(t, int32(0), rt.Hits(), "no insert for an empty batch")
 	assert.Nil(t, b.flushing)
@@ -1169,7 +1169,7 @@ func TestTableBatcher_RequestFlush_LatchesWhileFlushing(t *testing.T) {
 	b.flushing = make(chan struct{})
 	b.batch = parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1}))
 
-	b.requestFlush(context.Background(), triggerSize)
+	b.requestFlush(context.Background(), triggerSize, false)
 
 	assert.Equal(t, triggerSize, b.queued, "a trigger during an in-flight flush must latch, not start a 2nd flush")
 	assert.Len(t, b.batch, 1, "rows stay buffered for the deferred flush")
@@ -2816,13 +2816,13 @@ func TestTableBatcher_HandsRowsBackUnderTheTenantsOwnCap(t *testing.T) {
 
 	openUnder2m(pool)
 	m, pm = row(4)
-	w.flushTable(ctx, "events", []parsedMsg{pm}, own, true, triggerSize)
+	w.flushTable(ctx, "events", []parsedMsg{pm}, own, true, triggerSize, false)
 	handedBackUnderOwnCap(m, "a flush under the pool's window")
 	pool.succeed(clock)
 
 	openUnder2m(table)
 	m, pm = row(5)
-	w.flushTable(ctx, "events", []parsedMsg{pm}, own, true, triggerSize)
+	w.flushTable(ctx, "events", []parsedMsg{pm}, own, true, triggerSize, false)
 	handedBackUnderOwnCap(m, "a flush under the table's own window")
 	table.succeed(clock)
 
@@ -2849,7 +2849,7 @@ func TestFlushTable_EscalatesToTheTenantsCap(t *testing.T) {
 	var delays []time.Duration
 	for i := range 8 {
 		m := newIngestMsg(t, "events", "", map[string]any{"id": i})
-		w.flushTable(context.Background(), "events", parseAll(t, w, m), own, true, triggerSize)
+		w.flushTable(context.Background(), "events", parseAll(t, w, m), own, true, triggerSize, false)
 		require.True(t, m.Naked.Load())
 		d := time.Duration(m.NakDelay.Load())
 		delays = append(delays, d)
