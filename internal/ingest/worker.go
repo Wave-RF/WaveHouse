@@ -653,17 +653,18 @@ func (b *tableBatcher) onFlushDone(ctx context.Context) {
 // drainAndExit waits for the in-flight flush, then flushes any leftover rows
 // synchronously. Called when the input channel is closed (shutdown), so it
 // flushes the remainder regardless of size/timer. A remainder whose trigger
-// fired while that flush ran keeps the trigger, as onFlushDone would have,
-// and is counted as a flush that waited; one no trigger asked for yet is a
-// shutdown flush.
+// fired while that flush ran keeps the trigger, as onFlushDone would have;
+// one no trigger asked for yet is a shutdown flush. Either waited behind the
+// in-flight flush when there was one, and is counted so.
 func (b *tableBatcher) drainAndExit(ctx context.Context) {
-	if b.flushing != nil {
+	waited := b.flushing != nil
+	if waited {
 		<-b.flushing
 	}
 	if len(b.batch) > 0 {
-		trigger, waited := triggerShutdown, false
+		trigger := triggerShutdown
 		if b.queued != "" {
-			trigger, waited = b.queued, true
+			trigger = b.queued
 		}
 		b.w.flushTable(ctx, b.table, b.batch, b.limits, b.ok, trigger, waited)
 	}

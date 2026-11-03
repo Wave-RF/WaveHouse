@@ -64,12 +64,13 @@ import (
 //
 // Memory. Each unit may hold delivered and unsettled rows up to its share of
 // MaxHeld: an even share over the units this process is assigned, and never
-// less than twice the worker's prefetch (or MaxHeld, if smaller), so one hot
-// table still fills whole batches. At its share a unit fetches only what keeps its pin
-// (the broker's: a row every few seconds, at most one ack_wait's worth past
-// the share), and the broker keeps the rest; a stuck unit
-// never takes another unit's share. The process holds about max(MaxHeld,
-// units × two prefetches) at most.
+// less than twice the worker's prefetch (or MaxHeld, if smaller), so a unit
+// at its share still has a fetch-ahead in hand while as many rows are being
+// written. At its share a unit fetches only what keeps its pin (the
+// broker's: a row every few seconds, at most one ack_wait's worth past the
+// share), and the broker keeps the rest; a stuck unit never takes another
+// unit's share. The process holds about max(MaxHeld, units × two
+// prefetches) at most.
 const (
 	memberLeasePrefix = "ingest.m"
 

@@ -483,6 +483,19 @@ func TestWriteMetrics_FlushTriggers(t *testing.T) {
 	wait()
 	assert.Equal(t, int64(2), read().queuedFlushes[triggerSize], "a size flush that waited, not a shutdown one")
 
+	// Drained behind a flush: a row under the target, with nothing latched,
+	// left when the worker stops while a flush is in flight is a shutdown
+	// flush that waited.
+	b, w, wait = newTestBatcher(t, okRoundTripper())
+	inflight = make(chan struct{})
+	b.flushing = inflight
+	b.add(ctx, parseAll(t, w, row(13))[0])
+	require.Empty(t, b.queued, "under the target, nothing latched")
+	close(inflight)
+	b.drainAndExit(ctx)
+	wait()
+	assert.Equal(t, int64(1), read().queuedFlushes[triggerShutdown], "a shutdown flush that waited")
+
 	// None: a tenant with no limits and no pool has its row flushed at once
 	// to be parked, through a target of 0 that is no size trigger.
 	b, w, wait = newTestBatcher(t, okRoundTripper())
@@ -494,6 +507,6 @@ func TestWriteMetrics_FlushTriggers(t *testing.T) {
 	wait()
 	got = read()
 	assert.Equal(t, map[string]int64{triggerSize: 1, triggerTimer: 1, triggerShutdown: 1, triggerNone: 1}, got.flushes)
-	assert.Equal(t, map[string]int64{triggerSize: 2}, got.queuedFlushes)
+	assert.Equal(t, map[string]int64{triggerSize: 2, triggerShutdown: 1}, got.queuedFlushes)
 	assert.Equal(t, int64(1), got.rows[rowsDeadLettered], "parked")
 }
