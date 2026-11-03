@@ -43,6 +43,8 @@ func TestRunMQ_ExitCodes(t *testing.T) {
 		"over the store":    {[]string{"manifests", "--partitions", "6"}, 1},
 		"resized to fit":    {[]string{"manifests", "--partitions", "6", "--partition-max-bytes", "10Gi"}, 0},
 		"zero timeout":      {[]string{"manifests", "--publish-timeout", "0s"}, 2},
+		"zero ack wait":     {[]string{"manifests", "--ack-wait", "0s"}, 2},
+		"zero ack pending":  {[]string{"manifests", "--max-ack-pending", "0"}, 2},
 		"bad consumer":      {[]string{"manifests", "--ingest-consumer", "a.b"}, 1},
 		"bad history":       {[]string{"manifests", "--history-stream", "A B"}, 1},
 		"bad js domain":     {[]string{"permissions", "--js-domain", "a.b"}, 1},
@@ -97,6 +99,17 @@ func TestRunMQManifests_NamesAndPublishTimeout(t *testing.T) {
 		"durableName: acme-ingest-0\n", "name: ACME_REPLAY\n", "duplicateWindow: 3m0.5s\n",
 		"--ingest-consumer acme-ingest --history-stream ACME_REPLAY --publish-timeout 1m0s",
 	} {
+		assert.Contains(t, out.String(), want)
+	}
+}
+
+// The consumer settings boot config takes (mq.ack_wait, mq.max_ack_pending)
+// are flags too, rendered into every shard durable and recorded in the
+// generated-by line, so an operator who raised them regenerates to match.
+func TestRunMQManifests_ConsumerSettings(t *testing.T) {
+	var out, errOut bytes.Buffer
+	require.Equal(t, 0, runMQ([]string{"manifests", "--partitions", "1", "--shards", "1", "--ack-wait", "2m", "--max-ack-pending", "20000"}, &out, &errOut), errOut.String())
+	for _, want := range []string{"ackWait: 2m\n", "maxAckPending: 20000\n", "--ack-wait 2m0s --max-ack-pending 20000"} {
 		assert.Contains(t, out.String(), want)
 	}
 }

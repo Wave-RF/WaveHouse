@@ -334,6 +334,12 @@ func manifestFlags(o NATSManifestOptions) string {
 	if t.PublishTimeout != DefaultNATSPublishTimeout {
 		flags += " --publish-timeout " + t.PublishTimeout.String()
 	}
+	if t.AckWait != DefaultAckWait {
+		flags += " --ack-wait " + t.AckWait.String()
+	}
+	if t.MaxAckPending != DefaultMaxAckPending {
+		flags += " --max-ack-pending " + strconv.Itoa(t.MaxAckPending)
+	}
 	if t.CoordBucket != "" && t.CoordBucket != DefaultNATSCoordBucket(t.Prefix) {
 		flags += " --coord-bucket " + t.CoordBucket
 	}

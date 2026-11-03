@@ -101,7 +101,7 @@ curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}
 
-# Query it back (wait ~5s for the batch flush)
+# Query it back (wait for the batch flush: ingest.max_batch_wait_ms, 5s in the seed)
 curl -s -X POST "http://localhost:8080/v1/query?table=clicks" \
   -H "Content-Type: application/json" \
   -d '{"columns": ["page", "button", "score"], "limit": 10}'

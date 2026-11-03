@@ -86,7 +86,7 @@ func TestCoordNATS_MissingBucketRefusesBoot(t *testing.T) {
 	cfg := &config.Config{
 		DataDir: t.TempDir(),
 		Server:  config.Server{Port: 1, ShutdownTimeout: 1},
-		MQ: config.MQ{Backend: config.MQNATS, NATS: config.MQNATSConfig{
+		MQ: config.MQ{Backend: config.MQNATS, AckWait: mq.DefaultAckWait, MaxAckPending: mq.DefaultMaxAckPending, Prefetch: mq.DefaultPrefetch, NATS: config.MQNATSConfig{
 			URLs: []string{srv.URL()}, User: natstest.WaveHouseUser, PasswordFile: pw,
 			SubjectPrefix: "wh", Partitions: 4, Shards: 8, IngestConsumer: "wh-ingest",
 			ConnectTimeout: 5 * time.Second, PublishTimeout: 5 * time.Second, TopologyWait: 300 * time.Millisecond,

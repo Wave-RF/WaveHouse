@@ -38,7 +38,11 @@ type MockPublisher struct {
 	// ErrAfter lets that many calls succeed before Err applies, to fail a
 	// batch part-way through.
 	ErrAfter int
-	calls    int
+	// BeforeErr, if set, runs as Err applies, before it is returned: a test
+	// cancels the caller's context there to fail the call mid-flight. It runs
+	// under the mock's lock, so it must not call back into the mock.
+	BeforeErr func()
+	calls     int
 }
 
 // PublishedMessage records a single Publish or DeadLetter call, with the
@@ -63,6 +67,9 @@ func (m *MockPublisher) record(pm PublishedMessage, opts []mq.PublishOpt) error 
 	defer m.mu.Unlock()
 	m.calls++
 	if m.Err != nil && m.calls > m.ErrAfter {
+		if m.BeforeErr != nil {
+			m.BeforeErr()
+		}
 		return m.Err
 	}
 	headers := mq.Headers{}
@@ -125,7 +132,13 @@ type MockDeduplicator struct {
 	ErrAfter   int
 	CommitErr  error
 	ReleaseErr error
-	Released   []dedupe.Claim // every claim Release was given
+	// BeforeErr, if set, runs as Err applies, before Reserve returns it,
+	// under the mock's lock: it must not call back into the mock.
+	BeforeErr func()
+	// OnCommit, if set, runs as each Commit starts, under the same lock: it
+	// must not call back into the mock either.
+	OnCommit func()
+	Released []dedupe.Claim // every claim Release was given
 	// Calls to each phase, for tests that count round trips.
 	Reserves, Commits int
 }
@@ -142,6 +155,9 @@ func (m *MockDeduplicator) Reserve(_ context.Context, keys []dedupe.Key, _ time.
 	defer m.mu.Unlock()
 	m.Reserves++
 	if m.Err != nil && m.Reserves > m.ErrAfter {
+		if m.BeforeErr != nil {
+			m.BeforeErr()
+		}
 		return nil, m.Err
 	}
 	claims := make([]dedupe.Claim, 0, len(keys))
@@ -168,6 +184,9 @@ func (m *MockDeduplicator) Commit(_ context.Context, claims []dedupe.Claim, rete
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Commits++
+	if m.OnCommit != nil {
+		m.OnCommit()
+	}
 	if m.CommitErr != nil {
 		return m.CommitErr
 	}

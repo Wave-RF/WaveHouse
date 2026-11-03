@@ -134,7 +134,7 @@ func TestInsertToClickHouse_SpanIsTheFlushSpansChild(t *testing.T) {
 	m1 := newIngestMsg(t, "events", "", map[string]any{"id": 1})
 	m2 := newIngestMsg(t, "events", "", map[string]any{"id": 2})
 
-	w.flushTable(context.Background(), "events", parseAll(t, w, m1, m2))
+	flush(context.Background(), w, "events", parseAll(t, w, m1, m2))
 	wait()
 
 	flush := spanNamed(t, rec, "IngestWorker.Flush")
@@ -169,7 +169,7 @@ func TestInsertToClickHouse_SpanRecordsTheFailure(t *testing.T) {
 	w, _, _, wait := newTestWorker(rt)
 	m1 := newIngestMsg(t, "events", "", map[string]any{"id": 1})
 
-	w.flushTable(context.Background(), "events", parseAll(t, w, m1))
+	flush(context.Background(), w, "events", parseAll(t, w, m1))
 	wait()
 
 	for _, name := range []string{"clickhouse.insert", "IngestWorker.Flush"} {
@@ -218,8 +218,8 @@ func TestIngestTraceContinuity_EndToEnd(t *testing.T) {
 		target: func(tenant.ID) chconn.Target {
 			return chconn.Target{URL: fmt.Sprintf("http://%s:%s", host, port), Username: "u", Password: "p", Database: "db"}
 		},
-		maxBatch: defaultMaxBatch,
-		maxWait:  200 * time.Millisecond,
+		limits:   limitsOf(Limits{MaxBatchBytes: 1 << 20, MaxBatchWait: 200 * time.Millisecond}),
+		consumer: ConsumerSettings{}.withDefaults(),
 	}
 	worker.wg.Add(1)
 	go func() { worker.dispatchLoop(ctx, cons); worker.wg.Done() }()

@@ -1059,7 +1059,7 @@ func TestExternalNATS_UnitStates(t *testing.T) {
 		return mine, unowned
 	}
 	state, unowned := read(t)
-	require.Equal(t, UnitState{Unit: unit, MaxAckPending: 10000}, state, "the shipped durable, idle")
+	require.Equal(t, UnitState{Unit: unit, MaxAckPending: DefaultMaxAckPending}, state, "the shipped durable, idle")
 	assert.Zero(t, unowned, "no rows, nothing to own")
 
 	// The consumer info can trail the stream by a moment, as
@@ -1075,14 +1075,14 @@ func TestExternalNATS_UnitStates(t *testing.T) {
 		return unowned
 	}
 	require.NoError(t, e.Publish(t.Context(), topic, []byte("x")))
-	unowned = await(UnitState{Unit: unit, Pending: 1, MaxAckPending: 10000}, "a row nobody pulls")
+	unowned = await(UnitState{Unit: unit, Pending: 1, MaxAckPending: DefaultMaxAckPending}, "a row nobody pulls")
 	assert.Equal(t, 1, unowned)
 
 	var hold atomic.Bool
 	hold.Store(true)
 	_, _, got := unitConsumer(t, e, unit, &hold)
 	require.Equal(t, "x", receive(t, got))
-	unowned = await(UnitState{Unit: unit, AckPending: 1, MaxAckPending: 10000, Held: true}, "received and not acked, by a consumer that holds the unit")
+	unowned = await(UnitState{Unit: unit, AckPending: 1, MaxAckPending: DefaultMaxAckPending, Held: true}, "received and not acked, by a consumer that holds the unit")
 	assert.Zero(t, unowned, "held by the consumer that received it")
 }
 
