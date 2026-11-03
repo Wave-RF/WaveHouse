@@ -589,8 +589,9 @@ func (b *tableBatcher) add(ctx context.Context, pm parsedMsg) {
 				return
 			}
 		}
-		// A tenant with no limits and no pool is no longer served: its rows
-		// are flushed at once, zero limits, to be parked (flushTable).
+		// A tenant with no limits and no pool — no longer served, or served
+		// with both refused — has its rows flushed at once, zero limits, to
+		// be parked (flushTable).
 		b.limits, b.ok = lim, ok
 		if ok {
 			b.timer.Reset(lim.MaxBatchWait)

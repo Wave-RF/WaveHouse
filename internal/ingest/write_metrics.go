@@ -105,7 +105,7 @@ func newWriteMetrics(m metric.Meter) (writeMetrics, error) {
 	)
 	flushes, err4 := m.Int64Counter(
 		"wavehouse_ingest_flushes_total",
-		metric.WithDescription("Batches the ingest worker flushed, by what asked for the flush: size (the rows' JSON reached ingest.max_batch_bytes), timer (ingest.max_batch_wait_ms passed since the first row), shutdown (what the table held when the worker stopped), or none (the batch of a tenant no longer served, flushed at its first row to be parked); and by queued, whether the batch waited behind the table's previous flush before its own started"),
+		metric.WithDescription("Batches the ingest worker flushed, by what asked for the flush: size (the rows' JSON reached ingest.max_batch_bytes), timer (ingest.max_batch_wait_ms passed since the first row), shutdown (what the table held when the worker stopped), or none (the batch of a tenant with neither limits nor a pool, no longer served or served with both refused, flushed at its first row to be parked); and by queued, whether the batch waited behind the table's previous flush before its own started"),
 	)
 	isolations, err5 := m.Int64Counter(
 		"wavehouse_ingest_isolations_total",
