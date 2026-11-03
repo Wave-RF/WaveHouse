@@ -98,10 +98,16 @@ type TenantConfig struct {
 }
 
 // ClickHouseConfig is the ClickHouse wiring, password included. A reload
-// that changes any of it swaps the connection unconditionally; reachability
+// applies it unconditionally: a change to addr, database, username,
+// password or tls moves the tenant to the pool of its new tuple, the pool
+// sizes resize its pool, and the rest needs no new connection; reachability
 // is a runtime concern (schema discovery, /readyz), never a reload one. A
-// certificate file that cannot be read or parsed is the one exception: boot
-// refuses, and a reload keeps the previous connection.
+// pool that cannot be opened — a certificate file that cannot be read or
+// parsed, options the driver refuses, or the boot config's connection
+// ceiling (`clickhouse.max_total_conns`) — is the exception: a reload
+// leaves the tenant on the pool it had, or on none when it had none, and
+// boot refuses over a flat settings directory or serves the tenant on no
+// pool over a nested one.
 type ClickHouseConfig struct {
 	// Addr is the native-protocol host:port (schema discovery, structured
 	// queries, pipes, /readyz).
@@ -293,10 +299,12 @@ const MaxKeepaliveBuckets = 100
 // which replays from the gap window, than by a deeper queue.
 const MaxSubscriberQueue = 10_000
 
-// StreamConfig tunes GET /v1/stream: the tenant's SSE keepalive wheel and how
-// much NATS history the Active Sweeper keeps for its gap-fill. Keepalives are
-// set to the proxy in front of the tenant's streams and the gap window is its
-// replay budget, both of which change while the server runs.
+// StreamConfig tunes GET /v1/stream: the tenant's SSE keepalive wheel, how
+// much NATS history the Active Sweeper keeps for its gap-fill, and each
+// connection's outbound queue. Keepalives are set to the proxy in front of
+// the tenant's streams, the gap window is its replay budget and the queue is
+// how far a slow client may fall behind before frames are dropped, all of
+// which change while the server runs.
 type StreamConfig struct {
 	// KeepaliveInterval is the effective per-connection keepalive period in
 	// seconds — the longest a quiet stream goes unwritten before a ":"
