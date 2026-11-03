@@ -150,7 +150,7 @@ When a flush starts, the batcher hands the goroutine a **private snapshot**:
 ```go
 rows, lim, ok := b.batch, b.limits, b.ok  // snapshot the slice header and the batch's limits
 b.batch, b.bytes = nil, 0                 // fresh batch here; appends allocate a new backing array
-go func() { b.w.flushTable(ctx, b.table, rows, lim, ok, trigger) }()  // trigger: what asked for this flush
+go func() { b.w.flushTable(ctx, b.table, rows, lim, ok, trigger, waited) }()  // trigger: what asked for this flush; waited: whether it was latched behind the previous one
 ```
 
 The flush goroutine only ever touches `rows`, its copies of the limits, and the worker's concurrency-safe collaborators (HTTP client, cache, `ackWg`, the backoffs); it never touches `b.batch`, `b.bytes`, `b.limits`, `b.ok`, `b.timer`, or `b.flushing`. Those are touched solely by the `tableLoop` goroutine, which rewrites the limits at the next batch's first row while this flush may still be running — which is why they are passed as copies. `b.batch = nil` (rather than `b.batch[:0]`) is load-bearing — reusing the array would let new appends overwrite rows the flush is still reading. The race detector (`go test -race`) guards this.
