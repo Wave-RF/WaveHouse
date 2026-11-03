@@ -249,7 +249,7 @@ Several layers throttle the pipeline, inner to outer:
 | Knob | Default | Meaning / invariant |
 | --- | --- | --- |
 | `ingest.max_batch_bytes` | 262144 (seed) | row JSON that triggers a flush, per tenant (soft — coalescing can exceed it; never more than `mq.max_ack_pending` rows) |
-| `ingest.max_batch_wait_ms` | 5000 ms (seed) | max time a row waits before its batch flushes, per tenant |
+| `ingest.max_batch_wait_ms` | 5000 ms (seed) | time after a batch's first row that triggers a flush, per tenant (one triggered while the table's previous insert runs starts when it ends) |
 | `clickhouse.insert_timeout` | 30 s (seed) | deadline of each `INSERT`, per tenant; a timed-out one is retried with backoff |
 | `ingest.retry_backoff_max` | 30 s (seed) | cap of that backoff, per tenant; it doubles from 1 s |
 | `mq.ack_wait` | 60s | server redelivery timeout (boot config); **must exceed `ingest.max_batch_wait_ms` + `clickhouse.insert_timeout`** or in-flight rows get redelivered → duplicate inserts, which the ingest process checks when it adopts a tenant's settings. The rule bounds a batch's own wait plus one `INSERT`: a batch queued behind an in-flight flush, several column lists and row-by-row isolation add deadlines on top, so keep the sum well under it, as the seeds do |

@@ -224,9 +224,10 @@ type TableDLQ struct {
 }
 
 // IngestConfig tunes how the ingest worker batches the tenant's tables: a
-// table's batch is written to ClickHouse once its rows' JSON reaches
-// max_batch_bytes, or max_batch_wait_ms after its first row, whichever comes
-// first, and a reload applies to the next batch. The right values depend on
+// table's batch is flushed to ClickHouse once its rows' JSON reaches
+// max_batch_bytes, or max_batch_wait_ms after the batch's first row,
+// whichever comes first (a flush asked for while the table's previous one
+// runs starts when it ends), and a reload applies to the next batch. The right values depend on
 // the tenant's row width and rate, which is why they are the tenant's; the
 // consumer the batches come through — the redelivery timeout, the rows
 // delivered and unacked, the prefetch — is boot config (`mq.*`), sized once
@@ -239,11 +240,12 @@ type IngestConfig struct {
 	// yet acked (boot config's `mq.max_ack_pending`), so a target above
 	// that many rows is only ever reached by the timer.
 	MaxBatchBytes *int `json:"max_batch_bytes"`
-	// MaxBatchWaitMS is the longest a row waits in a batch before the batch
-	// is flushed, in milliseconds. Must be >= 1. With the insert's own
-	// deadline (clickhouse.insert_timeout) it must stay under the queue's
-	// redelivery timeout (boot config's `mq.ack_wait`), which only the
-	// server can check: see internal/app.
+	// MaxBatchWaitMS is the time after the first row of a table's batch at
+	// which the batch is flushed, in milliseconds (a flush asked for while
+	// the table's previous insert is still running starts when that insert
+	// ends). Must be >= 1. With the insert's own deadline (clickhouse.insert_timeout) it
+	// must stay under the queue's redelivery timeout (boot config's
+	// `mq.ack_wait`), which only the server can check: see internal/app.
 	MaxBatchWaitMS *int `json:"max_batch_wait_ms"`
 	// RetryBackoffMax caps, in seconds (>= 1), the backoff a ClickHouse
 	// that cannot take the tenant's inserts is retried under: the delay
