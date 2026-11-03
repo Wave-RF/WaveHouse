@@ -42,11 +42,12 @@ describe("Dead Letter Queue (DLQ) & Failures", () => {
 
     // 9 good rows must land. Budget is 10s (the suite norm), not the 6s a plain
     // timer-flush uses: the bad row forces the worker into 1-by-1 isolation —
-    // ~11 sequential CH round-trips after the 5s maxWait timer — which is far
-    // more post-timer work than a single-insert flush, so 6s sat right at the
-    // edge under CI load. The structural fix is a lower e2e maxWait (deferred
-    // config PR), which drops the 5s-timer dependency; this budget can shrink
-    // back once that lands.
+    // ~11 sequential CH round-trips after the 5s batch wait (the fixture's
+    // ingest.max_batch_wait_ms, tests/e2e/fixtures/settings/config.json) —
+    // which is far more post-timer work than a single-insert flush, so 6s sat
+    // right at the edge under CI load. The structural fix is lowering that key
+    // in the fixture, which drops the 5s-timer dependency; this budget can
+    // shrink back once it is lowered.
     await waitForCondition(async (signal) => {
       const chRows = await chQuery(
         `SELECT count() as cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,

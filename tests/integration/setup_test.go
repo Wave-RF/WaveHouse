@@ -34,9 +34,11 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/app"
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/mq/natstest"
 	"github.com/Wave-RF/WaveHouse/pkg/settings"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 const (
@@ -178,7 +180,7 @@ func setup() (int, func()) {
 		// The suite's client dials from loopback and plays the proxy, so
 		// a traceparent it sends is joined (TestOTel_IngestTraceContinuity).
 		Server:   config.Server{ShutdownTimeout: 10, TrustedProxies: []string{"127.0.0.1", "::1"}},
-		MQ:       config.MQ{Backend: config.MQEmbedded},
+		MQ:       embeddedMQ(),
 		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 30}, // 1 GB
 		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
 		Coord:    config.Coord{Backend: config.CoordLocal},
@@ -259,7 +261,7 @@ func tenantSettings(ch *chInstance, database string) (map[string][]byte, error) 
 	patch := map[string]any{
 		"clickhouse": map[string]any{
 			"addr": ch.nativeAddr(), "http_port": mustAtoi(ch.httpPort), "http_scheme": "http",
-			"database": database, "username": testCHUser, "password": testCHPassword, "query_timeout": 30,
+			"database": database, "username": testCHUser, "password": testCHPassword, "query_timeout": 30, "insert_timeout": 30,
 			"tls":     map[string]any{"enabled": false, "ca_file": "", "cert_file": "", "key_file": "", "insecure_skip_verify": false, "server_name": ""},
 			"headers": map[string]any{}, "max_open_conns": 10, "max_idle_conns": 5,
 		},
@@ -495,6 +497,19 @@ func waitForNativeReady(ctx context.Context, conn driver.Conn, timeout time.Dura
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// seedLimits is the ingest worker's batch limits as the seed sets them, for
+// a worker started outside internal/app.
+func seedLimits(tenant.ID) (ingest.Limits, bool) {
+	return ingest.Limits{MaxBatchBytes: 262144, MaxBatchWait: 5 * time.Second, InsertTimeout: 30 * time.Second, RetryBackoffMax: 30 * time.Second}, true
+}
+
+// embeddedMQ is the embedded queue with the consumer settings boot config
+// defaults to, for a Config built without config.Load (which New refuses
+// without them).
+func embeddedMQ() config.MQ {
+	return config.MQ{Backend: config.MQEmbedded, AckWait: mq.DefaultAckWait, MaxAckPending: mq.DefaultMaxAckPending, Prefetch: mq.DefaultPrefetch}
 }
 
 func mustTempDir() string {

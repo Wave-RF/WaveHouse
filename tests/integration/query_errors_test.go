@@ -119,7 +119,7 @@ func TestQueryErrors_ClickHouseDown(t *testing.T) {
 	cfg := &config.Config{
 		DataDir:  storedir.New(t),
 		Server:   config.Server{ShutdownTimeout: 10},
-		MQ:       config.MQ{Backend: config.MQEmbedded},
+		MQ:       embeddedMQ(),
 		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
 		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
 		Coord:    config.Coord{Backend: config.CoordLocal},

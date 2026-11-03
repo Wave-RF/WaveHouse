@@ -5,12 +5,16 @@ import (
 	"sync/atomic"
 )
 
-// defaultSubscriberQueue is the per-connection outbound buffer. A cap >1 (the
-// keepalive-only queue was cap 1) lets live event frames queue while the handler
-// is mid-write instead of being dropped on the spot; 64 matches the per-subscriber
-// hub channel this replaces. A keepalive Send still coalesces harmlessly — it only
-// drops when the queue is already full of events, which means the stream is
-// actively writing anyway. Right-sizing this into a config knob is tracked in #152.
+// defaultSubscriberQueue is the per-connection outbound buffer of a
+// Subscriber built without a size: NewSubscriber, and a NewTableSubscriber
+// handed none, which is a harness that wires no settings. The SSE handler
+// sizes each connection's from its tenant's stream.subscriber_queue, whose
+// seed is this value (#152; measuring the right size is still open there).
+// A cap >1 (the keepalive-only queue was cap 1) lets live event frames queue
+// while the handler is mid-write instead of being dropped on the spot. A
+// keepalive Send still coalesces harmlessly — it only drops when the queue
+// is already full of events, which means the stream is actively writing
+// anyway.
 const defaultSubscriberQueue = 64
 
 // Frame is one ready-to-write SSE byte frame tagged with its kind, so the handler
@@ -112,15 +116,21 @@ func (s *Subscriber) recordSchema(sig string) {
 // NewSubscriber returns a Subscriber ready to register with a Heartbeater and the
 // event Hub, carrying the connection's JWT claims (nil for a tokenless caller),
 // deep-copied — see the claims field for the snapshot rationale — and the shared
-// stream metrics (nil-safe) that Send counts drops on.
+// stream metrics (nil-safe) that Send counts drops on, with the default queue.
 func NewSubscriber(claims map[string]any, m *Metrics) *Subscriber {
-	return NewTableSubscriber("", claims, m)
+	return NewTableSubscriber("", claims, m, 0)
 }
 
 // NewTableSubscriber is NewSubscriber whose dropped frames carry table as
-// their label: pass Hub.LabelTable's, never the request's raw value.
-func NewTableSubscriber(table string, claims map[string]any, m *Metrics) *Subscriber {
-	s := newSubscriber(defaultSubscriberQueue, m)
+// their label — pass Hub.LabelTable's, never the request's raw value — and
+// whose outbound queue holds queue frames: the tenant's
+// stream.subscriber_queue, read when the connection opens; 0 or less takes
+// the default.
+func NewTableSubscriber(table string, claims map[string]any, m *Metrics, queue int) *Subscriber {
+	if queue <= 0 {
+		queue = defaultSubscriberQueue
+	}
+	s := newSubscriber(queue, m)
 	s.table = table
 	s.claims = cloneClaimsMap(claims)
 	return s
