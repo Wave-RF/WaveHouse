@@ -507,7 +507,7 @@ func nakAbandoned(m *mq.Message) {
 //
 // Concurrency: every method runs on a single goroutine (tableLoop), so the
 // fields need no locking. The only thing that runs concurrently is the flush
-// goroutine started in flushPending — and it operates on a private copy of the
+// goroutine started in requestFlush — and it operates on a private copy of the
 // rows, never on these fields, so there is no shared mutable state.
 //
 // Coalescing: at most one flush runs per tenant table at a time. A size or timer
