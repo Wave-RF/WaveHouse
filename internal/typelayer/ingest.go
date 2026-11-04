@@ -228,14 +228,14 @@ func (b *Batch) merge(w Batch) bool {
 // options and the check filter, which retry may drop (see retry).
 func (t *Table) parse(c *cursor, win []byte, settings map[string]string, chk *checkState) (chtypes.BatchResult, error) {
 	insert := t.insertOptions(c.format)
-	res, err := t.export(c.format, win, settings, c.docs, insert, chk.filter)
+	res, err := t.export(c.format, win, settings, leanDocs, insert, chk.filter)
 	if _, misuse := errors.AsType[*chtypes.UsageError](err); misuse && chk.filter != nil {
 		// The cached filter was evicted and closed between lookup and use,
 		// which chtypes refuses before reading the body. Fail the checks
 		// closed, as an evaluation error would, not the request. Any other
 		// error would come back the same from a second parse of the body.
 		chk.filter, chk.uniform = nil, ReasonDecline
-		res, err = t.export(c.format, win, settings, c.docs, insert, nil)
+		res, err = t.export(c.format, win, settings, leanDocs, insert, nil)
 	}
 	if err != nil {
 		// A view's other options were checked when it was built, so a call

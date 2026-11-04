@@ -92,7 +92,6 @@ type cursor struct {
 	opts   IngestOptions
 	body   []byte
 	lim    Limits
-	docs   chtypes.DocFlags
 	first  map[string]string // the first window's settings
 	later  map[string]string // every later window's
 	off    int               // where the next window starts in body
@@ -112,7 +111,7 @@ func newCursor(format Format, opts IngestOptions, body []byte) (*cursor, error) 
 			"typelayer: Ingest cannot parse format %d; use FormatJSONEachRow, FormatCSV, FormatTSV, FormatCSVWithNames or FormatTSVWithNames",
 			int(format))
 	}
-	c := &cursor{format: format, opts: opts, body: body, docs: leanDocs, lim: defaultLimits, grow: 1}
+	c := &cursor{format: format, opts: opts, body: body, lim: defaultLimits, grow: 1}
 	if opts.Window != (Limits{}) {
 		c.lim = opts.Window
 	}
