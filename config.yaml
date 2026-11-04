@@ -63,9 +63,8 @@ profiling:
 
 # Only the connection ceiling and the chtypes artifact keys are boot config;
 # addr, http_port, http_scheme, database, username, password, query_timeout,
-# insert_timeout, tls, headers
-# and the pool sizes are the settings directory's clickhouse
-# block.
+# insert_timeout, tls, headers and the pool sizes are the settings directory's
+# clickhouse block.
 clickhouse:
   max_total_conns: 0 # ceiling on open native connections across pools; 0 = none
   # chtypes cache root (CHTYPES_CACHE semantics; the 2.0.0-dev SDK uses it as
