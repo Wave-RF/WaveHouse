@@ -245,24 +245,47 @@ func hmacTable(ddl string, cols ...discovery.Column) *discovery.TableSchema {
 	}, cols...)}
 }
 
-// TestCompileSchema_MaskedColumnIsUnavailable: a DEFAULT whose key the server
-// masks would be computed with the literal '[HIDDEN]', a wrong hash the
-// worker would store, so the table is unavailable instead, with a cause that
-// names the column and not its expression.
+// TestCompileSchema_MaskedColumnIsUnavailable: an expression whose key the
+// server masks would be computed with the literal '[HIDDEN]', a wrong hash,
+// so the table is unavailable instead, with a cause that names the column
+// and not its expression. Every kind counts: a DEFAULT reading a MATERIALIZED
+// or an EPHEMERAL column exports what chtypes computed for it.
 func TestCompileSchema_MaskedColumnIsUnavailable(t *testing.T) {
 	t.Parallel()
-	eng := testEngine(t, eventsTable(), hmacTable("",
-		discovery.Column{Name: "d", Type: "String", Position: 2, DefaultKind: "DEFAULT", DefaultExpression: "hex(HMAC('SHA256', s, '[HIDDEN]'))"}))
-	tbl, err := eng.Table(tenant.Default, "hm")
-	if err == nil {
-		tbl.Release()
+	const hmac = "hex(HMAC('SHA256', s, '[HIDDEN]'))"
+	tests := []struct {
+		name   string
+		cols   []discovery.Column
+		masked string
+	}{
+		{"DEFAULT", []discovery.Column{
+			{Name: "d", Type: "String", Position: 2, DefaultKind: "DEFAULT", DefaultExpression: hmac},
+		}, "d"},
+		{"MATERIALIZED read by a DEFAULT", []discovery.Column{
+			{Name: "m", Type: "String", Position: 2, DefaultKind: "MATERIALIZED", DefaultExpression: hmac},
+			{Name: "d", Type: "String", Position: 3, DefaultKind: "DEFAULT", DefaultExpression: "concat(m, '!')"},
+		}, "m"},
+		{"EPHEMERAL read by a DEFAULT", []discovery.Column{
+			{Name: "e", Type: "String", Position: 2, DefaultKind: "EPHEMERAL", DefaultExpression: hmac},
+			{Name: "d", Type: "String", Position: 3, DefaultKind: "DEFAULT", DefaultExpression: "e"},
+		}, "e"},
 	}
-	var u *Unavailable
-	require.ErrorAs(t, err, &u)
-	assert.Equal(t, "hm", u.Table)
-	assert.Contains(t, u.Cause, `column "d"`)
-	assert.NotContains(t, u.Cause, "HMAC")
-	answers(t, eng, tenant.Default)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			eng := testEngine(t, eventsTable(), hmacTable("", tt.cols...))
+			tbl, err := eng.Table(tenant.Default, "hm")
+			if err == nil {
+				tbl.Release()
+			}
+			var u *Unavailable
+			require.ErrorAs(t, err, &u)
+			assert.Equal(t, "hm", u.Table)
+			assert.Contains(t, u.Cause, "column \""+tt.masked+"\"")
+			assert.NotContains(t, u.Cause, "HMAC")
+			answers(t, eng, tenant.Default)
+		})
+	}
 }
 
 // TestCompileSchema_MaskedDefinitionFallsBack: a definition holding a masked
