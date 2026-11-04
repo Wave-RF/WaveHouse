@@ -38,21 +38,23 @@ var defaultLimits = Limits{Bytes: 4 << 20, Records: 4096}
 // the failure (up to 160) inside the window, so the message is the body's.
 const tailMargin = 4 << 10
 
-// atRow is the record number ClickHouse's TSV reader puts in its message,
-// counted from the window's first record.
-var atRow = regexp.MustCompile(`\(at row (\d+)\)`)
+// atRow is a record number ClickHouse puts in its message, counted from the
+// window's first record: its TSV reader's "(at row N)" and a CHECK's
+// "violated at row N".
+var atRow = regexp.MustCompile(`(\(at row |violated at row )(\d+)`)
 
-// renumber rewrites msg's "(at row N)" to count from the body's first record.
+// renumber rewrites msg's record numbers to count from the body's first record.
 func renumber(msg string, base int) string {
 	if base == 0 {
 		return msg
 	}
 	return atRow.ReplaceAllStringFunc(msg, func(m string) string {
-		n, err := strconv.Atoi(atRow.FindStringSubmatch(m)[1])
+		sub := atRow.FindStringSubmatch(m)
+		n, err := strconv.Atoi(sub[2])
 		if err != nil {
 			return m
 		}
-		return "(at row " + strconv.Itoa(n+base) + ")"
+		return sub[1] + strconv.Itoa(n+base)
 	})
 }
 
@@ -83,10 +85,13 @@ func renumber(msg string, base int) string {
 // with no header reads later windows with detection off, since only a body's
 // first line can be its header.
 //
-// Whole-body steps of an INSERT (the partition cap, CHECKs over the merged
-// block) then run once per window; the statement chtypes compiles has neither
-// (#727). A body chtypes reports no InputSpan for, or whose container is not
-// the one guessed, is read in one call from where the cursor stands.
+// The table's own definition brings its CHECKs, judged per record, and its
+// engine's insert steps over a block, judged per window: a window they refuse
+// with every record read refuses the body, never growing (see ingestNext).
+// The partition cap is lifted at the parse (parseSettings), since the worker
+// forms the INSERT blocks. A body chtypes reports no InputSpan for, or whose
+// container is not the one guessed, is read in one call from where the
+// cursor stands.
 type cursor struct {
 	format Format
 	opts   IngestOptions
@@ -458,6 +463,13 @@ func (t *Table) ingestNext(c *cursor, checks []Predicate) (Batch, error) {
 			// refused one: a window's start reads a UTF-8 BOM or a `[` that
 			// one call refuses mid-body.
 			return t.closeAt(c, res, lead, j-1, chk)
+		case !accepted && j == n:
+			// Refused with every record read: an insert step over the block,
+			// such as a merge engine's check (a CollapsingMergeTree sign), not
+			// a record. A bigger window holds the same rows and more, so the
+			// refusal stands; growing would parse the whole body at once.
+			c.done = true
+			return t.batch(c, res, chk, n), nil
 		}
 		// Too few records to cut at: grow the window until it holds two, or
 		// is the rest of the body. Each step doubles both bounds.

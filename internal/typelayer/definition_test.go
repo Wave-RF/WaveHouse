@@ -1,6 +1,7 @@
 package typelayer
 
 import (
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -21,13 +22,13 @@ func checkedTable(ddl string) *discovery.TableSchema {
 	}}
 }
 
-// ingestTwo runs one record that breaks the CHECK and one that keeps it.
+// ingestTwo runs one record that keeps the CHECK, then one that breaks it.
 func ingestTwo(t *testing.T, eng *Engine) Batch {
 	t.Helper()
 	tbl, err := eng.Table(tenant.Default, "ck")
 	require.NoError(t, err)
 	defer tbl.Release()
-	b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{}, []byte("{\"id\":0,\"v\":\"bad\"}\n{\"id\":5,\"v\":\"ok\"}\n"))
+	b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{}, []byte("{\"id\":5,\"v\":\"ok\"}\n{\"id\":0,\"v\":\"bad\"}\n"))
 	require.NoError(t, err)
 	return b
 }
@@ -41,7 +42,7 @@ func TestCompileSchema_OwnDefinition(t *testing.T) {
 		"CREATE TABLE db.ck (`id` UInt64, `v` String, CONSTRAINT c CHECK id > 0) ENGINE = MergeTree ORDER BY id")))
 	require.NotNil(t, own.Refused, "the CHECK refuses the body")
 	assert.Equal(t, 469, own.Refused.Code)
-	assert.Equal(t, 1, own.Refused.Record)
+	assert.Equal(t, 2, own.Refused.Record, "the record that breaks it")
 	assert.Empty(t, own.Rows)
 
 	columns := ingestTwo(t, testEngine(t, checkedTable("")))
@@ -60,10 +61,13 @@ func TestCompileSchema_FallsBackToColumns(t *testing.T) {
 	tests := []struct {
 		name, ddl, cause string
 	}{
-		{"engine not modelled", "CREATE TABLE db.ck (`id` UInt64, `v` String) ENGINE = Distributed('cluster', 'db', 'ck_local', rand())", "chtypes declined: engine not modelled: Distributed"},
+		{"engine not modelled", "CREATE TABLE db.ck (`id` UInt64, `v` String) ENGINE = Distributed('cluster', 'db', 'ck_local', rand())", "chtypes declined: engine-not-modeled"},
+		// These two declines quote the definition in their message (measured).
+		{"table setting not modelled", "CREATE TABLE db.ck (`id` UInt64, `v` String) ENGINE = MergeTree ORDER BY id SETTINGS storage_policy = 'hunter2policy'", "chtypes declined: table-setting-not-modeled"},
+		{"CHECK reads a dictionary", "CREATE TABLE db.ck (`id` UInt64, `v` String, CONSTRAINT c CHECK dictHas('hunter2dict', id)) ENGINE = MergeTree ORDER BY id", "chtypes declined: expression-reads-storage"},
 		// ClickHouse's message for this one quotes the statement from the
 		// error on, the endpoint, key and secret with it (measured).
-		{"refused by ClickHouse", "CREATE TABLE db.ck (`id` UInt64, `v` String) ENGINE = S3((, 'https://bucket.example/x.csv', 'AKIAEXAMPLE', 'hunter2', 'CSV')", "compile refused with ClickHouse code 62"},
+		{"refused by ClickHouse", "CREATE TABLE db.ck (`id` UInt64, `v` String) ENGINE = S3((, 'https://bucket.example/x.csv', 'AKIAEXAMPLE', 'hunter2', 'CSV')", "compile refused with ClickHouse code 62 (SYNTAX_ERROR)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -99,4 +103,92 @@ func TestBind_DefinitionChangeRecompiles(t *testing.T) {
 	after := checkedTable(strings.Replace(before.DDL, "ORDER BY id", "ORDER BY (v, id)", 1))
 	eng.Bind(tenant.Default, testServerVersion, "UTC", []*discovery.TableSchema{after})
 	assert.Greater(t, gen(), first, "a new sorting key recompiles")
+}
+
+// walkOnce runs one ingestNext over body in windows of a few records, so a
+// test can read what the walk did to the cursor.
+func walkOnce(t *testing.T, eng *Engine, table, body string) (Batch, *cursor) {
+	t.Helper()
+	tbl, err := eng.Table(tenant.Default, table)
+	require.NoError(t, err)
+	defer tbl.Release()
+	c, err := newCursor(FormatJSONEachRow, IngestOptions{Window: Limits{Bytes: 1 << 20, Records: 3}}, []byte(body))
+	require.NoError(t, err)
+	b, err := tbl.ingestNext(c, nil)
+	require.NoError(t, err)
+	return b, c
+}
+
+// TestIngest_BlockRefusalDoesNotGrow: an insert step over the block (here a
+// CollapsingMergeTree sign) refuses a window with every record read and no
+// record to blame. That refuses the body at once: growing the window, which
+// holds the same rows and more, parsed the whole body in one call, gigabytes
+// for a large one.
+func TestIngest_BlockRefusalDoesNotGrow(t *testing.T) {
+	t.Parallel()
+	eng := testEngine(t, &discovery.TableSchema{
+		Name:    "cl",
+		DDL:     "CREATE TABLE db.cl (`id` UInt64, `sign` Int8) ENGINE = CollapsingMergeTree(sign) ORDER BY id",
+		Columns: []discovery.Column{{Name: "id", Type: "UInt64", Position: 1}, {Name: "sign", Type: "Int8", Position: 2}},
+	})
+	var body strings.Builder
+	for i := range 200 {
+		sign := 1
+		if i == 1 {
+			sign = 5
+		}
+		fmt.Fprintf(&body, "{\"id\":%d,\"sign\":%d}\n", i, sign)
+	}
+	b, c := walkOnce(t, eng, "cl", body.String())
+	require.NotNil(t, b.Refused)
+	assert.Equal(t, 117, b.Refused.Code)
+	assert.True(t, c.done)
+	assert.Equal(t, 1, c.grow, "the window never grew")
+}
+
+// TestIngest_PartitionCapLifted: a body spanning more partitions than one
+// INSERT block may (100 by default) is accepted, as the worker stores it,
+// splitting a block the cap refuses.
+func TestIngest_PartitionCapLifted(t *testing.T) {
+	t.Parallel()
+	eng := testEngine(t, &discovery.TableSchema{
+		Name:    "pt",
+		DDL:     "CREATE TABLE db.pt (`id` UInt64) ENGINE = MergeTree PARTITION BY id ORDER BY id",
+		Columns: []discovery.Column{{Name: "id", Type: "UInt64", Position: 1}},
+	})
+	tbl, err := eng.Table(tenant.Default, "pt")
+	require.NoError(t, err)
+	defer tbl.Release()
+	var body strings.Builder
+	for i := range 150 {
+		fmt.Fprintf(&body, "{\"id\":%d}\n", i)
+	}
+	b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{}, []byte(body.String()))
+	require.NoError(t, err)
+	assert.Nil(t, b.Refused)
+	assert.Len(t, b.Rows, 150)
+}
+
+// TestIngest_CheckRowCountsFromTheBody: a CHECK that refuses a record in a
+// later window names its row counted from the body's first record, as the
+// refusal's record number does.
+func TestIngest_CheckRowCountsFromTheBody(t *testing.T) {
+	t.Parallel()
+	eng := testEngine(t, checkedTable("CREATE TABLE db.ck (`id` UInt64, `v` String, CONSTRAINT c CHECK id > 0) ENGINE = MergeTree ORDER BY id"))
+	tbl, err := eng.Table(tenant.Default, "ck")
+	require.NoError(t, err)
+	defer tbl.Release()
+	var body strings.Builder
+	for i := 1; i <= 10; i++ {
+		id := i
+		if i == 7 {
+			id = 0
+		}
+		fmt.Fprintf(&body, "{\"id\":%d,\"v\":\"x\"}\n", id)
+	}
+	b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{Window: Limits{Bytes: 1 << 20, Records: 3}}, []byte(body.String()))
+	require.NoError(t, err)
+	require.NotNil(t, b.Refused)
+	assert.Equal(t, 7, b.Refused.Record)
+	assert.Contains(t, b.Refused.Message, "violated at row 7.")
 }

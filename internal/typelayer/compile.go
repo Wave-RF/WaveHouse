@@ -27,7 +27,9 @@ import (
 // Nullable(Tuple(...)) column, which needs a gate no list here held, kept its
 // table unavailable for good. The statement is the table's own definition
 // where chtypes models it, else its columns over a neutral engine
-// (compileSchema).
+// (compileSchema). That rebuild is WaveHouse's, but of a table the server
+// holds, from the server's own system.columns, and chtypes' maintainers
+// confirmed it compiles under load (2026-10-27).
 // flatten_nested=0 compiles a Nested column the way system.columns reported
 // it: a table created with flatten_nested=0 arrives as one `n Nested(...)`
 // column, and the default would split it into `n.a`, `n.b` Arrays the server
@@ -116,7 +118,10 @@ func compileStatement(lib *chtypes.Library, srv *chtypes.Server, stmt string) (*
 // chtypes declines (an engine it does not model, such as Distributed, S3 or
 // Buffer, or a view's) falls back to the table's columns on the neutral
 // engine, which serves it without those protections and says so in a WARN;
-// so does a table discovered without its definition, silently.
+// so does a table discovered without its definition, silently. The rebuild
+// carries none of the table's CHECKs, partitioning, engine behavior, TTL or
+// settings, so its preview can accept a row the real INSERT refuses; the
+// server still enforces them, and the worker parks such a row on the DLQ.
 func compileSchema(id tenant.ID, lib *chtypes.Library, srv *chtypes.Server, ts *discovery.TableSchema, cols []colDecl) (*compiled, string) {
 	if ts.DDL != "" {
 		c, err := compileStatement(lib, srv, ts.DDL)
@@ -131,17 +136,21 @@ func compileSchema(id tenant.ID, lib *chtypes.Library, srv *chtypes.Server, ts *
 
 // definitionCause is why a table's own definition did not compile, safe to
 // log: an external engine's definition carries its wiring (endpoint, bucket,
-// user, access key), and ClickHouse's message for a refused statement can
-// quote text from it, so a refusal is named by its code alone. chtypes' own
-// decline names the construct it does not model, not the statement's text.
+// user, access key), and both ClickHouse's message for a refused statement and
+// some of chtypes' declines quote text from it (a setting's value, a
+// dictionary's name), so a cause is named by its ids alone: ClickHouse's code
+// and code name, or chtypes' catalog reason.
 func definitionCause(err error) string {
 	var se *chtypes.SchemaError
 	if errors.As(err, &se) {
+		if se.ChName != "" {
+			return fmt.Sprintf("compile refused with ClickHouse code %d (%s)", se.ChCode, se.ChName)
+		}
 		return fmt.Sprintf("compile refused with ClickHouse code %d", se.ChCode)
 	}
 	var ue *chtypes.UnsupportedError
-	if errors.As(err, &ue) {
-		return "chtypes declined: " + ue.Message
+	if errors.As(err, &ue) && ue.Reason != "" {
+		return "chtypes declined: " + ue.Reason
 	}
 	return "the definition did not compile"
 }

@@ -59,6 +59,10 @@ func parseSettings(format Format, opts IngestOptions) (settings map[string]strin
 	// that skips a bad record can resume inside the next one (see Ingest).
 	settings["input_format_allow_errors_num"] = "0"
 	settings["input_format_allow_errors_ratio"] = "0"
+	// The table's own partition key is compiled, but the worker forms the
+	// INSERT blocks and splits one the cap refuses (code 252), so a body
+	// spanning many partitions is stored; a window must not refuse it.
+	settings["max_partitions_per_insert_block"] = "0"
 	settings["date_time_output_format"] = "iso"
 	settings["output_format_json_escape_forward_slashes"] = "0"
 	settings["output_format_json_quote_denormals"] = "1"
