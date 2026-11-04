@@ -66,7 +66,15 @@ func TestIngest_Windows_OneReserveAndCommitPerWindow(t *testing.T) {
 // every record exactly once.
 func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 	t.Parallel()
-	const n = 600
+	// Three windows of 8: the same cuts as the default window, at unit scale.
+	runPublishFailureAtK(t, 8, 22, publishFailureKs{midFirst: 4, midSecond: 12, midLast: 21})
+}
+
+// publishFailureKs places the failing publish within the windows of a run.
+type publishFailureKs struct{ midFirst, midSecond, midLast int }
+
+func runPublishFailureAtK(t *testing.T, window, n int, ks publishFailureKs) {
+	t.Helper()
 	refused := fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull)
 	tests := []struct {
 		name       string
@@ -76,14 +84,14 @@ func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 		clientGone bool // the request context canceled during the failing publish
 	}{
 		{"refused first record", 1, refused, http.StatusServiceUnavailable, false},
-		{"refused mid first window", 100, refused, http.StatusServiceUnavailable, false},
-		{"refused last of first window", 256, refused, http.StatusServiceUnavailable, false},
-		{"refused first of second window", 257, refused, http.StatusServiceUnavailable, false},
-		{"refused mid last window", 590, refused, http.StatusServiceUnavailable, false},
-		{"uncertain mid first window", 100, context.DeadlineExceeded, http.StatusInternalServerError, false},
-		{"uncertain mid second window", 400, context.DeadlineExceeded, http.StatusInternalServerError, false},
-		{"client gone mid first window", 100, errors.New("publish: context canceled"), statusClientClosedRequest, true},
-		{"client gone mid second window", 400, errors.New("publish: context canceled"), statusClientClosedRequest, true},
+		{"refused mid first window", ks.midFirst, refused, http.StatusServiceUnavailable, false},
+		{"refused last of first window", window, refused, http.StatusServiceUnavailable, false},
+		{"refused first of second window", window + 1, refused, http.StatusServiceUnavailable, false},
+		{"refused mid last window", ks.midLast, refused, http.StatusServiceUnavailable, false},
+		{"uncertain mid first window", ks.midFirst, context.DeadlineExceeded, http.StatusInternalServerError, false},
+		{"uncertain mid second window", ks.midSecond, context.DeadlineExceeded, http.StatusInternalServerError, false},
+		{"client gone mid first window", ks.midFirst, errors.New("publish: context canceled"), statusClientClosedRequest, true},
+		{"client gone mid second window", ks.midSecond, errors.New("publish: context canceled"), statusClientClosedRequest, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -91,6 +99,7 @@ func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 			pub := &testutil.MockPublisher{Err: tt.err, ErrAfter: tt.k - 1}
 			dedup := testutil.NewMockDeduplicator()
 			h := dedupHandler(t, pub, dedup, false)
+			h.window = window
 			lines := eventLines(t, n)
 
 			req := ndjsonRequest(t, "clicks", lines...)
@@ -106,7 +115,7 @@ func TestIngest_Windows_PublishFailureAtK(t *testing.T) {
 			require.Equal(t, tt.status, w.Code)
 			assert.Len(t, pub.Published(), tt.k-1)
 
-			windowEnd := min((tt.k-1)/ingestWindow*ingestWindow+ingestWindow, n)
+			windowEnd := min((tt.k-1)/window*window+window, n)
 			definite := errors.Is(tt.err, mq.ErrQueueFull)
 			var released []dedupe.Key
 			for _, c := range dedup.Released {

@@ -48,13 +48,15 @@ func TestIngest_RecoveryBodies(t *testing.T) {
 // catch a reader that loses, splits or misnumbers a record, in small windows:
 // each is still accepted whole or refused at the same record.
 func TestIngest_WindowsRecoveryBodies(t *testing.T) {
+	t.Parallel()
 	eng := typelayertest.TestEngine(t, typelayertest.BodyTables()...)
 	windows := []typelayer.Limits{{Bytes: 1 << 30, Records: 2}, {Bytes: 16, Records: 1 << 30}, {Bytes: 40, Records: 3}, {Bytes: 101, Records: 5}}
 	for _, c := range typelayertest.RecoveryBodies {
 		t.Run(string(c.Class)+"/"+c.Name, func(t *testing.T) {
+			t.Parallel()
 			tbl, err := eng.Table(tenant.Default, c.Table)
 			require.NoError(t, err)
-			defer tbl.Release()
+			t.Cleanup(tbl.Release)
 			for _, lim := range windows {
 				b, err := tbl.IngestWith(c.Format, typelayer.IngestOptions{StrictPositional: c.Strict, Window: lim}, []byte(c.Body))
 				require.NoError(t, err)

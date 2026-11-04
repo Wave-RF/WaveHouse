@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +12,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
@@ -30,33 +28,6 @@ func manyClicks(n, bad int, badLine string) string {
 		fmt.Fprintf(&b, `{"page":"/%d","count":%d}`+"\n", i, i)
 	}
 	return b.String()
-}
-
-// TestIngest_ParseWindowsPublishInOrder: a body longer than one parse window
-// publishes every record once, in body order, with one received time.
-func TestIngest_ParseWindowsPublishInOrder(t *testing.T) {
-	t.Parallel()
-	pub := &testutil.MockPublisher{}
-	h := newTestIngestHandler(t, testRegistry(t), pub)
-	const n = 10_000 // three default windows
-	w := httptest.NewRecorder()
-	h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "application/x-ndjson", manyClicks(n, 0, ""))))
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	resp := decodeBatchResult(t, w)
-	assert.Equal(t, n, resp.Total)
-	assert.Equal(t, n, resp.Succeeded)
-
-	require.Len(t, pub.Messages, n)
-	received := map[string]bool{}
-	for i, m := range pub.Messages {
-		var evt ingest.EventMessage
-		require.NoError(t, json.Unmarshal(m.Data, &evt))
-		var row []any
-		require.NoError(t, json.Unmarshal(evt.Row, &row))
-		require.Equal(t, fmt.Sprintf("/%d", i+1), row[0], "message %d", i)
-		received[evt.ReceivedTimestamp] = true
-	}
-	assert.Len(t, received, 1, "one request, one received time")
 }
 
 // TestIngest_ParseWindowsRefuseTheWholeBody: a record ClickHouse cannot read

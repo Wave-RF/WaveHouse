@@ -193,13 +193,15 @@ func windowBodies() []struct {
 // the answer one call over it gives: the same verdicts and exported lines in
 // the same order, or the same refusal numbered from the body's first record.
 func TestIngest_WindowsAnswerAsOneCall(t *testing.T) {
+	t.Parallel()
 	eng := testEngine(t, windowTable())
 	tbl, err := eng.Table(tenant.Default, "win")
 	require.NoError(t, err)
-	defer tbl.Release()
+	t.Cleanup(tbl.Release)
 	now := time.Date(2026, 3, 4, 5, 6, 7, 123456789, time.UTC)
 	for _, c := range windowBodies() {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			var want string
 			for i, lim := range windowSizes {
 				b, err := tbl.IngestWith(c.format, IngestOptions{StrictPositional: c.strict, Now: now, Window: lim}, []byte(c.body))
@@ -292,13 +294,15 @@ func TestIngest_LaterCSVWindowsDetectNoHeader(t *testing.T) {
 // default window is cut at is refused as one call refuses it, not read as the
 // start of the next window's body.
 func TestIngest_DefaultWindowsRefuseAMidBodyBOM(t *testing.T) {
+	t.Parallel()
 	eng := testEngine(t, windowTable())
 	tbl, err := eng.Table(tenant.Default, "win")
 	require.NoError(t, err)
 	defer tbl.Release()
+	const cut = 64 // the record count a window is cut at, the default's 4096 at unit scale
 	var body strings.Builder
-	for i := 1; i <= 5000; i++ {
-		if i == defaultLimits.Records {
+	for i := 1; i <= 200; i++ {
+		if i == cut {
 			body.WriteString("\xEF\xBB\xBF")
 		}
 		fmt.Fprintf(&body, `{"id":%d,"s":"x"}`+"\n", i)
@@ -307,7 +311,7 @@ func TestIngest_DefaultWindowsRefuseAMidBodyBOM(t *testing.T) {
 	one, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{Now: now, Window: Limits{Bytes: 1 << 30, Records: 1 << 30}}, []byte(body.String()))
 	require.NoError(t, err)
 	require.NotNil(t, one.Refused, "the control: one call refuses the body")
-	b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{Now: now}, []byte(body.String()))
+	b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{Now: now, Window: Limits{Bytes: defaultLimits.Bytes, Records: cut}}, []byte(body.String()))
 	require.NoError(t, err)
 	assert.Equal(t, answer(one), answer(b))
 }

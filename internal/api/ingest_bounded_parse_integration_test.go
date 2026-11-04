@@ -3,6 +3,8 @@
 package api
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
@@ -60,4 +63,38 @@ func TestIngest_NDJSON_ErrorsTruncated(t *testing.T) {
 	// Failed counts everything; the echoed per-record results are capped.
 	assert.Len(t, resp.Results, maxReportedResults)
 	assert.Empty(t, pub.Messages)
+}
+
+// TestIngest_ParseWindowsPublishInOrder: a body longer than one parse window
+// publishes every record once, in body order, with one received time.
+func TestIngest_ParseWindowsPublishInOrder(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := newTestIngestHandler(t, testRegistry(t), pub)
+	const n = 10_000 // three default windows
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "application/x-ndjson", manyClicks(n, 0, ""))))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, n, resp.Total)
+	assert.Equal(t, n, resp.Succeeded)
+
+	require.Len(t, pub.Messages, n)
+	received := map[string]bool{}
+	for i, m := range pub.Messages {
+		var evt ingest.EventMessage
+		require.NoError(t, json.Unmarshal(m.Data, &evt))
+		var row []any
+		require.NoError(t, json.Unmarshal(evt.Row, &row))
+		require.Equal(t, fmt.Sprintf("/%d", i+1), row[0], "message %d", i)
+		received[evt.ReceivedTimestamp] = true
+	}
+	assert.Len(t, received, 1, "one request, one received time")
+}
+
+// TestIngest_Windows_PublishFailureAtK_DefaultWindows: the unit test's cases
+// at the default 256-record window over 600 records.
+func TestIngest_Windows_PublishFailureAtK_DefaultWindows(t *testing.T) {
+	t.Parallel()
+	runPublishFailureAtK(t, ingestWindow, 600, publishFailureKs{midFirst: 100, midSecond: 400, midLast: 590})
 }
