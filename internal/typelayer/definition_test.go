@@ -235,3 +235,52 @@ func TestIngest_BlockStepOverACutRecord(t *testing.T) {
 		})
 	}
 }
+
+// hmacTable is a table whose s column feeds an HMAC under a key the server
+// masks, as system.columns and create_table_query report it (measured on
+// 26.8.34.13: the key alone becomes '[HIDDEN]', three arguments kept).
+func hmacTable(ddl string, cols ...discovery.Column) *discovery.TableSchema {
+	return &discovery.TableSchema{Name: "hm", DDL: ddl, Columns: append([]discovery.Column{
+		{Name: "s", Type: "String", Position: 1},
+	}, cols...)}
+}
+
+// TestCompileSchema_MaskedColumnIsUnavailable: a DEFAULT whose key the server
+// masks would be computed with the literal '[HIDDEN]', a wrong hash the
+// worker would store, so the table is unavailable instead, with a cause that
+// names the column and not its expression.
+func TestCompileSchema_MaskedColumnIsUnavailable(t *testing.T) {
+	t.Parallel()
+	eng := testEngine(t, eventsTable(), hmacTable("",
+		discovery.Column{Name: "d", Type: "String", Position: 2, DefaultKind: "DEFAULT", DefaultExpression: "hex(HMAC('SHA256', s, '[HIDDEN]'))"}))
+	tbl, err := eng.Table(tenant.Default, "hm")
+	if err == nil {
+		tbl.Release()
+	}
+	var u *Unavailable
+	require.ErrorAs(t, err, &u)
+	assert.Equal(t, "hm", u.Table)
+	assert.Contains(t, u.Cause, `column "d"`)
+	assert.NotContains(t, u.Cause, "HMAC")
+	answers(t, eng, tenant.Default)
+}
+
+// TestCompileSchema_MaskedDefinitionFallsBack: a definition holding a masked
+// value (a CHECK over a key the server hides) is not compiled, so no CHECK is
+// judged with the wrong key; the table is served from its columns. Not
+// t.Parallel: it captures the process-wide default logger.
+func TestCompileSchema_MaskedDefinitionFallsBack(t *testing.T) {
+	logs := logtest.Capture(t, slog.LevelWarn)
+	eng := testEngine(t, hmacTable("CREATE TABLE db.hm (`s` String, `sig` String, CONSTRAINT c CHECK sig = hex(HMAC('SHA256', s, '[HIDDEN]'))) ENGINE = MergeTree ORDER BY s",
+		discovery.Column{Name: "sig", Type: "String", Position: 2}))
+	tbl, err := eng.Table(tenant.Default, "hm")
+	require.NoError(t, err)
+	defer tbl.Release()
+	b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{}, []byte("{\"s\":\"x\",\"sig\":\"A12979808451EB3DFECBD2ECD098F1B174B342EAB7AFF45C613DBECA67C836ED\"}\n"))
+	require.NoError(t, err)
+	assert.Nil(t, b.Refused, "the CHECK is the server's to judge, with its key")
+	assert.Len(t, b.Rows, 1)
+	recs := withMsg(logRecords(t, logs), "chtypes could not compile the table's own definition; compiling its columns on a neutral engine, without its engine, keys, partition, indices, CHECKs or TTL")
+	require.Len(t, recs, 1)
+	assert.Equal(t, "the definition holds a value the server masks as '[HIDDEN]'", recs[0]["cause"])
+}

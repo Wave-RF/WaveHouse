@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"strings"
 
 	"github.com/wave-rf/chtypes/go/v2/chtypes"
 
@@ -123,16 +124,35 @@ func compileStatement(lib *chtypes.Library, srv *chtypes.Server, stmt string) (*
 // settings, so its preview can accept a row the real INSERT refuses; the
 // server still enforces them, and the worker parks such a row on the DLQ.
 func compileSchema(id tenant.ID, lib *chtypes.Library, srv *chtypes.Server, ts *discovery.TableSchema, cols []colDecl) (*compiled, string) {
+	for _, c := range cols {
+		if strings.Contains(c.DefaultExpression, maskedValue) {
+			return nil, fmt.Sprintf("column %q's %s expression holds a value the server masks as %s, which cannot be computed without the secret", c.Name, c.DefaultKind, maskedValue)
+		}
+	}
 	if ts.DDL != "" {
-		c, err := compileStatement(lib, srv, ts.DDL)
-		if err == nil {
-			return c, ""
+		cause := "the definition holds a value the server masks as " + maskedValue
+		if !strings.Contains(ts.DDL, maskedValue) {
+			c, err := compileStatement(lib, srv, ts.DDL)
+			if err == nil {
+				return c, ""
+			}
+			cause = definitionCause(err)
 		}
 		slog.Warn("chtypes could not compile the table's own definition; compiling its columns on a neutral engine, without its engine, keys, partition, indices, CHECKs or TTL",
-			"tenant", id, "table", ts.Name, "cause", definitionCause(err))
+			"tenant", id, "table", ts.Name, "cause", cause)
 	}
 	return compileColumns(lib, srv, cols)
 }
+
+// maskedValue is how the server spells a secret in the definitions it
+// reports (system.tables.create_table_query, system.columns): an HMAC or
+// encryption key, an engine's password. An expression holding it computes
+// with the literal '[HIDDEN]' in the key's place, a wrong value (an HMAC keeps
+// its three arguments), so a column whose expression holds it makes its
+// table unavailable rather than export that value for the worker to store,
+// and a definition holding it (a CHECK over such a key, an S3 password) is
+// not compiled.
+const maskedValue = "'[HIDDEN]'"
 
 // definitionCause is why a table's own definition did not compile, safe to
 // log: an external engine's definition carries its wiring (endpoint, bucket,
