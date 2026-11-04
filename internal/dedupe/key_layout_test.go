@@ -118,17 +118,28 @@ func TestKeyLayout_HashesOnTheEscapedLength(t *testing.T) {
 }
 
 // decodeKey inverts AppendKey. That it exists — every key splits back into
-// the one triple that wrote it — is what makes the layout collision-free.
-func decodeKey(t *testing.T, s string) (tn, table, idPart string) {
-	t.Helper()
-	require.True(t, utf8.ValidString(s), "a key is a valid DynamoDB String")
-	require.NotContains(t, s, "\x00")
+// the one triple that wrote it — is what makes the layout collision-free. It
+// reports what is wrong rather than failing the test itself: it runs for every
+// key of the exhaustive loop below, where testify and t.Helper cost more than
+// the 15 s unit budget allows under -race on a CI runner (#961).
+func decodeKey(s string) (tn, table, idPart string, err error) {
+	if !utf8.ValidString(s) {
+		return "", "", "", fmt.Errorf("%q is not valid UTF-8, so not a DynamoDB String", s)
+	}
+	if strings.Contains(s, "\x00") {
+		return "", "", "", fmt.Errorf("%q contains NUL", s)
+	}
 	parts, err := keyenc.Split(s, '/')
-	require.NoError(t, err)
-	require.Len(t, parts, 3, s)
-	_, err = tenant.Parse(parts[0])
-	require.NoError(t, err)
-	return parts[0], parts[1], parts[2]
+	if err != nil {
+		return "", "", "", err
+	}
+	if len(parts) != 3 {
+		return "", "", "", fmt.Errorf("%q splits into %d parts, not 3", s, len(parts))
+	}
+	if _, err := tenant.Parse(parts[0]); err != nil {
+		return "", "", "", err
+	}
+	return parts[0], parts[1], parts[2], nil
 }
 
 // Triples a separator could confuse — the separator, the escape and hash
@@ -139,12 +150,18 @@ func TestKeyLayout_NoCollisions(t *testing.T) {
 	t.Parallel()
 	tenants := []tenant.ID{"a", "ab", "a_b", "a-b", "acme"}
 	pieces := []string{"", "/", "%", "#", "\x00", "\xff", "a", "b", "a/", "/b", "a/b", "%2F", "a%2Fb", "#a", "acme/a", "é"}
-	seen := map[string]string{}
+	// The loop below checks about 330,000 keys, so it compares plainly and
+	// stores the triple rather than a formatted one (#961).
+	type triple struct {
+		tn        tenant.ID
+		table, id string
+	}
+	seen := make(map[string]triple, 1<<19)
 	check := func(tn tenant.ID, k dedupe.Key) {
 		s := key(tn, k)
-		who := string(tn) + " | " + k.Table + " | " + k.ID
+		who := triple{tn, k.Table, k.ID}
 		if prev, ok := seen[s]; ok && prev != who {
-			t.Fatalf("%q and %q share the key %q", prev, who, s)
+			t.Fatalf("%+v and %+v share the key %q", prev, who, s)
 		}
 		seen[s] = who
 		// So is the partitioned key: the same text split before the id, the
@@ -152,13 +169,16 @@ func TestKeyLayout_NoCollisions(t *testing.T) {
 		pk, sk := dedupe.PartitionedKey(tn, k)
 		if k.ID != "" {
 			cut := strings.LastIndexByte(pk, '/')
-			require.Equal(t, s, pk[:cut+1]+sk)
+			if got := pk[:cut+1] + sk; got != s {
+				t.Fatalf("%+v: partitioned key %q + %q is %q, not %q", who, pk, sk, got, s)
+			}
 		}
-		gotTenant, gotTable, idPart := decodeKey(t, s)
-		assert.Equal(t, string(tn), gotTenant)
-		assert.Equal(t, k.Table, gotTable)
-		if !k.Hashed() {
-			assert.Equal(t, k.ID, idPart)
+		gotTenant, gotTable, idPart, err := decodeKey(s)
+		if err != nil {
+			t.Fatalf("%+v: %v", who, err)
+		}
+		if gotTenant != string(tn) || gotTable != k.Table || (!k.Hashed() && idPart != k.ID) {
+			t.Fatalf("%+v: %q decodes to tenant %q, table %q, id %q", who, s, gotTenant, gotTable, idPart)
 		}
 	}
 	for _, tn := range tenants {
