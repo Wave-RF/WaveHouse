@@ -81,13 +81,16 @@ func trimSpaceBytes(b []byte) []byte {
 // column's index in the wire columns the row was exported with — so no record
 // is decoded for it. idx is -1 when the column is not on the wire at all.
 //
-// The id is a string, the stored value of a column dedupeIDStoresNothing
-// admits (prepareVerdict checks the column against that rule under the
-// settings it reads, so a reload cannot hand this another column's value).
+// The key is the STORED value, not the caller's spelling: `256` into a
+// `UInt8` keys on `0`, and a DateTime keys on ClickHouse's rendering. For the
+// documented case, a string id, the two are identical.
+//
 // "Missing" means "the row carries no value": a `null` cell or an empty
 // string. Keying on a null's spelling would make every null one id (#370).
-// That is the whole account of an id the record did not send, because such a
-// column stores NULL or "" for an omitted, null or unwritable one.
+// Nothing else is missing: a column that stores a value for an id the record
+// did not send (a number's 0, a nil UUID, a DEFAULT) is keyed on it. The
+// schema guidance (a Nullable or String id column with no DEFAULT) keeps that
+// from happening; nothing here checks it.
 func eventIDAt(line []byte, idx int) (string, bool) {
 	if idx < 0 {
 		return "", false

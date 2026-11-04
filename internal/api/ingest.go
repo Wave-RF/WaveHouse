@@ -65,9 +65,8 @@ type IngestHandler struct {
 	Dedup func(store *settings.Store) dedupe.Deduplicator
 	// DedupeSettings resolves the effective dedupe settings for a table of the
 	// request's tenant ((*settings.Store).DedupeFor in production). Called
-	// once per request, to check the id column, and once per record so a
-	// settings reload lands at a record boundary — one record never mixes two
-	// documents' values. Dedup is skipped when nil.
+	// once per record so a settings reload lands at a record boundary — one
+	// record never mixes two documents' values. Dedup is skipped when nil.
 	DedupeSettings func(store *settings.Store, table string) settings.Dedupe
 	// DedupeLease is how long a record's claimed id stays pending while it is
 	// published; 0 means dedupe.DefaultLease.
@@ -226,13 +225,7 @@ type ingestRun struct {
 	store        *settings.Store
 	table, scope string
 	now          time.Time
-	// schema is the table's schema the request was judged under, and
-	// idChecked the dedupe id_field it was checked against (dedupeIDReady;
-	// "" when dedupe was off). A reload can change id_field while the body is
-	// processed, so prepareVerdict checks any other one against schema.
-	schema    *discovery.TableSchema
-	idChecked string
-	batch     typelayer.Batch
+	batch        typelayer.Batch
 	// wire is the column list the rows were exported with (Batch.Columns):
 	// the envelope's Columns, and where the dedupe id sits in a row.
 	wire []string
@@ -362,14 +355,6 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A dedupe id column that stores a value the record never sent would key
-	// dedupe on it, so the table is refused whole, for the same reason.
-	dedupeJudged, abort := h.dedupeIDReady(ctx, store, table, schema)
-	if abort != nil {
-		writeAbort(ctx, w, abort)
-		return
-	}
-
 	// Bound the inbound body (parity with /v1/ops/query). See query.go for
 	// maxRequestBodyBytes.
 	reqCap := int64(maxRequestBodyBytes)
@@ -421,10 +406,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	run := &ingestRun{
 		store: store, table: table, scope: scope, now: now, writable: shape.Columns,
-		checkColumns: checkColumns, checkGuard: guard, schema: schema,
-	}
-	if dedupeJudged.Enabled {
-		run.idChecked = dedupeJudged.IDField
+		checkColumns: checkColumns, checkGuard: guard,
 	}
 	if abort := h.judge(ctx, run, shape, format, body.Bytes(), preds); abort != nil {
 		writeAbort(ctx, w, abort)
@@ -1034,15 +1016,6 @@ func (h *IngestHandler) prepareVerdict(ctx context.Context, run *ingestRun, i in
 	if h.Dedup != nil && h.DedupeSettings != nil {
 		if dd := h.DedupeSettings(run.store, run.table); dd.Enabled {
 			idField := dd.IDField
-			// A reload since the request was checked may have switched dedupe on
-			// or moved id_field to a column the rule refuses. Refusing the request
-			// publishes nothing in the open window and keys nothing.
-			if idField != run.idChecked {
-				if abort := h.dedupeIDColumn(ctx, run.store, run.table, run.schema, idField); abort != nil {
-					return pendingRecord{}, abort
-				}
-				run.idChecked = idField
-			}
 			if id, ok := eventIDAt(verdict.Line, run.idIndex(idField)); ok {
 				rec.key = &dedupe.Key{Table: run.table, ID: id}
 				rec.retention = dd.Retention
@@ -1087,9 +1060,11 @@ func (h *IngestHandler) prepareVerdict(ctx context.Context, run *ingestRun, i in
 }
 
 // idIndex is where idField sits in an exported row, or -1 when the role may
-// not write it: the row then holds the table's value there, not the record's,
-// so it identifies no event. On a column dedupeIDReady admits that value is
-// NULL or "" and reads as missing anyway.
+// not write it: the row then holds the table's value there, not the record's —
+// the same one for every record, unless the column is a Nullable or String
+// with no DEFAULT, where it is NULL or "" and reads as missing anyway — so it
+// identifies no event, and keying on it would make every record after the
+// first a duplicate.
 func (r *ingestRun) idIndex(idField string) int {
 	if r.writable != nil && !slices.Contains(r.writable, idField) {
 		return -1

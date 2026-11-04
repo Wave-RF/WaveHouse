@@ -1,15 +1,9 @@
 package api
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"slices"
-	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,73 +14,13 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
-	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
 )
 
-func TestDedupeIDStoresNothing(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		col  discovery.Column
-		want bool
-	}{
-		{"String", discovery.Column{Type: "String"}, true},
-		{"Nullable(String)", discovery.Column{Type: "Nullable(String)"}, true},
-		{"LowCardinality(String)", discovery.Column{Type: "LowCardinality(String)"}, true},
-		{"LowCardinality(Nullable(String))", discovery.Column{Type: "LowCardinality(Nullable(String))"}, true},
-
-		// An empty string sent for these is stored as the type's zero value, not
-		// NULL, so the first one would key every later one as a duplicate.
-		{"Nullable(UInt64)", discovery.Column{Type: "Nullable(UInt64)"}, false},
-		{"Nullable(Int32)", discovery.Column{Type: "Nullable(Int32)"}, false},
-		{"Nullable(Int8)", discovery.Column{Type: "Nullable(Int8)"}, false},
-		{"Nullable(Decimal)", discovery.Column{Type: "Nullable(Decimal(10, 2))"}, false},
-		{"Nullable(FixedString(4))", discovery.Column{Type: "Nullable(FixedString(4))"}, false},
-		{"Nullable(UUID)", discovery.Column{Type: "Nullable(UUID)"}, false},
-		{"Nullable(Date)", discovery.Column{Type: "Nullable(Date)"}, false},
-		{"Nullable(Float64)", discovery.Column{Type: "Nullable(Float64)"}, false},
-		{"Nullable(IPv4)", discovery.Column{Type: "Nullable(IPv4)"}, false},
-		{"Nullable(Enum8)", discovery.Column{Type: "Nullable(Enum8('a' = 0, 'b' = 1))"}, false},
-		{"Nullable(Bool)", discovery.Column{Type: "Nullable(Bool)"}, false},
-		{"LowCardinality(Nullable(UInt64))", discovery.Column{Type: "LowCardinality(Nullable(UInt64))"}, false},
-
-		{"UInt64", discovery.Column{Type: "UInt64"}, false},
-		{"Int32", discovery.Column{Type: "Int32"}, false},
-		{"UUID", discovery.Column{Type: "UUID"}, false},
-		{"FixedString", discovery.Column{Type: "FixedString(16)"}, false},
-		{"IPv4", discovery.Column{Type: "IPv4"}, false},
-		{"Enum8", discovery.Column{Type: "Enum8('a' = 0, 'b' = 1)"}, false},
-		{"Date", discovery.Column{Type: "Date"}, false},
-		{"DateTime", discovery.Column{Type: "DateTime"}, false},
-		{"LowCardinality(UInt64)", discovery.Column{Type: "LowCardinality(UInt64)"}, false},
-		{"LowCardinality(FixedString)", discovery.Column{Type: "LowCardinality(FixedString(4))"}, false},
-		{"Array(String)", discovery.Column{Type: "Array(String)"}, false},
-		{"Array(Nullable(String))", discovery.Column{Type: "Array(Nullable(String))"}, false},
-		{"Nullable(LowCardinality(String))", discovery.Column{Type: "Nullable(LowCardinality(String))"}, false},
-		{"unbalanced LowCardinality", discovery.Column{Type: "LowCardinality(String"}, false},
-		{"unbalanced Nullable", discovery.Column{Type: "Nullable(String"}, false},
-		{"empty type", discovery.Column{}, false},
-
-		{"String DEFAULT", discovery.Column{Type: "String", HasDefault: true, DefaultKind: "DEFAULT", DefaultExpression: "'x'"}, false},
-		{"String DEFAULT '' (flag only)", discovery.Column{Type: "String", HasDefault: true, DefaultExpression: "''"}, false},
-		{"UUID DEFAULT generator", discovery.Column{Type: "UUID", HasDefault: true, DefaultKind: "DEFAULT", DefaultExpression: "generateUUIDv4()"}, false},
-		{"Nullable(String) DEFAULT", discovery.Column{Type: "Nullable(String)", HasDefault: true, DefaultKind: "DEFAULT", DefaultExpression: "NULL"}, false},
-		{"Nullable(String) MATERIALIZED", discovery.Column{Type: "Nullable(String)", HasDefault: true, DefaultKind: "MATERIALIZED", DefaultExpression: "toString(page)"}, false},
-		{"String ALIAS", discovery.Column{Type: "String", HasDefault: true, DefaultKind: "ALIAS", DefaultExpression: "page"}, false},
-		{"String EPHEMERAL", discovery.Column{Type: "String", HasDefault: true, DefaultKind: "EPHEMERAL", DefaultExpression: "''"}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, dedupeIDStoresNothing(tt.col))
-		})
-	}
-}
-
 // dedupeIDTables holds one table per id column shape, each with event_id and a
-// page to tell its records apart: the ids_* ones are the four forms the rule
-// admits, the refused_* ones do not conform.
+// page to tell its records apart. The ids_* tables follow the documented
+// recommendation (Nullable(T) or String, no DEFAULT); ids_uint and ids_default
+// ignore it.
 func dedupeIDTables(t testing.TB) *discovery.SchemaRegistry {
 	page := discovery.Column{Name: "page", Type: "String"}
 	table := func(name string, id discovery.Column) *discovery.TableSchema {
@@ -96,19 +30,11 @@ func dedupeIDTables(t testing.TB) *discovery.SchemaRegistry {
 	return testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
 		table("ids_str", discovery.Column{Type: "String"}),
 		table("ids_nstr", discovery.Column{Type: "Nullable(String)"}),
-		table("ids_lcstr", discovery.Column{Type: "LowCardinality(String)"}),
-		table("ids_lcnstr", discovery.Column{Type: "LowCardinality(Nullable(String))"}),
-		table("refused_uint", discovery.Column{Type: "UInt64"}),
-		table("refused_nuint", discovery.Column{Type: "Nullable(UInt64)"}),
-		table("refused_nuuid", discovery.Column{Type: "Nullable(UUID)"}),
-		table("refused_nfixed", discovery.Column{Type: "Nullable(FixedString(4))"}),
-		table("refused_default", discovery.Column{Type: "String", HasDefault: true, DefaultKind: "DEFAULT", DefaultExpression: "'x'"}),
-		table("refused_generated", discovery.Column{Type: "UUID", HasDefault: true, DefaultKind: "DEFAULT", DefaultExpression: "generateUUIDv4()"}),
+		table("ids_nuint", discovery.Column{Type: "Nullable(UInt64)"}),
+		table("ids_uint", discovery.Column{Type: "UInt64"}),
+		table("ids_default", discovery.Column{Type: "String", HasDefault: true, DefaultKind: "DEFAULT", DefaultExpression: "'unset'"}),
 	})
 }
-
-// dedupeIDStringTables are the tables of dedupeIDTables a dedupe id may sit in.
-var dedupeIDStringTables = []string{"ids_str", "ids_nstr", "ids_lcstr", "ids_lcnstr"}
 
 // dedupeIDHandler is a handler over dedupeIDTables that dedupes every table
 // on event_id.
@@ -130,20 +56,38 @@ func handle(h *IngestHandler, r *http.Request) *httptest.ResponseRecorder {
 	return w
 }
 
-// TestIngest_DedupeIDNotSentIsMissing: on a string id column, an omitted, null
-// or empty id is missing, so it is published un-deduped (never keyed on a
-// stored value, which would make every later one a duplicate) or refused under
-// require_id, while an id the record does send dedupes across requests.
+// dedupeIDRecommended are the id columns the docs recommend: an id the record
+// does not send is stored as NULL (or "" for a String) and so is missing. id is
+// a real id as the JSON the producer sends and key the stored value it is
+// keyed on; emptyString says whether an empty string also reads as missing (a
+// Nullable number stores it as 0).
+var dedupeIDRecommended = []struct {
+	table, id, key string
+	emptyString    bool
+}{
+	{"ids_str", `"evt-1"`, "evt-1", true},
+	{"ids_nstr", `"evt-1"`, "evt-1", true},
+	{"ids_nuint", `7`, "7", false},
+}
+
+// TestIngest_DedupeIDNotSentIsMissing: on the recommended id columns, an
+// omitted or null id is missing, so it is published un-deduped (never keyed on
+// a stored value, which would make every later one a duplicate) or refused
+// under require_id, while an id the record does send dedupes across requests,
+// a numeric one included.
 func TestIngest_DedupeIDNotSentIsMissing(t *testing.T) {
 	t.Parallel()
-	for _, table := range dedupeIDStringTables {
+	for _, c := range dedupeIDRecommended {
 		for _, requireID := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/require_id=%t", table, requireID), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/require_id=%t", c.table, requireID), func(t *testing.T) {
 				t.Parallel()
 				h, pub, dd := dedupeIDHandler(t, requireID)
 
-				lines := []string{`{"page":"/a"}`, `{"page":"/b","event_id":null}`, `{"page":"/c","event_id":""}`, `{"page":"/c2","event_id":""}`}
-				w := handle(h, ndjsonRequest(t, table, lines...))
+				lines := []string{`{"page":"/a"}`, `{"page":"/b","event_id":null}`}
+				if c.emptyString {
+					lines = append(lines, `{"page":"/c","event_id":""}`, `{"page":"/c2","event_id":""}`)
+				}
+				w := handle(h, ndjsonRequest(t, c.table, lines...))
 				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 				resp := decodeBatchResult(t, w)
 				if requireID {
@@ -157,15 +101,16 @@ func TestIngest_DedupeIDNotSentIsMissing(t *testing.T) {
 					assert.Zero(t, resp.Duplicates)
 					assert.Len(t, pub.Messages, len(lines))
 				}
-				assert.False(t, dd.Committed(dedupe.Key{Table: table, ID: ""}), "the empty id is never keyed")
+				assert.False(t, dd.Committed(dedupe.Key{Table: c.table, ID: ""}), "a missing id is never keyed")
+				assert.False(t, dd.Committed(dedupe.Key{Table: c.table, ID: "0"}), "a missing id is never keyed")
 
 				before := len(pub.Messages)
 				for i, wantDuplicates := range []int{0, 1} {
-					w = handle(h, ndjsonRequest(t, table, `{"page":"/d","event_id":"evt-1"}`))
+					w = handle(h, ndjsonRequest(t, c.table, fmt.Sprintf(`{"page":"/d","event_id":%s}`, c.id)))
 					require.Equal(t, http.StatusOK, w.Code, "send %d: %s", i+1, w.Body.String())
 					assert.Equal(t, wantDuplicates, decodeBatchResult(t, w).Duplicates, "send %d", i+1)
 				}
-				assert.True(t, dd.Committed(dedupe.Key{Table: table, ID: "evt-1"}))
+				assert.True(t, dd.Committed(dedupe.Key{Table: c.table, ID: c.key}))
 				assert.Len(t, pub.Messages, before+1, "the repeated id was published once")
 			})
 		}
@@ -176,24 +121,29 @@ func TestIngest_DedupeIDNotSentIsMissing(t *testing.T) {
 // single-object response shape.
 func TestIngest_DedupeIDNotSentIsMissingSingleObject(t *testing.T) {
 	t.Parallel()
-	for _, table := range dedupeIDStringTables {
+	for _, c := range dedupeIDRecommended {
 		for _, requireID := range []bool{false, true} {
-			for _, body := range []string{`{"page":"/a"}`, `{"page":"/a","event_id":null}`, `{"page":"/a","event_id":""}`} {
-				t.Run(fmt.Sprintf("%s/require_id=%t/%s", table, requireID, body), func(t *testing.T) {
-					t.Parallel()
-					h, pub, _ := dedupeIDHandler(t, requireID)
-					w := handle(h, rawIngestRequest(t, table, "application/json", body))
+			t.Run(fmt.Sprintf("%s/require_id=%t", c.table, requireID), func(t *testing.T) {
+				t.Parallel()
+				h, pub, _ := dedupeIDHandler(t, requireID)
+				bodies := []string{`{"page":"/a"}`, `{"page":"/a","event_id":null}`}
+				if c.emptyString {
+					bodies = append(bodies, `{"page":"/a","event_id":""}`)
+				}
+				for _, body := range bodies {
+					before := len(pub.Messages)
+					w := handle(h, rawIngestRequest(t, c.table, "application/json", body))
 					if requireID {
-						require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
-						assert.Contains(t, w.Body.String(), "missing dedupe id field")
-						assert.Empty(t, pub.Messages)
-						return
+						require.Equal(t, http.StatusBadRequest, w.Code, "%s: %s", body, w.Body.String())
+						assert.Contains(t, w.Body.String(), "missing dedupe id field", body)
+						assert.Len(t, pub.Messages, before, body)
+						continue
 					}
-					require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-					assert.JSONEq(t, `{"ok":true}`, w.Body.String())
-					assert.Len(t, pub.Messages, 1)
-				})
-			}
+					require.Equal(t, http.StatusOK, w.Code, "%s: %s", body, w.Body.String())
+					assert.JSONEq(t, `{"ok":true}`, w.Body.String(), body)
+					assert.Len(t, pub.Messages, before+1, body)
+				}
+			})
 		}
 	}
 }
@@ -233,204 +183,40 @@ func TestIngest_DedupeIDTheRoleMayNotWriteIsMissing(t *testing.T) {
 	}
 }
 
-// TestIngest_DedupeIDColumnThatStoresAValueIsRefused: a table whose dedupe id
-// column is not a string, or has a DEFAULT, answers every ingest with a 500
-// that says why and is not retryable, publishes nothing and never consults the
-// dedupe store. That includes a Nullable number, UUID or FixedString, which
-// store a zero value for an empty id rather than NULL.
-func TestIngest_DedupeIDColumnThatStoresAValueIsRefused(t *testing.T) {
+// TestIngest_DedupeIDColumnThatStoresAValueIsKeyedOnIt pins the documented
+// caveat, not a behavior to rely on: WaveHouse does not check the id column, so
+// on one that ignores the recommendation (Nullable, or String, with no
+// DEFAULT) an id the record did not send is stored as a value, and that value
+// is the key. The first such record is published and the rest are duplicates
+// of it, require_id included, since the id is not missing.
+func TestIngest_DedupeIDColumnThatStoresAValueIsKeyedOnIt(t *testing.T) {
 	t.Parallel()
-	const want = `dedupe id column "event_id" must be String or Nullable(String) with no DEFAULT, MATERIALIZED, ALIAS or EPHEMERAL expression`
-	bodies := []struct{ name, contentType, body string }{
-		{"id sent", "application/json", `{"page":"/a","event_id":%s}`},
-		{"id omitted", "application/json", `{"page":"/a"}`},
-		{"ndjson", "application/x-ndjson", `{"page":"/a"}` + "\n" + `{"page":"/b"}` + "\n"},
+	tests := []struct {
+		name, table, first, second, key string
+	}{
+		{"omitted id in a non-Nullable UInt64 stores 0", "ids_uint", `{"page":"/a"}`, `{"page":"/b"}`, "0"},
+		{"null id in a non-Nullable UInt64 stores 0", "ids_uint", `{"page":"/a","event_id":null}`, `{"page":"/b"}`, "0"},
+		{"empty string into a Nullable number stores 0", "ids_nuint", `{"page":"/a","event_id":""}`, `{"page":"/b","event_id":""}`, "0"},
+		{"omitted id in a column with a DEFAULT stores it", "ids_default", `{"page":"/a"}`, `{"page":"/b"}`, "unset"},
 	}
-	sent := map[string]string{
-		"refused_uint": "7", "refused_nuint": "7", "refused_nfixed": `"abcd"`, "refused_default": `"e1"`,
-		"refused_nuuid":     `"61f0c404-5cb3-11e7-907b-a6006ad3dba0"`,
-		"refused_generated": `"61f0c404-5cb3-11e7-907b-a6006ad3dba0"`,
-	}
-	for _, table := range []string{"refused_uint", "refused_nuint", "refused_nuuid", "refused_nfixed", "refused_default", "refused_generated"} {
+	for _, tt := range tests {
 		for _, requireID := range []bool{false, true} {
-			for _, b := range bodies {
-				t.Run(fmt.Sprintf("%s/require_id=%t/%s", table, requireID, b.name), func(t *testing.T) {
-					t.Parallel()
-					h, pub, dd := dedupeIDHandler(t, requireID)
-					dd.Err = errors.New("the dedupe store must not be consulted")
-					body := b.body
-					if b.name == "id sent" {
-						body = fmt.Sprintf(body, sent[table])
-					}
+			t.Run(fmt.Sprintf("%s/require_id=%t", tt.name, requireID), func(t *testing.T) {
+				t.Parallel()
+				h, pub, dd := dedupeIDHandler(t, requireID)
 
-					w := handle(h, rawIngestRequest(t, table, b.contentType, body))
-
-					require.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
-					assert.Empty(t, w.Header().Get("Retry-After"))
-					var resp struct {
-						Error     string `json:"error"`
-						Retryable *bool  `json:"retryable"`
-					}
-					require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-					assert.Equal(t, want, resp.Error)
-					require.NotNil(t, resp.Retryable)
-					assert.False(t, *resp.Retryable)
-					assert.Empty(t, pub.Messages)
-				})
-			}
-		}
-	}
-}
-
-// TestIngest_DedupeIDRefusalIsLoggedOnce: the refusal stands until an operator
-// changes the settings or the table, so one line a minute says so, not one per
-// request.
-func TestIngest_DedupeIDRefusalIsLoggedOnce(t *testing.T) {
-	buf := logtest.Capture(t, slog.LevelError)
-	h, _, _ := dedupeIDHandler(t, false)
-	for range 3 {
-		w := handle(h, rawIngestRequest(t, "refused_uint", "application/json", `{"page":"/a"}`))
-		require.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
-	}
-	assert.Equal(t, 1, strings.Count(buf.String(), "the dedupe id column stores a value the record did not send"), buf.String())
-	assert.Contains(t, buf.String(), `"id_field":"event_id"`)
-	assert.Contains(t, buf.String(), `"type":"UInt64"`)
-}
-
-// TestIngest_DedupeIDRuleAppliesOnlyToTheIDColumnOfADedupingTable: dedupe off,
-// or on with another column as the id, leaves a UInt64 event_id an ordinary
-// column, and an id_field naming no column is the per-record missing-id path,
-// not a refusal.
-func TestIngest_DedupeIDRuleAppliesOnlyToTheIDColumnOfADedupingTable(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		dd   settings.Dedupe
-	}{
-		{"dedupe off", settings.Dedupe{IDField: "event_id", RequireID: true}},
-		{"another column is the id", settings.Dedupe{Enabled: true, IDField: "page"}},
-		{"id_field names no column", settings.Dedupe{Enabled: true, IDField: "nope"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			h, pub, _ := dedupeIDHandler(t, false)
-			h.DedupeSettings = func(*settings.Store, string) settings.Dedupe { return tt.dd }
-
-			w := handle(h, rawIngestRequest(t, "refused_uint", "application/json", `{"page":"/a","event_id":5}`))
-
-			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-			assert.Len(t, pub.Messages, 1)
-		})
-	}
-}
-
-// TestIngest_DedupeIDReloadMidRequest: dedupeIDReady judges the settings read
-// before the body, but a reload can land while the body is processed. The
-// settings read for each record are checked against the same rule, so a switch
-// to a column that could store a value the record never sent, or a switch of
-// dedupe on with one, refuses the request instead of keying on it. Nothing in
-// the open window is published and nothing is keyed.
-func TestIngest_DedupeIDReloadMidRequest(t *testing.T) {
-	t.Parallel()
-	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{{Name: "reloads", Columns: []discovery.Column{
-		{Name: "event_id", Type: "String"},
-		{Name: "alt_id", Type: "Nullable(String)"},
-		{Name: "seq", Type: "UInt64"},
-		{Name: "page", Type: "String"},
-	}}})
-	const refused = `dedupe id column "seq" must be String or Nullable(String) with no DEFAULT, MATERIALIZED, ALIAS or EPHEMERAL expression`
-	off := settings.Dedupe{}
-	on := func(field string) settings.Dedupe { return settings.Dedupe{Enabled: true, IDField: field} }
-	lines := []string{
-		`{"page":"/a","event_id":"a","alt_id":"x","seq":7}`,
-		`{"page":"/b","event_id":"b","alt_id":"y","seq":8}`,
-		`{"page":"/c","event_id":"c","alt_id":"z","seq":9}`,
-	}
-	tests := []struct {
-		name string
-		// reads is what each read of the settings returns, in order: the
-		// request's check first, then one per record; the last repeats.
-		reads         []settings.Dedupe
-		lines         []string
-		window        int
-		wantRefused   bool
-		wantPublished int
-		wantKeyed     []string
-	}{
-		{
-			name:  "id_field moves to a column the rule refuses",
-			reads: []settings.Dedupe{on("event_id"), on("event_id"), on("seq")}, lines: lines,
-			wantRefused: true,
-		},
-		{
-			name:  "dedupe switched on with a column the rule refuses",
-			reads: []settings.Dedupe{off, off, on("seq")}, lines: lines,
-			wantRefused: true,
-		},
-		{
-			name:  "a single object, dedupe switched on with a column the rule refuses",
-			reads: []settings.Dedupe{off, on("seq")}, lines: lines[:1],
-			wantRefused: true,
-		},
-		{
-			name:  "windows already published stand",
-			reads: []settings.Dedupe{on("event_id"), on("event_id"), on("seq")}, lines: lines, window: 1,
-			wantRefused: true, wantPublished: 1, wantKeyed: []string{"a"},
-		},
-		{
-			name:  "dedupe switched on with a string column",
-			reads: []settings.Dedupe{off, off, on("event_id")}, lines: lines,
-			wantPublished: 3, wantKeyed: []string{"b", "c"},
-		},
-		{
-			name:  "id_field moves to another string column",
-			reads: []settings.Dedupe{on("event_id"), on("event_id"), on("alt_id")}, lines: lines,
-			wantPublished: 3, wantKeyed: []string{"a", "y", "z"},
-		},
-		{
-			name:  "id_field moves to a column the table does not have",
-			reads: []settings.Dedupe{on("event_id"), on("event_id"), on("nope")}, lines: lines,
-			wantPublished: 3, wantKeyed: []string{"a"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			pub := &testutil.MockPublisher{}
-			dd := testutil.NewMockDeduplicator()
-			h := newTestIngestHandler(t, reg, pub)
-			h.Dedup = staticDedup(dd)
-			h.window = tt.window
-			var reads atomic.Int32
-			h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
-				return tt.reads[min(int(reads.Add(1))-1, len(tt.reads)-1)]
-			}
-
-			req := ndjsonRequest(t, "reloads", tt.lines...)
-			if len(tt.lines) == 1 {
-				req = rawIngestRequest(t, "reloads", "application/json", tt.lines[0])
-			}
-			w := handle(h, req)
-
-			if tt.wantRefused {
-				require.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
-				var resp struct {
-					Error     string `json:"error"`
-					Retryable *bool  `json:"retryable"`
-				}
-				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-				assert.Equal(t, refused, resp.Error)
-				require.NotNil(t, resp.Retryable)
-				assert.False(t, *resp.Retryable)
-				assert.Empty(t, w.Header().Get("Retry-After"))
-			} else {
+				w := handle(h, rawIngestRequest(t, tt.table, "application/json", tt.first))
 				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-			}
-			assert.Len(t, pub.Messages, tt.wantPublished)
-			for _, id := range []string{"a", "b", "c", "x", "y", "z", "7", "8", "9"} {
-				assert.Equal(t, slices.Contains(tt.wantKeyed, id), dd.Committed(dedupe.Key{Table: "reloads", ID: id}), "id %q", id)
-			}
-		})
+				assert.Len(t, pub.Messages, 1)
+				assert.True(t, dd.Committed(dedupe.Key{Table: tt.table, ID: tt.key}), "the stored value is the key")
+
+				w = handle(h, ndjsonRequest(t, tt.table, tt.second))
+				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+				resp := decodeBatchResult(t, w)
+				assert.Equal(t, 1, resp.Duplicates, "the second id-less record is answered as a duplicate")
+				assert.Zero(t, resp.Failed)
+				assert.Len(t, pub.Messages, 1, "and not published")
+			})
+		}
 	}
 }
