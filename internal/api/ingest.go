@@ -1347,8 +1347,9 @@ func clientGone(ctx context.Context) bool {
 	return errors.Is(ctx.Err(), context.Canceled)
 }
 
-// clientClosedAbort is the abort for a request its client abandoned while a
-// dedupe reserve or a publish was in flight (#947).
+// clientClosedAbort is the abort for a request its client abandoned while its
+// body waited for a parse slot or between windows, or while a dedupe reserve
+// or a publish was in flight (#947).
 func clientClosedAbort() *requestAbort {
 	return &requestAbort{Status: statusClientClosedRequest, Message: "client closed request", Result: resultRecordsCanceled}
 }

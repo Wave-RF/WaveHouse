@@ -594,8 +594,9 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 }
 
 // logLibrary records, once each time a tenant's library or its server's
-// version changes, which artifact answers for the tenant's server. A server on another patch of the
-// line is answered by the line's artifact, and patches can differ.
+// version changes, which artifact answers for the tenant's server. A server
+// on another patch of the line is answered by the line's artifact, and
+// patches can differ.
 func logLibrary(id tenant.ID, serverVersion string, lib *chtypes.Library) {
 	if res := lib.Resolved(); res != nil {
 		if _, seen := warnedLibs.LoadOrStore(lib, true); !seen {
