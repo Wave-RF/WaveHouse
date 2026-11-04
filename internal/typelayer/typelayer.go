@@ -525,12 +525,12 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 		sig := signature(ts, tz)
 		if !rebuild {
 			if old, exists := current[ts.Name]; exists && old.answers(sig) {
-				continue // same columns, zone and library: the handle still answers
+				continue // same columns, definition, zone and library: the handle still answers
 			}
 		}
 		p := pending{ts: ts, sig: sig}
 		decl := declsOf(ts.Columns)
-		p.c, p.cause = compileColumns(lib, srv, decl)
+		p.c, p.cause = compileSchema(s.id, lib, srv, ts, decl)
 		if p.cause == "" {
 			p.wire = wireColumns(p.c.desc)
 			p.inputs = inputColumns(lib, srv, decl, p.wire)
@@ -696,7 +696,8 @@ func (t *Table) close(cause string) {
 	c.close()
 }
 
-// signature is the column shape and zone a handle was compiled for. An
+// signature is the column shape, definition and zone a handle was compiled
+// for: a key, partition or TTL change recompiles as a column change does. An
 // unchanged signature keeps the handle and the generation, so a refresh that
 // discovers nothing new costs no compiles and invalidates no cached filter; a
 // zone change is a new server and a new generation, so no filter built under
@@ -708,6 +709,8 @@ func signature(ts *discovery.TableSchema, tz string) string {
 			c.Position, c.Name, c.Type, c.DefaultKind, c.DefaultExpression)
 	}
 	b.WriteString(tz)
+	b.WriteString("\x1e")
+	b.WriteString(ts.DDL)
 	return b.String()
 }
 
@@ -833,7 +836,7 @@ func readBy(lib *chtypes.Library, srv *chtypes.Server, cols []colDecl, name stri
 	if err != nil {
 		return true
 	}
-	s, err := lib.CompileTable(stmt, chtypes.OnServer(srv), chtypes.WithSettings(compileSettings))
+	s, err := lib.CompileTable(stmt, chtypes.OnServer(srv), chtypes.WithSettings(probeSettings))
 	if err != nil {
 		return true
 	}

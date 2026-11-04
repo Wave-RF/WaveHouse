@@ -10,12 +10,10 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 )
 
-// neutralEngine is the engine every CREATE TABLE compiled here declares: a
-// plain MergeTree with an empty sorting key, so no merge or TTL drops a row.
-// The verdicts this package asks for are the column types' and expressions',
-// never the server table's engine. chtypes declines Memory ("engine not
-// modelled"), and a Replicated engine that reads the server's macros, which
-// no server profile here describes.
+// neutralEngine is the engine a table compiles on when chtypes declines its
+// own definition (compileSchema): a plain MergeTree with an empty sorting key,
+// so no merge or TTL drops a row. chtypes models no Distributed, S3 or Buffer
+// engine and no view, and those tables are served from their columns on it.
 const neutralEngine = "MergeTree ORDER BY tuple()"
 
 // compiledTableName is the name every compiled table takes. Nothing reads it.

@@ -465,18 +465,19 @@ func gatedTable() *discovery.TableSchema {
 			{Name: "c", Type: "LowCardinality(UInt64)", Position: 1},
 			{Name: "fs", Type: "FixedString(300)", Position: 2},
 			{Name: "v", Type: "Variant(UInt32, Int64)", Position: 3},
+			{Name: "nt", Type: "Nullable(Tuple(a UInt8))", Position: 4},
 		},
 	}
 }
 
-// TestIngest_TypeGatedColumnsInsertAndFilter: the compile profile carries the
-// type gates, so a table with a LowCardinality(UInt64), a FixedString wider
-// than 256 or a Variant of similar types accepts its records and answers its
-// filters. The control compiles the same declarations without the gates: the
-// CREATE is declined naming the gate (chtypes answers as a stock server's
-// CREATE under the declared settings), or, on earlier builds, every record is
-// refused (455 and 44), which is what this table got on every call before. The
-// v1 26.8 artifact accepts FixedString(300) ungated; its gate stays, harmless.
+// TestIngest_TypeGatedColumnsInsertAndFilter: a table is compiled as the
+// server loads one it holds (PostureLoad), so a LowCardinality(UInt64), a
+// FixedString wider than 256, a Variant of similar types or a
+// Nullable(Tuple(...)) accepts its records and answers its filters with no
+// gate set. The control compiles the same declarations as a CREATE with no
+// gates: it is declined naming the gate, or, on earlier builds, every record is
+// refused (455 and 44), which is what such a table got before. The v1 26.8
+// artifact accepts FixedString(300) as a CREATE too, so it has no control.
 func TestIngest_TypeGatedColumnsInsertAndFilter(t *testing.T) {
 	eng := testEngine(t, gatedTable())
 	tbl, err := eng.Table(tenant.Default, "gated")
@@ -489,6 +490,14 @@ func TestIngest_TypeGatedColumnsInsertAndFilter(t *testing.T) {
 	require.Len(t, batch.Rows, 2)
 	for i, r := range batch.Rows {
 		assert.True(t, r.Accepted, "record %d: %s", i, r.Message)
+	}
+
+	nullable := []byte(`{"c":1,"fs":"x","v":1,"nt":null}` + "\n" + `{"c":1,"fs":"x","v":1,"nt":{"a":3}}` + "\n")
+	batch, err = tbl.Ingest(FormatJSONEachRow, nullable)
+	require.NoError(t, err)
+	require.Len(t, batch.Rows, 2)
+	for i, r := range batch.Rows {
+		assert.True(t, r.Accepted, "Nullable(Tuple) record %d: %s", i, r.Message)
 	}
 
 	isFive := Predicate{Column: "c", Op: "=", Values: []string{"5"}}

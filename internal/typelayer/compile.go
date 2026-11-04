@@ -3,8 +3,13 @@ package typelayer
 import (
 	"errors"
 	"fmt"
+	"log/slog"
+	"maps"
 
 	"github.com/wave-rf/chtypes/go/v2/chtypes"
+
+	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // compileSettings is the fixed parsing profile every table handle is compiled
@@ -14,15 +19,15 @@ import (
 // (input_format_allow_errors_ratio, _num) stays off, as on a default INSERT: the
 // first record the reader cannot read refuses the body (see Ingest).
 //
-// The type gates admit the column types ClickHouse refuses to create by
-// default. Every table compiled here already exists on the server, so its
-// CREATE passed these gates there; without them chtypes refuses every record
-// of, say, a LowCardinality(UInt64) table with code 455, which the server
-// would insert. A gate name the loaded line does not know fails the compile
-// with code 115 (allow_experimental_qbit_type did on 25.8, a line chtypes
-// does not publish), so the list holds only names measured accepted on all
-// five published chtypes lines (26.3.60.2, 26.7.19.5, 26.8.34.13, 26.9.25.15
-// and 26.10.2.103, build 20261104.155011; 26.7 from 20261021.130847).
+// No type gate is set: every table compiled here already exists on the
+// server, so compileTable compiles it under PostureLoad, as a server loads a
+// table it holds, where CREATE's checks, the allow_experimental_* and
+// allow_suspicious_* gates among them, do not apply (spec/abi-v2
+// input:schema_options). A fixed gate list could never be complete: a
+// Nullable(Tuple(...)) column, which needs a gate no list here held, kept its
+// table unavailable for good. The statement is the table's own definition
+// where chtypes models it, else its columns over a neutral engine
+// (compileSchema).
 // flatten_nested=0 compiles a Nested column the way system.columns reported
 // it: a table created with flatten_nested=0 arrives as one `n Nested(...)`
 // column, and the default would split it into `n.a`, `n.b` Arrays the server
@@ -35,18 +40,36 @@ import (
 var compileSettings = map[string]string{
 	"input_format_skip_unknown_fields": "0",
 	"flatten_nested":                   "0",
-
-	"allow_suspicious_low_cardinality_types": "1",
-	"allow_suspicious_fixed_string_types":    "1",
-	"allow_suspicious_variant_types":         "1",
-	"allow_experimental_json_type":           "1",
-	"allow_experimental_variant_type":        "1",
-	"allow_experimental_dynamic_type":        "1",
-	"allow_experimental_time_time64_type":    "1",
-	"allow_experimental_bfloat16_type":       "1",
-	"allow_experimental_object_type":         "1",
-	"allow_experimental_nlp_functions":       "1",
 }
+
+// probeSettings is compileSettings plus the type gates, for readBy's probe,
+// which must compile as a CREATE: only a CREATE refuses an expression over a
+// column the statement lacks, and the load posture admits it. A type no gate
+// here admits refuses the probe, which readBy counts as a read: such a
+// table's EPHEMERAL column is unwritable when any other expression could read
+// it, and writable only where nothing reads it (a DEFAULT probe refused over a
+// gate, with no MATERIALIZED, ALIAS or EPHEMERAL expression), which is
+// harmless since an EPHEMERAL value is never stored. A
+// gate name the loaded line does not know fails the compile with code 115, so
+// the list holds only names measured accepted on all five published chtypes
+// lines (26.3.60.2, 26.7.19.5, 26.8.34.13, 26.9.25.15 and 26.10.2.103, build
+// 20261104.155011; 26.7 from 20261021.130847).
+var probeSettings = func() map[string]string {
+	m := map[string]string{
+		"allow_suspicious_low_cardinality_types": "1",
+		"allow_suspicious_fixed_string_types":    "1",
+		"allow_suspicious_variant_types":         "1",
+		"allow_experimental_json_type":           "1",
+		"allow_experimental_variant_type":        "1",
+		"allow_experimental_dynamic_type":        "1",
+		"allow_experimental_time_time64_type":    "1",
+		"allow_experimental_bfloat16_type":       "1",
+		"allow_experimental_object_type":         "1",
+		"allow_experimental_nlp_functions":       "1",
+	}
+	maps.Copy(m, compileSettings)
+	return m
+}()
 
 // compiled is one table shape's handle: a schema every goroutine shares, the
 // filters compiled over it, and its columns as the compiler declared them.
@@ -63,16 +86,64 @@ type compiled struct {
 // compileTable compiles stmt on srv and reads its columns back. A non-empty
 // second return is the cause.
 func compileTable(lib *chtypes.Library, srv *chtypes.Server, stmt string) (*compiled, string) {
-	s, err := lib.CompileTable(stmt, chtypes.OnServer(srv), chtypes.WithSettings(compileSettings))
+	c, err := compileStatement(lib, srv, stmt)
 	if err != nil {
 		return nil, describeCompileError(err)
+	}
+	return c, ""
+}
+
+// compileStatement is compileTable with the library's error as it came.
+func compileStatement(lib *chtypes.Library, srv *chtypes.Server, stmt string) (*compiled, error) {
+	s, err := lib.CompileTable(stmt, chtypes.OnServer(srv), chtypes.WithSettings(compileSettings),
+		chtypes.WithPosture(chtypes.PostureLoad))
+	if err != nil {
+		return nil, err
 	}
 	d, err := s.Describe()
 	if err != nil {
 		_ = s.Close()
-		return nil, "cannot describe the compiled table: " + err.Error()
+		return nil, fmt.Errorf("cannot describe the compiled table: %w", err)
 	}
-	return &compiled{schema: s, filters: newFilterCache(filterCacheSize), desc: d.Columns}, ""
+	return &compiled{schema: s, filters: newFilterCache(filterCacheSize), desc: d.Columns}, nil
+}
+
+// compileSchema compiles a table from its own definition
+// (system.tables.create_table_query, ts.DDL) under PostureLoad, so chtypes
+// models its engine, keys, partition, indices, CHECKs and TTL as the server
+// holds them: protections that depend on the sorting key, such as an index
+// analysis the server refuses, then answer as the server does. A definition
+// chtypes declines (an engine it does not model, such as Distributed, S3 or
+// Buffer, or a view's) falls back to the table's columns on the neutral
+// engine, which serves it without those protections and says so in a WARN;
+// so does a table discovered without its definition, silently.
+func compileSchema(id tenant.ID, lib *chtypes.Library, srv *chtypes.Server, ts *discovery.TableSchema, cols []colDecl) (*compiled, string) {
+	if ts.DDL != "" {
+		c, err := compileStatement(lib, srv, ts.DDL)
+		if err == nil {
+			return c, ""
+		}
+		slog.Warn("chtypes could not compile the table's own definition; compiling its columns on a neutral engine, without its engine, keys, partition, indices, CHECKs or TTL",
+			"tenant", id, "table", ts.Name, "cause", definitionCause(err))
+	}
+	return compileColumns(lib, srv, cols)
+}
+
+// definitionCause is why a table's own definition did not compile, safe to
+// log: an external engine's definition carries its wiring (endpoint, bucket,
+// user, access key), and ClickHouse's message for a refused statement can
+// quote text from it, so a refusal is named by its code alone. chtypes' own
+// decline names the construct it does not model, not the statement's text.
+func definitionCause(err error) string {
+	var se *chtypes.SchemaError
+	if errors.As(err, &se) {
+		return fmt.Sprintf("compile refused with ClickHouse code %d", se.ChCode)
+	}
+	var ue *chtypes.UnsupportedError
+	if errors.As(err, &ue) {
+		return "chtypes declined: " + ue.Message
+	}
+	return "the definition did not compile"
 }
 
 // compileColumns builds the CREATE TABLE for cols and compiles it on srv.
