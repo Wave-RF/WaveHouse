@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -455,7 +456,8 @@ func TestBind_UnknownZoneIsThatTenantsUnavailable(t *testing.T) {
 		u := unavailable(t, eng, "nowhere")
 		assert.Empty(t, u.Table, "the cause covers every table of the tenant")
 		assert.Contains(t, u.Cause, `ClickHouse reports server timezone "`+zone+`", which chtypes cannot serve`)
-		assert.Contains(t, u.Cause, "Cannot load time zone "+zone, "chtypes' own refusal")
+		// ClickHouse's wording changed in 26.10 ("Time zone X is not supported").
+		assert.Regexp(t, "(Cannot load time zone|Time zone) "+regexp.QuoteMeta(zone), u.Cause, "chtypes' own refusal")
 		answers(t, eng, tenant.Default)
 	}
 	eng.Bind("nowhere", testServerVersion, "UTC", []*discovery.TableSchema{eventsTable()})
