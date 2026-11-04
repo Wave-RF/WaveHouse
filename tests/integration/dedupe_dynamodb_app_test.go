@@ -66,7 +66,7 @@ func TestDynamoDBDedupe_TwoInstancesShareSeenIDs(t *testing.T) {
 		cfg := &config.Config{
 			DataDir: t.TempDir(),
 			Server:  config.Server{ShutdownTimeout: 10},
-			MQ:      config.MQ{Backend: config.MQEmbedded},
+			MQ:      embeddedMQ(),
 			Cache:   config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
 			Dedupe: config.Dedupe{Backend: config.DedupeDynamoDB, Lease: lease, DynamoDB: config.DedupeDynamoDBConfig{
 				Table: ddbTable, Region: "us-east-1", Endpoint: e.dynamoEndpoint,

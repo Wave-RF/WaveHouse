@@ -72,8 +72,10 @@ type PipesFile struct {
 // cannot change under a running process — the implementation each layer
 // runs on (`mq.backend`, `cache.backend`, `dedupe.backend`,
 // `coord.backend`), resource sizing (`data_dir`, `cache.l1_max_cost`,
-// `clickhouse.max_total_conns`), listeners, the observability exporters —
-// and the process-level secrets (`auth.operator_key`, `cache.redis.password`).
+// `clickhouse.max_total_conns`, the ingest worker's consumer: `mq.ack_wait`,
+// `mq.max_ack_pending`, `mq.prefetch`), listeners, the observability
+// exporters — and the process-level secrets (`auth.operator_key`,
+// `cache.redis.password`).
 // A tenant's own secrets — `clickhouse.password`, `auth.jwt_secret` — live
 // here with the wiring they belong to, so they reload with it (#529). Every
 // block and every top-level key inside it is REQUIRED, but dedupe.retention
@@ -87,6 +89,7 @@ type TenantConfig struct {
 	Auth       *AuthConfig       `json:"auth"`
 	Dedupe     *DedupeConfig     `json:"dedupe"`
 	DLQ        *DLQConfig        `json:"dlq"`
+	Ingest     *IngestConfig     `json:"ingest"`
 	Query      *QueryConfig      `json:"query"`
 	Schema     *SchemaConfig     `json:"schema"`
 	Stream     *StreamConfig     `json:"stream"`
@@ -95,10 +98,16 @@ type TenantConfig struct {
 }
 
 // ClickHouseConfig is the ClickHouse wiring, password included. A reload
-// that changes any of it swaps the connection unconditionally; reachability
+// applies it unconditionally: a change to addr, database, username,
+// password or tls moves the tenant to the pool of its new tuple, the pool
+// sizes resize its pool, and the rest needs no new connection; reachability
 // is a runtime concern (schema discovery, /readyz), never a reload one. A
-// certificate file that cannot be read or parsed is the one exception: boot
-// refuses, and a reload keeps the previous connection.
+// pool that cannot be opened — a certificate file that cannot be read or
+// parsed, options the driver refuses, or the boot config's connection
+// ceiling (`clickhouse.max_total_conns`) — is the exception: a reload
+// leaves the tenant on the pool it had, or on none when it had none, and
+// boot refuses over a flat settings directory or serves the tenant on no
+// pool over a nested one.
 type ClickHouseConfig struct {
 	// Addr is the native-protocol host:port (schema discovery, /readyz, the
 	// storage metrics); queries and inserts go over the HTTP interface.
@@ -114,6 +123,13 @@ type ClickHouseConfig struct {
 	// QueryTimeout is the deadline in seconds (>= 1) of a call on the query
 	// paths: structured queries, pipes (writes included) and the raw-SQL proxy.
 	QueryTimeout *int `json:"query_timeout"`
+	// InsertTimeout is the deadline in seconds (>= 1) of each INSERT the
+	// ingest worker sends for the tenant's batches, row-by-row isolation
+	// included; a timed-out insert is retried with backoff. With
+	// ingest.max_batch_wait_ms it must stay under the queue's redelivery
+	// timeout (boot config's `mq.ack_wait`), which only the server can
+	// check: see internal/app.
+	InsertTimeout *int `json:"insert_timeout"`
 	// TLS is the TLS wiring of both hops: `enabled` switches the native
 	// protocol to TLS, `http_scheme` stays the HTTP hop's switch, and the
 	// material applies to whichever hop uses TLS. Paths, checked for shape
@@ -215,6 +231,38 @@ type TableDLQ struct {
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
+// IngestConfig tunes how the ingest worker batches the tenant's tables: a
+// table's batch is flushed to ClickHouse once its rows' JSON reaches
+// max_batch_bytes, or max_batch_wait_ms after the batch's first row,
+// whichever comes first (a flush asked for while the table's previous one
+// runs starts when it ends), and a reload applies to the next batch. The
+// right values depend on the tenant's row width and rate, which is why they
+// are the tenant's; the consumer the batches come through — the redelivery
+// timeout, the rows delivered and unacked, the prefetch — is boot config
+// (`mq.*`), sized once per process.
+type IngestConfig struct {
+	// MaxBatchBytes is the size at which a table's batch is flushed: the
+	// sum of its rows' JSON (each envelope's `row`, one JSONCompactEachRow
+	// line), an estimate of the uncompressed INSERT body. Must be >= 1. A
+	// batch never holds more rows than the consumer has delivered and not
+	// yet acked (boot config's `mq.max_ack_pending`), so a target above
+	// that many rows of the table's typical width is only ever reached by
+	// the timer.
+	MaxBatchBytes *int `json:"max_batch_bytes"`
+	// MaxBatchWaitMS is the time after the first row of a table's batch at
+	// which the batch is flushed, in milliseconds (a flush asked for while
+	// the table's previous insert is still running starts when that insert
+	// ends). Must be >= 1. With the insert's own deadline
+	// (clickhouse.insert_timeout) it must stay under the queue's redelivery
+	// timeout (boot config's `mq.ack_wait`), which only the server can
+	// check: see internal/app.
+	MaxBatchWaitMS *int `json:"max_batch_wait_ms"`
+	// RetryBackoffMax caps, in seconds (>= 1), the backoff a ClickHouse
+	// that cannot take the tenant's inserts is retried under: the delay
+	// doubles from a second up to it, jittered.
+	RetryBackoffMax *int `json:"retry_backoff_max"`
+}
+
 // QueryConfig holds query-shaping defaults. Server-wide *resource* limits
 // (memory, rows scanned, execution time) deliberately live in ClickHouse
 // itself — its settings profiles and quotas — so they apply uniformly to
@@ -245,10 +293,20 @@ type SchemaConfig struct {
 // nothing a proxy or client can tell apart.
 const MaxKeepaliveBuckets = 100
 
-// StreamConfig tunes GET /v1/stream: the tenant's SSE keepalive wheel and how
-// much NATS history the Active Sweeper keeps for its gap-fill. Keepalives are
-// set to the proxy in front of the tenant's streams and the gap window is its
-// replay budget, both of which change while the server runs.
+// MaxSubscriberQueue caps stream.subscriber_queue. Each GET /v1/stream
+// connection allocates its queue as it opens, about 40 bytes a slot, and a
+// client that falls behind holds up to that many event frames until it reads
+// them, so the cap bounds what one connection can make the process allocate.
+// A client that far behind is better served by a reconnect with ?since=,
+// which replays from the gap window, than by a deeper queue.
+const MaxSubscriberQueue = 10_000
+
+// StreamConfig tunes GET /v1/stream: the tenant's SSE keepalive wheel, how
+// much NATS history the Active Sweeper keeps for its gap-fill, and each
+// connection's outbound queue. Keepalives are set to the proxy in front of
+// the tenant's streams, the gap window is its replay budget and the queue is
+// how far a slow client may fall behind before frames are dropped, all of
+// which change while the server runs.
 type StreamConfig struct {
 	// KeepaliveInterval is the effective per-connection keepalive period in
 	// seconds — the longest a quiet stream goes unwritten before a ":"
@@ -262,6 +320,11 @@ type StreamConfig struct {
 	// keeps in NATS for SSE gap-fill (Last-Event-ID replay). Must be >= 0;
 	// applies from the next sweep.
 	GapWindowMinutes *int `json:"gap_window_minutes"`
+	// SubscriberQueue is each connection's outbound queue, in frames: how
+	// many event frames may wait for a slow client before the ones that do
+	// not fit are dropped. Must be in 1-MaxSubscriberQueue. Applies to
+	// connections opened after a reload.
+	SubscriberQueue *int `json:"subscriber_queue"`
 }
 
 // MQConfig sizes the tenant's message queue on disk.

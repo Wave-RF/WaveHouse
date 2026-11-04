@@ -59,7 +59,7 @@ func startIsolationWorker(t *testing.T) isolationWorker {
 	target := func(tenant.ID) chconn.Target {
 		return chconn.Target{URL: ch.httpURL(), Username: testCHUser, Password: testCHPassword, Database: testCHDatabase}
 	}
-	stop, _, err := ingest.StartIngestWorker(context.Background(), q, &testutil.MockCache{}, target, nil)
+	stop, _, err := ingest.StartIngestWorker(context.Background(), q, &testutil.MockCache{}, target, nil, seedLimits, ingest.ConsumerSettings{})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

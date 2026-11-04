@@ -47,3 +47,16 @@ func TestSubscriber_EvictedIsOpenUntilEvicted(t *testing.T) {
 		t.Fatal("Evicted must fire once the subscriber is evicted")
 	}
 }
+
+// The queue is the size the handler passes — the tenant's
+// stream.subscriber_queue — and the package default for a caller that
+// passes none.
+func TestSubscriber_QueueIsTheSizeAsked(t *testing.T) {
+	t.Parallel()
+	_, _, _, capacity := NewTableSubscriber("clicks", nil, nil, 7).QueueStats()
+	assert.Equal(t, 7, capacity)
+	_, _, _, capacity = NewTableSubscriber("clicks", nil, nil, 0).QueueStats()
+	assert.Equal(t, defaultSubscriberQueue, capacity, "none asked: the default")
+	_, _, _, capacity = NewSubscriber(nil, nil).QueueStats()
+	assert.Equal(t, defaultSubscriberQueue, capacity)
+}
