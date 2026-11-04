@@ -734,6 +734,7 @@ func TestPipesHandler_Execute_ClaimUnresolved_ReadAnswersNoRows(t *testing.T) {
 			assert.Equal(t, http.StatusOK, w.Code)
 			assert.Equal(t, "[]", w.Body.String())
 			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+			assert.Empty(t, w.Header().Get("X-Cache"), "an unresolved claim is neither cached nor served from the cache")
 			assert.Zero(t, ch.reads.Load(), "nothing runs")
 			assert.Zero(t, ch.writes.Load())
 		})
@@ -837,6 +838,7 @@ func TestPipesHandler_Execute_ClaimUnresolved_BeforeParameters(t *testing.T) {
 			assert.Equal(t, tt.want, w.Code, w.Body.String())
 			assert.Contains(t, w.Body.String(), tt.body)
 			assert.NotContains(t, w.Body.String(), "missing required parameter")
+			assert.Empty(t, w.Header().Get("X-Cache"))
 			assert.Zero(t, ch.reads.Load()+ch.writes.Load(), "nothing runs")
 		})
 	}

@@ -281,9 +281,10 @@ func setup() (int, func()) {
 // requests exercise functionality as a privileged caller and can hit
 // admin-gated endpoints without minting JWTs. A test that needs a restricted
 // role adopts a policy of its own (withPolicy) and sends a token for the role
-// (bearer); TestPipe_ClaimBindsOnNumericColumn and
-// TestPipe_ValueCannotCloseHeredoc mint one for the member role and the
-// claim-scoped pipes written here. The pipes are here, not written by the
+// (bearer); TestPipe_ClaimBindsOnNumericColumn,
+// TestPipe_ValueCannotCloseHeredoc and
+// TestPipe_HostileClaimValueMatchesItsLiteral mint one for the member role
+// and the claim-scoped pipes written here. The pipes are here, not written by the
 // tests, because the flat directory is shared and watched: one test
 // rewriting it would reload every test's settings mid-run. The stream budget
 // is shrunk to 1 GiB like the e2e fixture so the scratch directory stays

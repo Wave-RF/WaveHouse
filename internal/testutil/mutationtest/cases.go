@@ -7,7 +7,8 @@ package mutationtest
 type Case struct {
 	Name string
 	SQL  string
-	// Mutation is true for a statement that goes through Exec.
+	// Mutation is true for a statement that runs as a write, without
+	// readonly=2 (PipesHandler.executeWrite).
 	Mutation bool
 	// Unparsed marks a statement ClickHouse rejects as a syntax error, so its
 	// parser has no answer to check Mutation against; the integration test

@@ -18,7 +18,7 @@ import (
 // Sourced from the ClickHouse statement reference: DML, DDL, role/privilege
 // management, and runtime control (SYSTEM/KILL/SET). Read-only verbs
 // (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/EXISTS) intentionally fall through to
-// the default Query path.
+// the read path, under readonly=2.
 var mutationVerbs = map[string]struct{}{
 	"INSERT":   {},
 	"UPDATE":   {},
