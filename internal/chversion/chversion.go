@@ -7,10 +7,10 @@ package chversion
 import "strings"
 
 // Test is the clickhouse/clickhouse-server tag every suite runs: the newest
-// patch of the newest ClickHouse LTS line (each year's .3 and .8), which is
-// the patch that line's chtypes artifact is built from, so the suites run the
-// server the type layer models. scripts/fetch-chtypes.sh reads it from this
-// line.
+// patch of the newest ClickHouse LTS line (each year's .3 and .8) that the
+// line's chtypes artifact is built from, so the suites run the server the type
+// layer models. A ClickHouse patch newer than the artifact's waits for an
+// artifact built from it. scripts/fetch-chtypes.sh reads it from this line.
 const Test = "26.8.34.13"
 
 // TestImage is Test's container image.
