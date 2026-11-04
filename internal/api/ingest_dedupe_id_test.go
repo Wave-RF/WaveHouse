@@ -18,9 +18,9 @@ import (
 )
 
 // dedupeIDTables holds one table per id column shape, each with event_id and a
-// page to tell its records apart. The ids_* tables follow the documented
-// recommendation (Nullable(T) or String, no DEFAULT); ids_uint and ids_default
-// ignore it.
+// page to tell its records apart. ids_str, ids_nstr and ids_nuint follow the
+// documented recommendation (Nullable(T) or String, no DEFAULT); ids_uint,
+// ids_default and ids_uuid ignore it.
 func dedupeIDTables(t testing.TB) *discovery.SchemaRegistry {
 	page := discovery.Column{Name: "page", Type: "String"}
 	table := func(name string, id discovery.Column) *discovery.TableSchema {
@@ -33,6 +33,7 @@ func dedupeIDTables(t testing.TB) *discovery.SchemaRegistry {
 		table("ids_nuint", discovery.Column{Type: "Nullable(UInt64)"}),
 		table("ids_uint", discovery.Column{Type: "UInt64"}),
 		table("ids_default", discovery.Column{Type: "String", HasDefault: true, DefaultKind: "DEFAULT", DefaultExpression: "'unset'"}),
+		table("ids_uuid", discovery.Column{Type: "UUID", HasDefault: true, DefaultKind: "DEFAULT", DefaultExpression: "generateUUIDv4()"}),
 	})
 }
 
@@ -149,46 +150,58 @@ func TestIngest_DedupeIDNotSentIsMissingSingleObject(t *testing.T) {
 }
 
 // TestIngest_DedupeIDTheRoleMayNotWriteIsMissing: a column the role may not
-// write stores NULL for every record, so the id is missing for each of them
-// and naming the column is code 117.
+// write holds the table's value in every record, not the record's, so the id is
+// missing for each of them and naming the column is code 117. That holds
+// whatever the column stores: NULL, a constant DEFAULT (keying on it would make
+// every record after the first a duplicate) or a DEFAULT drawn per record
+// (keying on it would silently turn dedupe off).
 func TestIngest_DedupeIDTheRoleMayNotWriteIsMissing(t *testing.T) {
 	t.Parallel()
-	for _, requireID := range []bool{false, true} {
-		t.Run(fmt.Sprintf("require_id=%t", requireID), func(t *testing.T) {
-			t.Parallel()
-			h, pub, dd := dedupeIDHandler(t, requireID)
-			h.PolicySource = staticPolicy(&policy.Policy{Tables: map[string]policy.TablePolicy{
-				"ids_nstr": {"writer": {Insert: &policy.InsertPermissions{AllowColumns: []string{"page"}}}},
-			}})
-			send := func(body string) *httptest.ResponseRecorder {
-				r := rawIngestRequest(t, "ids_nstr", "application/json", body)
-				return handle(h, r.WithContext(auth.WithRole(r.Context(), "writer")))
-			}
+	for _, table := range []string{"ids_nstr", "ids_default", "ids_uuid"} {
+		for _, requireID := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/require_id=%t", table, requireID), func(t *testing.T) {
+				t.Parallel()
+				h, pub, dd := dedupeIDHandler(t, requireID)
+				h.PolicySource = staticPolicy(&policy.Policy{Tables: map[string]policy.TablePolicy{
+					table: {"writer": {Insert: &policy.InsertPermissions{AllowColumns: []string{"page"}}}},
+				}})
+				send := func(r *http.Request) *httptest.ResponseRecorder {
+					return handle(h, r.WithContext(auth.WithRole(r.Context(), "writer")))
+				}
 
-			w := send(`{"page":"/a"}`)
-			if requireID {
-				require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
-				assert.Contains(t, w.Body.String(), "missing dedupe id field")
-				assert.Empty(t, pub.Messages)
-			} else {
+				lines := []string{`{"page":"/a"}`, `{"page":"/b"}`}
+				w := send(ndjsonRequest(t, table, lines...))
 				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-				assert.Len(t, pub.Messages, 1)
-			}
+				resp := decodeBatchResult(t, w)
+				if requireID {
+					assert.Equal(t, len(lines), resp.Failed)
+					for i := range lines {
+						assert.Contains(t, resultAt(t, resp, i+1).Error, "missing dedupe id field", "record %d", i+1)
+					}
+					assert.Empty(t, pub.Messages)
+				} else {
+					assert.Equal(t, len(lines), resp.Succeeded, "none is a duplicate of another")
+					assert.Zero(t, resp.Duplicates)
+					assert.Len(t, pub.Messages, len(lines))
+				}
+				assert.Zero(t, dd.Reserves, "no record is keyed, on the stored value or any other")
 
-			w = send(`{"page":"/b","event_id":"evt-1"}`)
-			require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
-			assert.Contains(t, w.Body.String(), `"exception_code":117`)
-			assert.False(t, dd.Committed(dedupe.Key{Table: "ids_nstr", ID: "evt-1"}))
-		})
+				w = send(rawIngestRequest(t, table, "application/json", `{"page":"/c","event_id":"evt-1"}`))
+				require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+				assert.Contains(t, w.Body.String(), `"exception_code":117`)
+				assert.False(t, dd.Committed(dedupe.Key{Table: table, ID: "evt-1"}))
+			})
+		}
 	}
 }
 
 // TestIngest_DedupeIDColumnThatStoresAValueIsKeyedOnIt pins the documented
 // caveat, not a behavior to rely on: WaveHouse does not check the id column, so
-// on one that ignores the recommendation (Nullable, or String, with no
-// DEFAULT) an id the record did not send is stored as a value, and that value
-// is the key. The first such record is published and the rest are duplicates
-// of it, require_id included, since the id is not missing.
+// on one that stores a value for an id the record did not send (a number's 0, a
+// DEFAULT) that value is the key. The first such record is published and the
+// rest are duplicates of it, require_id included, since the id is not missing.
+// The empty string into a Nullable number is the same on a column that follows
+// the recommendation: the record did send a value, and the column stores 0.
 func TestIngest_DedupeIDColumnThatStoresAValueIsKeyedOnIt(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

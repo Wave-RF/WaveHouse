@@ -271,7 +271,7 @@ func TestIngestChecks_RefusedBatchExportsNothing(t *testing.T) {
 
 	expr, params, ok := tbl.render(preds)
 	require.True(t, ok)
-	res, err := tbl.export(FormatJSONEachRow, body, InsertSettings(), leanDocs, nil, tbl.filterFor(expr, params))
+	res, err := tbl.export(FormatJSONEachRow, body, InsertSettings(), nil, tbl.filterFor(expr, params))
 	require.NoError(t, err)
 	require.Equal(t, chtypes.Rejected, res.Outcome)
 	require.Empty(t, res.Payload)
@@ -435,7 +435,7 @@ func BenchmarkIngest_OneHandle(b *testing.B) {
 
 	b.Run("serial", func(b *testing.B) {
 		for range b.N {
-			if _, err := tbl.export(FormatJSONEachRow, raw, settings, leanDocs, nil, nil); err != nil {
+			if _, err := tbl.export(FormatJSONEachRow, raw, settings, nil, nil); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -443,7 +443,7 @@ func BenchmarkIngest_OneHandle(b *testing.B) {
 	b.Run("parallel", func(b *testing.B) {
 		b.RunParallel(func(pb *testing.PB) {
 			for pb.Next() {
-				if _, err := tbl.export(FormatJSONEachRow, raw, settings, leanDocs, nil, nil); err != nil {
+				if _, err := tbl.export(FormatJSONEachRow, raw, settings, nil, nil); err != nil {
 					b.Fatal(err)
 				}
 			}

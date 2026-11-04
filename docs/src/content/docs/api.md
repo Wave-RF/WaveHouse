@@ -199,7 +199,7 @@ Returns the build metadata embedded in the running binary — `version`, `git_co
   "version": "1.2.3",
   "git_commit": "a1b2c3d",
   "build_time": "2026-06-02T12:00:00Z",
-  "go_version": "go1.27.0"
+  "go_version": "go1.27.3"
 }
 ```
 
@@ -442,7 +442,7 @@ A `200` is returned whenever the body parsed and the records were processed — 
 | 404 | `{"error":"unknown table: ..."}` | Table not found in the tenant's discovered schema |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
 | 415 | `{"error":"no Content-Type: ingest requires one of application/json, application/x-ndjson, application/ndjson, application/jsonl, application/jsonlines, text/csv, text/csv; header=present, text/csv; header=absent, text/tab-separated-values, text/tab-separated-values; header=present, text/tab-separated-values; header=absent"}` (declared variant: `Content-Type "text/plain": ingest requires one of …`; conflicting variant: `conflicting Content-Type declarations "application/json", "application/x-ndjson": ingest reads one format per request, and requires one of …`) | No `Content-Type`, an unsupported or unparseable one, a `header` value other than `present`/`absent`, a comma-bearing value that does not parse as a single media type, or repeated lines that disagree. Checked before the body is read |
-| 499 | `{"error":"client closed request"}` | The client went away while a dedupe reserve or a publish was in flight, mid-batch. Recorded as a `4xx`, logged at `DEBUG`, with the unpublished records of the window it failed in counted as `canceled` (one rejected or found a duplicate keeps that result), and the records after that window neither read nor counted; the windows before it were published and keep their ids. After a publish cut short, the records of its window before the failing one keep their ids too, and the failing record's id is left to lapse, as for the `500` below. A publish the queue refused as full stays the `503` below even then |
+| 499 | `{"error":"client closed request"}` | The client went away while a dedupe reserve or a publish was in flight, mid-batch. Recorded as a `4xx`, logged at `DEBUG`, with the unpublished records of the window it failed in counted as `canceled` (one rejected or found a duplicate keeps that result), and the records after that window neither published nor counted; the windows before it were published and keep their ids. After a publish cut short, the records of its window before the failing one keep their ids too, and the failing record's id is left to lapse, as for the `500` below. A publish the queue refused as full stays the `503` below even then |
 | 422 | `{"error":"validation engine declined: <message>"}` | chtypes could not answer for the body; see the [single-record table](#post-v1ingesttabletable--ingest-data). Nothing is published |
 | 500 | `{"error":"validation failed"}` | The parse itself failed for a reason that is neither a record's fault nor an unavailable tenant or table (the `503` below); logged. Nothing was published |
 | 500 | `{"error":"this role's insert permissions cannot be enforced on this table","retryable":false}` | The role's insert permissions cannot be enforced on the table (for example, the role may write no column of it). It persists until the policy or the table changes, so it carries no `Retry-After` and must not be retried; the cause is in the server log |
@@ -579,7 +579,7 @@ Every column the query references — in `columns`, an aggregation argument, `fi
 | `columns` | string \| string[] | No | Columns to SELECT — an array, or a single string for one column. A literal `"*"` is the column *named* `*`, **not** a wildcard. Omit (or send `[]` / `""`) to select nothing; use `select_all` for a full-row read. Mutually exclusive with `select_all`. |
 | `select_all` | bool | No | Select every column the role may read (the all-columns wildcard, expanded server-side to the allow/deny set). Mutually exclusive with a non-empty `columns`, and with `aggregations`. |
 | `aggregations` | object[] | No | Aggregation functions (`fn`, `column`, `alias`). |
-| `filters` | object[] | No | WHERE conditions (`column`, `op`, `value`). Ops: eq, neq, gt, gte, lt, lte, in, like. A `null` value is a `400`. |
+| `filters` | object[] | No | WHERE conditions (`column`, `op`, `value`). Ops: eq, neq, gt, gte, lt, lte, in, like. A value must be a scalar (string, number or boolean), or for `in` a flat list of them; a `null` value, an object, and a list anywhere but `in` are each a `400`. |
 | `group_by` | string[] | No | GROUP BY columns. |
 | `order_by` | object[] | No | ORDER BY clauses (`column`, `dir`). |
 | `limit` | int | No | Max rows. Omitted or above the configured `query.default_max_rows` (default 10,000) → silently capped at that value; a policy `max_rows` can lower it further (see [Access Control](/access-control#resource-limits)). |
@@ -626,6 +626,8 @@ The inbound request body is capped at 1 MiB; a body over the cap is rejected wit
 | 400 | `{"error":"columns and select_all are mutually exclusive"}` / `{"error":"select_all cannot be combined with aggregations"}` | Both projection forms, or `select_all` with aggregations |
 | 400 | `{"error":"unknown column: x"}` | Schema validation error — an unknown column, a bad aggregation, or an unparseable `time_range` `since`/`until` (neither a relative duration nor an RFC3339 timestamp) |
 | 400 | `{"error":"filter value must not be null"}` | A filter carries `"value": null`. It is refused rather than answered: `col = NULL` is never true, and an empty parameter would silently ask a different question |
+| 400 | `{"error":"unsupported filter value type …"}` / `{"error":"nested list in an 'in' value"}` | A filter value that is not a scalar: an object, or a list given to an operator other than `in` (the message ends in the Go type, such as `map[string]interface {}`). An `in` value must be a flat list of scalars, so a list inside it is refused |
+| 400 | `{"error":"invalid value for 'in' operator"}` / `{"error":"unsupported operator: x"}` | An `in` filter whose value is not a non-empty list, or an `op` outside the list on the `filters` row |
 | 400 | `{"error":"filter value too large: …"}` / `{"error":"filter values too large: …"}` / `{"error":"query too large: …"}` | A scalar filter value over the 128 KiB ClickHouse's HTTP interface takes for one value once URL-encoded, all of them over the request line, or a query with an `in` list whose SQL is over the 128 KiB form field it travels in. An `in` list itself is never refused for size |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid or expired token was supplied and the request was then denied (the gate surfaces the token reason) |
 | 403 | `{"error":"forbidden"}` | Role lacks select permission on table |

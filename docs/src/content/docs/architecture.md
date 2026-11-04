@@ -334,8 +334,8 @@ Client POST /v1/ingest?table={table}
     chtypes filter — false is 403 for that record, unevaluable is 422
   → Optional dedupe: resolve the id from the row ClickHouse rendered
     (configurable ID field; its stored value is the key, so on a Nullable or
-    String column with no DEFAULT an omitted, null or empty id is NULL or ""
-    and is published un-deduped
+    String column with no DEFAULT an omitted or null id is NULL (an empty
+    string too, on a String) and is published un-deduped
     + logged/counted, or rejected under require_id) — deliberately after
     validation, so a refused body or a record failing a check is never marked
     seen

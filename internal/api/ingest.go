@@ -1060,11 +1060,10 @@ func (h *IngestHandler) prepareVerdict(ctx context.Context, run *ingestRun, i in
 }
 
 // idIndex is where idField sits in an exported row, or -1 when the role may
-// not write it: the row then holds the table's value there, not the record's —
-// the same one for every record, unless the column is a Nullable or String
-// with no DEFAULT, where it is NULL or "" and reads as missing anyway — so it
-// identifies no event, and keying on it would make every record after the
-// first a duplicate.
+// not write it: the row then holds what the table stores for it, not the
+// record's value, so it identifies no event. Keying on a constant would make
+// every record after the first a duplicate, and on a per-record DEFAULT (a
+// generated UUID) would silently turn dedupe off.
 func (r *ingestRun) idIndex(idField string) int {
 	if r.writable != nil && !slices.Contains(r.writable, idField) {
 		return -1
