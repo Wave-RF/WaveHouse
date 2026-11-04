@@ -412,7 +412,8 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		checkColumns: checkColumns, checkGuard: guard,
 	}
 	// Whether a record supplied its dedupe id is the parse's to say, and asking
-	// costs: only a table that dedupes on an id the role may write asks.
+	// costs: only a table that dedupes on an id the role may write asks. A role
+	// that may not write it never supplies one (idIndex).
 	if h.Dedup != nil && h.DedupeSettings != nil {
 		if dd := h.DedupeSettings(store, table); dd.Enabled && dd.IDField != "" &&
 			(run.writable == nil || slices.Contains(run.writable, dd.IDField)) {
