@@ -91,6 +91,9 @@ func trimSpaceBytes(b []byte) []byte {
 //     record supplied the id at all is the parse's answer, not this one's
 //     (RowVerdict.Supplied, see prepareVerdict): an omitted id stores its
 //     column's default (a nil UUID, 0, a constant DEFAULT), which is a value.
+//     Not yet a null into a UUID, FixedString, IPv4 or zero-member Enum column
+//     with no DEFAULT: it stores the zero value as input, and is keyed on it
+//     (#967).
 func eventIDAt(line []byte, idx int) (string, bool) {
 	if idx < 0 {
 		return "", false

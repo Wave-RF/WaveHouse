@@ -61,7 +61,7 @@ func TestIngest_SuppliedIsTheRecordsOwn(t *testing.T) {
 // input, so Supplied must come from the column entry's null_input fact, not
 // from the transform chtypes reports (uuid_mangle, fixedstring_pad).
 func TestIngest_NullIntoNoDefaultIDIsNotSupplied(t *testing.T) {
-	t.Skip("needs chtypes' Value.NullInput (the column entry's null_input), which the Go SDK does not decode yet")
+	t.Skip("#967: needs chtypes' Value.NullInput (the column entry's null_input), which the Go SDK does not decode yet")
 	eng := testEngine(t, &discovery.TableSchema{Name: "bare_ids", Columns: []discovery.Column{
 		{Name: "u", Type: "UUID", Position: 1},
 		{Name: "f", Type: "FixedString(4)", Position: 2},
