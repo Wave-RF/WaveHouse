@@ -505,6 +505,13 @@ func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelay
 		if clientGone(ctx) {
 			return clientClosedAbort()
 		}
+		if ctx.Err() != nil {
+			// The request's deadline passed, waiting for a parse slot or
+			// between windows: the server's failure, as in reserve, but not
+			// the engine's, so no ERROR.
+			slog.DebugContext(ctx, "record validation stopped: request context ended", "error", err, "table", run.table)
+			return &requestAbort{Status: http.StatusInternalServerError, Message: "validation failed"}
+		}
 		slog.ErrorContext(ctx, "record validation failed", "error", err, "table", run.table)
 		return &requestAbort{Status: http.StatusInternalServerError, Message: "validation failed"}
 	}

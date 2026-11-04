@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
@@ -110,4 +112,37 @@ func TestIngest_ParseSlotsWaitThenBusy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestIngest_ParseSlotWaitDeadline: a request whose deadline passes while it
+// waits for a parse slot is the server's 500, as a deadline during the dedupe
+// reserve is, logged at DEBUG rather than paged at ERROR. Not t.Parallel: it
+// captures the process-wide default logger.
+func TestIngest_ParseSlotWaitDeadline(t *testing.T) {
+	buf := logtest.Capture(t, slog.LevelDebug)
+	pub := &testutil.MockPublisher{}
+	h := newTestIngestHandler(t, testRegistry(t), pub)
+	var held []func()
+	for {
+		release, err := h.Types.TakeParseSlot(context.Background())
+		if err != nil {
+			require.ErrorIs(t, err, typelayer.ErrBusy)
+			break
+		}
+		held = append(held, release)
+	}
+	defer func() {
+		for _, release := range held {
+			release()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	w := httptest.NewRecorder()
+	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home"}).WithContext(ctx)))
+	require.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+	assert.Contains(t, buf.String(), `"level":"DEBUG","msg":"record validation stopped: request context ended"`)
+	assert.NotContains(t, buf.String(), `"level":"ERROR"`)
+	assert.Empty(t, pub.Messages)
 }
