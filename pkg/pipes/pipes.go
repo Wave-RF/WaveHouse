@@ -227,8 +227,21 @@ func isNumericLiteral(s string) bool {
 // them for an array claim (`('a', 'b')`, for IN), exactly as a policy filter
 // binds the same claim; ClickHouse reads a quoted constant as the column's
 // type. A reference the token cannot bind returns *UnresolvedClaimError, after
-// which the SQL is unusable: the caller fails closed.
+// which the SQL is unusable: the caller fails closed. The claims are checked
+// before any parameter, so that answer stands whatever the request sent: a
+// missing or malformed parameter is the caller's mistake to learn of only once
+// its token binds the pipe.
 func BindParams(q *NamedQuery, supplied, claims map[string]any) (string, []any, error) {
+	// A claim the token cannot bind fails the pipe closed ahead of every
+	// request-side check: the handler's answer to it ([] on a read, 403 on a
+	// write, 401 for an invalid token) is the caller's authorization outcome,
+	// which a missing required parameter must not pre-empt as a 400.
+	for _, path := range q.Claims() {
+		if _, _, ok := policy.ResolveClaim(claims, path); !ok {
+			return "", nil, &UnresolvedClaimError{Path: path}
+		}
+	}
+
 	// Build lookup from formal parameter definitions.
 	formal := make(map[string]*ParamDef, len(q.Parameters))
 	for i := range q.Parameters {

@@ -779,6 +779,52 @@ func TestPipesHandler_Execute_ClaimUnresolved_InvalidTokenFailsLoud(t *testing.T
 	}
 }
 
+// TestPipesHandler_Execute_ClaimUnresolved_BeforeParameters: the claim check
+// comes before the parameter checks, so a request that also leaves the pipe's
+// required parameter out gets the claim's answer — [] on a read, 403 on a
+// write, 401 for an invalid token — not 400 missing required parameter.
+func TestPipesHandler_Execute_ClaimUnresolved_BeforeParameters(t *testing.T) {
+	t.Parallel()
+	write := &pipes.NamedQuery{
+		Name:         "note",
+		SQL:          "INSERT INTO audit (tenant_id, msg) VALUES ({{ jwt.tenant_id }}, {{msg}})",
+		Parameters:   []pipes.ParamDef{{Name: "msg", Type: "string", Required: true}},
+		AllowedRoles: []string{"member"},
+	}
+	tests := []struct {
+		name    string
+		q       *pipes.NamedQuery
+		role    string
+		claims  jwt.MapClaims
+		authErr error
+		want    int
+		body    string
+	}{
+		{"read answers no rows", claimPipe(), "member", jwt.MapClaims{"sub": "u1"}, nil, http.StatusOK, "[]"},
+		{"write is forbidden", write, "member", jwt.MapClaims{"sub": "u1"}, nil, http.StatusForbidden, "cannot be resolved from the token"},
+		{"invalid token fails loud", claimPipe(), "", nil, errors.New("token expired"), http.StatusUnauthorized, "token expired"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			conn := &writeConn{}
+			h := claimHandler(t, conn, nil, tt.q)
+			r := claimRequest(t, tt.q.Name, tt.role, tt.claims, map[string]any{})
+			if tt.authErr != nil {
+				r = r.WithContext(auth.WithAuthError(r.Context(), tt.authErr))
+			}
+
+			w := httptest.NewRecorder()
+			h.Execute(w, r)
+
+			assert.Equal(t, tt.want, w.Code, w.Body.String())
+			assert.Contains(t, w.Body.String(), tt.body)
+			assert.NotContains(t, w.Body.String(), "missing required parameter")
+			assert.Zero(t, conn.queries.Load()+conn.execs.Load(), "nothing runs")
+		})
+	}
+}
+
 // TestPipesHandler_Execute_ClaimKeysCache: the claim is in the bound SQL the
 // cache key hashes, so two tenants' tokens never share an entry while one
 // token's repeats do.

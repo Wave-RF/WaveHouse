@@ -543,6 +543,42 @@ func TestNamedQuery_CheckTemplate(t *testing.T) {
 	}
 }
 
+// TestBindParams_ClaimCheckedBeforeParameters: a claim the token cannot bind
+// is reported ahead of any parameter problem — a declared required parameter
+// left unsupplied, or an inline placeholder with no value — whether the claim
+// reference sits before or after the parameter in the template, so the
+// handler's fail-closed answer stands whatever the request sent. Once the
+// claim binds, the parameter is reported as before.
+func TestBindParams_ClaimCheckedBeforeParameters(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		q    *NamedQuery
+	}{
+		{"declared required parameter unsupplied", &NamedQuery{
+			SQL:        "SELECT 1 FROM t WHERE tenant = {{ jwt.tenant_id }} AND day >= {{start}}",
+			Parameters: []ParamDef{{Name: "start", Type: "string", Required: true}},
+		}},
+		{"inline placeholder ahead of the claim", &NamedQuery{
+			SQL: "SELECT 1 FROM t WHERE day >= {{start}} AND tenant = {{ jwt.tenant_id }}",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := BindParams(tt.q, map[string]any{}, nil)
+			var unresolved *UnresolvedClaimError
+			require.ErrorAs(t, err, &unresolved, "%v", err)
+			assert.Equal(t, "tenant_id", unresolved.Path)
+
+			_, _, err = BindParams(tt.q, map[string]any{}, map[string]any{"tenant_id": "acme"})
+			require.Error(t, err)
+			assert.False(t, errors.As(err, &unresolved))
+			assert.Contains(t, err.Error(), "missing required parameter: start")
+		})
+	}
+}
+
 func TestUnresolvedClaimError_Is(t *testing.T) {
 	t.Parallel()
 	err := error(&UnresolvedClaimError{Path: "sub"})

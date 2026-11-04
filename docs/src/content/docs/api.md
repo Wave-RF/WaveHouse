@@ -655,6 +655,8 @@ The POST parameter body is capped at 1 MiB; a body over the cap is rejected with
 | 400 / 403 / 500 / 502 / 503 | `{"error":"clickhouse query: …","code":"clickhouse.…","retryable":…}` | ClickHouse failed the pipe's query — for instance a parameter value it cannot use (`400 clickhouse.rejected`), or ClickHouse down (`503 clickhouse.unavailable`, `Retry-After: 5`); see [ClickHouse errors on the query paths](#clickhouse-errors-on-the-query-paths). A [pipe that writes](/pipes#pipes-that-write) answers `retryable: false` with no `Retry-After`, its message led by `clickhouse exec:` |
 | 503 | `{"error":"token verifier not ready: the tenant's JWKS has not been fetched yet"}` | A token was supplied, with no valid operator key, while the tenant's JWKS has not been fetched yet; refused before any policy runs, with a `Retry-After: 30` header — see [Authentication](#authentication) |
 
+The three `400` parameter rows are decided after the claim check: a request to a pipe whose SQL reads a claim the token cannot bind gets the claim's answer instead — `200` with `[]`, `403` or `401` ([Binding token claims](/pipes#binding-token-claims)).
+
 ---
 
 ### `GET /v1/stream` — Server-Sent Events Stream
