@@ -545,7 +545,8 @@ func TestNamedQuery_CheckTemplate(t *testing.T) {
 
 // TestBindParams_ClaimCheckedBeforeParameters: a claim the token cannot bind
 // is reported ahead of any parameter problem — a declared required parameter
-// left unsupplied, or an inline placeholder with no value — whether the claim
+// left unsupplied, an inline placeholder with no value, or a supplied value
+// with no SQL form — whether the claim
 // reference sits before or after the parameter in the template, so the
 // handler's fail-closed answer stands whatever the request sent. Once the
 // claim binds, the parameter is reported as before.
@@ -568,6 +569,11 @@ func TestBindParams_ClaimCheckedBeforeParameters(t *testing.T) {
 			t.Parallel()
 			_, _, err := BindParams(tt.q, map[string]any{}, nil)
 			var unresolved *UnresolvedClaimError
+			require.ErrorAs(t, err, &unresolved, "%v", err)
+			assert.Equal(t, "tenant_id", unresolved.Path)
+
+			// A supplied value with no SQL form loses to the claim too.
+			_, _, err = BindParams(tt.q, map[string]any{"start": map[string]any{"k": "v"}}, nil)
 			require.ErrorAs(t, err, &unresolved, "%v", err)
 			assert.Equal(t, "tenant_id", unresolved.Path)
 
