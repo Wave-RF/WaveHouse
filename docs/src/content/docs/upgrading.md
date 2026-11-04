@@ -7,6 +7,12 @@ sidebar:
 
 WaveHouse is pre-1.0, so a minor release can change configuration, wire formats and on-disk state without an automatic migration. This page lists what to do for each upgrade, in order. The [changelog](https://github.com/Wave-RF/WaveHouse/blob/main/CHANGELOG.md) has the full list of changes behind each step.
 
+## From 0.2.1 to the next release
+
+Check this before you roll out the next release:
+
+1. **Validate your pipes with the new binary.** Validation now refuses a `{{param}}` or `{{ jwt.<path> }}` placeholder inside a comment (`-- uses {{start}}`, `/* {{x}} */`) or inside quotes (a `'…'` string literal, a double-quoted or backtick-quoted identifier, a `$tag$…$tag$` heredoc): ClickHouse reads text there, but the binder still binds, and inside quotes the bound value runs as SQL ([Binding token claims](/pipes#binding-token-claims)). A `pipes.json` that 0.2.1 loads can fail the check, most likely through a commented-out line that still names a placeholder. Run `wavehouse validate <settings dir>` with the new binary before upgrading: a flat directory with such a pipe no longer boots, and in a [nested](/deployment#the-nested-settings-directory) one that tenant's folder is rejected and the tenant answers `503` until its pipes are fixed. Write the placeholder bare (`WHERE id = {{id}}`) and delete or rewrite a comment that contains one.
+
 ## From 0.2.0 to 0.2.1
 
 0.2.1 is a binary swap: no setting moves, nothing is migrated, and the queue, the settings directory and the dedupe store carry over as they are. `@wavehouse/sdk` stays at 0.2.0, since the wire format did not change. Check these before you roll it out:
