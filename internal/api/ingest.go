@@ -46,8 +46,8 @@ const maxReportedResults = 10000
 // ingestWindow is how many records a batch prepares before reserving,
 // publishing and committing them together: one dedupe call per phase per
 // window rather than per record, and at most one window of encoded envelopes
-// held. The exported rows they are built from are held for the whole request —
-// one parse per body — and are bounded by the body cap.
+// held. The exported rows they are built from are held for the whole request,
+// gathered from every parse window, and are bounded by the body cap.
 const ingestWindow = 256
 
 // IngestHandler handles POST /v1/ingest?table={table}
@@ -438,14 +438,18 @@ func (h *IngestHandler) typesReady(ctx context.Context, id tenant.ID, table stri
 	return nil
 }
 
-// judge asks ClickHouse's own parser for a verdict per record — ONE call for
-// the whole body, no chunking — with the role's insert check clauses, if any,
-// compiled to ONE filter and answered by that same parse.
+// judge asks ClickHouse's own parser for a verdict per record, with the
+// role's insert check clauses, if any, compiled to ONE filter and answered by
+// the same parse. The type layer reads the body a window at a time
+// (typelayer.Engine.IngestRole), every window under the request's one clock,
+// and answers as one call over the body would: a refusal in any window
+// refuses the body, numbered from its first record. A body that cannot get one
+// of the process's parse slots is a 503, as other backpressure is.
 //
 // The role's view of the table answers column policy and the injected check
 // values inside the parser, so no Go code walks the record's keys. It is held
-// for the parse alone: the verdicts and exported rows are the run's own once
-// the call returns, so dedupe and publish latency never hold off a rebind.
+// for one window at a time: the verdicts and exported rows are the run's own
+// once the call returns, so dedupe and publish latency never hold off a rebind.
 //
 // A check value that cannot be its column's default (`count UInt64` = "abc",
 // which the column cannot read) is refused before any record is read. That
@@ -467,10 +471,12 @@ func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelay
 		h.logUnavailable(ctx, id, run.table, "no type layer is wired")
 		return unavailableAbort()
 	}
-	batch, err := h.ingestAs(id, run.table, shape, format, body, preds)
+	opts := format.options()
+	opts.Now = run.now
+	batch, err := h.ingestAs(ctx, id, run.table, shape, format, opts, body, preds)
 	if _, refused := errors.AsType[*typelayer.RoleRefused](err); refused && len(shape.Defaults) > 0 {
 		cause := err
-		batch, err = h.ingestAs(id, run.table, typelayer.RoleShape{Columns: shape.Columns}, format, body, preds)
+		batch, err = h.ingestAs(ctx, id, run.table, typelayer.RoleShape{Columns: shape.Columns}, format, opts, body, preds)
 		// A bare shape refused too was never the defaults' fault; that refusal stands.
 		if _, still := errors.AsType[*typelayer.RoleRefused](err); !still && h.noticeDue("inject:"+id.String()+"/"+run.table) {
 			slog.WarnContext(ctx, "the role's insert check values cannot be used as column defaults; "+
@@ -488,6 +494,13 @@ func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelay
 		}
 		if typelayer.IsUnavailable(err) {
 			return h.typesFailed(ctx, id, run.table, err)
+		}
+		if errors.Is(err, typelayer.ErrBusy) {
+			slog.WarnContext(ctx, "ingest refused: every parse slot is in use", "table", run.table)
+			return &requestAbort{Status: http.StatusServiceUnavailable, Message: "ingest validation is busy", RetryAfter: retryAfterBusy}
+		}
+		if clientGone(ctx) {
+			return clientClosedAbort()
 		}
 		slog.ErrorContext(ctx, "record validation failed", "error", err, "table", run.table)
 		return &requestAbort{Status: http.StatusInternalServerError, Message: "validation failed"}
@@ -515,16 +528,15 @@ func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelay
 	return nil
 }
 
-// ingestAs parses body as the role, holding its view of the table for the
-// call alone.
-func (h *IngestHandler) ingestAs(id tenant.ID, table string, shape typelayer.RoleShape, format IngestFormat, body []byte, preds []policy.Predicate) (typelayer.Batch, error) {
-	tbl, err := h.Types.RoleTable(id, table, shape)
-	if err != nil {
-		return typelayer.Batch{}, err
-	}
-	defer tbl.Release()
-	return tbl.IngestWith(format.wire(), format.options(), body, preds...)
+// ingestAs parses body as the role, holding its view of the table one window
+// at a time.
+func (h *IngestHandler) ingestAs(ctx context.Context, id tenant.ID, table string, shape typelayer.RoleShape, format IngestFormat, opts typelayer.IngestOptions, body []byte, preds []policy.Predicate) (typelayer.Batch, error) {
+	return h.Types.IngestRole(ctx, id, table, shape, format.wire(), opts, body, preds...)
 }
+
+// retryAfterBusy is the Retry-After for a body that found every parse slot
+// taken: one window takes tens of milliseconds, so a slot frees up soon.
+const retryAfterBusy = "1"
 
 // writeSingle answers a lone flat JSON object and preserves the GA response
 // contract: 200 {"ok":true} (or {"duplicate":true} when dedup skips it), or the

@@ -16,6 +16,7 @@
 package typelayer
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -81,6 +82,9 @@ type Config struct {
 	// Offline forbids any network fetch: a line no layout holds is that
 	// tenant's Unavailable (CHTYPES_ARTIFACT_MISSING) instead of a fetch.
 	Offline bool
+	// ParseSlots is how many bodies IngestRole parses at once; 0 is the
+	// default (parseSlots).
+	ParseSlots int
 }
 
 // Engine is the process's one chtypes registry plus every tenant's compiled
@@ -114,6 +118,8 @@ type Engine struct {
 	// retiring tracks Forget's background teardowns, so Close (and a test)
 	// can wait for them.
 	retiring sync.WaitGroup
+	// slots bounds IngestRole's concurrent parses: a send takes one.
+	slots chan struct{}
 }
 
 // tenantSet is one tenant's compiled tables.
@@ -283,6 +289,7 @@ func NewEngine(cfg Config) (*Engine, error) {
 	return &Engine{
 		reg: reg, autoFetch: cfg.AutoFetch, open: reg.ForContext, ctx: ctx, cancel: cancel,
 		tenants: make(map[tenant.ID]*tenantSet),
+		slots:   make(chan struct{}, cmp.Or(max(cfg.ParseSlots, 0), parseSlots())),
 	}, nil
 }
 

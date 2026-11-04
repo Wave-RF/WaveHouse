@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/wave-rf/chtypes/go/v2/chtypes"
 )
@@ -31,6 +32,12 @@ type IngestOptions struct {
 	// measured on the 26.6 and 26.8 servers and artifacts). Ignored for other
 	// formats.
 	StrictPositional bool
+	// Now pins the clock (chtypes_now_epoch_nanos) for every window of the
+	// body, so a now() DEFAULT is one instant across the request. The zero
+	// time leaves each call its own clock.
+	Now time.Time
+	// Window bounds each parse call; the zero value is defaultLimits.
+	Window Limits
 }
 
 // parseSettings is what a body is parsed under: the insert pins, plus header
@@ -127,7 +134,10 @@ type Refusal struct {
 }
 
 // Ingest asks ClickHouse's own parser whether each record in body would
-// insert, in ONE call, and exports the accepted rows as JSONCompactEachRow.
+// insert, and exports the accepted rows as JSONCompactEachRow. The body is
+// read a window at a time, each window one call cut at a record the reader
+// itself reported (see cursor), so a record's verdict, its number in a
+// refusal and what is exported are the same as from one call over the body.
 //
 // format is how body is spelled:
 //
@@ -157,8 +167,8 @@ type Refusal struct {
 // filter is cached per (generation, expression, values) on the table.
 //
 // The body is read as a ClickHouse INSERT reads it, with no error recovery:
-// the first record ClickHouse cannot read refuses the whole body
-// (Batch.Refused), and nothing is accepted. Recovery would hand back a verdict
+// the first record ClickHouse cannot read, in any window, refuses the whole
+// body (Batch.Refused), and nothing is accepted. Recovery would hand back a verdict
 // per record, but its reader resumes at the next line, which can be inside the
 // same record or past the next one, so the verdicts stop matching the records.
 // Per-record parse verdicts may return through Wave-RF/chtypes#497.
@@ -177,27 +187,55 @@ func (t *Table) Ingest(format Format, body []byte, checks ...Predicate) (Batch, 
 	return t.IngestWith(format, IngestOptions{}, body, checks...)
 }
 
-// IngestWith is Ingest with options; see IngestOptions.
+// IngestWith is Ingest with options; see IngestOptions. The body is parsed a
+// window at a time (see cursor) on this one held table; Engine.IngestRole is
+// the same walk, releasing the table between windows and bounding how many
+// parses run at once.
 func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, checks ...Predicate) (Batch, error) {
-	settings, ok := parseSettings(format, opts)
-	if !ok {
-		return Batch{}, fmt.Errorf(
-			"typelayer: Ingest cannot parse format %d; use FormatJSONEachRow, FormatCSV, FormatTSV, FormatCSVWithNames or FormatTSVWithNames",
-			int(format))
+	c, err := newCursor(format, opts, body)
+	if err != nil {
+		return Batch{}, err
 	}
-	if t.c == nil {
-		return Batch{}, &Unavailable{Tenant: t.tenant, Table: t.Name, Cause: t.cause}
+	var out Batch
+	for !c.done {
+		w, err := t.ingestNext(c, checks)
+		if err != nil {
+			return Batch{}, err
+		}
+		if out.merge(w) {
+			break
+		}
 	}
-	insert := t.insertOptions(format)
-	filter, uniform := t.checkFilter(checks)
-	res, err := t.export(format, body, settings, insert, filter)
-	if _, misuse := errors.AsType[*chtypes.UsageError](err); misuse && filter != nil {
+	return out, nil
+}
+
+// merge appends window w's verdicts to b and reports whether the body is
+// answered: a window ClickHouse refused or chtypes declined answers the whole
+// body, with no verdict from any window.
+func (b *Batch) merge(w Batch) bool {
+	if w.Refused != nil || w.Declined != "" {
+		*b = w
+		return true
+	}
+	b.Rows = append(b.Rows, w.Rows...)
+	if w.Columns != nil {
+		b.Columns = w.Columns
+	}
+	return false
+}
+
+// parse is one chtypes call over win, with the role's column list and insert
+// options and the check filter, which retry may drop (see retry).
+func (t *Table) parse(c *cursor, win []byte, settings map[string]string, chk *checkState) (chtypes.BatchResult, error) {
+	insert := t.insertOptions(c.format)
+	res, err := t.export(c.format, win, settings, c.docs, insert, chk.filter)
+	if _, misuse := errors.AsType[*chtypes.UsageError](err); misuse && chk.filter != nil {
 		// The cached filter was evicted and closed between lookup and use,
 		// which chtypes refuses before reading the body. Fail the checks
 		// closed, as an evaluation error would, not the request. Any other
 		// error would come back the same from a second parse of the body.
-		filter, uniform = nil, ReasonDecline
-		res, err = t.export(format, body, settings, insert, nil)
+		chk.filter, chk.uniform = nil, ReasonDecline
+		res, err = t.export(c.format, win, settings, c.docs, insert, nil)
 	}
 	if err != nil {
 		// A view's other options were checked when it was built, so a call
@@ -205,11 +243,23 @@ func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, check
 		// read, refused before any byte of the body. That is the role's
 		// standing condition, not this body's.
 		if _, usage := errors.AsType[*chtypes.UsageError](err); usage && t.role != nil && len(t.role.defaults) > 0 {
-			return Batch{}, &RoleRefused{Tenant: t.tenant, Table: t.Name, Cause: err.Error()}
+			return res, &RoleRefused{Tenant: t.tenant, Table: t.Name, Cause: err.Error()}
 		}
-		return Batch{}, err
+		return res, err
 	}
+	return res, nil
+}
 
+// checkState is the check filter one window parses with.
+type checkState struct {
+	filter  *chtypes.Filter
+	uniform string
+}
+
+// batch maps one window's chtypes answer to its verdicts: the first keep rows
+// of res, numbered after the base records earlier windows answered. A refusal
+// or a decline is the whole body's answer, whichever window it came from.
+func (t *Table) batch(c *cursor, res chtypes.BatchResult, chk *checkState, keep int) Batch {
 	// Only a fully accepted batch exports bytes. Gate on the outcome, never on
 	// RowsPassed or ExportDeclined: older artifact builds (every 26.6 build)
 	// count the admitted rows of a rejected batch and leave ExportDeclined
@@ -220,42 +270,47 @@ func (t *Table) IngestWith(format Format, opts IngestOptions, body []byte, check
 		// failed before reading any data, which is declined rather than blamed
 		// on the body.
 		if res.Outcome == chtypes.Rejected && res.ErrCode != 0 &&
-			(len(res.Rows) > 0 || res.Framing != nil || format == FormatCSVWithNames || format == FormatTSVWithNames) {
-			return Batch{Refused: refusal(res)}, nil
+			(len(res.Rows) > 0 || res.Framing != nil || c.format == FormatCSVWithNames || c.format == FormatTSVWithNames) {
+			r := refusal(res)
+			if r.Record > 0 {
+				r.Record += c.rows
+			}
+			r.Message = renumber(r.Message, c.rows)
+			return Batch{Refused: r}
 		}
 		// The reader stops at the first record it cannot answer for, so the
 		// rows it returned are not the body's: decline the body, not them.
-		return Batch{Declined: batchCause(res)}, nil
+		return Batch{Declined: batchCause(res)}
 	}
 	// Accepted but withheld (the full-arity guard, a serialization failure):
 	// nothing can be forwarded, whatever the per-row detail says.
 	if res.ExportDeclined != "" {
-		return Batch{Declined: res.ExportDeclined}, nil
+		return Batch{Declined: res.ExportDeclined}
 	}
 	// A setting the call asked for that the library declined, named at the
 	// batch level, declines the body even when no row carries it.
 	if msg := batchSettingsDecline(res); msg != "" {
-		return Batch{Declined: msg}, nil
+		return Batch{Declined: msg}
 	}
 	if msg := skippedDecline(res); msg != "" {
-		return Batch{Declined: msg}, nil
+		return Batch{Declined: msg}
 	}
 	// Every exported line carries the export's one column list, which the
 	// envelope names: the table's wire columns, on a role's view too, where a
 	// column the role may not write carries what the server would store.
 	if len(res.Rows) > 0 && !slices.Equal(res.ExportColumns, t.WireColumns) {
 		return Batch{Declined: fmt.Sprintf("chtypes exported the columns %q, not the table's wire columns %q",
-			res.ExportColumns, t.WireColumns)}, nil
+			res.ExportColumns, t.WireColumns)}
 	}
-	out := Batch{Rows: make([]RowVerdict, len(res.Rows)), Columns: res.ExportColumns}
+	out := Batch{Rows: make([]RowVerdict, keep), Columns: res.ExportColumns}
 	for i := range out.Rows {
-		v := rowVerdict(res.Rows[i], span(res, i), filter != nil)
-		if v.Accepted && uniform != "" {
-			v.Line, v.CheckReason = nil, uniform
+		v := rowVerdict(res.Rows[i], span(res, i), chk.filter != nil)
+		if v.Accepted && chk.uniform != "" {
+			v.Line, v.CheckReason = nil, chk.uniform
 		}
 		out.Rows[i] = v
 	}
-	return out, nil
+	return out
 }
 
 // batchCause is a batch's own cause when it was not accepted: its message, the
@@ -322,11 +377,11 @@ const leanDocs = chtypes.DocFlags(0)
 // (insertOptions). It names no zone, so the body parses in the zone of the
 // server the schema compiled on: a session_timezone that changed timezone()'s
 // answer would be declined per row.
-func (t *Table) export(format Format, body []byte, settings map[string]string, insert []chtypes.RowsOption, f *chtypes.Filter) (chtypes.BatchResult, error) {
+func (t *Table) export(format Format, body []byte, settings map[string]string, docs chtypes.DocFlags, insert []chtypes.RowsOption, f *chtypes.Filter) (chtypes.BatchResult, error) {
 	opts := append([]chtypes.RowsOption{
 		chtypes.WithSettings(settings),
 		chtypes.WithExport(chtypes.JSONCompactEachRow),
-		chtypes.WithDocFlags(leanDocs),
+		chtypes.WithDocFlags(docs),
 	}, insert...)
 	if f != nil {
 		opts = append(opts, chtypes.WithRowFilter(f))
