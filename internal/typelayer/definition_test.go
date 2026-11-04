@@ -64,6 +64,9 @@ func TestCompileSchema_FallsBackToColumns(t *testing.T) {
 		{"engine not modelled", "CREATE TABLE db.ck (`id` UInt64, `v` String) ENGINE = Distributed('cluster', 'db', 'ck_local', rand())", "chtypes declined: engine-not-modeled"},
 		// These two declines quote the definition in their message (measured).
 		{"table setting not modelled", "CREATE TABLE db.ck (`id` UInt64, `v` String) ENGINE = MergeTree ORDER BY id SETTINGS storage_policy = 'hunter2policy'", "chtypes declined: table-setting-not-modeled"},
+		// A key the server did not mask (a user allowed to see secrets) in an
+		// expression chtypes evaluates at parse: a refusal there quotes it.
+		{"a key in the partition expression", "CREATE TABLE db.ck (`id` UInt64, `v` String) ENGINE = MergeTree PARTITION BY decrypt('aes-256-ofb', v, 'hunter2hunter2hunter2hunter2abcd') ORDER BY id", "the definition calls a function that takes a key"},
 		{"CHECK reads a dictionary", "CREATE TABLE db.ck (`id` UInt64, `v` String, CONSTRAINT c CHECK dictHas('hunter2dict', id)) ENGINE = MergeTree ORDER BY id", "chtypes declined: expression-reads-storage"},
 		// ClickHouse's message for this one quotes the statement from the
 		// error on, the endpoint, key and secret with it (measured).

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"regexp"
 	"strings"
 
 	"github.com/wave-rf/chtypes/go/v2/chtypes"
@@ -131,7 +132,10 @@ func compileSchema(id tenant.ID, lib *chtypes.Library, srv *chtypes.Server, ts *
 	}
 	if ts.DDL != "" {
 		cause := "the definition holds a value the server masks as " + maskedValue
-		if !strings.Contains(ts.DDL, maskedValue) {
+		masked := strings.Contains(ts.DDL, maskedValue)
+		if !masked && secretCall.MatchString(ts.DDL) {
+			cause = "the definition calls a function that takes a key"
+		} else if !masked {
 			c, err := compileStatement(lib, srv, ts.DDL)
 			if err == nil {
 				return c, ""
@@ -153,6 +157,15 @@ func compileSchema(id tenant.ID, lib *chtypes.Library, srv *chtypes.Server, ts *
 // and a definition holding it (a CHECK over such a key, an S3 password) is
 // not compiled.
 const maskedValue = "'[HIDDEN]'"
+
+// secretCall matches a call of a ClickHouse function that takes a key (the
+// ones the server masks in what it reports). A definition calling one where
+// the server did not mask the key (a user allowed to see secrets) puts the key
+// into a CHECK, partition, sorting-key, index or TTL expression chtypes
+// evaluates at parse, and a refusal there quotes its constant arguments to
+// the client; such a definition is not compiled, as before the table's own
+// definition was, and its table is served from its columns.
+var secretCall = regexp.MustCompile(`(?i)\b(?:encrypt|decrypt|tryDecrypt|aes_encrypt_mysql|aes_decrypt_mysql|HMAC)\s*\(`)
 
 // definitionCause is why a table's own definition did not compile, safe to
 // log: an external engine's definition carries its wiring (endpoint, bucket,
