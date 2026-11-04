@@ -242,6 +242,9 @@ type ingestRun struct {
 	// checkGuard is the rejection every otherwise-acceptable record gets when
 	// the role's check clauses name columns no record can carry.
 	checkGuard *recordReject
+	// supplied is the dedupe id column whose provenance the parse reported
+	// (RowVerdict.Supplied), "" when none was asked for.
+	supplied string
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -408,6 +411,14 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		store: store, table: table, scope: scope, now: now, writable: shape.Columns,
 		checkColumns: checkColumns, checkGuard: guard,
 	}
+	// Whether a record supplied its dedupe id is the parse's to say, and asking
+	// costs: only a table that dedupes on an id the role may write asks.
+	if h.Dedup != nil && h.DedupeSettings != nil {
+		if dd := h.DedupeSettings(store, table); dd.Enabled && dd.IDField != "" &&
+			(run.writable == nil || slices.Contains(run.writable, dd.IDField)) {
+			run.supplied = dd.IDField
+		}
+	}
 	if abort := h.judge(ctx, run, shape, format, body.Bytes(), preds); abort != nil {
 		writeAbort(ctx, w, abort)
 		return
@@ -472,7 +483,7 @@ func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelay
 		return unavailableAbort()
 	}
 	opts := format.options()
-	opts.Now = run.now
+	opts.Now, opts.Supplied = run.now, run.supplied
 	batch, err := h.ingestAs(ctx, id, run.table, shape, format, opts, body, preds)
 	if _, refused := errors.AsType[*typelayer.RoleRefused](err); refused && len(shape.Defaults) > 0 {
 		cause := err
@@ -1015,7 +1026,14 @@ func (h *IngestHandler) prepareVerdict(ctx context.Context, run *ingestRun, i in
 	if h.Dedup != nil && h.DedupeSettings != nil {
 		if dd := h.DedupeSettings(run.store, run.table); dd.Enabled {
 			idField := dd.IDField
-			if id, ok := eventIDAt(verdict.Line, run.idIndex(idField)); ok {
+			id, ok := eventIDAt(verdict.Line, run.idIndex(idField))
+			// A reload between the parse and this record can name another
+			// id field, whose provenance was not asked for: its stored value
+			// stands in, as it did before provenance was read.
+			if ok && idField == run.supplied {
+				ok = verdict.Supplied
+			}
+			if ok {
 				rec.key = &dedupe.Key{Table: run.table, ID: id}
 				rec.retention = dd.Retention
 			} else {

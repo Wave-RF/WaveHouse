@@ -25,9 +25,14 @@ type Limits struct {
 	Records int
 }
 
-// defaultLimits bound a call: roughly 90 ms and 90 MB on a 20-column table
-// (measured on darwin-arm64); any byte bound far under 10 MiB would do.
-var defaultLimits = Limits{Bytes: 4 << 20, Records: 4096}
+// defaultLimits bound a lean call; valuesLimits one that asks for the
+// per-value document, which costs about seven times as much per record. Both
+// come to roughly 80 ms and 80 MB per call on a 20-column table (measured on
+// darwin-arm64), and any byte bound far under 10 MiB would do.
+var (
+	defaultLimits = Limits{Bytes: 4 << 20, Records: 4096}
+	valuesLimits  = Limits{Bytes: 4 << 20, Records: 512}
+)
 
 // tailMargin is how far before a window's end a refusal must sit to be taken
 // as the body's: a failure nearer the cut may be the cut's own, so the window
@@ -106,6 +111,9 @@ func newCursor(format Format, opts IngestOptions, body []byte) (*cursor, error) 
 			int(format))
 	}
 	c := &cursor{format: format, opts: opts, body: body, docs: leanDocs, lim: defaultLimits, grow: 1}
+	if opts.Supplied != "" {
+		c.docs, c.lim = sourceDocs, valuesLimits
+	}
 	if opts.Window != (Limits{}) {
 		c.lim = opts.Window
 	}

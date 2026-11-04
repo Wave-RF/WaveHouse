@@ -36,7 +36,13 @@ type IngestOptions struct {
 	// body, so a now() DEFAULT is one instant across the request. The zero
 	// time leaves each call its own clock.
 	Now time.Time
-	// Window bounds each parse call; the zero value is defaultLimits.
+	// Supplied names a column whose provenance each accepted verdict reports
+	// (RowVerdict.Supplied). It asks chtypes for the per-value document, which
+	// costs several times the lean one per record, so the body is parsed in
+	// smaller windows (valuesLimits). "" keeps the lean document.
+	Supplied string
+	// Window bounds each parse call; the zero value is the default for the
+	// documents the call asks for (defaultLimits, valuesLimits).
 	Window Limits
 }
 
@@ -100,6 +106,10 @@ type RowVerdict struct {
 	// CheckReason. It is a sub-slice of the batch's exported bytes, so a caller
 	// that outlives the request must copy it.
 	Line []byte
+	// Supplied reports whether the record itself gave IngestOptions.Supplied's
+	// column its value, rather than a DEFAULT, a generator or a null read as
+	// the default. Always false when that option is "".
+	Supplied bool
 }
 
 // Batch is a body's answer: a verdict per record, ClickHouse's refusal of the
@@ -174,8 +184,7 @@ type Refusal struct {
 // Per-record parse verdicts may return through Wave-RF/chtypes#497.
 //
 // Document flags stay lean (verdicts and exported bytes only), passed
-// explicitly: chtypes' default, every group, costs 5.6× on this path and
-// nothing here reads the per-value provenance it adds.
+// explicitly, unless IngestOptions.Supplied asks for one column's provenance.
 //
 // On a role's view (Engine.RoleTable) the parse is the role's INSERT: only the
 // columns it may write are listed, and its Defaults fill what a record omits.
@@ -308,9 +317,30 @@ func (t *Table) batch(c *cursor, res chtypes.BatchResult, chk *checkState, keep 
 		if v.Accepted && chk.uniform != "" {
 			v.Line, v.CheckReason = nil, chk.uniform
 		}
+		if v.Accepted && c.opts.Supplied != "" {
+			v.Supplied = suppliedBy(res.Rows[i], c.opts.Supplied)
+		}
 		out.Rows[i] = v
 	}
 	return out
+}
+
+// suppliedBy reports whether the record itself gave column name its value:
+// src is input, and the value is not a null read as the column's default
+// (input_format_null_as_default). A column with no DEFAULT reports such a
+// null as input, stored as its type's zero, so the transform is what tells.
+func suppliedBy(r chtypes.RowResult, name string) bool {
+	for _, x := range r.Transformed {
+		if x.Column == name && x.Reason == chtypes.ReasonNullToDefault {
+			return false
+		}
+	}
+	for _, v := range r.Columns {
+		if v.Column == name {
+			return v.Source == chtypes.SourceInput
+		}
+	}
+	return false
 }
 
 // batchCause is a batch's own cause when it was not accepted: its message, the
@@ -372,6 +402,10 @@ func (t *Table) checkFilter(checks []Predicate) (*chtypes.Filter, string) {
 
 // leanDocs asks a batch for its verdicts and exported bytes only.
 const leanDocs = chtypes.DocFlags(0)
+
+// sourceDocs adds each value's provenance and the silent changes made to it,
+// for IngestOptions.Supplied.
+const sourceDocs = chtypes.DocValues | chtypes.DocTransforms
 
 // export is the one parse, with insert as its column list and insert options
 // (insertOptions). It names no zone, so the body parses in the zone of the

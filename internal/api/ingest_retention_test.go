@@ -88,7 +88,8 @@ func TestIngest_Dedup_ReloadMidWindowCommitsEachRetention(t *testing.T) {
 	h.Dedup = staticDedup(dedup)
 	var calls atomic.Int32
 	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
-		if calls.Add(1) <= 2 {
+		// The first call is the parse's, which asks whether a record supplied its id.
+		if calls.Add(1) <= 3 {
 			return settings.Dedupe{Enabled: true, IDField: "event_id", Retention: time.Hour}
 		}
 		return settings.Dedupe{Enabled: true, IDField: "event_id", Retention: 2 * time.Hour}
