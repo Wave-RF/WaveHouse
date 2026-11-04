@@ -228,7 +228,7 @@ There is no lock file. CI, the test helpers and `scripts/fetch-chtypes.sh` use t
 
 ## Releases
 
-Releases are built with [GoReleaser](https://goreleaser.com/). The configuration is in `.goreleaser.yaml`. The release archives attached to each GitHub Release carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation — verify a downloaded archive with `gh attestation verify <file> --repo Wave-RF/WaveHouse --signer-workflow Wave-RF/WaveHouse/.github/workflows/release.yml`. (This covers the prebuilt archives, not `go install`, which compiles from source.)
+Each release binary is compiled by [GoReleaser](https://goreleaser.com/) (`goreleaser build --single-target`, configured in `.goreleaser.yaml`) on a native runner per platform; `.github/workflows/release.yml` then assembles the archives, `checksums.txt`, the GitHub Release and the image — see [Development → How the server release is built](/development#how-the-server-release-is-built). The release archives attached to each GitHub Release carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation — verify a downloaded archive with `gh attestation verify <file> --repo Wave-RF/WaveHouse --signer-workflow Wave-RF/WaveHouse/.github/workflows/release.yml`. (This covers the prebuilt archives, not `go install`, which compiles from source.)
 
 ### Supported Platforms
 
