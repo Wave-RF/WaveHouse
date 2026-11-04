@@ -121,7 +121,7 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:dev \
 
 Swap in `:vX.Y.Z` and `release.yml` for a release image. Pin the signer either way. `--repo` alone accepts an attestation from any workflow in the repo.
 
-The images carry no chtypes artifact: WaveHouse fetches the one for your ClickHouse line (the chtypes dev channel publishes 26.3, 26.7, 26.8 and 26.9; any other line is unavailable) when it first binds a tenant on it, verifying chtypes' signature (this build links the chtypes 2.0.0-dev SDK, which fetches only from chtypes' staging dev registry), into `/var/cache/chtypes` (the layout lands in `/var/cache/chtypes/v2-dev`). Mount a volume there (`-v chtypes-cache:/var/cache/chtypes`) so a restart or a new image does not fetch again; the bundled `chtypes` CLI (`--entrypoint /app/chtypes`) prefetches into it, and an air-gapped setup is a setting away (see [chtypes artifacts](https://wavehouse.dev/deployment#chtypes-artifacts)).
+The images carry no chtypes artifact: WaveHouse fetches the one for your ClickHouse line (the chtypes dev channel publishes 26.3, 26.7, 26.8, 26.9 and 26.10; any other line is unavailable) when it first binds a tenant on it, verifying chtypes' signature (this build links the chtypes 2.0.0-dev SDK, which fetches only from chtypes' staging dev registry), into `/var/cache/chtypes` (the layout lands in `/var/cache/chtypes/v2-dev`). Mount a volume there (`-v chtypes-cache:/var/cache/chtypes`) so a restart or a new image does not fetch again; the bundled `chtypes` CLI (`--entrypoint /app/chtypes`) prefetches into it, and an air-gapped setup is a setting away (see [chtypes artifacts](https://wavehouse.dev/deployment#chtypes-artifacts)).
 
 ### C. `go install` (binary, no Docker)
 

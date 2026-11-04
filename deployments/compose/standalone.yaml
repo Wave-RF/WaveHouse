@@ -2,7 +2,7 @@ services:
   clickhouse:
     # The ClickHouse this repository tests against (internal/chversion); its
     # line's chtypes artifact is fetched into chtypes-cache at first bind.
-    image: clickhouse/clickhouse-server:26.8.15.10
+    image: clickhouse/clickhouse-server:26.8.34.13
     ports:
       - "8123:8123"
       - "9000:9000"

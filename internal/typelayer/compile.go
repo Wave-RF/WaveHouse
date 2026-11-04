@@ -21,7 +21,7 @@ import (
 // would insert. A gate name the loaded line does not know fails the compile
 // with code 115 (allow_experimental_qbit_type did on 25.8, a line chtypes
 // does not publish), so the list holds only names measured accepted on all
-// four published chtypes lines (26.3.38.2, 26.7.19.5, 26.8.15.10 and 26.9.8.3).
+// five published chtypes lines (26.3.60.2, 26.7.19.5, 26.8.34.13, 26.9.25.15 and 26.10.2.103; measured on build 20261104.155011, 26.7 still served by 20261021.130847).
 // flatten_nested=0 compiles a Nested column the way system.columns reported
 // it: a table created with flatten_nested=0 arrives as one `n Nested(...)`
 // column, and the default would split it into `n.a`, `n.b` Arrays the server
