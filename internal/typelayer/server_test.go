@@ -159,8 +159,9 @@ func TestBind_CorruptArtifactIsThatTenantsUnavailable(t *testing.T) {
 }
 
 // TestBind_LogsTheLibraryOncePerTenant: which artifact answers for a tenant's
-// server is logged when the tenant's library changes, not on every refresh,
-// and a server on another patch of the line is a warning.
+// server is logged when the tenant's library or its server's version changes,
+// not on every refresh, and a server on another patch of the line is a
+// warning, including one upgraded in place within the line.
 func TestBind_LogsTheLibraryOncePerTenant(t *testing.T) {
 	eng := testEngine(t, eventsTable())
 	// The line's newest installed build, which need not be the pinned patch.
@@ -184,6 +185,21 @@ func TestBind_LogsTheLibraryOncePerTenant(t *testing.T) {
 	require.Len(t, other, 1)
 	assert.Equal(t, "WARN", other[0]["level"])
 	assert.Equal(t, otherPatch, other[0]["server_version"])
+
+	// The same tenant's server moved to another patch of its line keeps the
+	// line's library, and is logged all the same: once on the move, not on
+	// the refresh after it, and again on the move back.
+	seen := len(recs)
+	eng.Bind("exact", otherPatch, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("exact", otherPatch, "UTC", []*discovery.TableSchema{eventsTable()})
+	eng.Bind("exact", built, "UTC", []*discovery.TableSchema{eventsTable()})
+	recs = logRecords(t, logs)[seen:]
+	moved := withMsg(recs, "chtypes library bound from another patch of the server's line; verdicts follow the artifact's patch")
+	require.Len(t, moved, 1, "one record for the move, none for the refresh after it")
+	assert.Equal(t, "exact", moved[0]["tenant"])
+	back := withMsg(recs, "chtypes library bound")
+	require.Len(t, back, 1, "one record for the move back to the artifact's patch")
+	assert.Equal(t, built, back[0]["server_version"])
 }
 
 func TestVersionLine(t *testing.T) {

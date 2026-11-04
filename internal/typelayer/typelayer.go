@@ -141,6 +141,10 @@ type tenantSet struct {
 	// it any more (see bind and retire).
 	srv  *chtypes.Server
 	zone string
+	// logged is the server version the bind line was last logged for;
+	// written under bindMu. A patch upgrade in place keeps the line's library,
+	// so the library alone would not show the server drifting off its patch.
+	logged string
 
 	mu sync.RWMutex
 	// lib is the library the current handles were compiled against; a change
@@ -495,8 +499,9 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 			"tenant", s.id, "server_version", serverVersion, "server_tz", tz, "cause", cause)
 		return
 	}
-	if prev != lib {
+	if prev != lib || s.logged != serverVersion {
 		logLibrary(s.id, serverVersion, lib)
+		s.logged = serverVersion
 	}
 	// A new server recompiles every table on it, so once the swaps below are
 	// done no table can compile on the old one.
@@ -588,8 +593,8 @@ func (s *tenantSet) bind(serverVersion, serverTZ string, tables []*discovery.Tab
 	}
 }
 
-// logLibrary records, once each time a tenant's library changes, which
-// artifact answers for the tenant's server. A server on another patch of the
+// logLibrary records, once each time a tenant's library or its server's
+// version changes, which artifact answers for the tenant's server. A server on another patch of the
 // line is answered by the line's artifact, and patches can differ.
 func logLibrary(id tenant.ID, serverVersion string, lib *chtypes.Library) {
 	if res := lib.Resolved(); res != nil {
