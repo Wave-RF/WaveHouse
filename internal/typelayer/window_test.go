@@ -102,6 +102,49 @@ func windowBodies() []struct {
 	}
 	arr.WriteString("\n]\n")
 	ndBody := nd.String()
+	// Bare CSV and TSV bodies whose header ClickHouse detects: reordered,
+	// partial, quoted, with a types row, and a names-only one followed by data
+	// rows that are type names, which a window starting at one must not read
+	// as a types row.
+	var reCSV, partCSV, typedCSV, namesCSV, reTSV, partTSV, typedTSV, namesTSV strings.Builder
+	reCSV.WriteString("s,id,t\n")
+	partCSV.WriteString("\"s\" , id\r\n")
+	typedCSV.WriteString("s,id\nString,UInt32\n")
+	namesCSV.WriteString("s\n")
+	reTSV.WriteString("s\tid\tt\n")
+	partTSV.WriteString("s\tid\n")
+	typedTSV.WriteString("s\tid\nString\tUInt32\n")
+	namesTSV.WriteString("s\n")
+	for i := 1; i <= 23; i++ {
+		fmt.Fprintf(&reCSV, "v%d,%d,2024-01-01 00:00:00\n", i, i)
+		fmt.Fprintf(&partCSV, "\"v%d\",%d\r\n", i, i)
+		fmt.Fprintf(&typedCSV, "v%d,%d\n", i, i)
+		fmt.Fprintf(&reTSV, "v%d\t%d\t2024-01-01 00:00:00\n", i, i)
+		fmt.Fprintf(&partTSV, "v%d\t%d\n", i, i)
+		fmt.Fprintf(&typedTSV, "v%d\t%d\n", i, i)
+		v := fmt.Sprintf("v%d", i)
+		switch {
+		case i%3 == 0:
+			v = "Date"
+		case i%4 == 0:
+			v = "String"
+		}
+		namesCSV.WriteString(v + "\n")
+		namesTSV.WriteString(v + "\n")
+	}
+	// A UTF-8 BOM and a JSON array mid-body, which one call refuses: a body
+	// reads either only at its start.
+	var bomMid, arrayMid strings.Builder
+	for i := 1; i <= 12; i++ {
+		if i == 9 {
+			bomMid.WriteString("\xEF\xBB\xBF")
+		}
+		fmt.Fprintf(&bomMid, `{"id":%d,"s":"x"}`+"\n", i)
+	}
+	for i := 1; i <= 6; i++ {
+		fmt.Fprintf(&arrayMid, `{"id":%d,"s":"x"}`+"\n", i)
+	}
+	arrayMid.WriteString(`[{"id":7,"s":"a"},{"id":8,"s":"b"}]` + "\n")
 	var long strings.Builder // a refusal far from any cut, in the second of 1000-record windows
 	for i := 1; i <= 2000; i++ {
 		if i == 1500 {
@@ -131,6 +174,16 @@ func windowBodies() []struct {
 		{"refused far from a cut", FormatJSONEachRow, false, long.String()},
 		{"tsv refused late", FormatTSV, false, tsv.String() + "x\ty\t2024-01-01 00:00:00\n"},
 		{"tsv names refused late", FormatTSVWithNames, false, "s\tid\n" + "a\t1\nb\t2\nc\t3\nd\tx\n"},
+		{"csv reordered header", FormatCSV, false, reCSV.String()},
+		{"csv partial quoted header", FormatCSV, false, partCSV.String()},
+		{"csv names and types header", FormatCSV, false, typedCSV.String()},
+		{"csv names header, type-name data", FormatCSV, false, namesCSV.String()},
+		{"tsv reordered header", FormatTSV, false, reTSV.String()},
+		{"tsv partial header", FormatTSV, false, partTSV.String()},
+		{"tsv names and types header", FormatTSV, false, typedTSV.String()},
+		{"tsv names header, type-name data", FormatTSV, false, namesTSV.String()},
+		{"bom mid body", FormatJSONEachRow, false, bomMid.String()},
+		{"array mid body", FormatJSONEachRow, false, arrayMid.String()},
 	}
 }
 
@@ -191,7 +244,7 @@ func TestIngest_WindowsShareOneClock(t *testing.T) {
 	assert.Greater(t, len(unpinned), 1, "the control: unpinned windows read their own clocks")
 }
 
-// TestIngest_LaterCSVWindowsDetectNoHeader: a bare CSV or TSV body's later
+// TestIngest_LaterCSVWindowsDetectNoHeader: a headerless bare CSV or TSV body's later
 // windows read with header detection off. The control shows why: by default
 // the reader consumes a first line naming the columns, so a later window
 // starting at the data row "a,b" would lose it.
@@ -262,4 +315,28 @@ func TestIngest_WindowsKeepBigMapBodiesUnderTheCut(t *testing.T) {
 			t.Fatalf("record %d: %s", i+1, r.Message)
 		}
 	}
+}
+
+// TestIngest_DefaultWindowsRefuseAMidBodyBOM: a UTF-8 BOM before the record a
+// default window is cut at is refused as one call refuses it, not read as the
+// start of the next window's body.
+func TestIngest_DefaultWindowsRefuseAMidBodyBOM(t *testing.T) {
+	eng := testEngine(t, windowTable())
+	tbl, err := eng.Table(tenant.Default, "win")
+	require.NoError(t, err)
+	defer tbl.Release()
+	var body strings.Builder
+	for i := 1; i <= 5000; i++ {
+		if i == defaultLimits.Records {
+			body.WriteString("\xEF\xBB\xBF")
+		}
+		fmt.Fprintf(&body, `{"id":%d,"s":"x"}`+"\n", i)
+	}
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	one, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{Now: now, Window: Limits{Bytes: 1 << 30, Records: 1 << 30}}, []byte(body.String()))
+	require.NoError(t, err)
+	require.NotNil(t, one.Refused, "the control: one call refuses the body")
+	b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{Now: now}, []byte(body.String()))
+	require.NoError(t, err)
+	assert.Equal(t, answer(one), answer(b))
 }

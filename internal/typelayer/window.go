@@ -8,7 +8,9 @@ import (
 	"math"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/wave-rf/chtypes/go/v2/chtypes"
 
@@ -69,17 +71,21 @@ func renumber(msg string, base int) string {
 //
 //   - accepted, not the last window: the last record may be the cut's
 //     (a TSV line cut short still parses), so it is dropped and read again;
-//   - refused at a record past the first, near the cut: the window is read
-//     again up to that record's start, and the next window begins there;
+//   - refused at a record past the second, near the cut: the window is read
+//     again up to the start of the record before it, and the next window
+//     begins there, so the refused record is read mid-window again;
 //   - refused well before the cut: that refusal is the body's, numbered
 //     across windows;
-//   - fewer than two records, or refused at the first one near the cut: the
-//     window grows until it is the rest of the body, which is authoritative.
+//   - fewer than two records, or refused at the first or second one near the
+//     cut: the window grows until it is the rest of the body, which is
+//     authoritative.
 //
 // Later windows repeat what the reader consumed before the first record: a
-// WithNames header, or the `[` of a JSON array, closed by a `]` of our own on
-// every window but the last. They read bare CSV and TSV with header detection
-// off, since only a body's first line can be its header.
+// WithNames header, a header bare CSV or TSV detected (with the first
+// window's settings, so its names map the fields again), or the `[` of a JSON
+// array, closed by a `]` of our own on every window but the last. A bare body
+// with no header reads later windows with detection off, since only a body's
+// first line can be its header.
 //
 // Whole-body steps of an INSERT (the partition cap, CHECKs over the merged
 // block) then run once per window; the statement chtypes compiles has neither
@@ -248,16 +254,139 @@ func offset(x uint64) int {
 }
 
 // advance moves the cursor past kept records of res, to body offset next.
-func (c *cursor) advance(res chtypes.BatchResult, lead, kept, next int) {
+// desc is the compiled table's columns, which type a detected header.
+func (c *cursor) advance(res chtypes.BatchResult, lead, kept, next int, desc []chtypes.Column) {
 	if c.off == 0 {
+		head := c.body[:c.at(res.Rows[0].InputSpan.Off, lead)]
 		switch {
 		case c.array:
 			c.prefix = []byte("[")
 		case c.format == FormatCSVWithNames || c.format == FormatTSVWithNames:
-			c.prefix = c.body[:c.at(res.Rows[0].InputSpan.Off, lead)]
+			c.prefix = head
+		case c.format == FormatCSV || c.format == FormatTSV:
+			if p := detectedHeader(c.format, head, desc); p != nil {
+				c.prefix, c.later = p, c.first
+			}
 		}
 	}
 	c.off, c.rows, c.grow = next, c.rows+kept, 1
+}
+
+// detectedHeader is the prefix that makes a later window read the header the
+// reader detected in head, the bytes before a bare body's first record; nil
+// when head holds no header. A names-only header gets a types row after it:
+// detection reads the row after a names row as types when every field is a
+// type name, which a later window's first record may be (a String column
+// holding "Date"), but never a third row.
+func detectedHeader(format Format, head []byte, desc []chtypes.Column) []byte {
+	rows, eol := headerRows(format, bytes.TrimPrefix(head, []byte("\xEF\xBB\xBF")))
+	switch len(rows) {
+	case 0:
+		return nil
+	case 1:
+	default:
+		return head
+	}
+	types := make(map[string]string, len(desc))
+	for _, col := range desc {
+		types[col.Name] = col.Type
+	}
+	sep, out := ",", slices.Clone(head)
+	if format == FormatTSV {
+		sep = "\t"
+	}
+	for i, name := range rows[0] {
+		typ, ok := types[name]
+		if !ok {
+			// Not a name we can type: the header alone, as the first window read it.
+			return head
+		}
+		if i > 0 {
+			out = append(out, sep...)
+		}
+		if format == FormatTSV {
+			out = append(out, tsvField.Replace(typ)...)
+		} else {
+			out = append(out, `"`+strings.ReplaceAll(typ, `"`, `""`)+`"`...)
+		}
+	}
+	return append(out, eol...)
+}
+
+// headerRows splits a detected header into its non-empty rows of fields, as
+// the reader reads them (CSV: `"` quoting with `""`, unquoted fields trimmed
+// of spaces and tabs, a line ending at LF, CRLF or CR; TSV: backslash
+// escapes, a line ending at LF), and the line end its last row had.
+func headerRows(format Format, b []byte) (rows [][]string, eol string) {
+	var row []string
+	var field []byte
+	quoted, inQuote := false, false
+	end := func(term string) {
+		f := string(field)
+		if format == FormatCSV && !quoted {
+			f = strings.Trim(f, " \t")
+		}
+		row = append(row, f)
+		if term != "" {
+			if len(row) > 1 || row[0] != "" || quoted {
+				rows, eol = append(rows, row), term
+			}
+			row = nil
+		}
+		field, quoted = field[:0], false
+	}
+	for i := 0; i < len(b); i++ {
+		x := b[i]
+		switch {
+		case inQuote:
+			switch {
+			case x == '"' && i+1 < len(b) && b[i+1] == '"':
+				field = append(field, '"')
+				i++
+			case x == '"':
+				inQuote = false
+			default:
+				field = append(field, x)
+			}
+		case format == FormatCSV && x == '"' && len(bytes.Trim(field, " \t")) == 0:
+			field, inQuote, quoted = field[:0], true, true
+		case format == FormatTSV && x == '\\' && i+1 < len(b):
+			i++
+			field = append(field, tsvUnescape(b[i])...)
+		case x == ',' && format == FormatCSV, x == '\t' && format == FormatTSV:
+			end("")
+		case format == FormatCSV && x == '\r' && i+1 < len(b) && b[i+1] == '\n':
+			i++
+			end("\r\n")
+		case x == '\n', format == FormatCSV && x == '\r':
+			end(string(x))
+		default:
+			field = append(field, x)
+		}
+	}
+	if len(field) > 0 || len(row) > 0 {
+		end("\n")
+	}
+	return rows, eol
+}
+
+// tsvUnescape is the byte a TSV `\x` escape stands for.
+func tsvUnescape(x byte) string {
+	switch x {
+	case 't':
+		return "\t"
+	case 'n':
+		return "\n"
+	case 'r':
+		return "\r"
+	case '0':
+		return "\x00"
+	case 'b':
+		return "\b"
+	case 'f':
+		return "\f"
+	}
+	return string(x)
 }
 
 // spansKnown reports whether every row of res carries its InputSpan.
@@ -326,14 +455,17 @@ func (t *Table) ingestNext(c *cursor, checks []Predicate) (Batch, error) {
 				c.done = true
 				return b, nil
 			}
-			c.advance(res, lead, n-1, next)
+			c.advance(res, lead, n-1, next, t.c.desc)
 			return b, nil
 		case !accepted && j < n && offset(res.Rows[j].InputSpan.Off)+offset(res.Rows[j].InputSpan.Len)+tailMargin <= content:
 			// Refused well before the cut: the cut cannot be why.
 			c.done = true
 			return t.batch(c, res, chk, n), nil
-		case !accepted && j >= 1 && j < n:
-			return t.closeAt(c, res, lead, j, chk)
+		case !accepted && j >= 2 && j < n:
+			// The next window starts at the last record accepted, never at the
+			// refused one: a window's start reads a UTF-8 BOM or a `[` that
+			// one call refuses mid-body.
+			return t.closeAt(c, res, lead, j-1, chk)
 		}
 		// Too few records to cut at: grow the window until it holds two, or
 		// is the rest of the body. Each step doubles both bounds.
@@ -342,7 +474,7 @@ func (t *Table) ingestNext(c *cursor, checks []Predicate) (Batch, error) {
 }
 
 // closeAt reads the window again up to record j's start, every record in it
-// finished, and starts the next window at record j.
+// finished, and starts the next window at record j, one the window accepted.
 func (t *Table) closeAt(c *cursor, res chtypes.BatchResult, lead, j int, chk *checkState) (Batch, error) {
 	next := c.at(res.Rows[j].InputSpan.Off, lead)
 	end := next
@@ -380,7 +512,7 @@ func (t *Table) closeAt(c *cursor, res chtypes.BatchResult, lead, j int, chk *ch
 		return Batch{Declined: fmt.Sprintf("chtypes read %d records up to record %d's start, where it had read %d",
 			len(closed.Rows), c.rows+j+1, j)}, nil
 	}
-	c.advance(closed, lead, j, next)
+	c.advance(closed, lead, j, next, t.c.desc)
 	return b, nil
 }
 
