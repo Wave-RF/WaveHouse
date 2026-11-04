@@ -10,7 +10,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/keyenc"
@@ -82,14 +81,21 @@ func TestPartitionedKey_Buckets(t *testing.T) {
 	per := map[string]int{}
 	for _, tn := range []tenant.ID{"acme", "acme-2", "acme_x", "acm"} {
 		for _, table := range []string{"events", "events-2", "a/b"} {
-			for i := range 25_600 {
+			// The distribution below needs about 100 ids a bucket, for one
+			// table; the split and range checks need far fewer (#961).
+			ids := 512
+			if tn == "acme" && table == "events" {
+				ids = 25_600
+			}
+			for i := range ids {
 				pk, _ := dedupe.PartitionedKey(tn, dedupe.Key{Table: table, ID: fmt.Sprintf("evt-%d", i)})
 				parts, err := keyenc.Split(pk, '/')
-				require.NoError(t, err)
-				require.Equal(t, []string{string(tn), table}, parts[:2], pk)
-				n, err := strconv.Atoi(parts[2])
-				require.NoError(t, err)
-				require.True(t, n >= 0 && n < dedupe.TableBuckets, pk)
+				if err != nil || len(parts) != 3 || parts[0] != string(tn) || parts[1] != table {
+					t.Fatalf("%q splits into %q (%v), not %q, %q and a bucket", pk, parts, err, tn, table)
+				}
+				if n, err := strconv.Atoi(parts[2]); err != nil || n < 0 || n >= dedupe.TableBuckets {
+					t.Fatalf("%q: bucket %q is not in [0, %d)", pk, parts[2], dedupe.TableBuckets)
+				}
 				if tn == "acme" && table == "events" {
 					per[pk]++
 				}
@@ -156,7 +162,7 @@ func TestKeyLayout_NoCollisions(t *testing.T) {
 		tn        tenant.ID
 		table, id string
 	}
-	seen := make(map[string]triple, 1<<19)
+	seen := make(map[string]triple, 330_000)
 	check := func(tn tenant.ID, k dedupe.Key) {
 		s := key(tn, k)
 		who := triple{tn, k.Table, k.ID}
