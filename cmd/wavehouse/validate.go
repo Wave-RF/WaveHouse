@@ -4,8 +4,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/config"
@@ -51,21 +53,19 @@ Exit codes: 0 valid (warnings allowed), 1 invalid, 2 usage.
 		return 2
 	}
 
-	_, findings := settings.Validate(dir)
+	tree, findings := settings.Validate(dir)
 	var errs, warns int
 	configErrs := false
 	for _, f := range findings {
 		fmt.Println(f)
-		switch f.Severity {
-		case settings.SeverityError:
+		if f.Severity == settings.SeverityError {
 			errs++
 			configErrs = configErrs || path.Base(f.File) == settings.FileConfig
-		case settings.SeverityWarning:
+		} else {
 			warns++
-		case settings.SeverityInfo:
-			// Printed above; counts as neither.
 		}
 	}
+	printClaims(tree)
 	// The findings say what is wrong; the fix is this binary's to suggest.
 	if configErrs {
 		fmt.Println("hint: `wavehouse bootstrap <dir>` writes a complete starter config.json to compare against")
@@ -76,4 +76,39 @@ Exit codes: 0 valid (warnings allowed), 1 invalid, 2 usage.
 	}
 	fmt.Printf("valid: %s (%d warning(s))\n", dir, warns)
 	return 0
+}
+
+// printClaims lists, under the findings, the token claims each pipe binds
+// (`pipes.json: pipes[0] "daily_totals" binds token claims jwt.sub`), one line
+// per claim-scoped pipe, its file named as a finding names it (#938). A
+// reviewer of a pipes.json needs to see that a pipe is scoped by the caller's
+// token; it is a fact about the file, not a finding, so it counts as neither
+// an error nor a warning, and boot and a reload do not report it.
+func printClaims(tree *settings.Tree) {
+	if tree == nil {
+		return
+	}
+	for _, id := range slices.Sorted(maps.Keys(tree.Tenants)) {
+		doc := tree.Tenants[id].Doc
+		if doc == nil {
+			continue
+		}
+		file := settings.FilePipes
+		if tree.Nested {
+			// path, not filepath: a finding's File spells the folder this way on every OS.
+			file = path.Join(id.String(), file)
+		}
+		for i := range doc.Pipes {
+			q := &doc.Pipes[i]
+			claims := q.Claims()
+			if len(claims) == 0 {
+				continue
+			}
+			refs := make([]string, len(claims))
+			for k, c := range claims {
+				refs[k] = "jwt." + c
+			}
+			fmt.Printf("%s: pipes[%d] %q binds token claims %s\n", file, i, q.Name, strings.Join(refs, ", "))
+		}
+	}
 }

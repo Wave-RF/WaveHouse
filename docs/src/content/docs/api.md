@@ -892,7 +892,7 @@ Re-validates the [settings directory](/settings-directory) — `roles.json`, `po
 }
 ```
 
-`200` when adopted (warnings allowed); `422` when validation rejected the directory — the previous settings stay in effect, and `findings` says why. A finding's `severity` is `error` (the directory is rejected), `warning` (legal config worth a look), or `info` (something a reviewer of legal config should know, such as the token claims a pipe binds — [Binding token claims](/pipes#binding-token-claims)); only an `error` blocks adoption.
+`200` when adopted (warnings allowed); `422` when validation rejected the directory — the previous settings stay in effect, and `findings` says why.
 
 An optional `?tenant=<id>` reloads that tenant's folder of a [nested settings directory](/deployment#the-nested-settings-directory) and nothing else; it is parsed as strictly as on the [pipe reads](#get-v1opspipes--list-named-pipes) (`400`), and an unknown tenant is a `404`. A token sent with no valid operator key while tenant `0`'s JWKS has not been fetched yet (the ops tree verifies as tenant `0`) is refused with `503` + `Retry-After: 30`. Over a nested directory a rejected folder is not kept on its previous settings, and a `422` for the whole directory can mean adopted in part — see that section.
 

@@ -111,8 +111,8 @@ func (e *UnresolvedClaimError) Error() string {
 // `{{ jwt.<path> }}` references, each once, in order of first use; nil for a
 // pipe that binds none. It is BindParams's own scan (placeholderRe), so a
 // claim-shaped fragment inside a parameter's inline default, which binds the
-// parameter, is not reported. Validation reports the paths so a reviewer
-// sees that a pipe is claim-scoped.
+// parameter, is not reported. `wavehouse validate` lists the paths so a
+// reviewer sees that a pipe is claim-scoped.
 func (q *NamedQuery) Claims() []string {
 	var paths []string
 	seen := map[string]bool{}

@@ -838,10 +838,11 @@ func TestReportLegacyPolicyLayout_RoleNamedAfterAnOperation(t *testing.T) {
 	}
 }
 
-// TestValidate_PipeClaimsReported (#938): the token claims a pipe binds are an
-// info finding — neither an error nor a warning, so the directory stays valid
-// and HasErrors is false — and a pipe reading none reports nothing.
-func TestValidate_PipeClaimsReported(t *testing.T) {
+// TestValidate_PipeClaimsNoFinding (#938): a pipe that binds token claims is
+// legal config and reports nothing — the directory is valid with no finding
+// at all. The claims it binds are read off the Document (NamedQuery.Claims),
+// which `wavehouse validate` lists.
+func TestValidate_PipeClaimsNoFinding(t *testing.T) {
 	t.Parallel()
 	files := validFiles()
 	files[FilePipes] = `{"pipes": [
@@ -850,8 +851,7 @@ func TestValidate_PipeClaimsReported(t *testing.T) {
 	]}`
 	doc, findings := validateBoth(t, files)
 	require.NotNil(t, doc, findingStrings(findings))
-	assert.False(t, HasErrors(findings))
-	require.Len(t, findings, 1, findingStrings(findings))
-	assert.Equal(t, Finding{Severity: SeverityInfo, File: FilePipes, Path: "pipes[0].sql", Message: "binds token claims jwt.app_metadata.tenant_ids, jwt.sub"}, findings[0])
-	assert.Equal(t, "info: pipes.json: pipes[0].sql: binds token claims jwt.app_metadata.tenant_ids, jwt.sub", findings[0].String())
+	assert.Empty(t, findings, findingStrings(findings))
+	assert.Equal(t, []string{"app_metadata.tenant_ids", "sub"}, doc.Pipes[0].Claims())
+	assert.Empty(t, doc.Pipes[1].Claims())
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -50,6 +51,33 @@ func TestRunValidate(t *testing.T) {
 		assert.Equal(t, 1, runValidate([]string{nested(map[string]string{"acme": `{}`, "globex": `{"default_role": "ghost"}`})}))
 	})
 
+	// The token claims a pipe binds are listed under the findings, one line
+	// per claim-scoped pipe with its file named as a finding names it, so a
+	// reviewer sees the pipe is scoped by the caller's token. A pipe binding
+	// none is not listed, and the list is no finding: the directory is valid
+	// (#938).
+	t.Run("claims a pipe binds are listed", func(t *testing.T) {
+		pipes := `{"pipes": [
+			{"name": "plain", "sql": "SELECT 1 LIMIT {{limit:10}}"},
+			{"name": "daily_totals", "sql": "SELECT day FROM orders WHERE tenant_id IN {{ jwt.app_metadata.tenant_ids }} AND owner = {{jwt.sub}} AND day >= {{start}}", "parameters": [{"name": "start", "type": "string", "required": true}], "allowed_roles": ["public"]}
+		]}`
+		flat := writeSettingsDir(t, `{}`)
+		require.NoError(t, os.WriteFile(filepath.Join(flat, "pipes.json"), []byte(pipes), 0o600))
+		var code int
+		out := captureStdout(t, func() { code = runValidate([]string{flat}) })
+		assert.Equal(t, 0, code)
+		assert.Contains(t, out, "pipes.json: pipes[1] \"daily_totals\" binds token claims jwt.app_metadata.tenant_ids, jwt.sub\n")
+		assert.NotContains(t, out, `"plain"`)
+
+		root := t.TempDir()
+		acme := writeSettingsDir(t, `{}`)
+		require.NoError(t, os.WriteFile(filepath.Join(acme, "pipes.json"), []byte(pipes), 0o600))
+		require.NoError(t, os.Rename(acme, filepath.Join(root, "acme")))
+		out = captureStdout(t, func() { code = runValidate([]string{root}) })
+		assert.Equal(t, 0, code)
+		assert.Contains(t, out, "acme/pipes.json: pipes[1] \"daily_totals\" binds token claims jwt.app_metadata.tenant_ids, jwt.sub\n")
+	})
+
 	t.Run("env fallback", func(t *testing.T) {
 		t.Setenv("WH_SETTINGS_DIR", writeSettingsDir(t, `{}`))
 		assert.Equal(t, 0, runValidate(nil))
@@ -76,4 +104,24 @@ func TestRunValidate(t *testing.T) {
 	t.Run("unknown flag is a usage error", func(t *testing.T) {
 		assert.Equal(t, 2, runValidate([]string{"--bogus"}))
 	})
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns what
+// it wrote. runValidate prints through the fmt package's default writer, as a
+// CLI does, and the tests in this package run serially.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	stdout := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = stdout }()
+	read := make(chan []byte)
+	go func() {
+		out, _ := io.ReadAll(r)
+		read <- out
+	}()
+	fn()
+	require.NoError(t, w.Close())
+	return string(<-read)
 }

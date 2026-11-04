@@ -117,10 +117,6 @@ func (v *validator) warnf(file, path, format string, args ...any) {
 	v.findings = append(v.findings, Finding{Severity: SeverityWarning, File: file, Path: path, Message: fmt.Sprintf(format, args...)})
 }
 
-func (v *validator) infof(file, path, format string, args ...any) {
-	v.findings = append(v.findings, Finding{Severity: SeverityInfo, File: file, Path: path, Message: fmt.Sprintf(format, args...)})
-}
-
 // checkDir verifies the directory itself and reads each expected file's bytes;
 // a file it does not return is missing, which validateFiles reports — an
 // empty deployment writes {} in all four files, so absence always means
@@ -472,16 +468,11 @@ func (v *validator) parsePipes(data []byte) []pipes.NamedQuery {
 		// A placeholder the binder would not recognize reaches ClickHouse as
 		// literal text, and a parameter named jwt would read as a
 		// request-supplied claim: rejected on every adoption, like a malformed
-		// policy template. The claims a pipe binds are reported so a reviewer
-		// sees the pipe is scoped by the caller's token.
+		// policy template. The claims a pipe binds are legal config, not a
+		// finding: `wavehouse validate` lists them off the Document
+		// (NamedQuery.Claims) for a reviewer of the file.
 		if err := q.CheckTemplate(); err != nil {
 			v.errorf(FilePipes, path+".sql", "%v", err)
-		} else if claims := q.Claims(); len(claims) > 0 {
-			refs := make([]string, len(claims))
-			for k, c := range claims {
-				refs[k] = "jwt." + c
-			}
-			v.infof(FilePipes, path+".sql", "binds token claims %s", strings.Join(refs, ", "))
 		}
 		seenParams := map[string]bool{}
 		for j, param := range q.Parameters {
