@@ -226,7 +226,13 @@ type ingestRun struct {
 	store        *settings.Store
 	table, scope string
 	now          time.Time
-	batch        typelayer.Batch
+	// schema is the table's schema the request was judged under, and
+	// idChecked the dedupe id_field it was checked against (dedupeIDReady;
+	// "" when dedupe was off). A reload can change id_field while the body is
+	// processed, so prepareVerdict checks any other one against schema.
+	schema    *discovery.TableSchema
+	idChecked string
+	batch     typelayer.Batch
 	// wire is the column list the rows were exported with (Batch.Columns):
 	// the envelope's Columns, and where the dedupe id sits in a row.
 	wire []string
@@ -358,7 +364,8 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// A dedupe id column that stores a value the record never sent would key
 	// dedupe on it, so the table is refused whole, for the same reason.
-	if abort := h.dedupeIDReady(ctx, store, table, schema); abort != nil {
+	dedupeJudged, abort := h.dedupeIDReady(ctx, store, table, schema)
+	if abort != nil {
 		writeAbort(ctx, w, abort)
 		return
 	}
@@ -414,7 +421,10 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	run := &ingestRun{
 		store: store, table: table, scope: scope, now: now, writable: shape.Columns,
-		checkColumns: checkColumns, checkGuard: guard,
+		checkColumns: checkColumns, checkGuard: guard, schema: schema,
+	}
+	if dedupeJudged.Enabled {
+		run.idChecked = dedupeJudged.IDField
 	}
 	if abort := h.judge(ctx, run, shape, format, body.Bytes(), preds); abort != nil {
 		writeAbort(ctx, w, abort)
@@ -862,13 +872,10 @@ func (h *IngestHandler) noticeDue(key string) bool {
 
 // writeAbort emits a whole-request failure response: the status, message and
 // any error class and ClickHouse code, plus a Retry-After header when one is
-// set. Shared by the single-object and batch paths.
-// writeAbort emits a whole-request failure response: the status and message,
-// plus a Retry-After header when one is set (503 backpressure). Shared by the
-// single-object and batch paths. A 5xx is the engine's failure, so it marks
-// the handler's span, the one whose context rides into the queue headers, as
-// failed; a 4xx is the client's, and the span stays unset, as the server
-// span's does (#899).
+// set (503 backpressure). Shared by the single-object and batch paths. A 5xx
+// is the engine's failure, so it marks the handler's span, the one whose
+// context rides into the queue headers, as failed; a 4xx is the client's, and
+// the span stays unset, as the server span's does (#899).
 func writeAbort(ctx context.Context, w http.ResponseWriter, abort *requestAbort) {
 	if abort.Status >= http.StatusInternalServerError {
 		failSpan(ctx, abort.Message)
@@ -1027,6 +1034,15 @@ func (h *IngestHandler) prepareVerdict(ctx context.Context, run *ingestRun, i in
 	if h.Dedup != nil && h.DedupeSettings != nil {
 		if dd := h.DedupeSettings(run.store, run.table); dd.Enabled {
 			idField := dd.IDField
+			// A reload since the request was checked may have switched dedupe on
+			// or moved id_field to a column the rule refuses. Refusing the request
+			// publishes nothing in the open window and keys nothing.
+			if idField != run.idChecked {
+				if abort := h.dedupeIDColumn(ctx, run.store, run.table, run.schema, idField); abort != nil {
+					return pendingRecord{}, abort
+				}
+				run.idChecked = idField
+			}
 			if id, ok := eventIDAt(verdict.Line, run.idIndex(idField)); ok {
 				rec.key = &dedupe.Key{Table: run.table, ID: id}
 				rec.retention = dd.Retention
@@ -1046,11 +1062,12 @@ func (h *IngestHandler) prepareVerdict(ctx context.Context, run *ingestRun, i in
 	}
 
 	// The row travels POSITIONALLY as the bytes ClickHouse's own writer
-	// produced, with the column names alongside rather than in the row: a batch
-	// of rows for one table carries the names once, and the reader can tell a
-	// schema change mid-stream from a reordering. They are the export's
-	// columns, the table's whole wire list whatever the role: a column the role
-	// may not write carries what the server would store for it.
+	// produced, with the column names alongside rather than in the row. Each
+	// message is one record and stands alone, so it carries its own columns,
+	// which let the reader tell a schema change mid-stream from a reordering.
+	// They are the export's columns, the table's whole wire list whatever the
+	// role: a column the role may not write carries what the server would store
+	// for it.
 	evt := ingest.EventMessage{
 		TableName:         run.table,
 		Scope:             run.scope,
@@ -1072,8 +1089,7 @@ func (h *IngestHandler) prepareVerdict(ctx context.Context, run *ingestRun, i in
 // idIndex is where idField sits in an exported row, or -1 when the role may
 // not write it: the row then holds the table's value there, not the record's,
 // so it identifies no event. On a column dedupeIDReady admits that value is
-// NULL or "" and reads as missing anyway; this also covers a reload that names
-// another id field after the table was checked.
+// NULL or "" and reads as missing anyway.
 func (r *ingestRun) idIndex(idField string) int {
 	if r.writable != nil && !slices.Contains(r.writable, idField) {
 		return -1
