@@ -158,14 +158,14 @@ func compileSchema(id tenant.ID, lib *chtypes.Library, srv *chtypes.Server, ts *
 // not compiled.
 const maskedValue = "'[HIDDEN]'"
 
-// secretCall matches a call of a ClickHouse function that takes a key (the
-// ones the server masks in what it reports). A definition calling one where
-// the server did not mask the key (a user allowed to see secrets) puts the key
+// secretCall matches a call of a ClickHouse function that takes a key: the
+// ones the server masks in what it reports, and the keyed hashes, which it
+// never masks. A definition calling one where the key is not masked puts the key
 // into a CHECK, partition, sorting-key, index or TTL expression chtypes
 // evaluates at parse, and a refusal there quotes its constant arguments to
 // the client; such a definition is not compiled, as before the table's own
 // definition was, and its table is served from its columns.
-var secretCall = regexp.MustCompile(`(?i)\b(?:encrypt|decrypt|tryDecrypt|aes_encrypt_mysql|aes_decrypt_mysql|HMAC)\s*\(`)
+var secretCall = regexp.MustCompile(`(?i)\b(?:encrypt|decrypt|tryDecrypt|aes_encrypt_mysql|aes_decrypt_mysql|HMAC|sipHash64Keyed|sipHash128Keyed|sipHash128ReferenceKeyed)\s*\(`)
 
 // definitionCause is why a table's own definition did not compile, safe to
 // log: an external engine's definition carries its wiring (endpoint, bucket,

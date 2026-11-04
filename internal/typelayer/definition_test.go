@@ -67,6 +67,9 @@ func TestCompileSchema_FallsBackToColumns(t *testing.T) {
 		// A key the server did not mask (a user allowed to see secrets) in an
 		// expression chtypes evaluates at parse: a refusal there quotes it.
 		{"a key in the partition expression", "CREATE TABLE db.ck (`id` UInt64, `v` String) ENGINE = MergeTree PARTITION BY decrypt('aes-256-ofb', v, 'hunter2hunter2hunter2hunter2abcd') ORDER BY id", "the definition calls a function that takes a key"},
+		// A keyed hash's key, which the server never masks, in a CHECK: a
+		// violation quotes the expression, key included (measured).
+		{"a keyed hash in a CHECK", "CREATE TABLE db.ck (`id` UInt64, `v` String, CONSTRAINT c CHECK sipHash64Keyed((toUInt64(1111), toUInt64(2222)), v) % 2 = 0) ENGINE = MergeTree ORDER BY id", "the definition calls a function that takes a key"},
 		{"CHECK reads a dictionary", "CREATE TABLE db.ck (`id` UInt64, `v` String, CONSTRAINT c CHECK dictHas('hunter2dict', id)) ENGINE = MergeTree ORDER BY id", "chtypes declined: expression-reads-storage"},
 		// ClickHouse's message for this one quotes the statement from the
 		// error on, the endpoint, key and secret with it (measured).
