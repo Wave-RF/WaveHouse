@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,6 +16,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 )
 
 // manyClicks is n NDJSON click records, page "/<i>", with bad put in place of
@@ -73,36 +76,69 @@ func TestIngest_ParseWindowsRefuseTheWholeBody(t *testing.T) {
 	assert.Empty(t, pub.Messages)
 }
 
-// TestIngest_ParseSlotsFullIs503: with every parse slot taken, a body is
-// refused before any parse with 503 and Retry-After, as other backpressure is,
-// and is served once a slot frees.
-func TestIngest_ParseSlotsFullIs503(t *testing.T) {
+// TestIngest_ParseSlotsWaitThenBusy: with every parse slot taken, a body
+// waits a short while for one. Freed in time, it is served; not freed, it is
+// refused before any parse with 503 and Retry-After, as other backpressure
+// is; a client that goes away while it waits stops the wait.
+func TestIngest_ParseSlotsWaitThenBusy(t *testing.T) {
 	t.Parallel()
-	pub := &testutil.MockPublisher{}
-	h := newTestIngestHandler(t, testRegistry(t), pub)
-	var held []func()
-	for {
-		release, ok := h.Types.TakeParseSlot()
-		if !ok {
-			break
-		}
-		held = append(held, release)
+	tests := []struct {
+		name      string
+		freeAfter time.Duration // 0: the slots stay taken
+		cancel    bool
+		status    int
+	}{
+		{"freed within the wait", 20 * time.Millisecond, false, http.StatusOK},
+		{"never freed", 0, false, http.StatusServiceUnavailable},
+		{"client gone while waiting", 0, true, statusClientClosedRequest},
 	}
-	require.NotEmpty(t, held)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := newTestIngestHandler(t, testRegistry(t), pub)
+			var held []func()
+			for {
+				release, err := h.Types.TakeParseSlot(context.Background())
+				if err != nil {
+					require.ErrorIs(t, err, typelayer.ErrBusy)
+					break
+				}
+				held = append(held, release)
+			}
+			require.NotEmpty(t, held)
+			defer func() {
+				for _, release := range held {
+					release()
+				}
+			}()
 
-	w := httptest.NewRecorder()
-	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home"})))
-	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
-	assert.Equal(t, retryAfterBusy, w.Header().Get("Retry-After"))
-	testutil.AssertJSONContains(t, w, http.StatusServiceUnavailable, map[string]any{"error": "ingest validation is busy"})
-	assert.Empty(t, pub.Messages)
-
-	held[0]()
-	w = httptest.NewRecorder()
-	h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home"})))
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	for _, release := range held[1:] {
-		release()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			switch {
+			case tt.freeAfter > 0:
+				time.AfterFunc(tt.freeAfter, held[0])
+				held = held[1:]
+			case tt.cancel:
+				time.AfterFunc(10*time.Millisecond, cancel)
+			}
+			started := time.Now()
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(ingestRequest(t, "clicks", map[string]any{"page": "/home"}).WithContext(ctx)))
+			require.Equal(t, tt.status, w.Code, w.Body.String())
+			switch tt.status {
+			case http.StatusOK:
+				assert.Len(t, pub.Messages, 1)
+			case http.StatusServiceUnavailable:
+				assert.GreaterOrEqual(t, time.Since(started), 90*time.Millisecond, "it waited for a slot first")
+				assert.Equal(t, retryAfterBusy, w.Header().Get("Retry-After"))
+				testutil.AssertJSONContains(t, w, http.StatusServiceUnavailable, map[string]any{"error": "ingest validation is busy"})
+				assert.Empty(t, pub.Messages)
+			default:
+				// A 499, not the 503 an expired wait gives: the cancel ended it.
+				assert.Empty(t, pub.Messages)
+			}
+		})
 	}
 }
 

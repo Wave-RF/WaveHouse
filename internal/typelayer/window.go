@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wave-rf/chtypes/go/v2/chtypes"
 
@@ -526,14 +527,31 @@ var ErrBusy = errors.New("typelayer: every ingest parse slot is in use")
 // in flight come to about 0.7 GB on a 20-column table.
 func parseSlots() int { return min(runtime.GOMAXPROCS(0), 8) }
 
+// slotWait is how long IngestRole waits for a parse slot before ErrBusy:
+// about one default window's parse (some 80 ms measured), so a request that
+// arrives while every slot is busy with a small body or a window's worth is
+// served rather than refused, and one behind long bodies is refused quickly.
+const slotWait = 100 * time.Millisecond
+
 // TakeParseSlot takes one of the slots IngestRole holds for a body's walk,
-// without waiting: ok is false when every slot is in use. release frees it.
-func (e *Engine) TakeParseSlot() (release func(), ok bool) {
+// waiting up to slotWait for one to free: ErrBusy when none does, the
+// context's error when it ends first. release frees it.
+func (e *Engine) TakeParseSlot(ctx context.Context) (release func(), err error) {
+	release = func() { <-e.slots }
 	select {
 	case e.slots <- struct{}{}:
-		return func() { <-e.slots }, true
+		return release, nil
 	default:
-		return nil, false
+	}
+	timer := time.NewTimer(slotWait)
+	defer timer.Stop()
+	select {
+	case e.slots <- struct{}{}:
+		return release, nil
+	case <-timer.C:
+		return nil, ErrBusy
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
@@ -544,17 +562,18 @@ func (e *Engine) TakeParseSlot() (release func(), ok bool) {
 // between two is the table's *Unavailable, retried by the caller.
 //
 // The body holds one of the engine's parse slots for its whole walk, so the
-// memory all ingest parses hold together is bounded; with none free it
-// returns ErrBusy at once. A context that ends stops the walk between
-// windows; the first window runs whatever its state, as one call did.
+// memory all ingest parses hold together is bounded; with none free within
+// slotWait it returns ErrBusy. A context that ends stops the wait for a slot
+// and the walk between windows; with a slot free at once, the first window
+// runs whatever its state, as one call did.
 func (e *Engine) IngestRole(ctx context.Context, id tenant.ID, table string, shape RoleShape, format Format, opts IngestOptions, body []byte, checks ...Predicate) (Batch, error) {
 	c, err := newCursor(format, opts, body)
 	if err != nil {
 		return Batch{}, err
 	}
-	release, ok := e.TakeParseSlot()
-	if !ok {
-		return Batch{}, ErrBusy
+	release, err := e.TakeParseSlot(ctx)
+	if err != nil {
+		return Batch{}, err
 	}
 	defer release()
 

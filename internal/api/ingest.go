@@ -456,7 +456,8 @@ func (h *IngestHandler) typesReady(ctx context.Context, id tenant.ID, table stri
 // (typelayer.Engine.IngestRole), every window under the request's one clock,
 // and answers as one call over the body would: a refusal in any window
 // refuses the body, numbered from its first record. A body that cannot get one
-// of the process's parse slots is a 503, as other backpressure is.
+// of the process's parse slots within a short wait is a 503, as other
+// backpressure is.
 //
 // The role's view of the table answers column policy and the injected check
 // values inside the parser, so no Go code walks the record's keys. It is held
@@ -508,7 +509,9 @@ func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelay
 			return h.typesFailed(ctx, id, run.table, err)
 		}
 		if errors.Is(err, typelayer.ErrBusy) {
-			slog.WarnContext(ctx, "ingest refused: every parse slot is in use", "table", run.table)
+			if h.noticeDue("busy:" + id.String()) {
+				slog.WarnContext(ctx, "ingest refused: every parse slot stayed in use", "tenant", id, "table", run.table)
+			}
 			return &requestAbort{Status: http.StatusServiceUnavailable, Message: "ingest validation is busy", RetryAfter: retryAfterBusy}
 		}
 		if clientGone(ctx) {
@@ -546,8 +549,9 @@ func (h *IngestHandler) ingestAs(ctx context.Context, id tenant.ID, table string
 	return h.Types.IngestRole(ctx, id, table, shape, format.wire(), opts, body, preds...)
 }
 
-// retryAfterBusy is the Retry-After for a body that found every parse slot
-// taken: one window takes tens of milliseconds, so a slot frees up soon.
+// retryAfterBusy is the Retry-After for a body that waited for a parse slot
+// and found none: one window takes tens of milliseconds, so a slot frees up
+// soon.
 const retryAfterBusy = "1"
 
 // writeSingle answers a lone flat JSON object and preserves the GA response
