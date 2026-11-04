@@ -87,7 +87,9 @@ func renumber(msg string, base int) string {
 //
 // The table's own definition brings its CHECKs, judged per record, and its
 // engine's insert steps over a block, judged per window: a window they refuse
-// with every record read refuses the body, never growing (see ingestNext).
+// with every record read is read again without its last record, which the cut
+// may have shortened, and a refusal of complete records refuses the body,
+// never growing (see ingestNext).
 // The partition cap is lifted at the parse (parseSettings), since the worker
 // forms the INSERT blocks. A body chtypes reports no InputSpan for, or whose
 // container is not the one guessed, is read in one call from where the
@@ -463,13 +465,15 @@ func (t *Table) ingestNext(c *cursor, checks []Predicate) (Batch, error) {
 			// refused one: a window's start reads a UTF-8 BOM or a `[` that
 			// one call refuses mid-body.
 			return t.closeAt(c, res, lead, j-1, chk)
-		case !accepted && j == n:
+		case !accepted && j == n && n >= 2:
 			// Refused with every record read: an insert step over the block,
-			// such as a merge engine's check (a CollapsingMergeTree sign), not
-			// a record. A bigger window holds the same rows and more, so the
-			// refusal stands; growing would parse the whole body at once.
-			c.done = true
-			return t.batch(c, res, chk, n), nil
+			// such as a merge engine's check (a CollapsingMergeTree sign) or a
+			// partition key over a value, not a record. The last record may be
+			// the cut's, shortened (a CSV or TSV line cut at the byte limit
+			// still parses), so the window is read again without it; a refusal
+			// of complete records is the body's. Never grown: a bigger window
+			// holds the same rows and more, up to the whole body in one call.
+			return t.closeAt(c, res, lead, n-1, chk)
 		}
 		// Too few records to cut at: grow the window until it holds two, or
 		// is the rest of the body. Each step doubles both bounds.

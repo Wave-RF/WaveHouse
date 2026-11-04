@@ -192,3 +192,46 @@ func TestIngest_CheckRowCountsFromTheBody(t *testing.T) {
 	assert.Equal(t, 7, b.Refused.Record)
 	assert.Contains(t, b.Refused.Message, "violated at row 7.")
 }
+
+// TestIngest_BlockStepOverACutRecord: a window cut at its byte limit inside a
+// CSV record still parses its shortened last record, which a step over the
+// block (a partition key over a parsed date, a Collapsing sign) can then
+// refuse. The walk reads the window again without that record, so the body is
+// answered as one call answers it.
+func TestIngest_BlockStepOverACutRecord(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, ddl, body string
+		cols            []discovery.Column
+		window          int
+	}{
+		{
+			"partition key over a date", "CREATE TABLE db.bs (`id` UInt64, `s` String) ENGINE = MergeTree PARTITION BY toYYYYMM(toDate(s)) ORDER BY id",
+			"1,2024-01-01\n2,2024-01-02\n3,2024-01-03\n",
+			[]discovery.Column{{Name: "id", Type: "UInt64", Position: 1}, {Name: "s", Type: "String", Position: 2}},
+			22,
+		},
+		{
+			"collapsing sign", "CREATE TABLE db.bs (`id` UInt64, `sign` Int8) ENGINE = CollapsingMergeTree(sign) ORDER BY id",
+			"1,1\n2,1\n3,1\n",
+			[]discovery.Column{{Name: "id", Type: "UInt64", Position: 1}, {Name: "sign", Type: "Int8", Position: 2}},
+			6,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			eng := testEngine(t, &discovery.TableSchema{Name: "bs", DDL: tt.ddl, Columns: tt.cols})
+			tbl, err := eng.Table(tenant.Default, "bs")
+			require.NoError(t, err)
+			defer tbl.Release()
+			one, err := tbl.IngestWith(FormatCSV, IngestOptions{StrictPositional: true}, []byte(tt.body))
+			require.NoError(t, err)
+			require.Nil(t, one.Refused, "one call accepts the body")
+			windowed, err := tbl.IngestWith(FormatCSV, IngestOptions{StrictPositional: true, Window: Limits{Bytes: tt.window, Records: 100}}, []byte(tt.body))
+			require.NoError(t, err)
+			assert.Nil(t, windowed.Refused, "the windows answer as one call")
+			assert.Len(t, windowed.Rows, len(one.Rows))
+		})
+	}
+}
