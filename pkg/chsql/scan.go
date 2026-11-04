@@ -1,16 +1,24 @@
-package api
+package chsql
 
 import (
 	"strings"
 	"unicode/utf8"
 )
 
+// The functions in this file read ClickHouse SQL text as ClickHouse's own
+// lexer reads it — past whitespace, comments, quoted tokens and heredocs —
+// for two callers that cannot share code any other way, since internal/api
+// imports pkg/pipes: IsMutation, the write classifier the API runs a pipe as
+// a write by, and Opaque, the spans ClickHouse reads as text, which the pipes
+// template check refuses a placeholder inside.
+
 // mutationVerbs is a set of SQL leading keywords that don't return a result
 // set — anything that mutates schema or data. A pipe led by one runs as a
-// write (PipesHandler.executeWrite). Sourced from the ClickHouse statement
-// reference: DML, DDL, role/privilege management, and runtime control
-// (SYSTEM/KILL/SET). Read-only verbs (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/
-// EXISTS) intentionally fall through to the read path.
+// write (internal/api's PipesHandler.executeWrite).
+// Sourced from the ClickHouse statement reference: DML, DDL, role/privilege
+// management, and runtime control (SYSTEM/KILL/SET). Read-only verbs
+// (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/EXISTS) intentionally fall through to
+// the default Query path.
 var mutationVerbs = map[string]struct{}{
 	"INSERT":   {},
 	"UPDATE":   {},
@@ -45,16 +53,18 @@ var mutationVerbs = map[string]struct{}{
 // readonly=2, which refuses only what ClickHouse counts as a write in readonly
 // mode (DDL, INSERT, ALTER, access management). BACKUP, RESTORE and UNDROP are
 // not in that set, so they run and their result is cached like a read (#666).
+// The statement cases are internal/testutil/mutationtest, run by internal/api's
+// unit test and, against ClickHouse's own parser, by the integration suite.
 func IsMutation(sql string) bool {
-	s := stripLeadingSQLComments(sql)
-	if rest, ok := skipExecuteAs(s); ok {
+	s := StripLeadingComments(sql)
+	if rest, ok := SkipExecuteAs(s); ok {
 		// Bare, it switches the session's user and returns no result set.
 		if rest == "" || rest[0] == ';' {
 			return true
 		}
 		s = rest
 	}
-	end := skipWord(s, 0)
+	end := SkipWord(s, 0)
 	if end == 0 {
 		return false
 	}
@@ -66,16 +76,16 @@ func IsMutation(sql string) bool {
 	return hasTopLevelInsertInto(s[end:])
 }
 
-// skipExecuteAs returns what follows an `EXECUTE AS <user>[@<host>]` prefix
+// SkipExecuteAs returns what follows an `EXECUTE AS <user>[@<host>]` prefix
 // leading s, past whitespace and comments, and true; or s and false if no such
 // prefix leads it.
-func skipExecuteAs(s string) (string, bool) {
-	i := skipWord(s, 0)
+func SkipExecuteAs(s string) (string, bool) {
+	i := SkipWord(s, 0)
 	if !strings.EqualFold(s[:i], "EXECUTE") {
 		return s, false
 	}
 	i = skipSpaceAndComments(s, i)
-	j := skipWord(s, i)
+	j := SkipWord(s, i)
 	if !strings.EqualFold(s[i:j], "AS") {
 		return s, false
 	}
@@ -102,7 +112,7 @@ func skipName(s string, i int) int {
 			return j
 		}
 	}
-	return skipWord(s, i)
+	return SkipWord(s, i)
 }
 
 // hasTopLevelInsertInto reports whether s holds INSERT INTO outside
@@ -145,7 +155,7 @@ func hasTopLevelInsertInto(s string) bool {
 			if j := skipHeredoc(s, i); j > i {
 				i = j
 			} else {
-				i = skipWord(s, i+1)
+				i = SkipWord(s, i+1)
 			}
 		case c == '.' && i+1 < len(s) && isDigit(s[i+1]):
 			// A number led by `.` ends with its digits, so a word glued to it
@@ -158,10 +168,10 @@ func hasTopLevelInsertInto(s string) bool {
 			// A word led by a digit or `_` is read whole, so its tail is
 			// never taken for a keyword (`_insert`, `5insert`).
 			start := i
-			i = skipWord(s, i)
+			i = SkipWord(s, i)
 			if depth == 0 && strings.EqualFold(s[start:i], "INSERT") {
 				next := skipSpaceAndComments(s, i)
-				if strings.EqualFold(s[next:skipWord(s, next)], "INTO") {
+				if strings.EqualFold(s[next:SkipWord(s, next)], "INTO") {
 					return true
 				}
 			}
@@ -174,9 +184,9 @@ func hasTopLevelInsertInto(s string) bool {
 	return false
 }
 
-// skipWord returns the index just past the bareword at s[i]: ClickHouse's
+// SkipWord returns the index just past the bareword at s[i]: ClickHouse's
 // barewords run over ASCII letters, digits, `_` and `$`.
-func skipWord(s string, i int) int {
+func SkipWord(s string, i int) int {
 	for i < len(s) && (isWordByte(s[i]) || s[i] == '$') {
 		i++
 	}
@@ -233,9 +243,9 @@ func skipHeredoc(s string, i int) int {
 	return i
 }
 
-// stripLeadingSQLComments trims whitespace and comments from the front of
-// sql, the way ClickHouse's lexer skips them before the first token.
-func stripLeadingSQLComments(sql string) string {
+// StripLeadingComments trims whitespace and comments from the front of sql,
+// the way ClickHouse's lexer skips them before the first token.
+func StripLeadingComments(sql string) string {
 	return sql[skipSpaceAndComments(sql, 0):]
 }
 
@@ -318,10 +328,10 @@ func skipComment(s string, i int) int {
 func skipCurlyQuoted(s string, i int) int {
 	var closer string
 	switch {
-	case strings.HasPrefix(s[i:], "\u2018"):
-		closer = "\u2019"
-	case strings.HasPrefix(s[i:], "\u201c"):
-		closer = "\u201d"
+	case strings.HasPrefix(s[i:], "‘"):
+		closer = "’"
+	case strings.HasPrefix(s[i:], "“"):
+		closer = "”"
 	default:
 		return i
 	}
@@ -351,4 +361,60 @@ func skipQuoted(s string, i int) int {
 		}
 	}
 	return len(s)
+}
+
+// Span is a half-open byte range [Start, End) of a SQL text.
+type Span struct {
+	Start, End int
+	// Comment is true for a comment and false for a quoted token: a string
+	// literal, a quoted identifier or a heredoc.
+	Comment bool
+}
+
+// Opaque returns, in order, the spans of sql that ClickHouse's lexer reads as
+// text rather than as SQL: comments (`--`, `#` and `//` to the end of the
+// line, `/* … */` nesting) and quoted tokens (a string literal in '…', ‘…’ or
+// a $tag$…$tag$ heredoc; a quoted identifier in "…", `…` or “…”). An
+// unclosed one runs to the end, as it does for ClickHouse. A placeholder
+// inside one is text to ClickHouse but a binding to the pipes binder, which
+// is what the pipes template check refuses by it.
+func Opaque(sql string) []Span {
+	var spans []Span
+	for i := 0; i < len(sql); {
+		c := sql[i]
+		switch {
+		case c == '\'' || c == '"' || c == '`':
+			j := skipQuoted(sql, i)
+			spans = append(spans, Span{Start: i, End: j})
+			i = j
+		case c == 0xE2:
+			if j := skipCurlyQuoted(sql, i); j > i {
+				spans = append(spans, Span{Start: i, End: j})
+				i = j
+			} else {
+				i++
+			}
+		case c == '$':
+			// A heredoc, else a bareword led by `$`, read whole so a `$` in
+			// its tail opens nothing.
+			if j := skipHeredoc(sql, i); j > i {
+				spans = append(spans, Span{Start: i, End: j})
+				i = j
+			} else {
+				i = SkipWord(sql, i+1)
+			}
+		case c == '-' && i+1 < len(sql) && sql[i+1] == '-', c == '#', c == '/' && i+1 < len(sql) && (sql[i+1] == '*' || sql[i+1] == '/'):
+			j := skipComment(sql, i)
+			spans = append(spans, Span{Start: i, End: j, Comment: true})
+			i = j
+		case c == '.' && i+1 < len(sql) && isDigit(sql[i+1]):
+			i = skipDotNumber(sql, i)
+		case isWordByte(c):
+			// A bareword is read whole: a `$` inside it opens no heredoc.
+			i = SkipWord(sql, i)
+		default:
+			i++
+		}
+	}
+	return spans
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -646,4 +647,239 @@ func TestPipesHandler_Execute_ServesClickHouseBytes(t *testing.T) {
 	w := pipeCallAs(t, h, "top")
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	assert.Equal(t, `[{"page":"/a","n":1},{"page":"/b","n":2}]`, w.Body.String())
+}
+
+// claimPipe is a read pipe scoped by the caller's tenant_ids claim, open to
+// the member role, with one ordinary parameter beside the claim.
+func claimPipe() *pipes.NamedQuery {
+	return &pipes.NamedQuery{
+		Name:         "daily_totals",
+		SQL:          "SELECT day, sum(amount) FROM orders WHERE tenant_id IN {{ jwt.app_metadata.tenant_ids }} AND day >= {{start}} GROUP BY day",
+		Parameters:   []pipes.ParamDef{{Name: "start", Type: "string", Required: true}},
+		AllowedRoles: []string{"member"},
+	}
+}
+
+// claimRequest is a POST of the pipe with body as the parameters, as role,
+// carrying claims when non-nil (a request with no valid token carries none).
+func claimRequest(t *testing.T, name, role string, claims jwt.MapClaims, body any) *http.Request {
+	t.Helper()
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/"+name, name, body)
+	ctx := r.Context()
+	if role != "" {
+		ctx = auth.WithRole(ctx, role)
+	}
+	if claims != nil {
+		ctx = auth.WithClaims(ctx, claims)
+	}
+	return withTenant(r.WithContext(ctx))
+}
+
+// claimHandler serves q to default_role member, through ch.
+func claimHandler(t *testing.T, ch *fakeCH, c cache.Cache, q *pipes.NamedQuery) *PipesHandler {
+	t.Helper()
+	timeout := func(*settings.Store) time.Duration { return 5 * time.Second }
+	h := NewPipesHandler(staticPipes(q), staticPolicy(&policy.Policy{DefaultRole: "member"}), ch.target, c, timeout)
+	h.ch = ch.reader()
+	return h
+}
+
+// TestPipesHandler_Execute_ClaimBinds (#938): the token's claim scopes the SQL,
+// and a request parameter spelling the claim's name does not.
+func TestPipesHandler_Execute_ClaimBinds(t *testing.T) {
+	t.Parallel()
+	ch := &fakeCH{}
+	h := claimHandler(t, ch, nil, claimPipe())
+	claims := jwt.MapClaims{"app_metadata": map[string]any{"tenant_ids": []any{"acme", "globex"}}}
+	body := map[string]any{"start": "2026-01-01", "jwt.app_metadata.tenant_ids": []any{"evil"}}
+
+	w := httptest.NewRecorder()
+	h.Execute(w, claimRequest(t, "daily_totals", "member", claims, body))
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "SELECT day, sum(amount) FROM orders WHERE tenant_id IN ('acme', 'globex') AND day >= '2026-01-01' GROUP BY day", ch.sql())
+}
+
+// TestPipesHandler_Execute_ClaimUnresolved_ReadAnswersNoRows: a read pipe whose
+// claim the token cannot bind answers 200 with no rows and never reaches
+// ClickHouse — for an anonymous caller on default_role, a token without the
+// claim, and admin alike, the operator key included (it carries no claims).
+func TestPipesHandler_Execute_ClaimUnresolved_ReadAnswersNoRows(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		role     string
+		claims   jwt.MapClaims
+		operator bool
+	}{
+		{"no token, default_role member", "", nil, false},
+		{"member token without the claim", "member", jwt.MapClaims{"sub": "u1"}, false},
+		{"member token with an empty list", "member", jwt.MapClaims{"app_metadata": map[string]any{"tenant_ids": []any{}}}, false},
+		{"admin token without the claim", "admin", jwt.MapClaims{"sub": "ops"}, false},
+		{"operator key", "admin", nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ch := &fakeCH{}
+			h := claimHandler(t, ch, nil, claimPipe())
+			r := claimRequest(t, "daily_totals", tt.role, tt.claims, map[string]any{"start": "2026-01-01"})
+			if tt.operator {
+				r = r.WithContext(auth.WithOperator(r.Context()))
+			}
+
+			w := httptest.NewRecorder()
+			h.Execute(w, r)
+
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Equal(t, "[]", w.Body.String())
+			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+			assert.Zero(t, ch.reads.Load(), "nothing runs")
+			assert.Zero(t, ch.writes.Load())
+		})
+	}
+}
+
+// TestPipesHandler_Execute_ClaimUnresolved_WriteForbidden: "no rows" means
+// nothing for a write, so it is refused, as an insert under an unresolvable
+// _in check is, and nothing is sent — a write whose verb sits behind a
+// placeholder on the raw template too (an `EXECUTE AS` user, a quoted inline
+// default in a WITH list), which is classified on the Skeleton.
+func TestPipesHandler_Execute_ClaimUnresolved_WriteForbidden(t *testing.T) {
+	t.Parallel()
+	for name, sql := range map[string]string{
+		"insert":      "INSERT INTO audit (tenant_id, msg) VALUES ({{ jwt.tenant_id }}, {{msg}})",
+		"execute as":  "EXECUTE AS {{ jwt.sub }} INSERT INTO audit (tenant_id, msg) SELECT {{ jwt.tenant_id }}, {{msg}}",
+		"quoted with": "WITH {{x:it's}} AS a INSERT INTO audit (tenant_id, msg) SELECT {{ jwt.tenant_id }}, a",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ch := &fakeCH{}
+			h := claimHandler(t, ch, nil, &pipes.NamedQuery{Name: "note", SQL: sql, AllowedRoles: []string{"member"}})
+
+			w := httptest.NewRecorder()
+			h.Execute(w, claimRequest(t, "note", "member", jwt.MapClaims{"sub": "u1"}, map[string]any{"msg": "hi"}))
+
+			assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+			var body struct {
+				Error string `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, `forbidden: claim "tenant_id" cannot be resolved from the token`, body.Error)
+			testutil.AssertJSONErrorResponse(t, w)
+			assert.Zero(t, ch.writes.Load())
+			assert.Zero(t, ch.reads.Load())
+		})
+	}
+}
+
+// TestPipesHandler_Execute_ClaimUnresolved_InvalidTokenFailsLoud: a caller
+// whose present-but-invalid token fell back to default_role learns about the
+// token, not about an empty result, on a read and a write alike.
+func TestPipesHandler_Execute_ClaimUnresolved_InvalidTokenFailsLoud(t *testing.T) {
+	t.Parallel()
+	for _, q := range []*pipes.NamedQuery{
+		claimPipe(),
+		{Name: "daily_totals", SQL: "INSERT INTO audit (tenant_id) VALUES ({{ jwt.tenant_id }})", AllowedRoles: []string{"member"}},
+	} {
+		ch := &fakeCH{}
+		h := claimHandler(t, ch, nil, q)
+		r := claimRequest(t, "daily_totals", "", nil, map[string]any{"start": "2026-01-01"})
+		r = r.WithContext(auth.WithAuthError(r.Context(), errors.New("token expired")))
+
+		w := httptest.NewRecorder()
+		h.Execute(w, r)
+
+		assert.Equal(t, http.StatusUnauthorized, w.Code, q.SQL)
+		assert.Contains(t, w.Body.String(), "token expired")
+		assert.Zero(t, ch.reads.Load()+ch.writes.Load())
+	}
+}
+
+// TestPipesHandler_Execute_ClaimUnresolved_BeforeParameters: the claim check
+// comes before the parameter checks, so a request that also leaves the pipe's
+// required parameter out gets the claim's answer — [] on a read, 403 on a
+// write, 401 for an invalid token — not 400 missing required parameter.
+func TestPipesHandler_Execute_ClaimUnresolved_BeforeParameters(t *testing.T) {
+	t.Parallel()
+	write := &pipes.NamedQuery{
+		Name:         "note",
+		SQL:          "INSERT INTO audit (tenant_id, msg) VALUES ({{ jwt.tenant_id }}, {{msg}})",
+		Parameters:   []pipes.ParamDef{{Name: "msg", Type: "string", Required: true}},
+		AllowedRoles: []string{"member"},
+	}
+	tests := []struct {
+		name    string
+		q       *pipes.NamedQuery
+		role    string
+		claims  jwt.MapClaims
+		authErr error
+		want    int
+		body    string
+	}{
+		{"read answers no rows", claimPipe(), "member", jwt.MapClaims{"sub": "u1"}, nil, http.StatusOK, "[]"},
+		{"write is forbidden", write, "member", jwt.MapClaims{"sub": "u1"}, nil, http.StatusForbidden, "cannot be resolved from the token"},
+		{"invalid token fails loud", claimPipe(), "", nil, errors.New("token expired"), http.StatusUnauthorized, "token expired"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ch := &fakeCH{}
+			h := claimHandler(t, ch, nil, tt.q)
+			r := claimRequest(t, tt.q.Name, tt.role, tt.claims, map[string]any{})
+			if tt.authErr != nil {
+				r = r.WithContext(auth.WithAuthError(r.Context(), tt.authErr))
+			}
+
+			w := httptest.NewRecorder()
+			h.Execute(w, r)
+
+			assert.Equal(t, tt.want, w.Code, w.Body.String())
+			assert.Contains(t, w.Body.String(), tt.body)
+			assert.NotContains(t, w.Body.String(), "missing required parameter")
+			assert.Zero(t, ch.reads.Load()+ch.writes.Load(), "nothing runs")
+		})
+	}
+}
+
+// TestPipesHandler_Execute_ClaimKeysCache: the claim is in the bound SQL the
+// cache key hashes, so two tenants' tokens never share an entry while one
+// token's repeats do.
+func TestPipesHandler_Execute_ClaimKeysCache(t *testing.T) {
+	t.Parallel()
+	l1, err := cache.NewLocal(1 << 20)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l1.Close() })
+	ch := &fakeCH{}
+	h := claimHandler(t, ch, l1, claimPipe())
+	body := map[string]any{"start": "2026-01-01"}
+	acme := jwt.MapClaims{"app_metadata": map[string]any{"tenant_ids": []any{"acme"}}}
+	globex := jwt.MapClaims{"app_metadata": map[string]any{"tenant_ids": []any{"globex"}}}
+
+	for _, step := range []struct {
+		claims jwt.MapClaims
+		want   string
+	}{{acme, "MISS"}, {acme, "HIT"}, {globex, "MISS"}, {globex, "HIT"}} {
+		w := httptest.NewRecorder()
+		h.Execute(w, claimRequest(t, "daily_totals", "member", step.claims, body))
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.Equal(t, step.want, w.Header().Get("X-Cache"))
+		l1.Wait()
+	}
+	assert.Equal(t, int32(2), ch.reads.Load())
+}
+
+// TestPipesHandler_Execute_AdminBindsOwnClaims: admin is no exception — the
+// reference is the pipe author's SQL, so an admin token binds what it carries.
+func TestPipesHandler_Execute_AdminBindsOwnClaims(t *testing.T) {
+	t.Parallel()
+	ch := &fakeCH{}
+	h := claimHandler(t, ch, nil, claimPipe())
+	claims := jwt.MapClaims{"app_metadata": map[string]any{"tenant_ids": []any{"ops"}}}
+
+	w := httptest.NewRecorder()
+	h.Execute(w, claimRequest(t, "daily_totals", "admin", claims, map[string]any{"start": "2026-01-01"}))
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Contains(t, ch.sql(), "tenant_id IN ('ops')")
 }

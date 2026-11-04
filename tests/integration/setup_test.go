@@ -59,10 +59,23 @@ const (
 
 // The suite's default roles.json and policies.json: default_role is the admin
 // role, so a plain unauthenticated request runs as a privileged caller.
+// suiteRoles is what every roles.json the suite adopts declares: admin, and
+// member, the role writeTestSettings' claim-scoped pipes allow, so a policy a
+// test adopts never drops a role a pipe names (the reload would refuse it).
 var (
-	defaultRoles    = []byte(`{"roles": ["admin"]}`)
+	suiteRoles      = []string{"admin", "member"}
+	defaultRoles    = mustJSON(settings.RolesFile{Roles: suiteRoles})
 	defaultPolicies = []byte(`{"default_role": "admin"}`)
 )
+
+// mustJSON is v as JSON, for the suite's fixed documents.
+func mustJSON(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
 
 // testEnv holds the shared infrastructure available to every test.
 type testEnv struct {
@@ -263,13 +276,18 @@ func setup() (int, func()) {
 }
 
 // writeTestSettings materializes the embedded seed with the ClickHouse block
-// pointed at the testcontainer and a dev-style policy: default_role is the
-// admin role, so the suite's plain unauthenticated requests exercise
-// functionality as a privileged caller and can hit admin-gated endpoints
-// without minting JWTs. A test that needs a restricted role adopts a policy
-// of its own (withPolicy) and sends a token for the role (bearer). The stream
-// budget is shrunk to 1 GiB like the e2e fixture so the scratch directory
-// stays small.
+// pointed at the testcontainer (tenantSettings) and a dev-style policy:
+// default_role is the admin role, so the suite's plain unauthenticated
+// requests exercise functionality as a privileged caller and can hit
+// admin-gated endpoints without minting JWTs. A test that needs a restricted
+// role adopts a policy of its own (withPolicy) and sends a token for the role
+// (bearer); TestPipe_ClaimBindsOnNumericColumn and
+// TestPipe_ValueCannotCloseHeredoc mint one for the member role and the
+// claim-scoped pipes written here. The pipes are here, not written by the
+// tests, because the flat directory is shared and watched: one test
+// rewriting it would reload every test's settings mid-run. The stream budget
+// is shrunk to 1 GiB like the e2e fixture so the scratch directory stays
+// small.
 //
 // The directory sits in a scratch parent of its own, removed with it
 // (removeTestSettings): the settings watcher watches the parent too, and
@@ -280,6 +298,11 @@ func writeTestSettings(ch *chInstance) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	files[settings.FilePipes] = []byte(`{"pipes": [` +
+		`{"name": "tenant_totals", "sql": "SELECT tenant_id, sum(amount) AS total FROM ` + pipeClaimsTable + ` WHERE tenant_id IN {{ jwt.app_metadata.tenant_ids }} GROUP BY tenant_id ORDER BY tenant_id", "allowed_roles": ["member"]}, ` +
+		`{"name": "tenant_labels", "sql": "SELECT tenant_id, $t$ AS label, region FROM ` + pipeHeredocTable + ` WHERE tenant_id IN {{ jwt.app_metadata.tenant_ids }} AND region = {{region}} ORDER BY tenant_id", "allowed_roles": ["member"]}, ` +
+		`{"name": "tenant_literal", "sql": "SELECT label FROM ` + pipeLiteralTable + ` WHERE tenant_id = {{ jwt.app_metadata.tenant_id }} AND tenant_id IN {{ jwt.app_metadata.tenant_ids }} ORDER BY label", "allowed_roles": ["member"]}` +
+		`]}`)
 	dir := filepath.Join(mustTempDir(), "settings")
 	if err := writeSettingsFiles(dir, files); err != nil {
 		return "", err
@@ -294,7 +317,9 @@ func removeTestSettings(dir string) {
 }
 
 // tenantSettings is one tenant's four files: the seed with the ClickHouse
-// block pointed at the testcontainer's database, and the dev-style policy.
+// block pointed at the testcontainer's database, tokens verified with the
+// testutil.MakeJWT secret (a request without one is still the default_role),
+// and the dev-style policy.
 func tenantSettings(ch *chInstance, database string) (map[string][]byte, error) {
 	files, err := settings.Seed()
 	if err != nil {
@@ -383,7 +408,10 @@ func adoptHeldGrants(t *testing.T, grow bool) {
 	rolesDoc, policyDoc := defaultRoles, defaultPolicies
 	if len(heldGrants) > 0 {
 		p := policy.Policy{DefaultRole: "admin", AdminRole: "admin", Tables: map[string]policy.TablePolicy{}}
-		roles := map[string]bool{"admin": true}
+		roles := map[string]bool{}
+		for _, role := range suiteRoles {
+			roles[role] = true
+		}
 		for _, grants := range heldGrants {
 			for table, perms := range grants {
 				p.Tables[table] = perms

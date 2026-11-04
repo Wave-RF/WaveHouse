@@ -1,9 +1,10 @@
 // Package chsql holds ClickHouse SQL helpers shared across packages that build
-// SQL: safe identifier quoting, the encoding a value needs to survive a
-// `{p:String}` query parameter, and the strict cast an integer column's claims
-// are compared through. It is dependency-free so internal/query,
-// pkg/policy and internal/typelayer can all use it without an import
-// cycle.
+// or read SQL: safe identifier quoting, the encoding a value needs to survive
+// a `{p:String}` query parameter, and the strict cast an integer column's
+// claims are compared through (chsql.go), and the lexer-faithful reading
+// behind the write classifier and the pipes template check (scan.go). It is
+// dependency-free so internal/query, internal/api, internal/typelayer,
+// pkg/policy and pkg/pipes can all use it without an import cycle.
 package chsql
 
 import "strings"
