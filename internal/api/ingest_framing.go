@@ -83,17 +83,13 @@ func trimSpaceBytes(b []byte) []byte {
 //
 // Consequences worth knowing, all documented:
 //   - the key is the STORED value, not the caller's spelling: `256` into a
-//     UInt8 keys on `0`, and a DateTime keys on ClickHouse's rendering. For the
-//     documented case — a string id — the two are identical.
-//   - "missing" here means "the row carries no value". A `null` cell is
-//     missing, as an explicit null always has been (#370): keying on its
-//     spelling would make every null one id. So is an empty string. Whether the
-//     record supplied the id at all is the parse's answer, not this one's
-//     (RowVerdict.Supplied, see prepareVerdict): an omitted id stores its
-//     column's default (a nil UUID, 0, a constant DEFAULT), which is a value.
-//     Not yet a null into a UUID, FixedString, IPv4 or Enum (with a member
-//     valued 0) column with no DEFAULT: it stores the zero value as input,
-//     and is keyed on it (#967).
+//     `Nullable(UInt8)` keys on `0`, and a DateTime keys on ClickHouse's
+//     rendering. For the documented case — a string id — the two are identical.
+//   - "missing" means "the row carries no value": a `null` cell or an empty
+//     string. Keying on a null's spelling would make every null one id (#370).
+//     That is the whole account of an id the record did not send, because
+//     dedupeIDReady admits only a column that stores NULL or "" for an omitted,
+//     null or unwritable value; no other column's stored value is read here.
 func eventIDAt(line []byte, idx int) (string, bool) {
 	if idx < 0 {
 		return "", false

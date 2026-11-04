@@ -40,7 +40,7 @@ func testRegistry(t testing.TB) *discovery.SchemaRegistry {
 				{Name: "page", Type: "String"},
 				{Name: "button", Type: "String", HasDefault: true, DefaultExpression: "''"},
 				{Name: "count", Type: "UInt64", HasDefault: true, DefaultExpression: "0"},
-				{Name: "event_id", Type: "String", HasDefault: true, DefaultExpression: "''"},
+				{Name: "event_id", Type: "String"},
 				{Name: "org_id", Type: "String", HasDefault: true, DefaultExpression: "''"},
 			},
 		},

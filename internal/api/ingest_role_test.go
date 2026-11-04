@@ -7,8 +7,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Wave-RF/WaveHouse/internal/settings"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -222,27 +220,6 @@ func TestIngest_DeniedGeneratorColumnIsDrawn(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
 	_, code := errorAndCode(t, w)
 	assert.Equal(t, 117, code, "the role still may not supply it")
-}
-
-// TestIngest_DedupeIDTheRoleMayNotWriteIsMissing: the dedupe id is read off
-// the exported row by position, and a role's row carries every wire column —
-// but a value the role may not write is the table's, not the record's, so it
-// is no event's id: require_id rejects the record rather than keying on it.
-func TestIngest_DedupeIDTheRoleMayNotWriteIsMissing(t *testing.T) {
-	t.Parallel()
-	pub := &testutil.MockPublisher{}
-	h := newTestIngestHandler(t, uuidRegistry(t), pub)
-	h.PolicySource = visitsDenyingID()
-	h.Dedup = staticDedup(testutil.NewMockDeduplicator())
-	h.DedupeSettings = func(*settings.Store, string) settings.Dedupe {
-		return settings.Dedupe{Enabled: true, IDField: "id", RequireID: true}
-	}
-
-	w := httptest.NewRecorder()
-	h.Handle(w, withTenant(viewerIngestRequest(t, "visits", map[string]any{"page": "/a"})))
-	assert.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
-	assert.Contains(t, jsonErrorMessage(t, w), "missing dedupe id field")
-	assert.Empty(t, pub.Messages)
 }
 
 // TestIngest_CheckOnASuppliableEphemeralColumn_StillRefused: a record may now

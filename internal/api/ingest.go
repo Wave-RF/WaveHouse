@@ -65,8 +65,9 @@ type IngestHandler struct {
 	Dedup func(store *settings.Store) dedupe.Deduplicator
 	// DedupeSettings resolves the effective dedupe settings for a table of the
 	// request's tenant ((*settings.Store).DedupeFor in production). Called
-	// once per record so a settings reload lands at a record boundary — one
-	// record never mixes two documents' values. Dedup is skipped when nil.
+	// once per request, to check the id column, and once per record so a
+	// settings reload lands at a record boundary — one record never mixes two
+	// documents' values. Dedup is skipped when nil.
 	DedupeSettings func(store *settings.Store, table string) settings.Dedupe
 	// DedupeLease is how long a record's claimed id stays pending while it is
 	// published; 0 means dedupe.DefaultLease.
@@ -242,9 +243,6 @@ type ingestRun struct {
 	// checkGuard is the rejection every otherwise-acceptable record gets when
 	// the role's check clauses name columns no record can carry.
 	checkGuard *recordReject
-	// supplied is the dedupe id column whose provenance the parse reported
-	// (RowVerdict.Supplied), "" when none was asked for.
-	supplied string
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -358,6 +356,13 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A dedupe id column that stores a value the record never sent would key
+	// dedupe on it, so the table is refused whole, for the same reason.
+	if abort := h.dedupeIDReady(ctx, store, table, schema); abort != nil {
+		writeAbort(ctx, w, abort)
+		return
+	}
+
 	// Bound the inbound body (parity with /v1/ops/query). See query.go for
 	// maxRequestBodyBytes.
 	reqCap := int64(maxRequestBodyBytes)
@@ -410,15 +415,6 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	run := &ingestRun{
 		store: store, table: table, scope: scope, now: now, writable: shape.Columns,
 		checkColumns: checkColumns, checkGuard: guard,
-	}
-	// Whether a record supplied its dedupe id is the parse's to say, and asking
-	// costs: only a table that dedupes on an id the role may write asks. A role
-	// that may not write it never supplies one (idIndex).
-	if h.Dedup != nil && h.DedupeSettings != nil {
-		if dd := h.DedupeSettings(store, table); dd.Enabled && dd.IDField != "" &&
-			(run.writable == nil || slices.Contains(run.writable, dd.IDField)) {
-			run.supplied = dd.IDField
-		}
 	}
 	if abort := h.judge(ctx, run, shape, format, body.Bytes(), preds); abort != nil {
 		writeAbort(ctx, w, abort)
@@ -485,7 +481,7 @@ func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelay
 		return unavailableAbort()
 	}
 	opts := format.options()
-	opts.Now, opts.Supplied = run.now, run.supplied
+	opts.Now = run.now
 	batch, err := h.ingestAs(ctx, id, run.table, shape, format, opts, body, preds)
 	if _, refused := errors.AsType[*typelayer.RoleRefused](err); refused && len(shape.Defaults) > 0 {
 		cause := err
@@ -1031,14 +1027,7 @@ func (h *IngestHandler) prepareVerdict(ctx context.Context, run *ingestRun, i in
 	if h.Dedup != nil && h.DedupeSettings != nil {
 		if dd := h.DedupeSettings(run.store, run.table); dd.Enabled {
 			idField := dd.IDField
-			id, ok := eventIDAt(verdict.Line, run.idIndex(idField))
-			// A reload between the parse and this record can name another
-			// id field, whose provenance was not asked for: its stored value
-			// stands in, as it did before provenance was read.
-			if ok && idField == run.supplied {
-				ok = verdict.Supplied
-			}
-			if ok {
+			if id, ok := eventIDAt(verdict.Line, run.idIndex(idField)); ok {
 				rec.key = &dedupe.Key{Table: run.table, ID: id}
 				rec.retention = dd.Retention
 			} else {
@@ -1081,10 +1070,10 @@ func (h *IngestHandler) prepareVerdict(ctx context.Context, run *ingestRun, i in
 }
 
 // idIndex is where idField sits in an exported row, or -1 when the role may
-// not write it: the row then holds the table's value there, not the record's —
-// without a generator DEFAULT, the same one for every record — so it
-// identifies no event, and keying on it would make every record after the
-// first a duplicate.
+// not write it: the row then holds the table's value there, not the record's,
+// so it identifies no event. On a column dedupeIDReady admits that value is
+// NULL or "" and reads as missing anyway; this also covers a reload that names
+// another id field after the table was checked.
 func (r *ingestRun) idIndex(idField string) int {
 	if r.writable != nil && !slices.Contains(r.writable, idField) {
 		return -1
