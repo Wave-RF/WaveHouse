@@ -465,6 +465,15 @@ func (v *validator) parsePipes(data []byte) []pipes.NamedQuery {
 		if strings.TrimSpace(q.SQL) == "" {
 			v.errorf(FilePipes, path+".sql", "pipe SQL must not be empty")
 		}
+		// A placeholder the binder would not recognize reaches ClickHouse as
+		// literal text, and a parameter named jwt would read as a
+		// request-supplied claim: rejected on every adoption, like a malformed
+		// policy template. The claims a pipe binds are legal config, not a
+		// finding: `wavehouse validate` lists them off the Document
+		// (NamedQuery.Claims) for a reviewer of the file.
+		if err := q.CheckTemplate(); err != nil {
+			v.errorf(FilePipes, path+".sql", "%v", err)
+		}
 		seenParams := map[string]bool{}
 		for j, param := range q.Parameters {
 			ppath := fmt.Sprintf("%s.parameters[%d]", path, j)
@@ -473,6 +482,8 @@ func (v *validator) parsePipes(data []byte) []pipes.NamedQuery {
 				v.errorf(FilePipes, ppath, "parameter name must not be empty")
 			case seenParams[param.Name]:
 				v.errorf(FilePipes, ppath, "duplicate parameter %q", param.Name)
+			case param.Name == pipes.ReservedParam:
+				v.errorf(FilePipes, ppath, "parameter name %q is reserved — {{ jwt.<path> }} reads a claim of the caller's token", param.Name)
 			}
 			seenParams[param.Name] = true
 			if !validParamType(param.Type) {

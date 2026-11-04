@@ -1,6 +1,8 @@
 // Package chsql holds ClickHouse SQL helpers shared across packages that build
-// SQL — primarily safe identifier quoting. It is dependency-free so both
-// internal/query and pkg/policy can use it without an import cycle.
+// or read SQL: safe identifier quoting (chsql.go), and the lexer-faithful
+// reading behind the write classifier and the pipes template check (scan.go).
+// It is dependency-free so internal/query, internal/api, pkg/policy and
+// pkg/pipes can use it without an import cycle.
 package chsql
 
 import "strings"
