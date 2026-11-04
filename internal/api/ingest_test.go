@@ -1496,29 +1496,21 @@ func TestIngest_NDJSON_ContentTypeWithCharset(t *testing.T) {
 	assert.Equal(t, 1, resp.Succeeded)
 }
 
-func TestIngest_NDJSON_ErrorsTruncated(t *testing.T) {
+// TestBatchResult_AddCapsEchoedResults: the counts stay authoritative past
+// maxReportedResults while the echoed per-record results stop at it. The same
+// cap over a real 10,001-record request is TestIngest_NDJSON_ErrorsTruncated
+// (integration), too slow for the unit budget under -race.
+func TestBatchResult_AddCapsEchoedResults(t *testing.T) {
 	t.Parallel()
-	pub := &testutil.MockPublisher{}
-	h := dedupHandler(t, pub, testutil.NewMockDeduplicator(), true)
-
-	// Every record lacks the dedupe id the settings require: a per-record
-	// rejection each.
-	const total = maxReportedResults + 50
-	lines := make([]string, total)
-	for i := range lines {
-		lines[i] = `{"page":"/a"}`
+	var r batchResult
+	const total = maxReportedResults + 1
+	for i := 1; i <= total; i++ {
+		r.Total++
+		r.add(&pendingRecord{index: i, reject: &recordReject{Message: "rejected"}})
 	}
-	req := ndjsonRequest(t, "clicks", lines...)
-	w := httptest.NewRecorder()
-	h.Handle(w, withTenant(req))
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeBatchResult(t, w)
-	assert.Equal(t, total, resp.Total)
-	assert.Equal(t, total, resp.Failed)
-	// Failed counts everything; the echoed per-record results are capped.
-	assert.Len(t, resp.Results, maxReportedResults)
-	assert.Empty(t, pub.Messages)
+	assert.Equal(t, total, r.Total)
+	assert.Equal(t, total, r.Failed)
+	assert.Len(t, r.Results, maxReportedResults)
 }
 
 // wantAcceptedTypes is the accepted-media-type list as the 415 body renders it.

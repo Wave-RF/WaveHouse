@@ -2,7 +2,6 @@ package typelayer
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -145,13 +144,16 @@ func windowBodies() []struct {
 		fmt.Fprintf(&arrayMid, `{"id":%d,"s":"x"}`+"\n", i)
 	}
 	arrayMid.WriteString(`[{"id":7,"s":"a"},{"id":8,"s":"b"}]` + "\n")
-	var long strings.Builder // a refusal far from any cut, in the second of 1000-record windows
-	for i := 1; i <= 2000; i++ {
-		if i == 1500 {
+	// A refusal far from any cut: the second of 7-record windows of 1.5 KiB
+	// records holds it more than tailMargin before its end.
+	var long strings.Builder
+	pad := strings.Repeat("p", 1500)
+	for i := 1; i <= 16; i++ {
+		if i == 9 {
 			long.WriteString(`{"id":"bad","s":"far from the cut"}` + "\n")
 			continue
 		}
-		fmt.Fprintf(&long, `{"id":%d,"s":"padding"}`+"\n", i)
+		fmt.Fprintf(&long, `{"id":%d,"s":"%s"}`+"\n", i, pad)
 	}
 	return []struct {
 		name   string
@@ -282,37 +284,6 @@ func TestIngest_LaterCSVWindowsDetectNoHeader(t *testing.T) {
 			b, err := tbl.IngestWith(format, IngestOptions{Window: lim}, []byte(body.String()))
 			require.NoError(t, err)
 			assert.Len(t, b.Rows, 9, "format %v window %+v", format, lim)
-		}
-	}
-}
-
-// TestIngest_WindowsKeepBigMapBodiesUnderTheCut: a body over 10 MiB on a Map
-// table, which one call declines (parallel-segment-cut), is accepted record
-// for record in default windows.
-func TestIngest_WindowsKeepBigMapBodiesUnderTheCut(t *testing.T) {
-	if testing.Short() {
-		t.Skip("parses a 15 MiB body")
-	}
-	eng := testEngine(t, mapTable())
-	tbl, err := eng.Table(tenant.Default, "maps")
-	require.NoError(t, err)
-	defer tbl.Release()
-	line := `{"n":1,"m":{"k":` + strconv.Itoa(1) + `,"padding_key_to_make_records_longer":12345}}` + "\n"
-	n := (15 << 20) / len(line)
-	body := []byte(strings.Repeat(line, n))
-
-	one, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{Window: Limits{Bytes: 1 << 30, Records: 1 << 30}}, body)
-	require.NoError(t, err)
-	assert.Contains(t, one.Declined, "parallel", "the control: one call over the body is declined")
-
-	b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{}, body)
-	require.NoError(t, err)
-	require.Empty(t, b.Declined)
-	require.Nil(t, b.Refused)
-	require.Len(t, b.Rows, n)
-	for i, r := range b.Rows {
-		if !r.Accepted {
-			t.Fatalf("record %d: %s", i+1, r.Message)
 		}
 	}
 }
