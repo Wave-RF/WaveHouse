@@ -500,7 +500,9 @@ const violatedConstraint = 469
 // incorrectDataCode is ClickHouse's INCORRECT_DATA.
 const incorrectDataCode = 117
 
-// definitionWithheld replaces a refusal's message that can quote the definition.
+// definitionWithheld replaces a refusal's message that can quote the definition,
+// in the server's log line too: such a message can list every DEFAULT of the
+// table, a keyed hash's key among them, and a WARN exports at 100%.
 const definitionWithheld = "ClickHouse's message is withheld, since it can quote the table's definition"
 
 // withoutDefinitionText is a refusal's message less what it quotes of the
