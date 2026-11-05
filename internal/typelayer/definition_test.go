@@ -347,6 +347,11 @@ func TestWithoutDefinitionText(t *testing.T) {
 		{27, "Cannot parse input: expected '\\t' before: 'abc. Expression: xyz': (at row 3)", "Cannot parse input: expected '\\t' before: 'abc. Expression: xyz': (at row 3)"},
 		{27, "Cannot parse input: expected '\\t' before: 'Constraint x is violated. Expression: y': (at row 3)", "Cannot parse input: expected '\\t' before: 'Constraint x is violated. Expression: y': (at row 3)"},
 		{117, "Unknown field found while parsing JSONEachRow format: nope", "Unknown field found while parsing JSONEachRow format: nope"},
+		{117, "Duplicate field found while parsing format header: id: (while reading header)", "Duplicate field found while parsing format header: id: (while reading header)"},
+		{117, "Expected end of line", "Expected end of line"},
+		{117, "Cannot parse JSON value of type Variant(Enum8('constvalue' = 1), UInt8) here: \"zz\": (while reading the value of key v)", definitionWithheld},
+		{27, "Cannot parse quoted value of type Variant(Enum8('constvalue' = 1), UInt8) here: zz", definitionWithheld},
+		{117, "A shape not measured 'constvalue'", definitionWithheld},
 		{117, "Incorrect data: Sign = 5 (must be 1 or -1).", "Incorrect data: Sign = 5 (must be 1 or -1)."},
 	} {
 		assert.Equal(t, tt.want, withoutDefinitionText(tt.code, tt.in), "%q", tt.in)
@@ -515,4 +520,51 @@ func TestRefusal_KeepsTheReaderMessage(t *testing.T) {
 	for code := range readerCodes {
 		assert.True(t, covered[code], "reader code %d has no case", code)
 	}
+}
+
+// TestRefusal_KeepsNoDeclaredString: a record's bad value for a column whose
+// type declares strings (Enum labels, Tuple element names, a Variant's
+// members) is refused in every format with none of them in the message, so a
+// writer who cannot read the schema learns none from a refusal.
+func TestRefusal_KeepsNoDeclaredString(t *testing.T) {
+	t.Parallel()
+	types := []string{
+		"Variant(Enum8('qxlab' = 1, 'qxlabtwo' = 2), UInt8)", "Enum8('qxlab' = 1, 'qxlabtwo' = 2)", "Array(Enum8('qxlab' = 1))",
+		"Nullable(Enum16('qxlab' = 1))", "Array(Variant(Enum8('qxlab' = 1), UInt8))", "Tuple(qxnamea UInt8, qxnameb String)",
+		"Map(String, Variant(Tuple(qxnamea UInt8, qxnameb String), UInt64))",
+	}
+	bodies := []struct {
+		format Format
+		body   string
+	}{
+		{FormatJSONEachRow, `{"id":1,"v":"zz"}`},
+		{FormatJSONEachRow, `{"id":1,"v":"qxla"}`},
+		{FormatJSONEachRow, `{"id":1,"v":[1,"zz"]}`},
+		{FormatJSONEachRow, `{"id":1,"v":{"a":"zz"}}`},
+		{FormatJSONEachRow, `{"id":1,"v":[["zz"]]}`},
+		{FormatCSV, "1,zz"},
+		{FormatCSV, "1,qxla"},
+		{FormatTSV, "1\tzz"},
+		{FormatTSV, "1\tqxla"},
+	}
+	refused := 0
+	for _, typ := range types {
+		eng := testEngine(t, &discovery.TableSchema{Name: "ds", Columns: []discovery.Column{
+			{Name: "id", Type: "UInt64", Position: 1}, {Name: "v", Type: typ, Position: 2},
+		}})
+		tbl, err := eng.Table(tenant.Default, "ds")
+		require.NoError(t, err, typ)
+		for _, b := range bodies {
+			r, err := tbl.IngestWith(b.format, IngestOptions{}, []byte(b.body+"\n"))
+			require.NoError(t, err)
+			if r.Refused == nil {
+				continue
+			}
+			refused++
+			assert.NotContains(t, r.Refused.Message, "qxlab", "%s %q", typ, b.body)
+			assert.NotContains(t, r.Refused.Message, "qxname", "%s %q", typ, b.body)
+		}
+		tbl.Release()
+	}
+	assert.Greater(t, refused, 40, "the bodies are bad for these types")
 }

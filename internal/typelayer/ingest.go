@@ -478,6 +478,16 @@ var readerCodes = map[int]bool{
 // constraint and the row are kept.
 var checkHead = regexp.MustCompile(`(?s)^Constraint (.+?) for table .+? is violated( at row \d+)?\. Expression: `)
 
+// incorrectData is the shapes of 117 (INCORRECT_DATA) the reader raises for
+// a record's own bytes, quoting only those bytes and the names the record
+// used; another shape, a Variant's whole type among them, is withheld.
+var incorrectData = regexp.MustCompile(`^(?:Unknown field found |Duplicate field found |Expected end of line|JSON object should start with|JSON object/array should have equal number of|Unexpected symbol for key|Cannot insert data into JSON column|Cannot parse JSON object here|Incorrect data: )`)
+
+// typeText is a reader quoting a column's type whole ("Cannot parse JSON
+// value of type Variant(...) here"), which holds the strings the definition
+// declares: Enum labels, Tuple element names.
+var typeText = regexp.MustCompile(`value of type `)
+
 // enumHint is the near-miss labels ClickHouse suggests for an unknown Enum
 // element, which are the definition's. It runs to the last "]", so a label
 // holding one is cut whole; at worst it takes the client's key name with it.
@@ -486,6 +496,9 @@ var enumHint = regexp.MustCompile(`(?s), maybe you meant: \[.*\]`)
 // violatedConstraint is ClickHouse's VIOLATED_CONSTRAINT: a CHECK refused the
 // record. A message of that code in a shape checkHead does not know is withheld.
 const violatedConstraint = 469
+
+// incorrectDataCode is ClickHouse's INCORRECT_DATA.
+const incorrectDataCode = 117
 
 // definitionWithheld replaces a refusal's message that can quote the definition.
 const definitionWithheld = "ClickHouse's message is withheld, since it can quote the table's definition"
@@ -502,10 +515,10 @@ func withoutDefinitionText(code int, msg string) string {
 			return "Constraint " + m[1] + " is violated" + m[2] + "."
 		}
 		return definitionWithheld
-	case readerCodes[code]:
-		return enumHint.ReplaceAllString(msg, "")
-	default:
+	case !readerCodes[code], typeText.MatchString(msg), code == incorrectDataCode && !incorrectData.MatchString(msg):
 		return definitionWithheld
+	default:
+		return enumHint.ReplaceAllString(msg, "")
 	}
 }
 
