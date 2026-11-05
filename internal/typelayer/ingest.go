@@ -464,7 +464,8 @@ var definitionMarker = regexp.MustCompile(`(?i)while executing '|\bin scope\b`)
 
 // readerCodes are the exception codes ClickHouse's input reader raises for a
 // record's own bytes, measured over every column type and format on build
-// 20261104.224808. A refusal with any other code has its message withheld
+// 20261104.224808 and held, a case per code, by TestRefusal_KeepsTheReaderMessage
+// on the build in use (26.8 build 20261105.095805). A refusal with any other code has its message withheld
 // however it is worded: that is how the definition's evaluation refuses a
 // record. 36, which the reader raises only for an AggregateFunction state, is
 // withheld as the broad BAD_ARGUMENTS it is; 117 and 190 are kept only in the

@@ -322,7 +322,8 @@ func TestCompileSchema_MaskedDefinitionFallsBack(t *testing.T) {
 // evaluated or analyzed is withheld, and so is a CHECK's in a shape not known
 // and any message of a code the reader does not raise; a record's own parse
 // error, client text that only looks like a CHECK's included, is untouched.
-// Messages measured on build 20261104.224808.
+// Messages measured on build 20261104.224808; the engine-backed tests below
+// measure their shapes again on the build in use.
 func TestWithoutDefinitionText(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {

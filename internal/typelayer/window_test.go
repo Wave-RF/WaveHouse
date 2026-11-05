@@ -17,7 +17,7 @@ import (
 
 // windowTable has a now64(9) DEFAULT, so a clock that differs between windows
 // shows in the exported rows, and a Map column, the kind of table a call over
-// 10 MiB is declined on.
+// 10 MiB is declined on, on some lines.
 func windowTable() *discovery.TableSchema {
 	return &discovery.TableSchema{Name: "win", Columns: []discovery.Column{
 		{Name: "id", Type: "UInt32", Position: 1},

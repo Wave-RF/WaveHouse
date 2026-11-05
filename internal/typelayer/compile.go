@@ -57,7 +57,8 @@ var compileSettings = map[string]string{
 // gate name the loaded line does not know fails the compile with code 115, so
 // the list holds only names measured accepted on all five published chtypes
 // lines (26.3.60.2, 26.7.19.5, 26.8.34.13, 26.9.25.15 and 26.10.2.103, build
-// 20261104.155011; 26.7 from 20261021.130847).
+// 20261104.155011; 26.7 from 20261021.130847), and compiled on every bind of
+// the test line since (26.8 build 20261105.095805).
 var probeSettings = func() map[string]string {
 	m := map[string]string{
 		"allow_suspicious_low_cardinality_types": "1",
