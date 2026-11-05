@@ -19,8 +19,9 @@ import (
 )
 
 // TestIngest_NearCapBodyOnAMapTable: a body near the 16 MiB cap on a table with
-// a Map column, which one parse over it declines on some lines (ClickHouse's
-// parallel parsing cut at 10 MiB), is accepted record for record.
+// a Map column, which one parse over it was declined on by library builds
+// before 20261105.095805 (ClickHouse's parallel parsing cut at 10 MiB), is
+// accepted record for record.
 func TestIngest_NearCapBodyOnAMapTable(t *testing.T) {
 	t.Parallel()
 	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{{Name: "maps", Columns: []discovery.Column{

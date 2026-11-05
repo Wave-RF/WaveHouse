@@ -13,11 +13,9 @@ import (
 )
 
 // TestIngest_WindowsAcceptABigMapBody: a body over 10 MiB on a Map table,
-// which one call declines on some lines and library builds (ClickHouse's
-// parallel-parsing cut; measured on 26.10 build 20261105.003921, while 26.8
-// accepts it since build 20261105.095805), is accepted record for record in
-// default windows when its records are ordinary ones: a window holds at least
-// two, so two of several MiB each are still one call.
+// which library builds before 20261105.095805 declined in one call
+// (ClickHouse's parallel-parsing cut), is accepted record for record in
+// default windows.
 func TestIngest_WindowsAcceptABigMapBody(t *testing.T) {
 	eng := testEngine(t, mapTable())
 	tbl, err := eng.Table(tenant.Default, "maps")
