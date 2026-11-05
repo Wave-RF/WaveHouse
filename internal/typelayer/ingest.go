@@ -439,7 +439,7 @@ func batchSettingsDecline(res chtypes.BatchResult) string {
 // refusal is a rejected batch's verdict, naming the first record the reader
 // did not accept: the records before it parsed, so its index is the caller's.
 func refusal(res chtypes.BatchResult) *Refusal {
-	r := &Refusal{Code: int(res.ErrCode), Message: withoutDefinitionText(res.ErrMsg)}
+	r := &Refusal{Code: int(res.ErrCode), Message: withoutDefinitionText(int(res.ErrCode), res.ErrMsg)}
 	for i, row := range res.Rows {
 		if row.Outcome != chtypes.Accepted {
 			r.Record = i + 1
@@ -459,20 +459,31 @@ func refusal(res chtypes.BatchResult) *Refusal {
 // that message is withheld too, which loses its locator and leaks nothing.
 var definitionMarker = regexp.MustCompile(`: while executing '|: In scope `)
 
-// checkTail is a CHECK violation's quote of its expression and of the row's
-// values, after the sentence naming the constraint and the row.
-var checkTail = regexp.MustCompile(`(?s)(violated at row \d+)\. Expression: .*$`)
+// checkHead is a CHECK violation: the sentence naming the constraint (and the
+// row, unless the expression came out NULL), then its quote of the expression
+// and of the row's values.
+var checkHead = regexp.MustCompile(`(?s)^(Constraint .+? is violated(?: at row \d+)?)\. Expression: `)
+
+// violatedConstraint is ClickHouse's VIOLATED_CONSTRAINT: a CHECK refused the
+// record. A message of that code in a shape checkHead does not know is withheld.
+const violatedConstraint = 469
 
 // definitionWithheld replaces a message definitionMarker matched.
 const definitionWithheld = "the record was refused while an expression of the table's definition was evaluated; the message is withheld, since it can quote the definition"
 
 // withoutDefinitionText is a refusal's message less what it quotes of the
 // table's definition (Eric's choice, 2026-11-05).
-func withoutDefinitionText(msg string) string {
+func withoutDefinitionText(code int, msg string) string {
 	if definitionMarker.MatchString(msg) {
 		return definitionWithheld
 	}
-	return checkTail.ReplaceAllString(msg, "$1.")
+	if m := checkHead.FindStringSubmatch(msg); m != nil {
+		return m[1] + "."
+	}
+	if code == violatedConstraint {
+		return definitionWithheld
+	}
+	return msg
 }
 
 // declinedVerdict reports an outcome that is not a verdict about the data,

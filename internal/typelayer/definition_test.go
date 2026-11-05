@@ -316,22 +316,78 @@ func TestCompileSchema_MaskedDefinitionFallsBack(t *testing.T) {
 }
 
 // TestWithoutDefinitionText: a CHECK violation keeps the sentence naming the
-// constraint and the row and drops its quote of the expression and values; a
-// message raised while a definition expression was evaluated is withheld; a
-// record's own parse error, client text that only looks like a CHECK's
-// included, is untouched. Messages measured on build 20261104.224808.
+// constraint (and the row, when it has one) and drops its quote of the
+// expression and values; a message raised while a definition expression was
+// evaluated is withheld, and so is a CHECK's in a shape not known; a record's
+// own parse error, client text that only looks like a CHECK's included, is
+// untouched. Messages measured on build 20261104.224808.
 func TestWithoutDefinitionText(t *testing.T) {
 	t.Parallel()
-	for in, want := range map[string]string{
-		"Constraint `c` for table db.t1 is violated at row 1. Expression: (v != 'constvalue'). Column values: v = 'constvalue'":                                                        "Constraint `c` for table db.t1 is violated at row 1.",
-		"Cannot parse date here: zzconstpar: Cannot parse Date from String: while executing 'FUNCTION toDate(concat(s, 'constpart') :: 2) -> toDate(concat(s, 'constpart')) Date : 1'": definitionWithheld,
-		"Cannot parse string 'notanumberconst' as UInt64: syntax error at begin of string: In scope _CAST(toUInt64('notanumberconst'), 'UInt64') AS d":                                 definitionWithheld,
-		"Cannot parse input: expected '\"' before: 'x\"}\\n': (while reading the value of key id)":                                                                                     "Cannot parse input: expected '\"' before: 'x\"}\\n': (while reading the value of key id)",
-		"Cannot parse input: expected '\\t' before: 'abc. Expression: xyz': (at row 3)":                                                                                                "Cannot parse input: expected '\\t' before: 'abc. Expression: xyz': (at row 3)",
-		"Unknown field found while parsing JSONEachRow format: nope":                                                                                                                   "Unknown field found while parsing JSONEachRow format: nope",
-		"Incorrect data: Sign = 5 (must be 1 or -1).":                                                                                                                                  "Incorrect data: Sign = 5 (must be 1 or -1).",
+	for _, tt := range []struct {
+		code     int
+		in, want string
+	}{
+		{469, "Constraint `c` for table db.t1 is violated at row 1. Expression: (v != 'constvalue'). Column values: v = 'constvalue'", "Constraint `c` for table db.t1 is violated at row 1."},
+		{469, "Constraint `c` for table db.t is violated. Expression: (v != 'constvalue').Constraint expression returns nullable column that contains null value", "Constraint `c` for table db.t is violated."},
+		{469, "Constraint `c` for table db.t refused 'constvalue'", definitionWithheld},
+		{6, "Cannot parse date here: zzconstpar: Cannot parse Date from String: while executing 'FUNCTION toDate(concat(s, 'constpart') :: 2) -> toDate(concat(s, 'constpart')) Date : 1'", definitionWithheld},
+		{6, "Cannot parse string 'notanumberconst' as UInt64: syntax error at begin of string: In scope _CAST(toUInt64('notanumberconst'), 'UInt64') AS d", definitionWithheld},
+		{27, "Cannot parse input: expected '\"' before: 'x\"}\\n': (while reading the value of key id)", "Cannot parse input: expected '\"' before: 'x\"}\\n': (while reading the value of key id)"},
+		{27, "Cannot parse input: expected '\\t' before: 'abc. Expression: xyz': (at row 3)", "Cannot parse input: expected '\\t' before: 'abc. Expression: xyz': (at row 3)"},
+		{27, "Cannot parse input: expected '\\t' before: 'Constraint x is violated. Expression: y': (at row 3)", "Cannot parse input: expected '\\t' before: 'Constraint x is violated. Expression: y': (at row 3)"},
+		{117, "Unknown field found while parsing JSONEachRow format: nope", "Unknown field found while parsing JSONEachRow format: nope"},
+		{117, "Incorrect data: Sign = 5 (must be 1 or -1).", "Incorrect data: Sign = 5 (must be 1 or -1)."},
 	} {
-		assert.Equal(t, want, withoutDefinitionText(in), "%q", in)
+		assert.Equal(t, tt.want, withoutDefinitionText(tt.code, tt.in), "%q", tt.in)
+	}
+}
+
+// TestRefusal_CheckQuotesNoDefinition: a CHECK refusal reaches the client as
+// the sentence naming the constraint, whether the CHECK came out false or NULL
+// and whether the column it read is one the role may write, and withheld when
+// a conversion inside it failed; no constant of the definition survives.
+func TestRefusal_CheckQuotesNoDefinition(t *testing.T) {
+	t.Parallel()
+	nullable := &discovery.TableSchema{
+		Name: "cq", DDL: "CREATE TABLE db.cq (`id` UInt64, `n` Nullable(String), CONSTRAINT c CHECK n != 'topsecretconst') ENGINE = MergeTree ORDER BY id",
+		Columns: []discovery.Column{{Name: "id", Type: "UInt64", Position: 1}, {Name: "n", Type: "Nullable(String)", Position: 2}},
+	}
+	hidden := func(check string) *discovery.TableSchema {
+		return &discovery.TableSchema{
+			Name: "cq", DDL: "CREATE TABLE db.cq (`id` UInt64, `secret` String DEFAULT 'topsecretconst', CONSTRAINT c CHECK " + check + ") ENGINE = MergeTree ORDER BY id",
+			Columns: []discovery.Column{
+				{Name: "id", Type: "UInt64", Position: 1},
+				{Name: "secret", Type: "String", Position: 2, DefaultKind: "DEFAULT", DefaultExpression: "'topsecretconst'"},
+			},
+		}
+	}
+	tests := []struct {
+		name  string
+		table *discovery.TableSchema
+		shape RoleShape
+		body  string
+		want  string
+	}{
+		{"NULL", nullable, RoleShape{}, `{"id":1}`, "Constraint `c` for table db.cq is violated."},
+		{"false", nullable, RoleShape{}, `{"id":1,"n":"topsecretconst"}`, "Constraint `c` for table db.cq is violated at row 1."},
+		{"unwritable column, false", hidden("secret != 'topsecretconst'"), RoleShape{Columns: []string{"id"}}, `{"id":1}`, "Constraint `c` for table db.cq is violated at row 1."},
+		{"unwritable column, conversion", hidden("toUInt64(secret) > 0"), RoleShape{Columns: []string{"id"}}, `{"id":1}`, definitionWithheld},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			eng := testEngine(t, tt.table)
+			tbl, err := eng.RoleTable(tenant.Default, "cq", tt.shape)
+			require.NoError(t, err)
+			defer tbl.Release()
+			b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{}, []byte(tt.body+"\n"))
+			require.NoError(t, err)
+			require.NotNil(t, b.Refused)
+			assert.NotZero(t, b.Refused.Code)
+			assert.Equal(t, 1, b.Refused.Record)
+			assert.Equal(t, tt.want, b.Refused.Message)
+			assert.NotContains(t, b.Refused.Message, "topsecretconst")
+		})
 	}
 }
 
