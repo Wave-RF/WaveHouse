@@ -338,6 +338,7 @@ func TestWithoutDefinitionText(t *testing.T) {
 		{47, "Unknown expression or function identifier `constvalue_col` in scope _CAST(toString(constvalue_col), 'String') AS dx", definitionWithheld},
 		{6, "Cannot parse string 'constvalue' as UInt64: syntax error at begin of string", definitionWithheld},
 		{190, "Arrays passed to arrayMap must have equal size. Argument 3 has size 1 which differs with the size of another argument, 2", definitionWithheld},
+		{190, "Elements 'n.a' and 'n.b' of Nested data structure 'n' (Array columns) have different array sizes.", "Elements 'n.a' and 'n.b' of Nested data structure 'n' (Array columns) have different array sizes."},
 		{38, "Cannot parse date: value is too short: in scope _CAST(toDate('constvalue'), 'Date') AS d", definitionWithheld},
 		{38, "Cannot parse date: value is too short: (while reading the value of key v)", "Cannot parse date: value is too short: (while reading the value of key v)"},
 		{676, "Cannot parse IPv6 zz\"}", "Cannot parse IPv6 zz\"}"},
@@ -490,6 +491,7 @@ func TestRefusal_KeepsTheReaderMessage(t *testing.T) {
 		{117, "String", FormatJSONEachRow, `{"id":1,"zz":1}`},
 		{130, "Array(UInt8)", FormatJSONEachRow, `{"id":1,"v":"x"}`},
 		{131, "FixedString(2)", FormatJSONEachRow, `{"id":1,"v":"abcd"}`},
+		{190, "Array(String)", FormatJSONEachRow, `{"id":1,"v":["x","y"],"n.b":["z"]}`},
 		{376, "UUID", FormatJSONEachRow, `{"id":1,"v":"zz"}`},
 		{407, "DateTime64(9)", FormatJSONEachRow, `{"id":1,"v":"9999-12-31T23:59:59Z"}`},
 		{467, "Bool", FormatJSONEachRow, `{"id":1,"v":"maybe"}`},
@@ -504,13 +506,18 @@ func TestRefusal_KeepsTheReaderMessage(t *testing.T) {
 		covered[tt.code] = true
 		t.Run(strconv.Itoa(tt.code), func(t *testing.T) {
 			t.Parallel()
-			eng := testEngine(t, &discovery.TableSchema{Name: "rd", Columns: []discovery.Column{
-				{Name: "id", Type: "UInt64", Position: 1}, {Name: "v", Type: tt.typ, Position: 2},
-			}})
+			cols := []discovery.Column{{Name: "id", Type: "UInt64", Position: 1}, {Name: "v", Type: tt.typ, Position: 2}}
+			body := tt.body
+			if tt.code == 190 { // a Nested group: n.a beside n.b
+				cols[1].Name = "n.a"
+				cols = append(cols, discovery.Column{Name: "n.b", Type: tt.typ, Position: 3})
+				body = strings.Replace(body, `"v":`, `"n.a":`, 1)
+			}
+			eng := testEngine(t, &discovery.TableSchema{Name: "rd", Columns: cols})
 			tbl, err := eng.Table(tenant.Default, "rd")
 			require.NoError(t, err)
 			defer tbl.Release()
-			b, err := tbl.IngestWith(tt.format, IngestOptions{}, []byte(tt.body+"\n"))
+			b, err := tbl.IngestWith(tt.format, IngestOptions{}, []byte(body+"\n"))
 			require.NoError(t, err)
 			require.NotNil(t, b.Refused)
 			assert.Equal(t, tt.code, b.Refused.Code, "%s", b.Refused.Message)
@@ -606,4 +613,31 @@ func TestRefusal_KeepsTheShapesOf117(t *testing.T) {
 			assert.NotEqual(t, definitionWithheld, b.Refused.Message)
 		})
 	}
+}
+
+// TestRefusal_NestedNamesNoHiddenSibling: a Nested group's unequal arrays are
+// refused naming the columns the record wrote, never a sibling the role may
+// not write, which takes its DEFAULT.
+func TestRefusal_NestedNamesNoHiddenSibling(t *testing.T) {
+	t.Parallel()
+	eng := testEngine(t, &discovery.TableSchema{Name: "nh", Columns: []discovery.Column{
+		{Name: "id", Type: "UInt64", Position: 1},
+		{Name: "n.a", Type: "Array(String)", Position: 2},
+		{Name: "n.b", Type: "Array(String)", Position: 3},
+		{Name: "n.qxhidden", Type: "Array(String)", Position: 4},
+	}})
+	tbl, err := eng.RoleTable(tenant.Default, "nh", RoleShape{Columns: []string{"id", "n.a", "n.b"}})
+	require.NoError(t, err)
+	defer tbl.Release()
+	refused := 0
+	for _, body := range []string{`{"id":1,"n.a":["x","y"],"n.b":["z"]}`, `{"id":1,"n.a":["x","y"]}`, `{"id":1,"n.a":["x"],"n.b":["z"]}`} {
+		b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{}, []byte(body+"\n"))
+		require.NoError(t, err)
+		if b.Refused != nil {
+			refused++
+			assert.Equal(t, 190, b.Refused.Code, body)
+			assert.NotContains(t, b.Refused.Message, "qxhidden", body)
+		}
+	}
+	assert.Positive(t, refused, "unequal arrays are refused")
 }
