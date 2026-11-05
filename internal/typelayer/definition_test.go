@@ -43,6 +43,7 @@ func TestCompileSchema_OwnDefinition(t *testing.T) {
 	require.NotNil(t, own.Refused, "the CHECK refuses the body")
 	assert.Equal(t, 469, own.Refused.Code)
 	assert.Equal(t, 2, own.Refused.Record, "the record that breaks it")
+	assert.Equal(t, "Constraint `c` for table db.ck is violated at row 2.", own.Refused.Message, "no expression or values quoted")
 	assert.Empty(t, own.Rows)
 
 	columns := ingestTwo(t, testEngine(t, checkedTable("")))
@@ -312,4 +313,21 @@ func TestCompileSchema_MaskedDefinitionFallsBack(t *testing.T) {
 	recs := withMsg(logRecords(t, logs), "chtypes could not compile the table's own definition; compiling its columns on a neutral engine, without its engine, keys, partition, indices, CHECKs or TTL")
 	require.Len(t, recs, 1)
 	assert.Equal(t, "the definition holds a value the server masks as '[HIDDEN]'", recs[0]["cause"])
+}
+
+// TestWithoutDefinitionText: a refusal keeps the code's sentence and drops
+// what ClickHouse quotes of the table's definition (messages measured on build
+// 20261104.224808); a record's own parse errors are untouched.
+func TestWithoutDefinitionText(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"Constraint `c` for table db.t1 is violated at row 1. Expression: (v != 'constvalue'). Column values: v = 'constvalue'":                                                "Constraint `c` for table db.t1 is violated at row 1.",
+		"Cannot parse date here: zz: Cannot parse Date from String: while executing 'FUNCTION toDate(concat(s, 'constpart') :: 2) -> toDate(concat(s, 'constpart')) Date : 1'": "Cannot parse date here: zz: Cannot parse Date from String",
+		"Cannot parse string 'x' as UInt64: syntax error at begin of string: In scope _CAST(toUInt64('notanumberconst'), 'UInt64') AS d":                                       "Cannot parse string 'x' as UInt64: syntax error at begin of string",
+		"Cannot parse input: expected '\"' before: 'x\"}\\n': (while reading the value of key id)":                                                                             "Cannot parse input: expected '\"' before: 'x\"}\\n': (while reading the value of key id)",
+		"Unknown field found while parsing JSONEachRow format: nope":                                                                                                           "Unknown field found while parsing JSONEachRow format: nope",
+		"Incorrect data: Sign = 5 (must be 1 or -1).":                                                                                                                          "Incorrect data: Sign = 5 (must be 1 or -1).",
+	} {
+		assert.Equal(t, want, withoutDefinitionText(in), "%q", in)
+	}
 }

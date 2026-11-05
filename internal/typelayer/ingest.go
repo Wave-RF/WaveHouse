@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -438,7 +439,7 @@ func batchSettingsDecline(res chtypes.BatchResult) string {
 // refusal is a rejected batch's verdict, naming the first record the reader
 // did not accept: the records before it parsed, so its index is the caller's.
 func refusal(res chtypes.BatchResult) *Refusal {
-	r := &Refusal{Code: int(res.ErrCode), Message: res.ErrMsg}
+	r := &Refusal{Code: int(res.ErrCode), Message: withoutDefinitionText(res.ErrMsg)}
 	for i, row := range res.Rows {
 		if row.Outcome != chtypes.Accepted {
 			r.Record = i + 1
@@ -446,6 +447,27 @@ func refusal(res chtypes.BatchResult) *Refusal {
 		}
 	}
 	return r
+}
+
+// definitionTail is what ClickHouse appends to a refusal raised by a step of
+// the table's own definition, quoting it: a CHECK's expression and the row's
+// values ("Expression: … Column values: …"), and the expression a key,
+// partition, TTL or DEFAULT was running (": while executing '…'", ": In scope
+// …"). A refusal is the client's to read, and the definition's constants, or
+// the values of columns its role may not write, are not, so the message is cut
+// there; the code and the sentence naming what failed stay.
+var definitionTail = regexp.MustCompile(`(?s)(\. Expression: |: while executing '|: In scope ).*$`)
+
+// withoutDefinitionText is msg cut at definitionTail.
+func withoutDefinitionText(msg string) string {
+	loc := definitionTail.FindStringIndex(msg)
+	if loc == nil {
+		return msg
+	}
+	if strings.HasPrefix(msg[loc[0]:], ". Expression: ") {
+		return msg[:loc[0]] + "."
+	}
+	return msg[:loc[0]]
 }
 
 // declinedVerdict reports an outcome that is not a verdict about the data,
