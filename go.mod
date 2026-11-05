@@ -44,7 +44,7 @@ require (
 	github.com/samber/slog-sampling v1.7.0
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
-	github.com/wave-rf/chtypes/go/v2 v2.0.0-dev.14
+	github.com/wave-rf/chtypes/go/v2 v2.0.0-dev.15
 	go.opentelemetry.io/contrib/bridges/otelslog v0.21.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.72.0
