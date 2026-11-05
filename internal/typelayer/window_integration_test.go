@@ -7,16 +7,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
-// TestIngest_WindowsKeepBigMapBodiesUnderTheCut: a body over 10 MiB on a Map
-// table, which one call declines (parallel-segment-cut), is accepted record
-// for record in default windows.
-func TestIngest_WindowsKeepBigMapBodiesUnderTheCut(t *testing.T) {
+// TestIngest_BigMapBodyIsAcceptedWholeAndWindowed: a body over 10 MiB on a
+// Map table is accepted record for record in one call and in default windows
+// alike. Library builds before 20261105.095805 declined the one call
+// (parallel-segment-cut), which the windows stayed under.
+func TestIngest_BigMapBodyIsAcceptedWholeAndWindowed(t *testing.T) {
 	eng := testEngine(t, mapTable())
 	tbl, err := eng.Table(tenant.Default, "maps")
 	require.NoError(t, err)
@@ -25,18 +25,16 @@ func TestIngest_WindowsKeepBigMapBodiesUnderTheCut(t *testing.T) {
 	n := (15 << 20) / len(line)
 	body := []byte(strings.Repeat(line, n))
 
-	one, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{Window: Limits{Bytes: 1 << 30, Records: 1 << 30}}, body)
-	require.NoError(t, err)
-	assert.Contains(t, one.Declined, "parallel", "the control: one call over the body is declined")
-
-	b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{}, body)
-	require.NoError(t, err)
-	require.Empty(t, b.Declined)
-	require.Nil(t, b.Refused)
-	require.Len(t, b.Rows, n)
-	for i, r := range b.Rows {
-		if !r.Accepted {
-			t.Fatalf("record %d: %s", i+1, r.Message)
+	for _, window := range []Limits{{Bytes: 1 << 30, Records: 1 << 30}, {}} {
+		b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{Window: window}, body)
+		require.NoError(t, err)
+		require.Empty(t, b.Declined, "%+v", window)
+		require.Nil(t, b.Refused, "%+v", window)
+		require.Len(t, b.Rows, n, "%+v", window)
+		for i, r := range b.Rows {
+			if !r.Accepted {
+				t.Fatalf("window %+v, record %d: %s", window, i+1, r.Message)
+			}
 		}
 	}
 }
