@@ -449,25 +449,30 @@ func refusal(res chtypes.BatchResult) *Refusal {
 	return r
 }
 
-// definitionTail is what ClickHouse appends to a refusal raised by a step of
-// the table's own definition, quoting it: a CHECK's expression and the row's
-// values ("Expression: … Column values: …"), and the expression a key,
-// partition, TTL or DEFAULT was running (": while executing '…'", ": In scope
-// …"). A refusal is the client's to read, and the definition's constants, or
-// the values of columns its role may not write, are not, so the message is cut
-// there; the code and the sentence naming what failed stay.
-var definitionTail = regexp.MustCompile(`(?s)(\. Expression: |: while executing '|: In scope ).*$`)
+// definitionMarker is how ClickHouse says an expression of the table's own
+// definition (a DEFAULT, a key, partition or TTL expression, a CHECK over a
+// conversion) was being evaluated when it refused the record. Such a message
+// can quote the definition anywhere, its head included (the value a
+// conversion failed on, a constant or a column the role may not write), so it
+// is withheld whole and the client keeps its exception code and record. A
+// record's own parse error carries no marker, unless the bytes it echoes do:
+// that message is withheld too, which loses its locator and leaks nothing.
+var definitionMarker = regexp.MustCompile(`: while executing '|: In scope `)
 
-// withoutDefinitionText is msg cut at definitionTail.
+// checkTail is a CHECK violation's quote of its expression and of the row's
+// values, after the sentence naming the constraint and the row.
+var checkTail = regexp.MustCompile(`(?s)(violated at row \d+)\. Expression: .*$`)
+
+// definitionWithheld replaces a message definitionMarker matched.
+const definitionWithheld = "the record was refused while an expression of the table's definition was evaluated; the message is withheld, since it can quote the definition"
+
+// withoutDefinitionText is a refusal's message less what it quotes of the
+// table's definition (Eric's choice, 2026-11-05).
 func withoutDefinitionText(msg string) string {
-	loc := definitionTail.FindStringIndex(msg)
-	if loc == nil {
-		return msg
+	if definitionMarker.MatchString(msg) {
+		return definitionWithheld
 	}
-	if strings.HasPrefix(msg[loc[0]:], ". Expression: ") {
-		return msg[:loc[0]] + "."
-	}
-	return msg[:loc[0]]
+	return checkTail.ReplaceAllString(msg, "$1.")
 }
 
 // declinedVerdict reports an outcome that is not a verdict about the data,

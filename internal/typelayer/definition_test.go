@@ -315,19 +315,61 @@ func TestCompileSchema_MaskedDefinitionFallsBack(t *testing.T) {
 	assert.Equal(t, "the definition holds a value the server masks as '[HIDDEN]'", recs[0]["cause"])
 }
 
-// TestWithoutDefinitionText: a refusal keeps the code's sentence and drops
-// what ClickHouse quotes of the table's definition (messages measured on build
-// 20261104.224808); a record's own parse errors are untouched.
+// TestWithoutDefinitionText: a CHECK violation keeps the sentence naming the
+// constraint and the row and drops its quote of the expression and values; a
+// message raised while a definition expression was evaluated is withheld; a
+// record's own parse error, client text that only looks like a CHECK's
+// included, is untouched. Messages measured on build 20261104.224808.
 func TestWithoutDefinitionText(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]string{
-		"Constraint `c` for table db.t1 is violated at row 1. Expression: (v != 'constvalue'). Column values: v = 'constvalue'":                                                "Constraint `c` for table db.t1 is violated at row 1.",
-		"Cannot parse date here: zz: Cannot parse Date from String: while executing 'FUNCTION toDate(concat(s, 'constpart') :: 2) -> toDate(concat(s, 'constpart')) Date : 1'": "Cannot parse date here: zz: Cannot parse Date from String",
-		"Cannot parse string 'x' as UInt64: syntax error at begin of string: In scope _CAST(toUInt64('notanumberconst'), 'UInt64') AS d":                                       "Cannot parse string 'x' as UInt64: syntax error at begin of string",
-		"Cannot parse input: expected '\"' before: 'x\"}\\n': (while reading the value of key id)":                                                                             "Cannot parse input: expected '\"' before: 'x\"}\\n': (while reading the value of key id)",
-		"Unknown field found while parsing JSONEachRow format: nope":                                                                                                           "Unknown field found while parsing JSONEachRow format: nope",
-		"Incorrect data: Sign = 5 (must be 1 or -1).":                                                                                                                          "Incorrect data: Sign = 5 (must be 1 or -1).",
+		"Constraint `c` for table db.t1 is violated at row 1. Expression: (v != 'constvalue'). Column values: v = 'constvalue'":                                                        "Constraint `c` for table db.t1 is violated at row 1.",
+		"Cannot parse date here: zzconstpar: Cannot parse Date from String: while executing 'FUNCTION toDate(concat(s, 'constpart') :: 2) -> toDate(concat(s, 'constpart')) Date : 1'": definitionWithheld,
+		"Cannot parse string 'notanumberconst' as UInt64: syntax error at begin of string: In scope _CAST(toUInt64('notanumberconst'), 'UInt64') AS d":                                 definitionWithheld,
+		"Cannot parse input: expected '\"' before: 'x\"}\\n': (while reading the value of key id)":                                                                                     "Cannot parse input: expected '\"' before: 'x\"}\\n': (while reading the value of key id)",
+		"Cannot parse input: expected '\\t' before: 'abc. Expression: xyz': (at row 3)":                                                                                                "Cannot parse input: expected '\\t' before: 'abc. Expression: xyz': (at row 3)",
+		"Unknown field found while parsing JSONEachRow format: nope":                                                                                                                   "Unknown field found while parsing JSONEachRow format: nope",
+		"Incorrect data: Sign = 5 (must be 1 or -1).":                                                                                                                                  "Incorrect data: Sign = 5 (must be 1 or -1).",
 	} {
 		assert.Equal(t, want, withoutDefinitionText(in), "%q", in)
+	}
+}
+
+// TestRefusal_WithholdsADefinitionConstant: a conversion that fails inside a
+// DEFAULT or a partition expression names the value it failed on, a constant
+// of the definition among it, in the head of ClickHouse's message; the
+// refusal keeps its code and record and withholds the message.
+func TestRefusal_WithholdsADefinitionConstant(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, ddl, body string
+		cols            []discovery.Column
+	}{
+		{
+			"DEFAULT", "", `{"id":1}`,
+			[]discovery.Column{
+				{Name: "id", Type: "UInt64", Position: 1},
+				{Name: "d", Type: "UInt64", Position: 2, DefaultKind: "DEFAULT", DefaultExpression: "toUInt64('notanumberconst')"},
+			},
+		},
+		{
+			"partition expression", "CREATE TABLE db.wd (`id` UInt64, `v` String) ENGINE = MergeTree PARTITION BY toUInt64(concat(v, 'notanumberconst')) ORDER BY id", `{"id":1,"v":"zz"}`,
+			[]discovery.Column{{Name: "id", Type: "UInt64", Position: 1}, {Name: "v", Type: "String", Position: 2}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			eng := testEngine(t, &discovery.TableSchema{Name: "wd", DDL: tt.ddl, Columns: tt.cols})
+			tbl, err := eng.Table(tenant.Default, "wd")
+			require.NoError(t, err)
+			defer tbl.Release()
+			b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{}, []byte(tt.body+"\n"))
+			require.NoError(t, err)
+			require.NotNil(t, b.Refused)
+			assert.NotZero(t, b.Refused.Code)
+			assert.Equal(t, definitionWithheld, b.Refused.Message)
+			assert.NotContains(t, b.Refused.Message, "notanumberconst")
+		})
 	}
 }
