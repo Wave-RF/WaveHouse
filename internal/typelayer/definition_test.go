@@ -616,28 +616,39 @@ func TestRefusal_KeepsTheShapesOf117(t *testing.T) {
 }
 
 // TestRefusal_NestedNamesNoHiddenSibling: a Nested group's unequal arrays are
-// refused naming the columns the record wrote, never a sibling the role may
-// not write, which takes its DEFAULT.
+// refused naming the columns the record could write, and withheld when the
+// pair ClickHouse names holds a sibling the role may not write that takes a
+// value of its own (a DEFAULT, a MATERIALIZED), in the record's group or one
+// it never touched.
 func TestRefusal_NestedNamesNoHiddenSibling(t *testing.T) {
 	t.Parallel()
-	eng := testEngine(t, &discovery.TableSchema{Name: "nh", Columns: []discovery.Column{
-		{Name: "id", Type: "UInt64", Position: 1},
-		{Name: "n.a", Type: "Array(String)", Position: 2},
-		{Name: "n.b", Type: "Array(String)", Position: 3},
-		{Name: "n.qxhidden", Type: "Array(String)", Position: 4},
-	}})
-	tbl, err := eng.RoleTable(tenant.Default, "nh", RoleShape{Columns: []string{"id", "n.a", "n.b"}})
-	require.NoError(t, err)
-	defer tbl.Release()
-	refused := 0
-	for _, body := range []string{`{"id":1,"n.a":["x","y"],"n.b":["z"]}`, `{"id":1,"n.a":["x","y"]}`, `{"id":1,"n.a":["x"],"n.b":["z"]}`} {
-		b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{}, []byte(body+"\n"))
-		require.NoError(t, err)
-		if b.Refused != nil {
-			refused++
-			assert.Equal(t, 190, b.Refused.Code, body)
-			assert.NotContains(t, b.Refused.Message, "qxhidden", body)
-		}
+	arr := func(name string, pos uint64, kind, expr string) discovery.Column {
+		return discovery.Column{Name: name, Type: "Array(String)", Position: pos, DefaultKind: kind, DefaultExpression: expr}
 	}
-	assert.Positive(t, refused, "unequal arrays are refused")
+	tests := []struct {
+		name string
+		cols []discovery.Column
+		body string
+		kept bool
+	}{
+		{"written pair", []discovery.Column{arr("n.a", 2, "", ""), arr("n.b", 3, "", ""), arr("n.qxhidden", 4, "", "")}, `{"id":1,"n.a":["x","y"],"n.b":["z"]}`, true},
+		{"hidden DEFAULT sibling", []discovery.Column{arr("n.a", 2, "", ""), arr("n.b", 3, "", ""), arr("n.qxhidden", 4, "DEFAULT", "['d']")}, `{"id":1,"n.a":["x","y"],"n.b":["z","w"]}`, false},
+		{"MATERIALIZED sibling", []discovery.Column{arr("n.a", 2, "", ""), arr("n.b", 3, "", ""), arr("n.qxhidden", 4, "MATERIALIZED", "['d']")}, `{"id":1,"n.a":["x","y"],"n.b":["z","w"]}`, false},
+		{"a group the record never touched", []discovery.Column{arr("n.a", 2, "", ""), arr("n.b", 3, "", ""), arr("m.qxone", 4, "", ""), arr("m.qxhidden", 5, "DEFAULT", "['d', 'e']")}, `{"id":1,"n.a":["x"],"n.b":["z"]}`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			eng := testEngine(t, &discovery.TableSchema{Name: "nh", Columns: append([]discovery.Column{{Name: "id", Type: "UInt64", Position: 1}}, tt.cols...)})
+			tbl, err := eng.RoleTable(tenant.Default, "nh", RoleShape{Columns: []string{"id", "n.a", "n.b"}})
+			require.NoError(t, err)
+			defer tbl.Release()
+			b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{}, []byte(tt.body+"\n"))
+			require.NoError(t, err)
+			require.NotNil(t, b.Refused, "unequal arrays are refused")
+			assert.Equal(t, 190, b.Refused.Code)
+			assert.NotContains(t, b.Refused.Message, "qx")
+			assert.Equal(t, tt.kept, b.Refused.Message != definitionWithheld, "%s", b.Refused.Message)
+		})
+	}
 }

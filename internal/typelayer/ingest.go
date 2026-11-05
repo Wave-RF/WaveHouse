@@ -277,6 +277,9 @@ func (t *Table) batch(c *cursor, res chtypes.BatchResult, chk *checkState, keep 
 		if res.Outcome == chtypes.Rejected && res.ErrCode != 0 &&
 			(len(res.Rows) > 0 || res.Framing != nil || c.format == FormatCSVWithNames || c.format == FormatTSVWithNames) {
 			r := refusal(res)
+			if r.Code == nestedSizesCode {
+				r.Message = t.ownNested(r.Message)
+			}
 			if r.Record > 0 {
 				r.Record += c.rows
 			}
@@ -478,7 +481,33 @@ var readerCodes = map[int]bool{
 // 190 as a Nested group's unequal arrays are.
 var readerShapes = map[int]*regexp.Regexp{
 	incorrectDataCode: incorrectData,
-	190:               regexp.MustCompile(`^Elements '.+?' and '.+?' of Nested data structure '.+?' \(Array columns\) have different array sizes\.$`),
+	nestedSizesCode:   nestedSizes,
+}
+
+// nestedSizesCode is ClickHouse's SIZES_OF_ARRAYS_DONT_MATCH.
+const nestedSizesCode = 190
+
+// nestedSizes is 190 for a Nested group whose arrays differ in length. It
+// names two of the group's columns, one of which can be a sibling the record
+// did not write (a DEFAULT or MATERIALIZED one), so Table.ownNested keeps it
+// only when the record could have written both.
+var nestedSizes = regexp.MustCompile(`^Elements '(.+?)' and '(.+?)' of Nested data structure '.+?' \(Array columns\) have different array sizes\.$`)
+
+// ownNested is a refusal's message, withheld when it is a Nested group's
+// sizes naming a column a record of t may not write.
+func (t *Table) ownNested(msg string) string {
+	m := nestedSizes.FindStringSubmatch(msg)
+	if m == nil {
+		return msg
+	}
+	cols := t.inputs
+	if cols == nil {
+		cols = t.WireColumns
+	}
+	if slices.Contains(cols, m[1]) && slices.Contains(cols, m[2]) {
+		return msg
+	}
+	return definitionWithheld
 }
 
 // checkHead is a CHECK violation: the sentence naming the constraint, its
