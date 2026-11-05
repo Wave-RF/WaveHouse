@@ -478,6 +478,11 @@ var readerCodes = map[int]bool{
 // constraint and the row are kept.
 var checkHead = regexp.MustCompile(`(?s)^Constraint (.+?) for table .+? is violated( at row \d+)?\. Expression: `)
 
+// enumHint is the near-miss labels ClickHouse suggests for an unknown Enum
+// element, which are the definition's. It runs to the last "]", so a label
+// holding one is cut whole; at worst it takes the client's key name with it.
+var enumHint = regexp.MustCompile(`(?s), maybe you meant: \[.*\]`)
+
 // violatedConstraint is ClickHouse's VIOLATED_CONSTRAINT: a CHECK refused the
 // record. A message of that code in a shape checkHead does not know is withheld.
 const violatedConstraint = 469
@@ -498,7 +503,7 @@ func withoutDefinitionText(code int, msg string) string {
 		}
 		return definitionWithheld
 	case readerCodes[code]:
-		return msg
+		return enumHint.ReplaceAllString(msg, "")
 	default:
 		return definitionWithheld
 	}

@@ -21,9 +21,10 @@ import (
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
-// A CHECK constraint is a refusal chtypes does not make yet (#727), so a row
-// that violates one reaches the worker and fails its batch's INSERT. These
-// tests run the worker against the shared ClickHouse with the server's own
+// A CHECK constraint chtypes does not see (a table compiled from its columns,
+// #727) lets a row that violates it reach the worker and fail its batch's
+// INSERT; these tests drive the worker with such rows directly. They
+// run the worker against the shared ClickHouse with the server's own
 // async_insert default, which is on for 26.8: the batch INSERT is async, and
 // an async flush merges every concurrent INSERT of the same statement into one
 // block, which a constraint fails as a whole.

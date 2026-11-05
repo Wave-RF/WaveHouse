@@ -341,6 +341,8 @@ func TestWithoutDefinitionText(t *testing.T) {
 		{38, "Cannot parse date: value is too short: in scope _CAST(toDate('constvalue'), 'Date') AS d", definitionWithheld},
 		{38, "Cannot parse date: value is too short: (while reading the value of key v)", "Cannot parse date: value is too short: (while reading the value of key v)"},
 		{676, "Cannot parse IPv6 zz\"}", "Cannot parse IPv6 zz\"}"},
+		{691, "Unknown element 'internal_tier_g' for enum, maybe you meant: ['internal_tier_gold']: (while reading the value of key v)", "Unknown element 'internal_tier_g' for enum: (while reading the value of key v)"},
+		{691, "Unknown element 'a]' for enum, maybe you meant: ['a]b', 'a]c']", "Unknown element 'a]' for enum"},
 		{27, "Cannot parse input: expected '\"' before: 'x\"}\\n': (while reading the value of key id)", "Cannot parse input: expected '\"' before: 'x\"}\\n': (while reading the value of key id)"},
 		{27, "Cannot parse input: expected '\\t' before: 'abc. Expression: xyz': (at row 3)", "Cannot parse input: expected '\\t' before: 'abc. Expression: xyz': (at row 3)"},
 		{27, "Cannot parse input: expected '\\t' before: 'Constraint x is violated. Expression: y': (at row 3)", "Cannot parse input: expected '\\t' before: 'Constraint x is violated. Expression: y': (at row 3)"},
@@ -488,7 +490,7 @@ func TestRefusal_KeepsTheReaderMessage(t *testing.T) {
 		{632, "DateTime", FormatCSV, `1,1704103200abc`},
 		{675, "IPv4", FormatJSONEachRow, `{"id":1,"v":"zz"}`},
 		{676, "IPv6", FormatJSONEachRow, `{"id":1,"v":"zz"}`},
-		{691, "Enum8('a' = 1)", FormatJSONEachRow, `{"id":1,"v":"x"}`},
+		{691, "Enum8('alpha' = 1)", FormatJSONEachRow, `{"id":1,"v":"alph"}`},
 	}
 	covered := map[int]bool{}
 	for _, tt := range tests {
@@ -507,6 +509,7 @@ func TestRefusal_KeepsTheReaderMessage(t *testing.T) {
 			assert.Equal(t, tt.code, b.Refused.Code, "%s", b.Refused.Message)
 			assert.NotEqual(t, definitionWithheld, b.Refused.Message)
 			assert.NotEmpty(t, b.Refused.Message)
+			assert.NotContains(t, b.Refused.Message, "alpha", "an Enum's labels are the definition's")
 		})
 	}
 	for code := range readerCodes {
