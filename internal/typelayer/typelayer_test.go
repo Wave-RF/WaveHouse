@@ -412,25 +412,16 @@ func seededCache(t *testing.T) (dir, root string) {
 // download or a bad disk leaves.
 func corruptLayout(t *testing.T) string {
 	t.Helper()
-	testEngine(t) // skips (or fails under WAVEHOUSE_TEST_REQUIRE_CHTYPES) without the real artifact
-	return corruptCopy(t)
-}
-
-// corruptCopy is corruptLayout without the skip.
-func corruptCopy(t *testing.T) string {
-	t.Helper()
-	reg, err := chtypes.NewRegistry(chtypes.WithAutoFetch(false))
-	require.NoError(t, err)
-	installed, err := reg.Installed()
-	require.NoError(t, err)
+	eng := testEngine(t) // skips (or fails under WAVEHOUSE_TEST_REQUIRE_CHTYPES) without the real artifact
+	// The build the engine opened, not the newest installed: a shared cache
+	// holds builds for other SDK releases, which this one never opens.
 	var good *chtypes.Resolved
-	for i, r := range installed {
-		if r.Platform == runtime.GOOS+"-"+runtime.GOARCH && strings.HasPrefix(r.Version, testLine+".") &&
-			(good == nil || r.Build > good.Build) { // a dev SDK ignores other fingerprints' builds: take the newest, as the cache accrues one per SDK release
-			good = &installed[i]
+	for _, lib := range eng.reg.Libraries() {
+		if r := lib.Resolved(); r != nil && strings.HasPrefix(r.Version, testLine+".") {
+			good = r
 		}
 	}
-	require.NotNil(t, good)
+	require.NotNil(t, good, "the engine opened the test line's library")
 	rel, err := filepath.Rel(good.Dir, good.LibraryPath)
 	require.NoError(t, err)
 
