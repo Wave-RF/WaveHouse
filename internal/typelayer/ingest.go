@@ -463,12 +463,13 @@ var definitionMarker = regexp.MustCompile(`(?i)while executing '|\bin scope\b`)
 // record's own bytes, measured over every column type and format on build
 // 20261104.224808. A refusal with any other code has its message withheld
 // however it is worded: that is how the definition's evaluation refuses a
-// record, and 36, which an AggregateFunction state also raises, is withheld
-// since a definition's time-zone argument raises it too.
+// record. 36 (an AggregateFunction state) and 190 (a Nested pair of unequal
+// lengths) are withheld though the reader raises them, since a definition
+// raises them too with no marker: a time-zone argument, an array function.
 var readerCodes = map[int]bool{
 	25: true, 26: true, 27: true, 32: true, 33: true, 38: true, 41: true, 69: true, 72: true,
-	117: true, 130: true, 131: true, 376: true, 467: true, 563: true, 632: true, 675: true,
-	676: true, 691: true,
+	117: true, 130: true, 131: true, 376: true, 407: true, 467: true, 563: true, 632: true,
+	675: true, 676: true, 691: true,
 }
 
 // checkHead is a CHECK violation: the sentence naming the constraint, its
