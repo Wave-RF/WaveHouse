@@ -3,6 +3,7 @@ package typelayer
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -43,7 +44,7 @@ func TestCompileSchema_OwnDefinition(t *testing.T) {
 	require.NotNil(t, own.Refused, "the CHECK refuses the body")
 	assert.Equal(t, 469, own.Refused.Code)
 	assert.Equal(t, 2, own.Refused.Record, "the record that breaks it")
-	assert.Equal(t, "Constraint `c` for table db.ck is violated at row 2.", own.Refused.Message, "no expression or values quoted")
+	assert.Equal(t, "Constraint `c` is violated at row 2.", own.Refused.Message, "no expression or values quoted")
 	assert.Empty(t, own.Rows)
 
 	columns := ingestTwo(t, testEngine(t, checkedTable("")))
@@ -328,8 +329,8 @@ func TestWithoutDefinitionText(t *testing.T) {
 		code     int
 		in, want string
 	}{
-		{469, "Constraint `c` for table db.t1 is violated at row 1. Expression: (v != 'constvalue'). Column values: v = 'constvalue'", "Constraint `c` for table db.t1 is violated at row 1."},
-		{469, "Constraint `c` for table db.t is violated. Expression: (v != 'constvalue').Constraint expression returns nullable column that contains null value", "Constraint `c` for table db.t is violated."},
+		{469, "Constraint `c` for table db.t1 is violated at row 1. Expression: (v != 'constvalue'). Column values: v = 'constvalue'", "Constraint `c` is violated at row 1."},
+		{469, "Constraint `c` for table db.t is violated. Expression: (v != 'constvalue').Constraint expression returns nullable column that contains null value", "Constraint `c` is violated."},
 		{469, "Constraint `c` for table db.t refused 'constvalue'", definitionWithheld},
 		{6, "Cannot parse date here: zzconstpar: Cannot parse Date from String: while executing 'FUNCTION toDate(concat(s, 'constpart') :: 2) -> toDate(concat(s, 'constpart')) Date : 1'", definitionWithheld},
 		{6, "Cannot parse string 'notanumberconst' as UInt64: syntax error at begin of string: In scope _CAST(toUInt64('notanumberconst'), 'UInt64') AS d", definitionWithheld},
@@ -375,9 +376,9 @@ func TestRefusal_CheckQuotesNoDefinition(t *testing.T) {
 		body  string
 		want  string
 	}{
-		{"NULL", nullable, RoleShape{}, `{"id":1}`, "Constraint `c` for table db.cq is violated."},
-		{"false", nullable, RoleShape{}, `{"id":1,"n":"topsecretconst"}`, "Constraint `c` for table db.cq is violated at row 1."},
-		{"unwritable column, false", hidden("secret != 'topsecretconst'"), RoleShape{Columns: []string{"id"}}, `{"id":1}`, "Constraint `c` for table db.cq is violated at row 1."},
+		{"NULL", nullable, RoleShape{}, `{"id":1}`, "Constraint `c` is violated."},
+		{"false", nullable, RoleShape{}, `{"id":1,"n":"topsecretconst"}`, "Constraint `c` is violated at row 1."},
+		{"unwritable column, false", hidden("secret != 'topsecretconst'"), RoleShape{Columns: []string{"id"}}, `{"id":1}`, "Constraint `c` is violated at row 1."},
 		{"unwritable column, conversion", hidden("toUInt64(secret) > 0"), RoleShape{Columns: []string{"id"}}, `{"id":1}`, definitionWithheld},
 	}
 	for _, tt := range tests {
@@ -452,5 +453,61 @@ func TestRefusal_WithholdsADefinitionConstant(t *testing.T) {
 			assert.Equal(t, definitionWithheld, b.Refused.Message)
 			assert.NotContains(t, b.Refused.Message, "notanumberconst")
 		})
+	}
+}
+
+// TestRefusal_KeepsTheReaderMessage: a record's own bad bytes, on a table with
+// no definition expression, are refused with ClickHouse's message kept, one
+// case per code readerCodes lists, so a code the reader raises that the list
+// lacks shows up here rather than as a withheld message to a client.
+func TestRefusal_KeepsTheReaderMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		code   int
+		typ    string
+		format Format
+		body   string
+	}{
+		{25, "String", FormatJSONEachRow, `{"id":1,"v":"\ud800"}`},
+		{26, "String", FormatJSONEachRow, `[{"id":1,"v":"ab`},
+		{27, "UInt64", FormatJSONEachRow, `{"id":1,"v":"abc"}`},
+		{32, "String", FormatJSONEachRow, `{"id":`},
+		{33, "String", FormatJSONEachRow, `{"id":1`},
+		{38, "Date", FormatJSONEachRow, `{"id":1,"v":"zz"}`},
+		{41, "DateTime", FormatJSONEachRow, `{"id":1,"v":"zz"}`},
+		{69, "Decimal(5, 2)", FormatJSONEachRow, `{"id":1,"v":12345678.9}`},
+		{72, "UInt64", FormatJSONEachRow, `{"id":1,"v":-1}`},
+		{117, "String", FormatJSONEachRow, `{"id":1,"zz":1}`},
+		{130, "Array(UInt8)", FormatJSONEachRow, `{"id":1,"v":"x"}`},
+		{131, "FixedString(2)", FormatJSONEachRow, `{"id":1,"v":"abcd"}`},
+		{376, "UUID", FormatJSONEachRow, `{"id":1,"v":"zz"}`},
+		{467, "Bool", FormatJSONEachRow, `{"id":1,"v":"maybe"}`},
+		{563, "Map(String, UInt8)", FormatCSV, `1,"{'a':'x'}"`},
+		{632, "DateTime", FormatCSV, `1,1704103200abc`},
+		{675, "IPv4", FormatJSONEachRow, `{"id":1,"v":"zz"}`},
+		{676, "IPv6", FormatJSONEachRow, `{"id":1,"v":"zz"}`},
+		{691, "Enum8('a' = 1)", FormatJSONEachRow, `{"id":1,"v":"x"}`},
+	}
+	covered := map[int]bool{}
+	for _, tt := range tests {
+		covered[tt.code] = true
+		t.Run(strconv.Itoa(tt.code), func(t *testing.T) {
+			t.Parallel()
+			eng := testEngine(t, &discovery.TableSchema{Name: "rd", Columns: []discovery.Column{
+				{Name: "id", Type: "UInt64", Position: 1}, {Name: "v", Type: tt.typ, Position: 2},
+			}})
+			tbl, err := eng.Table(tenant.Default, "rd")
+			require.NoError(t, err)
+			defer tbl.Release()
+			b, err := tbl.IngestWith(tt.format, IngestOptions{}, []byte(tt.body+"\n"))
+			require.NoError(t, err)
+			require.NotNil(t, b.Refused)
+			assert.Equal(t, tt.code, b.Refused.Code, "%s", b.Refused.Message)
+			assert.NotEqual(t, definitionWithheld, b.Refused.Message)
+			assert.NotEmpty(t, b.Refused.Message)
+		})
+	}
+	for code := range readerCodes {
+		assert.True(t, covered[code], "reader code %d has no case", code)
 	}
 }

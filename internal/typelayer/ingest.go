@@ -461,17 +461,21 @@ var definitionMarker = regexp.MustCompile(`(?i)while executing '|\bin scope\b`)
 
 // readerCodes are the exception codes ClickHouse's input reader raises for a
 // record's own bytes, measured over every column type and format on build
-// 20261104.224808. A refusal with any other code, which only the definition's
-// evaluation raises, has its message withheld however it is worded.
+// 20261104.224808. A refusal with any other code has its message withheld
+// however it is worded: that is how the definition's evaluation refuses a
+// record, and 36, which an AggregateFunction state also raises, is withheld
+// since a definition's time-zone argument raises it too.
 var readerCodes = map[int]bool{
-	26: true, 27: true, 32: true, 33: true, 38: true, 41: true, 69: true, 72: true, 117: true,
-	130: true, 131: true, 376: true, 467: true, 675: true, 676: true, 691: true,
+	25: true, 26: true, 27: true, 32: true, 33: true, 38: true, 41: true, 69: true, 72: true,
+	117: true, 130: true, 131: true, 376: true, 467: true, 563: true, 632: true, 675: true,
+	676: true, 691: true,
 }
 
-// checkHead is a CHECK violation: the sentence naming the constraint (and the
-// row, unless the expression came out NULL), then its quote of the expression
-// and of the row's values.
-var checkHead = regexp.MustCompile(`(?s)^(Constraint .+? is violated(?: at row \d+)?)\. Expression: `)
+// checkHead is a CHECK violation: the sentence naming the constraint, its
+// table (with the tenant's database) and the row, unless the expression came
+// out NULL, then its quote of the expression and of the row's values. The
+// constraint and the row are kept.
+var checkHead = regexp.MustCompile(`(?s)^Constraint (.+?) for table .+? is violated( at row \d+)?\. Expression: `)
 
 // violatedConstraint is ClickHouse's VIOLATED_CONSTRAINT: a CHECK refused the
 // record. A message of that code in a shape checkHead does not know is withheld.
@@ -489,7 +493,7 @@ func withoutDefinitionText(code int, msg string) string {
 		return definitionWithheld
 	case code == violatedConstraint:
 		if m := checkHead.FindStringSubmatch(msg); m != nil {
-			return m[1] + "."
+			return "Constraint " + m[1] + " is violated" + m[2] + "."
 		}
 		return definitionWithheld
 	case readerCodes[code]:
