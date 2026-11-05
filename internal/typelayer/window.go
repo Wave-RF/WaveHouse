@@ -24,7 +24,9 @@ import (
 // a call over 10 MiB on a table with a Map, Dynamic, JSON or Object column is
 // declined on some lines and library builds (ClickHouse's parallel-parsing
 // cut, min_chunk_bytes_for_parallel_parsing; measured on 26.10 build
-// 20261105.003921, while 26.8 accepts it since build 20261105.095805).
+// 20261105.003921, while 26.8 accepts it since build 20261105.095805). A
+// window grows past Bytes to hold two records, so two records that together
+// pass 10 MiB are one call, which such a line declines.
 type Limits struct {
 	Bytes   int
 	Records int
