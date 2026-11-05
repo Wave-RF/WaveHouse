@@ -349,6 +349,8 @@ func TestWithoutDefinitionText(t *testing.T) {
 		{117, "Unknown field found while parsing JSONEachRow format: nope", "Unknown field found while parsing JSONEachRow format: nope"},
 		{117, "Duplicate field found while parsing format header: id: (while reading header)", "Duplicate field found while parsing format header: id: (while reading header)"},
 		{117, "Expected end of line", "Expected end of line"},
+		{117, "Cannot read JSON field here: 'None}'. Unexpected symbol 'N': (while reading the value of key v)", "Cannot read JSON field here: 'None}'. Unexpected symbol 'N': (while reading the value of key v)"},
+		{117, "\nYou have carriage return (\\r, 0x0D, ASCII 13) at end of first row.", "\nYou have carriage return (\\r, 0x0D, ASCII 13) at end of first row."},
 		{117, "Cannot parse JSON value of type Variant(Enum8('constvalue' = 1), UInt8) here: \"zz\": (while reading the value of key v)", definitionWithheld},
 		{27, "Cannot parse quoted value of type Variant(Enum8('constvalue' = 1), UInt8) here: zz", definitionWithheld},
 		{117, "A shape not measured 'constvalue'", definitionWithheld},
@@ -567,4 +569,41 @@ func TestRefusal_KeepsNoDeclaredString(t *testing.T) {
 		tbl.Release()
 	}
 	assert.Greater(t, refused, 40, "the bodies are bad for these types")
+}
+
+// TestRefusal_KeepsTheShapesOf117: the 117 shapes a client's own mistakes
+// raise keep ClickHouse's message, so incorrectData lists every one of them
+// a common mistake reaches (a bare word for a JSON string, Windows line ends
+// in TSV, an unknown or repeated field, too many fields).
+func TestRefusal_KeepsTheShapesOf117(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		format Format
+		body   string
+	}{
+		{"unknown field", FormatJSONEachRow, `{"id":1,"zz":1}` + "\n"},
+		{"bare word", FormatJSONEachRow, `{"id":1,"v":None}` + "\n"},
+		{"single quotes", FormatJSONEachRow, `{"id":1,"v":'x'}` + "\n"},
+		{"too many fields", FormatCSV, "1,a,b\n"},
+		{"repeated header field", FormatCSVWithNames, "id,id\n1,2\n"},
+		{"carriage return", FormatTSV, "1\ta\r\n2\tb\n"},
+		{"carriage return under a header", FormatTSVWithNames, "id\tv\r\n1\ta\r\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			eng := testEngine(t, &discovery.TableSchema{Name: "s117", Columns: []discovery.Column{
+				{Name: "id", Type: "UInt64", Position: 1}, {Name: "v", Type: "String", Position: 2},
+			}})
+			tbl, err := eng.Table(tenant.Default, "s117")
+			require.NoError(t, err)
+			defer tbl.Release()
+			b, err := tbl.IngestWith(tt.format, IngestOptions{}, []byte(tt.body))
+			require.NoError(t, err)
+			require.NotNil(t, b.Refused)
+			assert.Equal(t, incorrectDataCode, b.Refused.Code, "%s", b.Refused.Message)
+			assert.NotEqual(t, definitionWithheld, b.Refused.Message)
+		})
+	}
 }

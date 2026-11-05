@@ -481,7 +481,7 @@ var checkHead = regexp.MustCompile(`(?s)^Constraint (.+?) for table .+? is viola
 // incorrectData is the shapes of 117 (INCORRECT_DATA) the reader raises for
 // a record's own bytes, quoting only those bytes and the names the record
 // used; another shape, a Variant's whole type among them, is withheld.
-var incorrectData = regexp.MustCompile(`^(?:Unknown field found |Duplicate field found |Expected end of line|JSON object should start with|JSON object/array should have equal number of|Unexpected symbol for key|Cannot insert data into JSON column|Cannot parse JSON object here|Incorrect data: )`)
+var incorrectData = regexp.MustCompile(`^(?:Unknown field found |Duplicate field found |Expected end of line|JSON object should start with|JSON object/array should have equal number of|Unexpected symbol for key|Cannot insert data into JSON column|Cannot parse JSON object here|Cannot read JSON field here: |\s*You have carriage return|Incorrect data: )`)
 
 // typeText is a reader quoting a column's type whole ("Cannot parse JSON
 // value of type Variant(...) here"), which holds the strings the definition
