@@ -318,9 +318,10 @@ func TestCompileSchema_MaskedDefinitionFallsBack(t *testing.T) {
 // TestWithoutDefinitionText: a CHECK violation keeps the sentence naming the
 // constraint (and the row, when it has one) and drops its quote of the
 // expression and values; a message raised while a definition expression was
-// evaluated is withheld, and so is a CHECK's in a shape not known; a record's
-// own parse error, client text that only looks like a CHECK's included, is
-// untouched. Messages measured on build 20261104.224808.
+// evaluated or analyzed is withheld, and so is a CHECK's in a shape not known
+// and any message of a code the reader does not raise; a record's own parse
+// error, client text that only looks like a CHECK's included, is untouched.
+// Messages measured on build 20261104.224808.
 func TestWithoutDefinitionText(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -332,6 +333,12 @@ func TestWithoutDefinitionText(t *testing.T) {
 		{469, "Constraint `c` for table db.t refused 'constvalue'", definitionWithheld},
 		{6, "Cannot parse date here: zzconstpar: Cannot parse Date from String: while executing 'FUNCTION toDate(concat(s, 'constpart') :: 2) -> toDate(concat(s, 'constpart')) Date : 1'", definitionWithheld},
 		{6, "Cannot parse string 'notanumberconst' as UInt64: syntax error at begin of string: In scope _CAST(toUInt64('notanumberconst'), 'UInt64') AS d", definitionWithheld},
+		{46, "Function with name `futureFunction` does not exist. In scope _CAST('constvalue', 'String') AS secret, _CAST(concat('constvalue', futureFunction(dummy.dummy.v)), 'String') AS dx", definitionWithheld},
+		{47, "Unknown expression or function identifier `constvalue_col` in scope _CAST(toString(constvalue_col), 'String') AS dx", definitionWithheld},
+		{6, "Cannot parse string 'constvalue' as UInt64: syntax error at begin of string", definitionWithheld},
+		{38, "Cannot parse date: value is too short: in scope _CAST(toDate('constvalue'), 'Date') AS d", definitionWithheld},
+		{38, "Cannot parse date: value is too short: (while reading the value of key v)", "Cannot parse date: value is too short: (while reading the value of key v)"},
+		{676, "Cannot parse IPv6 zz\"}", "Cannot parse IPv6 zz\"}"},
 		{27, "Cannot parse input: expected '\"' before: 'x\"}\\n': (while reading the value of key id)", "Cannot parse input: expected '\"' before: 'x\"}\\n': (while reading the value of key id)"},
 		{27, "Cannot parse input: expected '\\t' before: 'abc. Expression: xyz': (at row 3)", "Cannot parse input: expected '\\t' before: 'abc. Expression: xyz': (at row 3)"},
 		{27, "Cannot parse input: expected '\\t' before: 'Constraint x is violated. Expression: y': (at row 3)", "Cannot parse input: expected '\\t' before: 'Constraint x is violated. Expression: y': (at row 3)"},
@@ -393,7 +400,8 @@ func TestRefusal_CheckQuotesNoDefinition(t *testing.T) {
 
 // TestRefusal_WithholdsADefinitionConstant: a conversion that fails inside a
 // DEFAULT or a partition expression names the value it failed on, a constant
-// of the definition among it, in the head of ClickHouse's message; the
+// of the definition among it, in the head of ClickHouse's message, and a
+// DEFAULT the library cannot analyze lists every DEFAULT of the table; the
 // refusal keeps its code and record and withholds the message.
 func TestRefusal_WithholdsADefinitionConstant(t *testing.T) {
 	t.Parallel()
@@ -411,6 +419,23 @@ func TestRefusal_WithholdsADefinitionConstant(t *testing.T) {
 		{
 			"partition expression", "CREATE TABLE db.wd (`id` UInt64, `v` String) ENGINE = MergeTree PARTITION BY toUInt64(concat(v, 'notanumberconst')) ORDER BY id", `{"id":1,"v":"zz"}`,
 			[]discovery.Column{{Name: "id", Type: "UInt64", Position: 1}, {Name: "v", Type: "String", Position: 2}},
+		},
+		{
+			"unknown function", "CREATE TABLE db.wd (`id` UInt64, `v` String, `s` String DEFAULT 'notanumberconst', `d` String DEFAULT concat('notanumberconst', futureFunction(v))) ENGINE = MergeTree ORDER BY id", `{"id":1,"v":"zz"}`,
+			[]discovery.Column{
+				{Name: "id", Type: "UInt64", Position: 1},
+				{Name: "v", Type: "String", Position: 2},
+				{Name: "s", Type: "String", Position: 3, DefaultKind: "DEFAULT", DefaultExpression: "'notanumberconst'"},
+				{Name: "d", Type: "String", Position: 4, DefaultKind: "DEFAULT", DefaultExpression: "concat('notanumberconst', futureFunction(v))"},
+			},
+		},
+		{
+			"unknown identifier", "CREATE TABLE db.wd (`id` UInt64, `v` String, `d` String DEFAULT toString(notanumberconst_col)) ENGINE = MergeTree ORDER BY id", `{"id":1,"v":"zz"}`,
+			[]discovery.Column{
+				{Name: "id", Type: "UInt64", Position: 1},
+				{Name: "v", Type: "String", Position: 2},
+				{Name: "d", Type: "String", Position: 3, DefaultKind: "DEFAULT", DefaultExpression: "toString(notanumberconst_col)"},
+			},
 		},
 	}
 	for _, tt := range tests {

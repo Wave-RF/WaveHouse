@@ -451,13 +451,22 @@ func refusal(res chtypes.BatchResult) *Refusal {
 
 // definitionMarker is how ClickHouse says an expression of the table's own
 // definition (a DEFAULT, a key, partition or TTL expression, a CHECK over a
-// conversion) was being evaluated when it refused the record. Such a message
-// can quote the definition anywhere, its head included (the value a
-// conversion failed on, a constant or a column the role may not write), so it
-// is withheld whole and the client keeps its exception code and record. A
+// conversion) was being evaluated or analyzed when it refused the record. Such
+// a message can quote the definition anywhere, its head included (the value a
+// conversion failed on, a constant, every DEFAULT of the table), so it is
+// withheld whole and the client keeps its exception code and record. A
 // record's own parse error carries no marker, unless the bytes it echoes do:
 // that message is withheld too, which loses its locator and leaks nothing.
-var definitionMarker = regexp.MustCompile(`: while executing '|: In scope `)
+var definitionMarker = regexp.MustCompile(`(?i)while executing '|\bin scope\b`)
+
+// readerCodes are the exception codes ClickHouse's input reader raises for a
+// record's own bytes, measured over every column type and format on build
+// 20261104.224808. A refusal with any other code, which only the definition's
+// evaluation raises, has its message withheld however it is worded.
+var readerCodes = map[int]bool{
+	26: true, 27: true, 32: true, 33: true, 38: true, 41: true, 69: true, 72: true, 117: true,
+	130: true, 131: true, 376: true, 467: true, 675: true, 676: true, 691: true,
+}
 
 // checkHead is a CHECK violation: the sentence naming the constraint (and the
 // row, unless the expression came out NULL), then its quote of the expression
@@ -468,22 +477,26 @@ var checkHead = regexp.MustCompile(`(?s)^(Constraint .+? is violated(?: at row \
 // record. A message of that code in a shape checkHead does not know is withheld.
 const violatedConstraint = 469
 
-// definitionWithheld replaces a message definitionMarker matched.
-const definitionWithheld = "the record was refused while an expression of the table's definition was evaluated; the message is withheld, since it can quote the definition"
+// definitionWithheld replaces a refusal's message that can quote the definition.
+const definitionWithheld = "ClickHouse's message is withheld, since it can quote the table's definition"
 
 // withoutDefinitionText is a refusal's message less what it quotes of the
-// table's definition (Eric's choice, 2026-11-05).
+// table's definition (Eric's choice, 2026-11-05): a reader's message is kept,
+// a CHECK's is cut to the sentence naming it, and any other is withheld.
 func withoutDefinitionText(code int, msg string) string {
-	if definitionMarker.MatchString(msg) {
+	switch {
+	case definitionMarker.MatchString(msg):
+		return definitionWithheld
+	case code == violatedConstraint:
+		if m := checkHead.FindStringSubmatch(msg); m != nil {
+			return m[1] + "."
+		}
+		return definitionWithheld
+	case readerCodes[code]:
+		return msg
+	default:
 		return definitionWithheld
 	}
-	if m := checkHead.FindStringSubmatch(msg); m != nil {
-		return m[1] + "."
-	}
-	if code == violatedConstraint {
-		return definitionWithheld
-	}
-	return msg
 }
 
 // declinedVerdict reports an outcome that is not a verdict about the data,
