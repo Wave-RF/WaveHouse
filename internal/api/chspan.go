@@ -24,10 +24,9 @@ const (
 // query path sends, operation as the query histogram names it, so a slow or
 // failed call stands apart from the server span around it (#897). It names
 // the statement by its verb alone: the text and parameters can hold row
-// values. t names the server; withPort is false on the native protocol, whose
-// port t's HTTP URL does not carry. Each call site starts and ends the span
+// values. t names the server. Each call site starts and ends the span
 // itself, setting its result with setCHQueryResult before the end.
-func chQuerySpanOptions(t chconn.Target, withPort bool, operation, sql string, attrs ...attribute.KeyValue) []trace.SpanStartOption {
+func chQuerySpanOptions(t chconn.Target, operation, sql string, attrs ...attribute.KeyValue) []trace.SpanStartOption {
 	attrs = append(attrs,
 		semconv.DBSystemKey.String("clickhouse"),
 		semconv.DBOperation(sqlVerb(sql)),
@@ -38,7 +37,7 @@ func chQuerySpanOptions(t chconn.Target, withPort bool, operation, sql string, a
 	}
 	if u, err := url.Parse(t.URL); err == nil && u.Hostname() != "" {
 		attrs = append(attrs, semconv.ServerAddress(u.Hostname()))
-		if port, err := strconv.Atoi(u.Port()); err == nil && withPort {
+		if port, err := strconv.Atoi(u.Port()); err == nil {
 			attrs = append(attrs, semconv.ServerPort(port))
 		}
 	}

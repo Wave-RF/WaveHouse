@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
@@ -64,11 +63,6 @@ func schemaHandlerOver(reg *discovery.SchemaRegistry, tenants *settings.Registry
 	h := NewSchemaHandler(fixedRegistry(reg))
 	h.Tenants = tenants
 	return h
-}
-
-// fixedConn is a connection source fixed to conn, whatever the tenant.
-func fixedConn(conn driver.Conn) func(*settings.Store) driver.Conn {
-	return func(*settings.Store) driver.Conn { return conn }
 }
 
 // fixedWheel is a StreamHandler.Heartbeater fixed to hb, whatever the tenant.

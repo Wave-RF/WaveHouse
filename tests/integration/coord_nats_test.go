@@ -33,6 +33,7 @@ func TestCoordNATS_ReplicasShareTheShards(t *testing.T) {
 	require.NoError(t, op.ApplyShipped(ctx))
 	root, err := writeTestSettings(e.ch)
 	require.NoError(t, err)
+	t.Cleanup(func() { removeTestSettings(root) })
 
 	replicas := map[string]*natsProcess{}
 	for range 2 {
@@ -83,6 +84,7 @@ func TestCoordNATS_MissingBucketRefusesBoot(t *testing.T) {
 	require.NoError(t, os.WriteFile(pw, []byte(natstest.Password(natstest.WaveHouseUser)), 0o600))
 	root, err := writeTestSettings(env(t).ch)
 	require.NoError(t, err)
+	t.Cleanup(func() { removeTestSettings(root) })
 	cfg := &config.Config{
 		DataDir: t.TempDir(),
 		Server:  config.Server{Port: 1, ShutdownTimeout: 1},

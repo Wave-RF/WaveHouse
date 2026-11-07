@@ -26,7 +26,7 @@ func TestNew_IngestLimitsOverAckWaitRefuseBoot(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig(t, writeSettings(t, nil))
 	cfg.MQ.AckWait = 35 * time.Second // the seed's 5s + 30s, not under
-	_, err := New(t.Context(), Options{Config: cfg})
+	_, err := newForTest(t.Context(), t, Options{Config: cfg})
 	require.ErrorContains(t, err, "ingest limits: tenant 0: ingest.max_batch_wait_ms 5000 plus clickhouse.insert_timeout 30 is not under mq.ack_wait 35s")
 
 	cfg.MQ.AckWait = 36 * time.Second

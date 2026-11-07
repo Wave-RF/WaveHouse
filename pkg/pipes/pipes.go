@@ -218,8 +218,10 @@ func isNumericLiteral(s string) bool {
 // parameter definitions.
 //
 // Values are inlined directly into the SQL string (scalars are escaped, arrays
-// render as a parenthesized list — see formatParamValue). This avoids
-// driver-level positional parameter limitations (e.g. LIMIT position).
+// render as a parenthesized list — see formatParamValue). This avoids the
+// positional-parameter limitations a pipe would otherwise hit: a placeholder
+// may sit in a LIMIT or an identifier, where a bound value is
+// not legal SQL. Nothing is left for the caller to bind.
 //
 // A claim reference never reads supplied: it resolves through
 // policy.ResolveClaim against claims alone — nil for a request that carried
@@ -231,14 +233,14 @@ func isNumericLiteral(s string) bool {
 // before any parameter, so that answer stands whatever the request sent: a
 // missing or malformed parameter is the caller's mistake to learn of only once
 // its token binds the pipe.
-func BindParams(q *NamedQuery, supplied, claims map[string]any) (string, []any, error) {
+func BindParams(q *NamedQuery, supplied, claims map[string]any) (string, error) {
 	// A claim the token cannot bind fails the pipe closed ahead of every
 	// request-side check: the handler's answer to it ([] on a read, 403 on a
 	// write, 401 for an invalid token) is the caller's authorization outcome,
 	// which a missing required parameter must not pre-empt as a 400.
 	for _, path := range q.Claims() {
 		if _, _, ok := policy.ResolveClaim(claims, path); !ok {
-			return "", nil, &UnresolvedClaimError{Path: path}
+			return "", &UnresolvedClaimError{Path: path}
 		}
 	}
 
@@ -252,7 +254,7 @@ func BindParams(q *NamedQuery, supplied, claims map[string]any) (string, []any, 
 	for _, p := range q.Parameters {
 		if p.Required {
 			if _, ok := supplied[p.Name]; !ok {
-				return "", nil, fmt.Errorf("missing required parameter: %s", p.Name)
+				return "", fmt.Errorf("missing required parameter: %s", p.Name)
 			}
 		}
 	}
@@ -297,9 +299,9 @@ func BindParams(q *NamedQuery, supplied, claims map[string]any) (string, []any, 
 	})
 
 	if bindErr != nil {
-		return "", nil, bindErr
+		return "", bindErr
 	}
-	return sql, nil, nil
+	return sql, nil
 }
 
 // formatParamValue converts a Go value to a safe SQL literal for inline

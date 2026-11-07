@@ -161,7 +161,19 @@ GSA         := GOEXPERIMENT=jsonv2 go tool gsa
 
 # Externally-installed tools — version is encoded in the path so bumping the
 # version invalidates the file rule and triggers a reinstall.
-GOLANGCI_LINT_VERSION := v2.11.4
+#
+# v2.11.4 panics in its type-checker on every package once go.mod says
+# `go 1.27`. v2.13.0 is the OLDEST release whose
+# changelog claims go1.27 support ("go1.27 support (#6642)"), but it panics
+# too — a DIFFERENT bug: `nilness`/`honnef.co/go/tools@v0.8.0-rc.1` crashes
+# analyzing a third-party dependency's source (measured: `internal error:
+# unhandled builtin recover`, package "sentry", i.e. getsentry/sentry-go).
+# v2.13.1 bumps that dependency past its release candidate to the real
+# 0.8.0 and the panic is gone; v2.13.2 bumps it again, to 0.8.1.
+# Go 1.27.2 writes export data version 5, which the x/tools v0.49.0 inside
+# v2.13.2 cannot read (every package fails typecheck); v2.14.0 carries
+# x/tools v0.50.0, the first that reads it.
+GOLANGCI_LINT_VERSION := v2.14.0
 GOLANGCI_LINT         := $(LOCAL_BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 
 # air is the hot-reload runner used by `make dev`. We install it to .bin/
@@ -172,7 +184,7 @@ AIR_VERSION := v1.65.1
 AIR         := $(LOCAL_BIN)/air-$(AIR_VERSION)
 
 # misspell: curated common-typo corrector + US/UK locale enforcer. Installed
-# standalone to .bin/ (pure Go, `go install` — same pattern as air) so it can
+# standalone to .bin/ via `go install`, same pattern as air, so it can
 # lint Markdown/MDX prose. DISTINCT from the misspell analyzer bundled inside
 # golangci-lint, which only inspects Go source; same maintained fork
 # (github.com/golangci/misspell), two entry points. Drives `make lint-prose`.
@@ -888,6 +900,16 @@ install-playwright-docs: pnpm-install
 COV_DEFER ?=
 export COV_DEFER
 
+# The chtypes artifact for the test line, fetched by ONE process before a
+# suite starts its test binaries in parallel, so they do not each download it
+# on a cold cache. A cached build costs no request; a failed
+# fetch leaves the suites to skip, or under WAVEHOUSE_TEST_REQUIRE_CHTYPES=1
+# fail, naming the cause.
+.PHONY: chtypes-artifact
+chtypes-artifact:
+	@scripts/fetch-chtypes.sh --offline >/dev/null 2>&1 || scripts/fetch-chtypes.sh >/dev/null || \
+		printf "$(YELLOW)==> chtypes artifact not fetched; the suites that need it skip$(RESET)\n"
+
 # UNIT_TIMEOUT: go test's limit for each package of the unit suite. 15s is the
 # budget a unit package has to fit when the suite runs on its own (#617), as
 # it does in CI's unit job.
@@ -910,7 +932,7 @@ CI_UNIT_TIMEOUT ?= 60s
 INTEGRATION_TIMEOUT ?= 900s
 
 .PHONY: test-unit
-test-unit: go-mod-download ## Run Go unit tests + render coverage + gate threshold
+test-unit: go-mod-download chtypes-artifact ## Run Go unit tests + render coverage + gate threshold
 	@printf "$(CYAN)==> Running Unit Tests...$(RESET)\n"
 	@rm -rf $(COV_UNIT)/data && mkdir -p $(COV_UNIT)/data
 	@GOCOVERDIR="$(CURDIR)/$(COV_UNIT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
@@ -925,7 +947,8 @@ test: test-unit
 
 # The integration suite runs in parts, each a target of its own:
 #   app       tests/integration: the wired app against ClickHouse
-#   backends  the shared cache and external NATS backends' own suites
+#   backends  the shared cache and external NATS backends' own suites, and the
+#             tagged tests of the packages in INTEGRATION_TAGGED_PKGS
 # CI runs each part as a job of its own, reading the list from
 # INTEGRATION_PARTS (scripts/ci/integration-parts.sh); test-integration runs
 # them all at once. A part only collects coverage into $(COV_INT)/data, which
@@ -939,15 +962,18 @@ INTEGRATION_APP_PKGS     := ./tests/integration/...
 # so a server bump that changes it fails here; beside internal/cache it adds
 # no wall-clock.
 INTEGRATION_BACKEND_PKGS := ./internal/cache/... ./internal/mq/natsspike/...
-# The packages above run all their tests, untagged ones too. internal/mq's
-# untagged tests are the unit suite's, so it runs only the ones the tag adds,
-# in a run of its own.
-INTEGRATION_MQ_PKG := ./internal/mq
+# The packages above run all their tests, untagged ones too. These packages'
+# untagged tests are the unit suite's, so each runs only the ones the tag adds,
+# in a run of its own: internal/mq's (the external NATS broker), internal/api's
+# (the read path's filters against a ClickHouse in a non-UTC zone) and
+# internal/typelayer's (a tenant's server zone against a ClickHouse in that
+# zone).
+INTEGRATION_TAGGED_PKGS := ./internal/mq ./internal/api ./internal/typelayer
 # The packages each part runs, which check-integration-parts holds against the
 # packages with tagged tests: a part dropped from INTEGRATION_PARTS drops its
 # packages from that check too.
 INTEGRATION_PKGS_app      = $(INTEGRATION_APP_PKGS)
-INTEGRATION_PKGS_backends = $(INTEGRATION_BACKEND_PKGS) $(INTEGRATION_MQ_PKG)
+INTEGRATION_PKGS_backends = $(INTEGRATION_BACKEND_PKGS) $(INTEGRATION_TAGGED_PKGS)
 
 .PHONY: test-integration
 test-integration: go-mod-download ## Run Go integration tests + render coverage + gate threshold (requires Docker)
@@ -963,7 +989,7 @@ check-integration-parts:
 # -parallel 8: its parallel tests mostly wait, on leases, handovers and
 # containers, so more of them at once than there are cores still fit.
 .PHONY: test-integration-app
-test-integration-app: go-mod-download check-integration-parts ## Integration part: tests/integration (requires Docker)
+test-integration-app: go-mod-download chtypes-artifact check-integration-parts ## Integration part: tests/integration (requires Docker)
 	@printf "$(CYAN)==> Running Integration Tests (app)...$(RESET)\n"
 	@mkdir -p $(COV_INT)/data
 	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
@@ -972,18 +998,20 @@ test-integration-app: go-mod-download check-integration-parts ## Integration par
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
 
 .PHONY: test-integration-backends
-test-integration-backends: go-mod-download check-integration-parts ## Integration part: the cache and NATS backends (requires Docker)
+test-integration-backends: go-mod-download chtypes-artifact check-integration-parts ## Integration part: the cache and NATS backends, and the tagged tests of internal/{mq,api,typelayer} (requires Docker)
 	@printf "$(CYAN)==> Running Integration Tests (backends)...$(RESET)\n"
 	@mkdir -p $(COV_INT)/data
 	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
 		-tags="integration $(TAGS)" -timeout $(INTEGRATION_TIMEOUT) -coverpkg=./... -race -count=1 \
 		$(INTEGRATION_BACKEND_PKGS) $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
-	@run="$$(scripts/ci/tagged-tests.sh run integration $(INTEGRATION_MQ_PKG))" && \
+	@for pkg in $(INTEGRATION_TAGGED_PKGS); do \
+		run="$$(scripts/ci/tagged-tests.sh run integration "$$pkg")" && \
 		GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
-		-tags="integration $(TAGS)" -timeout 240s -coverpkg=./... -race -count=1 \
-		-run "$$run" $(INTEGRATION_MQ_PKG) $(ARGS) \
-		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
+			-tags="integration $(TAGS)" -timeout 240s -coverpkg=./... -race -count=1 \
+			-run "$$run" "$$pkg" $(ARGS) \
+			-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data" || exit 1; \
+	done
 
 # test-e2e starts ClickHouse + bin/wavehouse-cov via the orchestrator under
 # scripts/, then runs the SDK vitest harness against the live stack so both
@@ -993,7 +1021,7 @@ test-integration-backends: go-mod-download check-integration-parts ## Integratio
 # as the Go test targets. `make cov` merges ts-unit + ts-e2e after.
 #
 .PHONY: test-e2e
-test-e2e: build-ts build-cover ## Run E2E SDK suite against cover binary + render coverage + gate
+test-e2e: build-ts build-cover chtypes-artifact ## Run E2E SDK suite against cover binary + render coverage + gate
 	@printf "$(CYAN)==> Running E2E Tests...$(RESET)\n"
 	@rm -rf $(COV_E2E)/data tmp/coverage/ts-e2e
 	@mkdir -p $(COV_E2E)/data tmp/coverage/ts-e2e tmp
@@ -1130,20 +1158,6 @@ release-sdk-go: ## Tag a Go SDK release — go get (VERSION=X.Y.Z)
 # `verify` or `ci` — `deadcode` has false positives on reflection / HTTP
 # routers, and the size/dep tools are too slow for a pre-push gate.
 
-# audit-cgo: WaveHouse builds with CGO_ENABLED=0. Listed packages have pure-Go
-# fallbacks today, but a new dep could quietly break that constraint — this
-# audit surfaces every transitively-reachable package with C files so the drift
-# is visible before a release-time cross-compile breaks.
-.PHONY: audit-cgo
-audit-cgo: ## Audit dependency tree for CGO files (informational)
-	@echo "$(CYAN)==> Scanning dependency tree for packages with C files...$(RESET)"
-	@printf "  WaveHouse builds with %sCGO_ENABLED=0%s — listed packages have pure-Go fallbacks\n" "$(YELLOW)" "$(RESET)"
-	@echo  "  and their C code is never compiled. This audit catches new CGO deps."
-	@echo
-	@CGO_ENABLED=1 go list -deps -f '{{if .CgoFiles}}  ⚠ {{.ImportPath}}  ({{len .CgoFiles}} C files){{end}}' ./cmd/...
-	@echo
-	@echo "$(GREEN)==> CGO audit complete$(RESET)"
-
 # deadcode: whole-program reachability analysis, complementary to
 # golangci-lint's `unused` (which is locally scoped). False positives are
 # common for HTTP routers, reflection-based dispatch, and init() registration
@@ -1170,9 +1184,9 @@ dep-cut: ## Top cuttable dependencies by transitive weight (LIMIT=N to override)
 	@LIMIT='$(LIMIT)' scripts/dep-cut.sh
 
 # binary-analysis: one command for "what's in my binary, and what's wrong with
-# it." Runs in dep-order: build → size → audit-cgo → deadcode.
+# it." Runs in dep-order: build → size → deadcode.
 .PHONY: binary-analysis
-binary-analysis: size audit-cgo deadcode ## Combined: size + audit-cgo + deadcode
+binary-analysis: size deadcode ## Combined: size + deadcode
 	@echo
 	@echo "$(GREEN)==> Binary analysis complete$(RESET)"
 	@printf "  Cuttable dependencies: %smake dep-cut%s\n" "$(CYAN)" "$(RESET)"
@@ -1264,7 +1278,7 @@ $(GOLANGCI_LINT):
 	@mv $(LOCAL_BIN)/golangci-lint $@
 	@echo "$(GREEN)==> Installed: $@$(RESET)"
 
-# air installs cleanly via `go install` (pure Go, no shell-piping). GOBIN
+# air installs cleanly via `go install` (no shell-piping). GOBIN
 # pins the install location to our .bin/ rather than the user's $GOPATH/bin.
 $(AIR):
 	@echo "$(YELLOW)==> Installing air $(AIR_VERSION) for $(OS)_$(ARCH)...$(RESET)"
@@ -1273,7 +1287,7 @@ $(AIR):
 	@mv $(LOCAL_BIN)/air $@
 	@echo "$(GREEN)==> Installed: $@$(RESET)"
 
-# misspell installs cleanly via `go install` (pure Go), GOBIN-pinned to .bin/
+# misspell installs cleanly via `go install`, GOBIN-pinned to .bin/
 # like air. cmd/misspell is the CLI entry point of the golangci fork — the same
 # codebase golangci-lint vendors as a library for its Go-only misspell linter.
 $(MISSPELL):

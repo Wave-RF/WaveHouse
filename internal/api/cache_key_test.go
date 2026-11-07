@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -18,9 +20,9 @@ func TestQueryCacheKey(t *testing.T) {
 	tests := []struct {
 		name        string
 		sqlA        string
-		paramsA     []any
+		paramsA     []string
 		sqlB        string
-		paramsB     []any
+		paramsB     []string
 		expectEqual bool
 	}{
 		{
@@ -44,49 +46,46 @@ func TestQueryCacheKey(t *testing.T) {
 			sqlA:        "SELECT 1",
 			paramsA:     nil,
 			sqlB:        "SELECT 1",
-			paramsB:     []any{"a"},
+			paramsB:     []string{"a"},
 			expectEqual: false,
 		},
 		{
 			name:        "embedded NUL byte does not collide with split params",
 			sqlA:        "SELECT 1",
-			paramsA:     []any{"foo\x00bar"},
+			paramsA:     []string{"foo\x00bar"},
 			sqlB:        "SELECT 1",
-			paramsB:     []any{"foo", "bar"},
+			paramsB:     []string{"foo", "bar"},
 			expectEqual: false,
 		},
 		{
-			name:        "string and int with same textual value are distinct",
-			sqlA:        "SELECT 1",
-			paramsA:     []any{"42"},
-			sqlB:        "SELECT 1",
-			paramsB:     []any{42},
-			expectEqual: false,
+			// Every value reaches ClickHouse as a String parameter, so the
+			// same text is the same query whatever JSON type it arrived as.
+			name:        "the same text is the same key",
+			sqlA:        "SELECT {p0:String}",
+			paramsA:     []string{"42"},
+			sqlB:        "SELECT {p0:String}",
+			paramsB:     []string{"42"},
+			expectEqual: true,
 		},
 		{
 			name:        "nil and empty slice params produce the same key",
 			sqlA:        "SELECT 1",
 			paramsA:     nil,
 			sqlB:        "SELECT 1",
-			paramsB:     []any{},
+			paramsB:     []string{},
 			expectEqual: true,
 		},
 		{
-			// Constructed as an actual collision pair under the old
-			// "raw sql + framed params" format. The param frame for
-			// `"y"` is 0x00 + 8-byte BE length (0x1D = 29) +
-			// `{"type":"string","value":"y"}` (29 bytes), so the byte
-			// stream `("X", ["y"])` produces under the old framing is
-			// `"X" + 0x00 + 0x00…0x1D + {"type":"string","value":"y"}`.
-			// Setting sqlA to exactly those bytes and paramsA to nil
-			// reproduces that stream — under the old framing the two
-			// inputs hashed identically. The new 0x01-marker + 8-byte
-			// length prefix on sql forces them apart.
+			// Constructed as a collision pair under a "raw sql + framed
+			// params" format: the param frame for "y" is 0x00 + the 8-byte
+			// big-endian length 1 + "y", so sqlA with no params produces the
+			// byte stream ("X", ["y"]) would. The 0x01 marker and length
+			// prefix on the sql force them apart.
 			name:        "sql crafted to mimic a param-frame stream does not collide with shorter sql + real param",
-			sqlA:        "X\x00\x00\x00\x00\x00\x00\x00\x00\x1d{\"type\":\"string\",\"value\":\"y\"}",
+			sqlA:        "X\x00\x00\x00\x00\x00\x00\x00\x00\x01y",
 			paramsA:     nil,
 			sqlB:        "X",
-			paramsB:     []any{"y"},
+			paramsB:     []string{"y"},
 			expectEqual: false,
 		},
 	}
@@ -110,12 +109,28 @@ func TestQueryCacheKey(t *testing.T) {
 // the flat directory's tenant 0 simply gains its "0".
 func TestQueryCacheKey_LeadsWithTheTenant(t *testing.T) {
 	t.Parallel()
-	acme := queryCacheKey("acme", "SELECT 1", []any{"a"})
-	globex := queryCacheKey("globex", "SELECT 1", []any{"a"})
+	acme := queryCacheKey("acme", "SELECT 1", []string{"a"})
+	globex := queryCacheKey("globex", "SELECT 1", []string{"a"})
 	assert.True(t, strings.HasPrefix(acme, "acme:query:"), acme)
 	assert.True(t, strings.HasPrefix(globex, "globex:query:"), globex)
 	assert.NotEqual(t, acme, globex)
 	assert.Equal(t, strings.TrimPrefix(acme, "acme"), strings.TrimPrefix(globex, "globex"),
 		"the tenant is a prefix, not an input to the hash")
 	assert.True(t, strings.HasPrefix(queryCacheKey(tenant.Default, "SELECT 1", nil), "0:query:"))
+}
+
+// The rendering contract opens the hash: a build that renders rows another
+// way (chRendering) keys every entry apart from this one's, including a pipe
+// or a query with no parameters, whose SQL is the same under both builds.
+func TestQueryCacheKey_LeadsWithTheRendering(t *testing.T) {
+	t.Parallel()
+	h := sha256.New()
+	writeFrame(h, 2, chRendering)
+	writeFrame(h, 1, "SELECT 1")
+	assert.Equal(t, "0:query:"+hex.EncodeToString(h.Sum(nil)), queryCacheKey(tenant.Default, "SELECT 1", nil))
+
+	other := sha256.New()
+	writeFrame(other, 2, "JSON/0")
+	writeFrame(other, 1, "SELECT 1")
+	assert.NotEqual(t, "0:query:"+hex.EncodeToString(other.Sum(nil)), queryCacheKey(tenant.Default, "SELECT 1", nil))
 }

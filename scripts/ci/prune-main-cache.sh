@@ -6,6 +6,9 @@
 # sets in the 10 GB budget. CodeQL's overlay base databases add one entry
 # per language per main commit (`...-<commit sha>-<run id>-<attempt>`) and
 # are restored by the prefix before the sha, so only the newest is read.
+# A chtypes artifact key ends in the first 16 hex of its line's newest
+# build (`chtypes-v2-<os>-<arch>-<line>-<build>`), about 340 MiB each, and a
+# new upstream build is a new key.
 # In refs/heads/main this deletes every such entry but the newest of its
 # family (the key minus that tail):
 #   - each family has one writer whose main runs never overlap (ci.yml
@@ -64,6 +67,7 @@ doomed="$(jq -rs '
     if test("-[0-9a-f]{64}$") then sub("-[0-9a-f]{64}$"; "")
     elif test("^codeql-overlay-base-database-.*-[0-9a-f]{40}-[0-9]+-[0-9]+$")
     then sub("-[0-9a-f]{40}-[0-9]+-[0-9]+$"; "")
+    elif test("^chtypes-v2-.*-[0-9a-f]{16}$") then sub("-[0-9a-f]{16}$"; "")
     else null end;
   map(select(.ref == "refs/heads/main") | .family = (.key | family) | select(.family != null))
   | unique_by(.id)

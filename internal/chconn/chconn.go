@@ -6,8 +6,9 @@
 // implements driver.Conn by delegating every call to the connection current
 // at that instant, so a consumer resolves its tenant's Manager per call and
 // never learns a resize happened; the HTTP-side consumers (ingest INSERTs,
-// the raw-SQL proxy) read their tenant's Target per request and take their
-// client from an HTTPClients.
+// structured queries, pipes, the raw-SQL proxy) read their tenant's Target
+// per request, and the worker and the proxy take their client from an
+// HTTPClients.
 package chconn
 
 import (
@@ -771,6 +772,12 @@ func (p *Pools) Close() error {
 	}
 	return errors.Join(errs...)
 }
+
+// IdleConnTimeout is how long every client of the ClickHouse HTTP interface
+// keeps an idle connection: under ClickHouse's keep_alive_timeout (10 s on
+// 24.8, 30 s on 26.8), so the server never closes a connection the client is
+// about to reuse. A POST that loses that race is not replayed.
+const IdleConnTimeout = 5 * time.Second
 
 // HTTPClients hands an HTTP-interface consumer the client for a target: one
 // per TLS config, made by the consumer's own factory (the worker's tuned

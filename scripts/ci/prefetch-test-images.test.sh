@@ -25,7 +25,7 @@ has() {
   if [ -z "$missing" ]; then ok "$suite lists $*"; else fail "$suite is missing$missing; got: $(tr '\n' ' ' <<<"$got")"; fi
 }
 has app clickhouse/clickhouse-server amazon/dynamodb-local nats redis
-has backends redis valkey/valkey docker.dragonflydb.io/dragonflydb/dragonfly
+has backends clickhouse/clickhouse-server redis valkey/valkey docker.dragonflydb.io/dragonflydb/dragonfly
 has e2e clickhouse/clickhouse-server redis
 
 # Every integration part CI runs has a case in the script.

@@ -10,7 +10,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/keyenc"
@@ -82,14 +81,21 @@ func TestPartitionedKey_Buckets(t *testing.T) {
 	per := map[string]int{}
 	for _, tn := range []tenant.ID{"acme", "acme-2", "acme_x", "acm"} {
 		for _, table := range []string{"events", "events-2", "a/b"} {
-			for i := range 25_600 {
+			// The distribution below needs about 100 ids a bucket, for one
+			// table; the split and range checks need far fewer (#961).
+			ids := 512
+			if tn == "acme" && table == "events" {
+				ids = 25_600
+			}
+			for i := range ids {
 				pk, _ := dedupe.PartitionedKey(tn, dedupe.Key{Table: table, ID: fmt.Sprintf("evt-%d", i)})
 				parts, err := keyenc.Split(pk, '/')
-				require.NoError(t, err)
-				require.Equal(t, []string{string(tn), table}, parts[:2], pk)
-				n, err := strconv.Atoi(parts[2])
-				require.NoError(t, err)
-				require.True(t, n >= 0 && n < dedupe.TableBuckets, pk)
+				if err != nil || len(parts) != 3 || parts[0] != string(tn) || parts[1] != table {
+					t.Fatalf("%q splits into %q (%v), not %q, %q and a bucket", pk, parts, err, tn, table)
+				}
+				if n, err := strconv.Atoi(parts[2]); err != nil || n < 0 || n >= dedupe.TableBuckets {
+					t.Fatalf("%q: bucket %q is not in [0, %d)", pk, parts[2], dedupe.TableBuckets)
+				}
 				if tn == "acme" && table == "events" {
 					per[pk]++
 				}
@@ -118,17 +124,28 @@ func TestKeyLayout_HashesOnTheEscapedLength(t *testing.T) {
 }
 
 // decodeKey inverts AppendKey. That it exists — every key splits back into
-// the one triple that wrote it — is what makes the layout collision-free.
-func decodeKey(t *testing.T, s string) (tn, table, idPart string) {
-	t.Helper()
-	require.True(t, utf8.ValidString(s), "a key is a valid DynamoDB String")
-	require.NotContains(t, s, "\x00")
+// the one triple that wrote it — is what makes the layout collision-free. It
+// reports what is wrong rather than failing the test itself: it runs for every
+// key of the exhaustive loop below, where testify and t.Helper cost more than
+// the 15 s unit budget allows under -race on a CI runner (#961).
+func decodeKey(s string) (tn, table, idPart string, err error) {
+	if !utf8.ValidString(s) {
+		return "", "", "", fmt.Errorf("%q is not valid UTF-8, so not a DynamoDB String", s)
+	}
+	if strings.Contains(s, "\x00") {
+		return "", "", "", fmt.Errorf("%q contains NUL", s)
+	}
 	parts, err := keyenc.Split(s, '/')
-	require.NoError(t, err)
-	require.Len(t, parts, 3, s)
-	_, err = tenant.Parse(parts[0])
-	require.NoError(t, err)
-	return parts[0], parts[1], parts[2]
+	if err != nil {
+		return "", "", "", err
+	}
+	if len(parts) != 3 {
+		return "", "", "", fmt.Errorf("%q splits into %d parts, not 3", s, len(parts))
+	}
+	if _, err := tenant.Parse(parts[0]); err != nil {
+		return "", "", "", err
+	}
+	return parts[0], parts[1], parts[2], nil
 }
 
 // Triples a separator could confuse — the separator, the escape and hash
@@ -139,12 +156,18 @@ func TestKeyLayout_NoCollisions(t *testing.T) {
 	t.Parallel()
 	tenants := []tenant.ID{"a", "ab", "a_b", "a-b", "acme"}
 	pieces := []string{"", "/", "%", "#", "\x00", "\xff", "a", "b", "a/", "/b", "a/b", "%2F", "a%2Fb", "#a", "acme/a", "é"}
-	seen := map[string]string{}
+	// The loop below checks about 330,000 keys, so it compares plainly and
+	// stores the triple rather than a formatted one (#961).
+	type triple struct {
+		tn        tenant.ID
+		table, id string
+	}
+	seen := make(map[string]triple, 330_000)
 	check := func(tn tenant.ID, k dedupe.Key) {
 		s := key(tn, k)
-		who := string(tn) + " | " + k.Table + " | " + k.ID
+		who := triple{tn, k.Table, k.ID}
 		if prev, ok := seen[s]; ok && prev != who {
-			t.Fatalf("%q and %q share the key %q", prev, who, s)
+			t.Fatalf("%+v and %+v share the key %q", prev, who, s)
 		}
 		seen[s] = who
 		// So is the partitioned key: the same text split before the id, the
@@ -152,13 +175,16 @@ func TestKeyLayout_NoCollisions(t *testing.T) {
 		pk, sk := dedupe.PartitionedKey(tn, k)
 		if k.ID != "" {
 			cut := strings.LastIndexByte(pk, '/')
-			require.Equal(t, s, pk[:cut+1]+sk)
+			if got := pk[:cut+1] + sk; got != s {
+				t.Fatalf("%+v: partitioned key %q + %q is %q, not %q", who, pk, sk, got, s)
+			}
 		}
-		gotTenant, gotTable, idPart := decodeKey(t, s)
-		assert.Equal(t, string(tn), gotTenant)
-		assert.Equal(t, k.Table, gotTable)
-		if !k.Hashed() {
-			assert.Equal(t, k.ID, idPart)
+		gotTenant, gotTable, idPart, err := decodeKey(s)
+		if err != nil {
+			t.Fatalf("%+v: %v", who, err)
+		}
+		if gotTenant != string(tn) || gotTable != k.Table || (!k.Hashed() && idPart != k.ID) {
+			t.Fatalf("%+v: %q decodes to tenant %q, table %q, id %q", who, s, gotTenant, gotTable, idPart)
 		}
 	}
 	for _, tn := range tenants {

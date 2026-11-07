@@ -18,10 +18,9 @@ func TestBindParams_AllSupplied(t *testing.T) {
 			{Name: "min_count", Type: "number", Required: true},
 		},
 	}
-	sql, params, err := BindParams(q, map[string]any{"page": "/home", "min_count": 10}, nil)
+	sql, err := BindParams(q, map[string]any{"page": "/home", "min_count": 10}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM clicks WHERE page = '/home' AND count > 10", sql)
-	assert.Nil(t, params)
 }
 
 func TestBindParams_MissingRequired(t *testing.T) {
@@ -30,7 +29,7 @@ func TestBindParams_MissingRequired(t *testing.T) {
 		SQL:        "SELECT * FROM clicks WHERE page = {{page}}",
 		Parameters: []ParamDef{{Name: "page", Type: "string", Required: true}},
 	}
-	_, _, err := BindParams(q, map[string]any{}, nil)
+	_, err := BindParams(q, map[string]any{}, nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "missing required parameter: page")
 }
@@ -41,10 +40,9 @@ func TestBindParams_DefaultApplied(t *testing.T) {
 		SQL:        "SELECT * FROM clicks LIMIT {{limit}}",
 		Parameters: []ParamDef{{Name: "limit", Type: "number", Default: 100}},
 	}
-	sql, params, err := BindParams(q, map[string]any{}, nil)
+	sql, err := BindParams(q, map[string]any{}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM clicks LIMIT 100", sql)
-	assert.Nil(t, params)
 }
 
 func TestBindParams_MultipleOccurrences(t *testing.T) {
@@ -53,19 +51,17 @@ func TestBindParams_MultipleOccurrences(t *testing.T) {
 		SQL:        "SELECT * FROM t WHERE a = {{val}} OR b = {{val}}",
 		Parameters: []ParamDef{{Name: "val", Type: "string", Required: true}},
 	}
-	sql, params, err := BindParams(q, map[string]any{"val": "x"}, nil)
+	sql, err := BindParams(q, map[string]any{"val": "x"}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM t WHERE a = 'x' OR b = 'x'", sql)
-	assert.Nil(t, params)
 }
 
 func TestBindParams_NoParameters(t *testing.T) {
 	t.Parallel()
 	q := &NamedQuery{SQL: "SELECT count(*) FROM clicks"}
-	sql, params, err := BindParams(q, map[string]any{}, nil)
+	sql, err := BindParams(q, map[string]any{}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT count(*) FROM clicks", sql)
-	assert.Empty(t, params)
 }
 
 func TestBindParams_OptionalWithDefault_Supplied(t *testing.T) {
@@ -74,10 +70,9 @@ func TestBindParams_OptionalWithDefault_Supplied(t *testing.T) {
 		SQL:        "SELECT * FROM clicks LIMIT {{limit}}",
 		Parameters: []ParamDef{{Name: "limit", Type: "number", Default: 100}},
 	}
-	sql, params, err := BindParams(q, map[string]any{"limit": 50}, nil)
+	sql, err := BindParams(q, map[string]any{"limit": 50}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM clicks LIMIT 50", sql)
-	assert.Nil(t, params)
 }
 
 func TestBindParams_PlaceholderNotInSQL(t *testing.T) {
@@ -86,10 +81,9 @@ func TestBindParams_PlaceholderNotInSQL(t *testing.T) {
 		SQL:        "SELECT * FROM clicks",
 		Parameters: []ParamDef{{Name: "unused", Type: "string"}},
 	}
-	sql, params, err := BindParams(q, map[string]any{"unused": "val"}, nil)
+	sql, err := BindParams(q, map[string]any{"unused": "val"}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM clicks", sql)
-	assert.Empty(t, params, "unused param should not generate positional args")
 }
 
 func TestBindParams_InlineDefault_NoFormalParam(t *testing.T) {
@@ -97,10 +91,9 @@ func TestBindParams_InlineDefault_NoFormalParam(t *testing.T) {
 	q := &NamedQuery{
 		SQL: "SELECT page, count() FROM clicks GROUP BY page LIMIT {{limit:10}}",
 	}
-	sql, params, err := BindParams(q, map[string]any{}, nil)
+	sql, err := BindParams(q, map[string]any{}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT page, count() FROM clicks GROUP BY page LIMIT 10", sql)
-	assert.Nil(t, params)
 }
 
 func TestBindParams_InlineDefault_SuppliedOverrides(t *testing.T) {
@@ -108,10 +101,9 @@ func TestBindParams_InlineDefault_SuppliedOverrides(t *testing.T) {
 	q := &NamedQuery{
 		SQL: "SELECT * FROM clicks LIMIT {{limit:10}}",
 	}
-	sql, params, err := BindParams(q, map[string]any{"limit": float64(5)}, nil)
+	sql, err := BindParams(q, map[string]any{"limit": float64(5)}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM clicks LIMIT 5", sql)
-	assert.Nil(t, params)
 }
 
 func TestBindParams_InlineNoDefault_MissingRequired(t *testing.T) {
@@ -119,7 +111,7 @@ func TestBindParams_InlineNoDefault_MissingRequired(t *testing.T) {
 	q := &NamedQuery{
 		SQL: "SELECT * FROM clicks WHERE page = {{page}}",
 	}
-	_, _, err := BindParams(q, map[string]any{}, nil)
+	_, err := BindParams(q, map[string]any{}, nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "missing required parameter: page")
 }
@@ -129,10 +121,9 @@ func TestBindParams_InlineMultipleParams(t *testing.T) {
 	q := &NamedQuery{
 		SQL: "SELECT * FROM clicks WHERE country = {{country:US}} LIMIT {{limit:10}}",
 	}
-	sql, params, err := BindParams(q, map[string]any{}, nil)
+	sql, err := BindParams(q, map[string]any{}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM clicks WHERE country = 'US' LIMIT 10", sql)
-	assert.Nil(t, params)
 }
 
 func TestBindParams_StringEscaping(t *testing.T) {
@@ -141,7 +132,7 @@ func TestBindParams_StringEscaping(t *testing.T) {
 		SQL:        "SELECT * FROM t WHERE name = {{name}}",
 		Parameters: []ParamDef{{Name: "name", Type: "string", Required: true}},
 	}
-	sql, _, err := BindParams(q, map[string]any{"name": "O'Brien"}, nil)
+	sql, err := BindParams(q, map[string]any{"name": "O'Brien"}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM t WHERE name = 'O''Brien'", sql)
 }
@@ -152,7 +143,7 @@ func TestBindParams_BooleanParam(t *testing.T) {
 		SQL:        "SELECT * FROM t WHERE active = {{active}}",
 		Parameters: []ParamDef{{Name: "active", Type: "boolean", Required: true}},
 	}
-	sql, _, err := BindParams(q, map[string]any{"active": true}, nil)
+	sql, err := BindParams(q, map[string]any{"active": true}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM t WHERE active = 1", sql)
 }
@@ -163,7 +154,7 @@ func TestBindParams_NilParam(t *testing.T) {
 		SQL:        "SELECT * FROM t WHERE col = {{val}}",
 		Parameters: []ParamDef{{Name: "val", Type: "string", Default: nil}},
 	}
-	sql, _, err := BindParams(q, map[string]any{}, nil)
+	sql, err := BindParams(q, map[string]any{}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM t WHERE col = NULL", sql)
 }
@@ -233,17 +224,16 @@ func TestBindParams_ArrayInClause(t *testing.T) {
 		SQL:        "SELECT * FROM t WHERE id IN {{ids}}",
 		Parameters: []ParamDef{{Name: "ids", Type: "array", Required: true}},
 	}
-	sql, params, err := BindParams(q, map[string]any{"ids": []any{"a", "b", "c"}}, nil)
+	sql, err := BindParams(q, map[string]any{"ids": []any{"a", "b", "c"}}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM t WHERE id IN ('a', 'b', 'c')", sql)
-	assert.Nil(t, params)
 }
 
 func TestBindParams_ArrayWorksWithoutDeclaredType(t *testing.T) {
 	t.Parallel()
 	// An undeclared (inline) parameter still renders an array safely.
 	q := &NamedQuery{SQL: "SELECT * FROM t WHERE id IN {{ids}}"}
-	sql, _, err := BindParams(q, map[string]any{"ids": []any{float64(1), float64(2)}}, nil)
+	sql, err := BindParams(q, map[string]any{"ids": []any{float64(1), float64(2)}}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM t WHERE id IN (1, 2)", sql)
 }
@@ -254,7 +244,7 @@ func TestBindParams_ArrayMixedNumericAndStringElements(t *testing.T) {
 	// quoted on its own: a numeric-looking string renders bare, a non-numeric one
 	// is quoted (and escaped).
 	q := &NamedQuery{SQL: "SELECT * FROM t WHERE id IN {{ids}}"}
-	sql, _, err := BindParams(q, map[string]any{"ids": []any{"100", "abc"}}, nil)
+	sql, err := BindParams(q, map[string]any{"ids": []any{"100", "abc"}}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM t WHERE id IN (100, 'abc')", sql)
 }
@@ -265,7 +255,7 @@ func TestBindParams_ArrayMixedNumericAndStringElements(t *testing.T) {
 func TestBindParams_ArrayNeutralizesInjection(t *testing.T) {
 	t.Parallel()
 	q := &NamedQuery{SQL: "SELECT secret FROM t WHERE id IN {{ids}}"}
-	sql, _, err := BindParams(q, map[string]any{
+	sql, err := BindParams(q, map[string]any{
 		"ids": []any{"' UNION SELECT pw FROM users -- "},
 	}, nil)
 	require.NoError(t, err)
@@ -275,7 +265,7 @@ func TestBindParams_ArrayNeutralizesInjection(t *testing.T) {
 func TestBindParams_ObjectRejected(t *testing.T) {
 	t.Parallel()
 	q := &NamedQuery{SQL: "SELECT * FROM t WHERE col = {{p}}"}
-	_, _, err := BindParams(q, map[string]any{"p": map[string]any{"k": "v"}}, nil)
+	_, err := BindParams(q, map[string]any{"p": map[string]any{"k": "v"}}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `parameter "p"`)
 	assert.Contains(t, err.Error(), "unsupported parameter type object")
@@ -284,7 +274,7 @@ func TestBindParams_ObjectRejected(t *testing.T) {
 func TestBindParams_EmptyArrayRejected(t *testing.T) {
 	t.Parallel()
 	q := &NamedQuery{SQL: "SELECT * FROM t WHERE id IN {{ids}}"}
-	_, _, err := BindParams(q, map[string]any{"ids": []any{}}, nil)
+	_, err := BindParams(q, map[string]any{"ids": []any{}}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "array parameter must not be empty")
 }
@@ -309,17 +299,16 @@ func TestBindParams_ClaimBindsQuoted(t *testing.T) {
 		Parameters: []ParamDef{{Name: "start", Type: "string", Required: true}},
 	}
 	claims := map[string]any{"app_metadata": map[string]any{"tenant_id": "acme"}}
-	sql, params, err := BindParams(q, map[string]any{"start": "2026-01-01"}, claims)
+	sql, err := BindParams(q, map[string]any{"start": "2026-01-01"}, claims)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM orders WHERE tenant_id = 'acme' AND ts >= '2026-01-01'", sql)
-	assert.Nil(t, params)
 }
 
 func TestBindParams_ClaimArrayBindsAsSet(t *testing.T) {
 	t.Parallel()
 	q := &NamedQuery{SQL: "SELECT * FROM orders WHERE tenant_id IN {{ jwt.app_metadata.tenant_ids }}"}
 	claims := map[string]any{"app_metadata": map[string]any{"tenant_ids": []any{"acme", "globex"}}}
-	sql, _, err := BindParams(q, nil, claims)
+	sql, err := BindParams(q, nil, claims)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM orders WHERE tenant_id IN ('acme', 'globex')", sql)
 }
@@ -346,7 +335,7 @@ func TestBindParams_ClaimStaysQuoted(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			q := &NamedQuery{SQL: "SELECT 1 WHERE a = {{jwt.v}} AND b = {{v}}"}
-			sql, _, err := BindParams(q, map[string]any{"v": "42"}, map[string]any{"v": tt.claim})
+			sql, err := BindParams(q, map[string]any{"v": "42"}, map[string]any{"v": tt.claim})
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, sql)
 		})
@@ -372,7 +361,7 @@ func TestBindParams_ClaimUnresolvedFailsClosed(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			q := &NamedQuery{SQL: "SELECT * FROM t WHERE tenant_id IN {{ jwt.tenant_ids }}"}
-			_, _, err := BindParams(q, map[string]any{"tenant_ids": []any{"evil"}}, tt.claims)
+			_, err := BindParams(q, map[string]any{"tenant_ids": []any{"evil"}}, tt.claims)
 			var unresolved *UnresolvedClaimError
 			require.ErrorAs(t, err, &unresolved)
 			assert.Equal(t, "tenant_ids", unresolved.Path)
@@ -388,11 +377,11 @@ func TestBindParams_ClaimNeverReadsRequest(t *testing.T) {
 	q := &NamedQuery{SQL: "SELECT * FROM t WHERE tenant_id = {{ jwt.tenant_id }}"}
 	supplied := map[string]any{"jwt.tenant_id": "evil", "jwt": map[string]any{"tenant_id": "evil"}, "tenant_id": "evil"}
 
-	_, _, err := BindParams(q, supplied, nil)
+	_, err := BindParams(q, supplied, nil)
 	var unresolved *UnresolvedClaimError
 	require.ErrorAs(t, err, &unresolved)
 
-	sql, _, err := BindParams(q, supplied, map[string]any{"tenant_id": "acme"})
+	sql, err := BindParams(q, supplied, map[string]any{"tenant_id": "acme"})
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM t WHERE tenant_id = 'acme'", sql)
 }
@@ -403,7 +392,7 @@ func TestBindParams_ClaimNeverReadsRequest(t *testing.T) {
 func TestBindParams_BoundTextNotRescanned(t *testing.T) {
 	t.Parallel()
 	q := &NamedQuery{SQL: "SELECT * FROM t WHERE a = {{ jwt.a }} AND b = {{b}}"}
-	sql, _, err := BindParams(q, map[string]any{"b": "{{ jwt.a }}", "limit": 5}, map[string]any{"a": "{{limit}}"})
+	sql, err := BindParams(q, map[string]any{"b": "{{ jwt.a }}", "limit": 5}, map[string]any{"a": "{{limit}}"})
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM t WHERE a = '{{limit}}' AND b = '{{ jwt.a }}'", sql)
 }
@@ -412,7 +401,7 @@ func TestBindParams_ClaimSpacingForms(t *testing.T) {
 	t.Parallel()
 	for _, tmpl := range []string{"{{jwt.a}}", "{{ jwt.a }}", "{{  jwt.a  }}"} {
 		q := &NamedQuery{SQL: "SELECT " + tmpl}
-		sql, _, err := BindParams(q, nil, map[string]any{"a": "x"})
+		sql, err := BindParams(q, nil, map[string]any{"a": "x"})
 		require.NoError(t, err, tmpl)
 		assert.Equal(t, "SELECT 'x'", sql, tmpl)
 	}
@@ -426,7 +415,7 @@ func TestBindParams_ValueCannotEndComment(t *testing.T) {
 	t.Parallel()
 	q := &NamedQuery{SQL: "SELECT 1 FROM t WHERE a IN {{ jwt.ids }} /* AND b = {{ jwt.region }} */ -- AND c = {{c}}"}
 	claims := map[string]any{"ids": []any{"1"}, "region": "*/ OR 1=1 /*"}
-	sql, _, err := BindParams(q, map[string]any{"c": "y\r\nOR 1=1"}, claims)
+	sql, err := BindParams(q, map[string]any{"c": "y\r\nOR 1=1"}, claims)
 	require.NoError(t, err)
 	assert.Equal(t, `SELECT 1 FROM t WHERE a IN ('1') /* AND b = '\x2A/ OR 1=1 /\x2A' */ -- AND c = 'y\r\nOR 1=1'`, sql)
 	assert.NotContains(t, sql, "\n")
@@ -442,7 +431,7 @@ func TestBindParams_ValueCannotCloseHeredoc(t *testing.T) {
 	t.Parallel()
 	q := &NamedQuery{SQL: "SELECT $t$ AS label FROM t WHERE a IN {{ jwt.ids }} AND b = {{b}}"}
 	require.NoError(t, q.CheckTemplate())
-	sql, _, err := BindParams(q, map[string]any{"b": "$t$, x FROM t -- "}, map[string]any{"ids": []any{"1"}})
+	sql, err := BindParams(q, map[string]any{"b": "$t$, x FROM t -- "}, map[string]any{"ids": []any{"1"}})
 	require.NoError(t, err)
 	assert.Equal(t, `SELECT $t$ AS label FROM t WHERE a IN ('1') AND b = '\x24t\x24, x FROM t -- '`, sql)
 	assert.Equal(t, `'\x24'`, quoteLiteral("$"))
@@ -458,14 +447,14 @@ func TestBindParams_NegativeNumberCannotStartComment(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			q := &NamedQuery{SQL: "SELECT 1 FROM t WHERE n > 0-{{min}} AND tenant_id IN {{ jwt.ids }}"}
-			sql, _, err := BindParams(q, map[string]any{"min": min}, map[string]any{"ids": []any{"acme"}})
+			sql, err := BindParams(q, map[string]any{"min": min}, map[string]any{"ids": []any{"acme"}})
 			require.NoError(t, err)
 			assert.NotContains(t, sql, "--")
 			assert.Contains(t, sql, "n > 0- -")
 			assert.Contains(t, sql, "tenant_id IN ('acme')")
 		})
 	}
-	sql, _, err := BindParams(&NamedQuery{SQL: "SELECT {{n}}"}, map[string]any{"n": 5}, nil)
+	sql, err := BindParams(&NamedQuery{SQL: "SELECT {{n}}"}, map[string]any{"n": 5}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT 5", sql, "a non-negative number renders as before")
 }
@@ -480,7 +469,7 @@ func TestNamedQuery_Claims(t *testing.T) {
 	// share one scan.
 	inDefault := &NamedQuery{SQL: "SELECT * FROM t WHERE tenant_id = {{t:{{ jwt.tenant_id }}  -- }}"}
 	assert.Nil(t, inDefault.Claims())
-	sql, _, err := BindParams(inDefault, map[string]any{"t": "req"}, map[string]any{"tenant_id": "tok"})
+	sql, err := BindParams(inDefault, map[string]any{"t": "req"}, map[string]any{"tenant_id": "tok"})
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM t WHERE tenant_id = 'req'  -- }}", sql)
 }
@@ -567,17 +556,17 @@ func TestBindParams_ClaimCheckedBeforeParameters(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, _, err := BindParams(tt.q, map[string]any{}, nil)
+			_, err := BindParams(tt.q, map[string]any{}, nil)
 			var unresolved *UnresolvedClaimError
 			require.ErrorAs(t, err, &unresolved, "%v", err)
 			assert.Equal(t, "tenant_id", unresolved.Path)
 
 			// A supplied value with no SQL form loses to the claim too.
-			_, _, err = BindParams(tt.q, map[string]any{"start": map[string]any{"k": "v"}}, nil)
+			_, err = BindParams(tt.q, map[string]any{"start": map[string]any{"k": "v"}}, nil)
 			require.ErrorAs(t, err, &unresolved, "%v", err)
 			assert.Equal(t, "tenant_id", unresolved.Path)
 
-			_, _, err = BindParams(tt.q, map[string]any{}, map[string]any{"tenant_id": "acme"})
+			_, err = BindParams(tt.q, map[string]any{}, map[string]any{"tenant_id": "acme"})
 			require.Error(t, err)
 			assert.False(t, errors.As(err, &unresolved))
 			assert.Contains(t, err.Error(), "missing required parameter: start")

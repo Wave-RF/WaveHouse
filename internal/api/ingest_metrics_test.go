@@ -24,7 +24,8 @@ import (
 
 // TestIngestRecords_EveryResult: each record POST /v1/ingest reads is counted
 // once under its result, in single and batch bodies, and a refusal before any
-// record is read counts nothing (#896). Not parallel: it swaps the counter,
+// record is read counts nothing (#896). A body the parser refuses counts its
+// records up to the one refused as invalid_body, and none of it is published. Not parallel: it swaps the counter,
 // which binds to the first global provider.
 func TestIngestRecords_EveryResult(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
@@ -52,7 +53,7 @@ func TestIngestRecords_EveryResult(t *testing.T) {
 	}
 
 	plain := func(t *testing.T, pub *testutil.MockPublisher) *IngestHandler {
-		return NewIngestHandler(fixedRegistry(testRegistry(t)), pub)
+		return newTestIngestHandler(t, testRegistry(t), pub)
 	}
 	deduped := func(dd *testutil.MockDeduplicator, requireID bool) func(*testing.T, *testutil.MockPublisher) *IngestHandler {
 		return func(t *testing.T, pub *testutil.MockPublisher) *IngestHandler {
@@ -72,6 +73,20 @@ func TestIngestRecords_EveryResult(t *testing.T) {
 		return h
 	}
 	asWriter := func(r *http.Request) *http.Request { return r.WithContext(auth.WithRole(r.Context(), "writer")) }
+	org := "o1"
+	checkedPolicy := staticPolicy(&policy.Policy{Tables: map[string]policy.TablePolicy{
+		"clicks": {"writer": {Insert: &policy.InsertPermissions{Check: map[string]policy.Filter{"org_id": {Eq: &org}}}}},
+	}})
+	checked := func(t *testing.T, pub *testutil.MockPublisher) *IngestHandler {
+		h := plain(t, pub)
+		h.PolicySource = checkedPolicy
+		return h
+	}
+	checkedDeduped := func(t *testing.T, pub *testutil.MockPublisher) *IngestHandler {
+		h := dedupHandler(t, pub, testutil.NewMockDeduplicator(), false)
+		h.PolicySource = checkedPolicy
+		return h
+	}
 
 	tests := []struct {
 		name    string
@@ -91,12 +106,18 @@ func TestIngestRecords_EveryResult(t *testing.T) {
 		{"unparsable single", plain, nil, 0, func(t *testing.T) *http.Request {
 			return rawIngestRequest(t, "clicks", "application/json", `{"page":`)
 		}, map[string]int64{resultInvalidBody: 1}, ""},
-		{"schema", plain, nil, 0, func(t *testing.T) *http.Request {
+		{"unknown column", plain, nil, 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a", "nope": 1})
-		}, map[string]int64{resultSchema: 1}, ""},
-		{"forbidden column", writer, nil, 0, func(t *testing.T) *http.Request {
+		}, map[string]int64{resultInvalidBody: 1}, ""},
+		{"denied column", writer, nil, 0, func(t *testing.T) *http.Request {
 			return asWriter(ingestRequest(t, "clicks", map[string]any{"page": "/a", "button": "b"}))
+		}, map[string]int64{resultInvalidBody: 1}, ""},
+		{"check failed", checked, nil, 0, func(t *testing.T) *http.Request {
+			return asWriter(ingestRequest(t, "clicks", map[string]any{"page": "/a", "org_id": "o2"}))
 		}, map[string]int64{resultForbidden: 1}, ""},
+		{"no verdict", plain, nil, 0, func(t *testing.T) *http.Request {
+			return rawIngestRequest(t, "clicks", "application/json", ";")
+		}, map[string]int64{resultDeclined: 1}, ""},
 		{"missing id", deduped(testutil.NewMockDeduplicator(), true), nil, 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a"})
 		}, map[string]int64{resultMissingID: 1}, ""},
@@ -115,15 +136,22 @@ func TestIngestRecords_EveryResult(t *testing.T) {
 		{"publish failed", plain, errors.New("nats: bad subject"), 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a"})
 		}, map[string]int64{resultPublishFailed: 1}, ""},
-		{"mixed batch", deduped(testutil.NewMockDeduplicator(), false), nil, 0, func(t *testing.T) *http.Request {
+		{"mixed batch", checkedDeduped, nil, 0, func(t *testing.T) *http.Request {
+			return asWriter(ndjsonRequest(t, "clicks",
+				jsonLine(t, map[string]any{"page": "/a", "event_id": "b1", "org_id": "o1"}),
+				jsonLine(t, map[string]any{"page": "/a", "event_id": "b1", "org_id": "o1"}),
+				jsonLine(t, map[string]any{"page": "/a", "org_id": "o2"}),
+				jsonLine(t, map[string]any{"page": "/b", "org_id": "o1"}),
+			))
+		}, map[string]int64{resultQueued: 2, resultDuplicate: 1, resultForbidden: 1}, ""},
+		{"batch refused at its third record", plain, nil, 0, func(t *testing.T) *http.Request {
 			return ndjsonRequest(t, "clicks",
-				jsonLine(t, map[string]any{"page": "/a", "event_id": "b1"}),
-				jsonLine(t, map[string]any{"page": "/a", "event_id": "b1"}),
-				jsonLine(t, map[string]any{"page": "/a", "nope": 1}),
-				"{ not json",
+				jsonLine(t, map[string]any{"page": "/a"}),
 				jsonLine(t, map[string]any{"page": "/b"}),
+				jsonLine(t, map[string]any{"page": "/c", "nope": 1}),
+				jsonLine(t, map[string]any{"page": "/d"}),
 			)
-		}, map[string]int64{resultQueued: 2, resultDuplicate: 1, resultSchema: 1, resultInvalidBody: 1}, ""},
+		}, map[string]int64{resultInvalidBody: 3}, ""},
 		{"batch cut short by a full queue", plain, fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull), 1, func(t *testing.T) *http.Request {
 			return ndjsonRequest(t, "clicks",
 				jsonLine(t, map[string]any{"page": "/a"}),
@@ -156,11 +184,11 @@ func TestIngestRecords_EveryResult(t *testing.T) {
 		{"client gone mid-batch", plain, errors.New("nats: context canceled"), 1, func(t *testing.T) *http.Request {
 			return ndjsonRequest(t, "clicks",
 				jsonLine(t, map[string]any{"page": "/a"}),
-				jsonLine(t, map[string]any{"page": "/a", "nope": 1}),
 				jsonLine(t, map[string]any{"page": "/b"}),
 				jsonLine(t, map[string]any{"page": "/c"}),
+				jsonLine(t, map[string]any{"page": "/d"}),
 			)
-		}, map[string]int64{resultQueued: 1, resultSchema: 1, resultRecordsCanceled: 2}, "publish"},
+		}, map[string]int64{resultQueued: 1, resultRecordsCanceled: 3}, "publish"},
 		{"client gone as the queue refused", plain, fmt.Errorf("%w: maximum bytes exceeded", mq.ErrQueueFull), 0, func(t *testing.T) *http.Request {
 			return ingestRequest(t, "clicks", map[string]any{"page": "/a"})
 		}, map[string]int64{resultRecordsCanceled: 1}, "publish"},

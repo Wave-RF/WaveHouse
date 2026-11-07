@@ -16,14 +16,15 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
+	"github.com/Wave-RF/WaveHouse/pkg/chsql"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
 // NewTestSchemaRegistry creates a SchemaRegistry pre-loaded with the given
 // table schemas, without a real ClickHouse: a mock connection serves the
 // schemas as system.columns rows (UTC as the server zone) and the registry is
-// built by the real discovery path — NewSchemaRegistry + Refresh — so
-// timestamp column specs are precomputed exactly as in production.
+// built by the real discovery path — NewSchemaRegistry + Refresh — so the
+// derived fields are computed exactly as in production.
 //
 // The registry holds schemas rebuilt from those rows (Name, Type, HasDefault,
 // DefaultKind, DefaultExpression, Position, DDL; IsNullable derived from the
@@ -88,7 +89,7 @@ func (c *schemaConn) Query(_ context.Context, q string, _ ...any) (driver.Rows, 
 		for _, t := range c.tables {
 			ddl := t.DDL
 			if ddl == "" {
-				ddl = "CREATE TABLE test." + t.Name + " (…) ENGINE = MergeTree"
+				ddl = mockDDL(t)
 			}
 			r.rows = append(r.rows, [2]string{t.Name, ddl})
 		}
@@ -114,6 +115,35 @@ func (c *schemaConn) Query(_ context.Context, q string, _ ...any) (driver.Rows, 
 		}
 	}
 	return r, nil
+}
+
+// mockDDL renders a table the way system.tables.create_table_query would for
+// its columns on a keyless MergeTree, so the type layer compiles a fixture
+// from its own definition as it does a real table.
+func mockDDL(t *discovery.TableSchema) string {
+	var b strings.Builder
+	b.WriteString("CREATE TABLE test." + chsql.QuoteIdent(t.Name) + " (")
+	for i, col := range t.Columns {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(chsql.QuoteIdent(col.Name) + " " + col.Type)
+		kind := col.DefaultKind
+		if kind == "" && col.HasDefault {
+			kind = "DEFAULT"
+		}
+		switch {
+		case kind == "EPHEMERAL":
+			b.WriteString(" EPHEMERAL")
+			if col.DefaultExpression != "" {
+				b.WriteString(" " + col.DefaultExpression)
+			}
+		case kind != "" && col.DefaultExpression != "":
+			b.WriteString(" " + kind + " " + col.DefaultExpression)
+		}
+	}
+	b.WriteString(") ENGINE = MergeTree ORDER BY tuple()")
+	return b.String()
 }
 
 // UTCRow is a driver.Row stub answering Refresh's single-string probes with

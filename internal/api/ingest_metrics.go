@@ -17,7 +17,7 @@ const (
 	resultDuplicate         = "duplicate"
 	resultInFlight          = "in_flight"
 	resultInvalidBody       = "invalid_body"
-	resultSchema            = "schema"
+	resultDeclined          = "declined"
 	resultForbidden         = "forbidden"
 	resultMissingID         = "missing_id"
 	resultDedupeUnavailable = "dedupe_unavailable"
@@ -38,7 +38,7 @@ var ingestRecords, _ = newIngestRecordsCounter(otel.Meter("wavehouse-ingest"))
 func newIngestRecordsCounter(m metric.Meter) (metric.Int64Counter, error) {
 	return m.Int64Counter(
 		"wavehouse_ingest_records_total",
-		metric.WithDescription("Records POST /v1/ingest read, by result: queued, duplicate, in_flight, a rejection (invalid_body, schema, forbidden, missing_id), a failure (dedupe_unavailable, queue_full, queue_unavailable, publish_failed), or canceled when the client went away first"),
+		metric.WithDescription("Records POST /v1/ingest read, by result: queued, duplicate, in_flight, a rejection (invalid_body, forbidden, missing_id), declined when the validation engine reached no verdict, a failure (dedupe_unavailable, queue_full, queue_unavailable, publish_failed), or canceled when the client went away first"),
 	)
 }
 
@@ -77,4 +77,14 @@ func countRecords(ctx context.Context, table string, recs []pendingRecord, abort
 			attribute.String("result", result),
 		))
 	}
+}
+
+// rejected is n records refused under result, for a body refused whole.
+func rejected(n int, result string) []pendingRecord {
+	recs := make([]pendingRecord, n)
+	reject := &recordReject{Result: result}
+	for i := range recs {
+		recs[i].reject = reject
+	}
+	return recs
 }

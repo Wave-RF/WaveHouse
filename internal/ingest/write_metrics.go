@@ -163,7 +163,7 @@ func bodyBytes(msgs []parsedMsg) int {
 // it records nothing.
 func (w *IngestWorker) insert(ctx context.Context, tableName string, columns []string, msgs []parsedMsg, mode string, timeout time.Duration) error {
 	start := time.Now()
-	err := w.insertToClickHouse(ctx, tableName, columns, msgs, timeout)
+	err := w.insertToClickHouse(ctx, tableName, columns, msgs, timeout, mode == modeIsolated)
 	if errors.Is(err, errNoTarget) {
 		return err
 	}

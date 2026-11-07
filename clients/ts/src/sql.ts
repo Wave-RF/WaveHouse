@@ -13,8 +13,9 @@ import type { HttpContext, OpsRequestOptions, Result } from "./types.js";
  * the structured query builder (`wh.from(table)...`) instead.
  *
  * The server proxies the SQL string verbatim to ClickHouse's HTTP interface,
- * so any ClickHouse-accepted statement works — including multi-statement
- * input (`SELECT 1; TRUNCATE t`) and arbitrary DDL/DML/SYSTEM verbs.
+ * so any single statement ClickHouse accepts works, arbitrary DDL/DML/SYSTEM
+ * verbs included. ClickHouse's HTTP interface refuses multi-statement input
+ * (`SELECT 1; TRUNCATE t` is code 62): send one statement per call.
  *
  * **JSON-row contract.** This helper returns `Result<Row[]>` and assumes the
  * response is the standard `FORMAT JSON` envelope (or an empty body for

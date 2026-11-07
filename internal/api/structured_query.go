@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
@@ -23,16 +21,18 @@ import (
 
 // StructuredQueryHandler handles POST /v1/query?table={table}
 type StructuredQueryHandler struct {
-	// CHConn yields the request tenant's connection (chconn.Pools.For in
-	// production); nil is a tenant on no pool, a 503.
-	CHConn func(*settings.Store) driver.Conn
-	// CHTarget names the tenant's ClickHouse on the clickhouse.query span
-	// (chconn.Pools.Target in production); nil leaves the server off it.
-	CHTarget     func(*settings.Store) chconn.Target
+	// Target yields the request tenant's ClickHouse HTTP wiring
+	// (chconn.Pools.Target in production); the zero Target is a tenant on no
+	// pool, a 503.
+	Target func(*settings.Store) chconn.Target
+	// MaxConns caps the concurrent reads on the tenant's pool (its native
+	// pool's size in production); nil or non-positive is defaultReadConns.
+	MaxConns     func(*settings.Store) int
 	Cache        cache.Cache
 	Registry     RegistrySource
 	PolicySource PolicySource
 	sf           singleflight.Group
+	ch           *chReader
 	// queryTimeout bounds each query, read per request off the tenant's
 	// settings ((*settings.Store).ClickHouse().QueryTimeout in production)
 	// so a settings reload applies without a restart.
@@ -60,7 +60,7 @@ type StructuredQueryHandler struct {
 }
 
 func NewStructuredQueryHandler(
-	conn func(*settings.Store) driver.Conn,
+	target func(*settings.Store) chconn.Target,
 	c cache.Cache,
 	registry RegistrySource,
 	policyStore PolicySource,
@@ -69,7 +69,8 @@ func NewStructuredQueryHandler(
 	defaultMaxRows func(*settings.Store) int,
 ) *StructuredQueryHandler {
 	return &StructuredQueryHandler{
-		CHConn:         conn,
+		Target:         target,
+		ch:             NewCHReader(),
 		Cache:          c,
 		Registry:       registry,
 		PolicySource:   policyStore,
@@ -79,6 +80,10 @@ func NewStructuredQueryHandler(
 		metrics:        newQueryMetrics(),
 	}
 }
+
+// SetReader replaces the handler's private reader with a shared one. Call it
+// before serving.
+func (h *StructuredQueryHandler) SetReader(r *CHReader) { h.ch = r }
 
 func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	store, ok := requestStore(w, r)
@@ -108,7 +113,12 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
 
 	var sq query.StructuredQuery
-	if err := json.NewDecoder(r.Body).Decode(&sq); err != nil {
+	// UseNumber so a filter value keeps the digits the caller wrote: every
+	// value binds as a ClickHouse String parameter, so "12.50" and an integer
+	// past 2^53 reach the server intact instead of through a float64.
+	dec := json.NewDecoder(r.Body)
+	dec.UseNumber()
+	if err := dec.Decode(&sq); err != nil {
 		if writeMaxBytesError(w, err, reqCap) {
 			return
 		}
@@ -169,9 +179,26 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Bind the built SQL for ClickHouse's HTTP interface: positional `?`
+	// placeholders become {pN:String} query parameters, and `in` lists
+	// external tables, each value the text ClickHouse reads it back from. A
+	// value with no text form (a JSON null, an object), or a query too large
+	// for the HTTP interface to take, is a malformed query, not a server
+	// fault.
+	bound, err := result.Bind()
+	if err == nil {
+		err = checkRequestSize(bound)
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Cache key, led by the tenant the store was resolved for (#583 story 8);
-	// the singleflight key too.
-	cacheKey := queryCacheKey(store.Tenant(), result.SQL, result.Params)
+	// the singleflight key too. Keyed on what reaches ClickHouse, so two
+	// requests that differ only in a spelling the binding erases share an
+	// entry and two that differ in the bytes sent never do.
+	cacheKey := queryCacheKey(store.Tenant(), bound.SQL, cacheValues(bound))
 
 	// TODO: impl scope
 	scope := ""
@@ -193,8 +220,8 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// The tenant's pool, ahead of serving a hit: a tenant on none — its
 	// tuple could not be opened, such as by the connection ceiling — fails
 	// closed rather than serve what it cached before (#583 story 6).
-	conn := connOf(h.CHConn, store)
-	if conn == nil {
+	target := targetOf(h.Target, store)
+	if target.URL == "" {
 		writeUnavailable(w, noConnectionMessage, retryAfterPool)
 		return
 	}
@@ -216,81 +243,63 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		// An overrun is the role's cap only when the cap is the tighter
 		// budget; under a shorter query_timeout it reads as it does for a
 		// role with no cap (#620).
-		time:   timeCap > 0 && timeCap <= timeout,
-		memory: perms.Select.MaxMemoryUsage > 0,
+		time:     timeCap > 0 && timeCap <= timeout,
+		memory:   perms.Select.MaxMemoryUsage > 0,
+		readonly: true,
 	}
 	if timeCap > 0 {
 		timeout = min(timeCap, timeout)
 	}
+	// Enforce the budget server-side, not just via the request's deadline
+	// (#316): the settings ride on this query's URL, so they reach ClickHouse
+	// for this query only. The time bound goes on every read — the tighter of
+	// the role's cap and query_timeout — so ClickHouse stops a query nobody
+	// is waiting for and says which limit stopped it; the role's other caps
+	// only when it set them.
+	// The role's scan cap is on the table: an `in` list's elements, which
+	// ClickHouse counts as rows read from its external table, go on top.
+	maxRowsToRead := perms.Select.MaxRowsToRead
+	if maxRowsToRead > 0 {
+		maxRowsToRead += bound.TableRows()
+	}
+	chSettings := chReadSettings(chQueryLimits{
+		ExecutionTime:  timeout,
+		MaxResultRows:  perms.Select.MaxRows,
+		MaxRowsToRead:  maxRowsToRead,
+		MaxMemoryBytes: perms.Select.MaxMemoryUsage.Bytes(),
+	})
+	conns := connsOf(h.MaxConns, store)
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		var queryCtx context.Context
-		var cancel context.CancelFunc
-		if timeCap > 0 {
-			// ClickHouse enforces the budget (max_execution_time below) and
-			// answers an overrun with TIMEOUT_EXCEEDED. A context deadline
-			// would let the driver raise that setting to deadline+5s and turn
-			// every overrun into a bare DeadlineExceeded — indistinguishable
-			// from a pool wait or a dial timeout, which are outages, not the
-			// caller's cost.
-			queryCtx, cancel = cancelAfter(r.Context(), timeout+capBackstop)
-		} else {
-			queryCtx, cancel = context.WithTimeout(r.Context(), timeout)
-		}
+		// The deadline outlasts max_execution_time by capBackstop, so an
+		// overrun comes back as ClickHouse's TIMEOUT_EXCEEDED, naming the
+		// limit, rather than as a dropped connection.
+		queryCtx, cancel := context.WithTimeout(r.Context(), timeout+capBackstop)
 		defer cancel()
 
-		// Enforce the role's resource caps server-side, not just via the client
-		// context deadline (#316). The settings ride on the query context, so they
-		// reach ClickHouse for this query only. Server-wide backstops are
-		// ClickHouse's job (settings profiles / quotas); a role with no caps (e.g.
-		// admin) sends nothing here. An explicit max_execution_time is sent only
-		// when the role set a time cap; otherwise the context deadline (=
-		// query_timeout) is the time bound the driver derives.
-		limits := chQueryLimits{
-			MaxResultRows:  perms.Select.MaxRows,
-			MaxRowsToRead:  perms.Select.MaxRowsToRead,
-			MaxMemoryBytes: perms.Select.MaxMemoryUsage.Bytes(),
-		}
-		if timeCap > 0 {
-			limits.ExecutionTime = timeout
-		}
-		if settings := chReadSettings(limits); settings != nil {
-			queryCtx = clickhouse.Context(queryCtx, clickhouse.WithSettings(settings))
-		}
-
 		spanCtx, span := otel.Tracer(chTracerName).Start(queryCtx, chQuerySpanName,
-			chQuerySpanOptions(targetOf(h.CHTarget, store), false, opStructuredQuery, result.SQL, semconv.DBSQLTable(table))...)
+			chQuerySpanOptions(target, opStructuredQuery, bound.SQL, semconv.DBSQLTable(table))...)
 		start := time.Now()
-
-		rows, err := executeCHQuery(spanCtx, conn, result.SQL, result.Params)
-		queryDuration := time.Since(start)
-		setCHQueryResult(span, h.metrics.observe(r.Context(), opStructuredQuery, queryDuration, err, caps))
+		// ClickHouse's own JSON rendering of the rows, stored and served
+		// verbatim — no per-row scan, no re-marshal.
+		data, err := h.ch.do(spanCtx, target, conns, chRequest{sql: bound.SQL, params: bound.Params, tables: bound.Tables, settings: chSettings})
+		setCHQueryResult(span, h.metrics.observe(r.Context(), opStructuredQuery, time.Since(start), err, caps))
 		span.End()
 		if err != nil {
-			// TODO: depending on the error, we may actually want to cache it
 			return nil, err
 		}
-
-		data, err := json.Marshal(rows)
-		if err != nil {
-			// TODO: eventually we want CSV support etc
-			return nil, err
-		}
-
-		ttl := cache.QueryTimeToTTL(queryDuration)
-
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), snap, data, ttl)
+			_ = h.Cache.Set(r.Context(), snap, data, cache.QueryTimeToTTL(time.Since(start)))
 		}
 		return data, nil
 	})
 	if err != nil {
-		writeCHError(w, r, err, err.Error(), http.StatusInternalServerError, caps)
+		writeCHError(w, r, err, chErrorMessage(err), http.StatusInternalServerError, caps)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
-	_, _ = w.Write(v.([]byte)) //nolint:gosec // G705: the tenant id on the key only selects the entry; the bytes are JSON the handler marshalled from ClickHouse rows
+	_, _ = w.Write(v.([]byte)) //nolint:gosec,nolintlint // G705 (reported on darwin and linux-amd64, not on linux-arm64, hence nolintlint): the tenant id on the key only selects the entry; the bytes are ClickHouse's JSONEachRow rows framed as an array
 }

@@ -110,7 +110,7 @@ A self-contained `wavehouse storage-check` preflight subcommand that bakes this 
 
 If you see any of these, benchmark the `<data_dir>/nats` volume as above:
 
-- `open dlq stream: ... context deadline exceeded`, or `open ingest stream: ...`, when a tenant's queue first opens, at the boot or reload that first serves the tenant.
+- `open dlq stream: ... context deadline exceeded`, `dlq stream info: ...`, or `open ingest stream: ...`, when a tenant's queue first opens, at the boot or reload that first serves the tenant.
 - `mq queue not reconciled with settings; the next reload retries` with `join the queue: ... context deadline exceeded`, and that tenant's ingest answering `503`, when a tenant's queue opens while the server runs and the ingest worker's or the stream hub's consumer cannot join it in time.
 - Ingest p99 latency in the seconds, or occasional `200`s that take multiple seconds to return.
 - Intermittent `503 Service Unavailable` from `/v1/ingest` when ClickHouse is healthy (the worker can't drain fast enough because acking is `fsync`-bound).
