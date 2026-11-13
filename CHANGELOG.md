@@ -80,6 +80,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Spans and OpenTelemetry HTTP metrics name the ops route a request matched, not `/v1/ops/*`** (`internal/api/correlation.go` (+ test), `docs/src/content/docs/architecture.md`): closes [#892](https://github.com/Wave-RF/WaveHouse/issues/892), part of [#908](https://github.com/Wave-RF/WaveHouse/issues/908). Every request under `/v1/ops/` was recorded under the sub-router's mount, so a raw-SQL `POST /v1/ops/query` and a `GET /v1/ops/dlq/stats` poll shared one span name (`POST /v1/ops/*`, `GET /v1/ops/*`) and one `http_route` series on `http_server_request_duration_seconds` and the body-size histograms. They now carry the full route pattern, such as `GET /v1/ops/dlq/stats`, and the server span also carries `http.route`. A request the ops gate refuses never reaches a route and keeps `/v1/ops/*`, as `wavehouse_http_request_duration_seconds` already did. Dashboards, alerts or trace queries that match `/v1/ops/*` need the per-route names.
 
+### Security
+
+- **Builds use Go 1.26.11 for [GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859)** (`go.mod`, `deployments/Dockerfile`): a race in `net/http`'s `MaxBytesReader` could crash an HTTP/1 server. `govulncheck` reports it against Go 1.26.10, so `make verify`'s `vulncheck` step failed on `main` until both this and the brotli bump below landed. Closes [#985](https://github.com/Wave-RF/WaveHouse/issues/985).
+- **`github.com/andybalholm/brotli` moves to v1.2.7 for [GO-2026-6888](https://pkg.go.dev/vuln/GO-2026-6888)** (`go.mod`, `go.sum`): an indirect dependency, through `github.com/ClickHouse/clickhouse-go/v2`. `govulncheck` reports the advisory against v1.2.6, so `make verify`'s `vulncheck` step failed on `main` and on every PR until the module moved. It reports no call path from WaveHouse's code to the vulnerable code.
+
 ## [0.2.1] - 2026-10-21
 
 Upgrading from 0.2.0 is a binary swap: no setting moves and nothing is migrated. Six changes can still need action ([Upgrading](https://wavehouse.dev/upgrading#from-020-to-021)):
