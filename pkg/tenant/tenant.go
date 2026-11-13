@@ -7,6 +7,7 @@ package tenant
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 )
 
 // ID is a validated tenant identifier. It is a string, never a number: ids
@@ -48,3 +49,7 @@ func Parse(s string) (ID, error) {
 }
 
 func (id ID) String() string { return string(id) }
+
+// LogValue keeps the otelslog bridge from exporting an id as
+// "unhandled: (tenant.ID) <id>" (#887).
+func (id ID) LogValue() slog.Value { return slog.StringValue(string(id)) }

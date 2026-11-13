@@ -15,6 +15,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
@@ -113,6 +114,48 @@ func (c *goneClient) Write(p []byte) (int, error) {
 		return 0, errors.New("broken pipe")
 	}
 	return c.ResponseRecorder.Write(p)
+}
+
+// Each stream's outbound queue is its tenant's stream.subscriber_queue, read
+// as the stream opens: a smaller one drops sooner, and the queue state the
+// slow-consumer line reports is that size.
+func TestSSE_SubscriberQueueIsTheTenants(t *testing.T) {
+	m, dropped := sseMetrics(t)
+	logs := logtest.Capture(t, slog.LevelInfo)
+	hub := stream.NewHub(nil, clicksRegistry(t), m)
+	h := &StreamHandler{Hub: hub, Metrics: m, SubscriberQueue: func(s *settings.Store) int {
+		require.Same(t, testStore, s, "the request tenant's store")
+		return 8
+	}}
+	topic := mq.Topic{Tenant: tenant.Default, Table: "clicks"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := &slowClient{ResponseRecorder: httptest.NewRecorder(), release: make(chan struct{})}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.Handle(w, withTenant(httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)))
+	}()
+	require.Eventually(t, func() bool { return hub.Len(topic) == 1 }, 5*time.Second, 5*time.Millisecond)
+
+	const events = 20
+	for range events {
+		hub.Broadcast(topic, []byte(`{"n":1}`))
+	}
+	// The queue holds 8; the handler may hold one more, blocked writing it.
+	lost := dropped()["clicks/"+stream.DropBufferFull]
+	assert.GreaterOrEqual(t, lost, int64(events-9))
+	assert.LessOrEqual(t, lost, int64(events-8))
+
+	close(w.release)
+	require.Eventually(t, func() bool {
+		return len(logLines(t, logs, "SSE stream dropping frames")) == 1
+	}, 5*time.Second, 5*time.Millisecond)
+	warn := logLines(t, logs, "SSE stream dropping frames")[0]
+	assert.InDelta(t, 8, warn["queue_capacity"], 0)
+	cancel()
+	<-done
 }
 
 // A slow consumer's drops are counted as buffer_full under the streamed
@@ -236,7 +279,7 @@ func TestSSE_CloseStreamCountsQueuedFramesByEnd(t *testing.T) {
 		t.Run(tt.end, func(t *testing.T) {
 			m, dropped := sseMetrics(t)
 			logs := logtest.Capture(t, slog.LevelInfo)
-			sub := stream.NewTableSubscriber("clicks", nil, m)
+			sub := stream.NewTableSubscriber("clicks", nil, m, 0)
 			sub.Send(stream.Frame{Kind: stream.KindEvent})
 			sub.Send(stream.Frame{Kind: stream.KindKeepalive})
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/MicahParks/jwkset"
 	"github.com/MicahParks/keyfunc/v3"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/pkg/policy"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	"github.com/golang-jwt/jwt/v5"
@@ -158,7 +159,10 @@ func newVerifier(w Wiring) *verifier {
 	v.validMethods = asymmetricMethods
 	ctx, cancel := context.WithCancel(context.Background())
 	v.cancel = cancel
-	go v.fetch(ctx)
+	go func() {
+		defer observability.Crash("jwks_fetch")
+		v.fetch(ctx)
+	}()
 	return v
 }
 
@@ -332,6 +336,9 @@ type Authenticator struct {
 func NewAuthenticator(cfg Config, tenantOf TenantSource, policies PolicySource) *Authenticator {
 	a := &Authenticator{cfg: cfg, tenantOf: tenantOf, policies: policies}
 	a.verifiers.Store(&map[tenant.ID]*verifier{})
+	// Exported at 0 from here on, so the first wrong key is an increase (#905).
+	observability.ZeroCounter(operatorKeyFailures, 0)
+	observability.ZeroCounter(operatorKeyRequests, 0)
 	return a
 }
 

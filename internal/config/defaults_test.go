@@ -39,6 +39,7 @@ var zeroCases = []zeroCase{
 	{"prometheus.path", "WH_PROMETHEUS_PATH", "", "/metrics", "/prom", "/prom", func(c *Config) any { return c.Prometheus.Path }},
 	{"profiling.addr", "WH_PROFILING_ADDR", "", "127.0.0.1:6060", "127.0.0.1:7070", "127.0.0.1:7070", func(c *Config) any { return c.Profiling.Addr }},
 	{"prometheus.per_table_metrics", "WH_METRICS_PER_TABLE", false, true, "false", false, func(c *Config) any { return c.Prometheus.PerTableMetrics }},
+	{"prometheus.per_tenant_metrics", "WH_METRICS_PER_TENANT", false, true, "false", false, func(c *Config) any { return c.Prometheus.PerTenantMetrics }},
 	{"data_dir", "WH_DATA_DIR", "", "./data", "/var/lib/wh", "/var/lib/wh", func(c *Config) any { return c.DataDir }},
 	// The cache.redis block is validated only under backend=redis, so under
 	// the default backend its zeros load as written.
@@ -74,6 +75,9 @@ var refusedZeros = []struct {
 	{"dedupe.backend", "", `dedupe.backend (WH_DEDUPE_BACKEND) ""`, nil},
 	{"coord.backend", "", `coord.backend (WH_COORD_BACKEND) ""`, nil},
 	{"roles", []string{}, "roles (WH_ROLES) is empty", nil},
+	{"mq.ack_wait", "0s", "mq.ack_wait (WH_MQ_ACK_WAIT) must be > 0", nil},
+	{"mq.max_ack_pending", 0, "mq.max_ack_pending (WH_MQ_MAX_ACK_PENDING) must be at least mq.prefetch (500), got 0", nil},
+	{"mq.prefetch", 0, "mq.prefetch (WH_MQ_PREFETCH) must be at least 1", nil},
 	{"dedupe.lease", "0s", "dedupe.lease (WH_DEDUPE_LEASE) must be > 0", nil},
 	{"dedupe.reserve_concurrency", 0, "dedupe.reserve_concurrency (WH_DEDUPE_RESERVE_CONCURRENCY) must be > 0", nil},
 	{"dedupe.dynamodb.timeout", "0s", "dedupe.dynamodb.timeout (WH_DEDUPE_DYNAMODB_TIMEOUT) must be > 0", dynamoSelected},

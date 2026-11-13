@@ -15,15 +15,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Wave-RF/WaveHouse/internal/api"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/mutationtest"
+	"github.com/Wave-RF/WaveHouse/pkg/chsql"
 )
 
 // codeSyntaxError is ClickHouse's SYNTAX_ERROR.
 const codeSyntaxError = 62
 
-// astMutation is api.IsMutation's answer for each statement kind astRoot
+// astMutation is chsql.IsMutation's answer for each statement kind astRoot
 // names.
 var astMutation = map[string]bool{
 	// A bare EXECUTE AS: it switches the session's user and returns no
@@ -197,7 +197,7 @@ func TestIsMutation_KeywordNamesInWithList(t *testing.T) {
 				case err != nil:
 				case !known:
 					failure = fmt.Sprintf("%q: no IsMutation answer for statement kind %s", sql, root)
-				case api.IsMutation(sql) != want:
+				case chsql.IsMutation(sql) != want:
 					failure = fmt.Sprintf("%q: ClickHouse parses it as %s, IsMutation says %v", sql, root, !want)
 				}
 				mu.Lock()

@@ -13,7 +13,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 
 | Tool | Required version | Why | Install |
 | ---- | ---------------- | --- | ------- |
-| **Go** | Any Go ≥ 1.21; `make` runs the version `go.mod` pins, its `toolchain` line if it has one, else its `go` line (currently 1.26.10), downloading it once if yours differs (needs network). `make GOTOOLCHAIN=local …` uses yours instead (an environment value is ignored): it needs a Go ≥ that version, and `make lint-go` needs `go.mod`'s minor | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
+| **Go** | Any Go ≥ 1.21; `make` runs the version `go.mod` pins, its `toolchain` line if it has one, else its `go` line (currently 1.26.11), downloading it once if yours differs (needs network). `make GOTOOLCHAIN=local …` uses yours instead (an environment value is ignored): it needs a Go ≥ that version, and `make lint-go` needs `go.mod`'s minor | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
 | **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with GNU Make 3.81, which is **not supported**: it silently ignores `--output-sync`, so the parallel output of `make verify` / `make ci` interleaves line by line and a failure can scroll away behind other jobs' output | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse and a Redis via testcontainers (no compose file), the integration suite also dynamodb-local, and the integration suite also runs the shared cache backend against Redis, Valkey, Dragonfly (pulled from `docker.dragonflydb.io`) and a one-node Redis Cluster | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
@@ -101,7 +101,7 @@ curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}
 
-# Query it back (wait ~5s for the batch flush)
+# Query it back (wait for the batch flush: ingest.max_batch_wait_ms, 5s in the seed)
 curl -s -X POST "http://localhost:8080/v1/query?table=clicks" \
   -H "Content-Type: application/json" \
   -d '{"columns": ["page", "button", "score"], "limit": 10}'
@@ -215,6 +215,8 @@ curl -X POST -H "Authorization: Operator dev-operator-key" http://localhost:8080
 # the X-Operator-Key alias works too:
 curl -H "X-Operator-Key: dev-operator-key" http://localhost:8080/v1/ops/pipes
 ```
+
+The exception is a pipe whose SQL binds a `{{ jwt.<path> }}` claim: the key carries no claims, so such a pipe answers it `[]` (a write pipe, `403`). Trial those with a token that carries the claim ([Binding token claims](/pipes#binding-token-claims)).
 
 Then mint a token (role == the policy `admin_role`) and call an admin endpoint:
 
@@ -489,9 +491,9 @@ WaveHouse/
 │   ├── stream/             # SSE fan-out: Hub, Subscriber queue, Bucket, keepalive wheel
 │   └── testutil/           # Shared test helpers and mocks (cachetest suite)
 ├── pkg/                    # Public packages: importable at a release tag, no internal/ or runtime dependency
-│   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
-│   ├── pipes/              # Named query pipes (types + parameter binding)
-│   ├── policy/             # Access control policies (types + evaluation)
+│   ├── chsql/              # Shared ClickHouse SQL helpers (quoting, bind-safety, SQL scanning, write classifier)
+│   ├── pipes/              # Named query pipes (types + parameter and claim binding)
+│   ├── policy/             # Access control policies (types + evaluation + claim resolution)
 │   ├── settings/           # Settings model: document types, Finding, the validator (on disk and over bytes), embedded seed
 │   ├── shard/              # Placement hashing: Jump consistent hash, Mix finalizer
 │   └── tenant/             # Tenant id: type, grammar, reserved default, request header name

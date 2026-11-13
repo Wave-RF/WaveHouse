@@ -18,6 +18,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // Shard claims: over a sharded queue (mq.Sharded), each unit — one shard of
@@ -63,19 +64,17 @@ import (
 //
 // Memory. Each unit may hold delivered and unsettled rows up to its share of
 // MaxHeld: an even share over the units this process is assigned, and never
-// less than minUnitHeld (or MaxHeld, if smaller), so one hot table still
-// fills whole batches. At its share a unit fetches only what keeps its pin
-// (the broker's: a row every few seconds, at most one ack_wait's worth past
-// the share), and the broker keeps the rest; a stuck unit
-// never takes another unit's share. The process holds about max(MaxHeld,
-// units × minUnitHeld) at most.
+// less than twice the worker's prefetch (or MaxHeld, if smaller), so a unit
+// at its share still has a fetch-ahead in hand while as many rows are being
+// written. At its share a unit fetches only what keeps its pin (the
+// broker's: a row every few seconds, at most one ack_wait's worth past the
+// share), and the broker keeps the rest; a stuck unit never takes another
+// unit's share. The process holds about max(MaxHeld, units × two
+// prefetches) at most.
 const (
 	memberLeasePrefix = "ingest.m"
 
 	defaultUnownedEvery = 15 * time.Second
-	// minUnitHeld is two of the worker's batches: one being written while
-	// the next fills.
-	minUnitHeld = 2 * defaultMaxBatch
 	// settlePoll is how often a handover checks its rows have settled.
 	settlePoll = 50 * time.Millisecond
 	// bindEscalate is how long a configured unit may fail to bind, for a
@@ -104,19 +103,20 @@ type ClaimConfig struct {
 	// default coord.RetryPeriod.
 	Every time.Duration
 	// Handover bounds how long a unit given up waits for its delivered rows
-	// to settle before it is released; default the worker's ack_wait, after
-	// which the broker redelivers them anyway.
+	// to settle before it is released: the worker's ack wait (boot config's
+	// mq.ack_wait, which internal/app passes), after which the broker
+	// redelivers them anyway; default mq.DefaultAckWait.
 	Handover time.Duration
 	// MaxHeld is the process's budget of rows delivered and not yet settled,
-	// shared out per unit (see Memory above); default the worker's
-	// maxAckPending.
+	// shared out per unit (see Memory above): the worker's max ack pending
+	// (mq.max_ack_pending); default mq.DefaultMaxAckPending.
 	MaxHeld int
 	// UnownedEvery is how often the lowest live member reads every unit's
 	// backlog, and which have rows and no owner; default 15s.
 	UnownedEvery time.Duration
 	// SlotExpiry frees a delivered row's MaxHeld slot if the worker never
-	// settles it: by then the broker redelivers the row anyway. Default the
-	// worker's ack_wait.
+	// settles it: by then the broker redelivers the row anyway. The worker's
+	// ack wait, like Handover; default mq.DefaultAckWait.
 	SlotExpiry time.Duration
 }
 
@@ -142,16 +142,16 @@ func ClaimShards(q Queue, c coord.Coordinator, cfg ClaimConfig) (Queue, error) {
 		cfg.Every = coord.RetryPeriod
 	}
 	if cfg.Handover <= 0 {
-		cfg.Handover = ackWait
+		cfg.Handover = mq.DefaultAckWait
 	}
 	if cfg.MaxHeld <= 0 {
-		cfg.MaxHeld = maxAckPending
+		cfg.MaxHeld = mq.DefaultMaxAckPending
 	}
 	if cfg.UnownedEvery <= 0 {
 		cfg.UnownedEvery = defaultUnownedEvery
 	}
 	if cfg.SlotExpiry <= 0 {
-		cfg.SlotExpiry = ackWait
+		cfg.SlotExpiry = mq.DefaultAckWait
 	}
 	return &claimingQueue{Queue: q, sq: sq, c: c, obs: obs, cfg: cfg}, nil
 }
@@ -213,8 +213,13 @@ func (c *claimingConsumer) Consume(handler func(*mq.Message), prefetch int) (fun
 	if l.gauges, err = registerClaimGauges(l); err != nil {
 		slog.Warn("ingest: shard claim gauges not registered", "error", err)
 	}
+	observability.ZeroCounter(claimEvents, 0, observability.LabelSets(observability.Values("event", claimEventNames...))...)
 	c.loop.Store(l)
-	go l.run()
+	go func() {
+		defer observability.Crash("shard_claims")
+		l.run()
+		close(l.done)
+	}()
 	return l.stop, l.failed, nil
 }
 
@@ -304,7 +309,6 @@ func (cl *claim) stop() {
 }
 
 func (l *claimLoop) run() {
-	defer close(l.done)
 	t := time.NewTicker(l.q.cfg.Every)
 	defer t.Stop()
 	for {
@@ -350,7 +354,7 @@ func (l *claimLoop) tick() {
 		}
 	}
 	if len(targets) > 0 {
-		l.share.Store(int64(unitShare(l.q.cfg.MaxHeld, len(targets))))
+		l.share.Store(int64(unitShare(l.q.cfg.MaxHeld, len(targets), l.prefetch)))
 	}
 	l.giveUp(targets)
 	l.take(ctx, targets, len(targets), live)
@@ -383,6 +387,7 @@ func (l *claimLoop) readMembers(ctx context.Context) ([]int, error) {
 	for j := range l.slots {
 		sem <- struct{}{}
 		wg.Go(func() {
+			defer observability.Crash("shard_claims")
 			defer func() { <-sem }()
 			held[j], errs[j] = l.q.obs.Held(ctx, memberLease(j))
 		})
@@ -452,7 +457,10 @@ func (l *claimLoop) giveUp(targets map[string]bool) {
 		l.mu.Lock()
 		l.releasing[u] = cl
 		l.mu.Unlock()
-		l.handovers.Go(func() { l.handOver(cl) })
+		l.handovers.Go(func() {
+			defer observability.Crash("shard_claims", slog.String("unit", cl.unit))
+			l.handOver(cl)
+		})
 	}
 }
 
@@ -525,9 +533,12 @@ func (l *claimLoop) isReleasing(u string) bool {
 	return ok
 }
 
-// unitShare is each of count units' cap on rows delivered and unsettled.
-func unitShare(maxHeld, count int) int {
-	return max(min(maxHeld, minUnitHeld), maxHeld/max(1, count))
+// unitShare is each of count units' cap on rows delivered and unsettled:
+// an even share of maxHeld, and never under twice the prefetch, so a unit
+// at its cap still has a fetch-ahead in hand while as many rows are being
+// written.
+func unitShare(maxHeld, count, prefetch int) int {
+	return max(min(maxHeld, 2*prefetch), maxHeld/max(1, count))
 }
 
 // open binds unit u and starts delivering it, under the unit's share of
@@ -574,6 +585,7 @@ func (l *claimLoop) open(u string, count int) error {
 // ending is the operator deleting it once drained.
 func (l *claimLoop) watch(cl *claim, failed <-chan error) {
 	go func() {
+		defer observability.Crash("shard_claims", slog.String("unit", cl.unit))
 		select {
 		case err := <-failed:
 			if !l.configured[cl.unit] {
@@ -678,11 +690,17 @@ func (l *claimLoop) halt() {
 		<-l.done
 		var halts sync.WaitGroup
 		for _, cl := range l.owned {
-			halts.Go(cl.stop)
+			halts.Go(func() {
+				defer observability.Crash("shard_claims", slog.String("unit", cl.unit))
+				cl.stop()
+			})
 		}
 		l.mu.Lock()
 		for _, cl := range l.releasing {
-			halts.Go(cl.stop)
+			halts.Go(func() {
+				defer observability.Crash("shard_claims", slog.String("unit", cl.unit))
+				cl.stop()
+			})
 		}
 		l.mu.Unlock()
 		halts.Wait()
@@ -704,7 +722,10 @@ func (l *claimLoop) stop() {
 		// wait, not one per unit.
 		var releases sync.WaitGroup
 		for _, cl := range l.owned {
-			releases.Go(func() { l.release(cl) })
+			releases.Go(func() {
+				defer observability.Crash("shard_claims", slog.String("unit", cl.unit))
+				l.release(cl)
+			})
 			claimEvents.Add(context.Background(), 1, eventAttr("released"))
 		}
 		releases.Wait()
@@ -732,12 +753,18 @@ var (
 		"wavehouse_ingest_shard_handover_seconds",
 		metric.WithDescription("Time from giving a shard up to releasing it: the drain of what it had delivered"),
 		metric.WithUnit("s"),
+		// One 50 ms poll up to twice the one-minute handover bound.
+		metric.WithExplicitBucketBoundaries(.05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120),
 	)
 )
 
 // claimMeter is the meter the claim gauges register on (tests substitute
 // their own rather than the global provider, which binds only once).
 var claimMeter = func() metric.Meter { return otel.Meter("wavehouse-ingest") }
+
+// claimEventNames are wavehouse_ingest_shard_events_total's events, all
+// exported at 0 once a process claims shards (#905).
+var claimEventNames = []string{"taken", "released", "reset", "handover_timeout", "lost", "bind_failed"}
 
 func eventAttr(event string) metric.AddOption {
 	return metric.WithAttributes(attribute.String("event", event))

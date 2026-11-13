@@ -519,13 +519,14 @@ func TestClaims_EndedDelivery(t *testing.T) {
 }
 
 // Each unit's cap on rows delivered and unsettled is an even share of
-// MaxHeld over the units the process is assigned, never below two batches,
-// so one stuck unit cannot take the others' room; it follows the assignment.
+// MaxHeld over the units the process is assigned, never below twice the
+// prefetch, so one stuck unit cannot take the others' room; it follows the
+// assignment.
 func TestClaims_UnitShareOfMaxHeld(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, 5000, unitShare(10_000, 2))
-	assert.Equal(t, minUnitHeld, unitShare(10_000, 32), "never below two batches")
-	assert.Equal(t, 64, unitShare(64, 32), "nor above MaxHeld")
+	assert.Equal(t, 5000, unitShare(10_000, 2, 500))
+	assert.Equal(t, 1000, unitShare(10_000, 32, 500), "never below twice the prefetch")
+	assert.Equal(t, 64, unitShare(64, 32, 500), "nor above MaxHeld")
 
 	f, c := newFakeShards(8), coord.NewLocal()
 	a := startClaims(t, f, c, "a", ClaimConfig{MaxHeld: 8000}, nil)

@@ -54,7 +54,7 @@ func TestIngest_ClickHouseOutage_RetriedNotDeadLettered(t *testing.T) {
 	target := func(tenant.ID) chconn.Target {
 		return chconn.Target{URL: *chURL.Load(), Username: testCHUser, Password: testCHPassword, Database: testCHDatabase}
 	}
-	stop, _, err := ingest.StartIngestWorker(ctx, broker, &testutil.MockCache{}, target, nil)
+	stop, _, err := ingest.StartIngestWorker(ctx, broker, &testutil.MockCache{}, target, nil, seedLimits, ingest.ConsumerSettings{})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

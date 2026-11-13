@@ -6,11 +6,16 @@ describe("Ingest Batching Triggers", () => {
   const wh = dataClient();
   const T = suiteTables("batching");
 
-  it("flushes immediately when hitting the 500-item batch limit", async () => {
+  it("flushes immediately when the batch reaches ingest.max_batch_bytes", async () => {
     const runId = testId();
+    // The fixture's ingest.max_batch_bytes is 262144: the worker flushes a
+    // table's batch once its rows' JSON adds up to that, however many rows.
+    // 500 rows of ~700 bytes each (the page padded to 600) are ~350 KB, so
+    // the batch reaches the byte trigger well before the last row lands.
+    const page = `/batch-bytes-test/${"x".repeat(600)}`;
     const rows = Array.from({ length: 500 }).map((_, i) => ({
       event_id: `${runId}-${i}`,
-      page: `/batch-count-test`,
+      page,
       session_id: `session-${runId}`,
       user_id: `user-${runId}`,
     }));
@@ -30,15 +35,21 @@ describe("Ingest Batching Triggers", () => {
 
     if (ackMs < 4_000) {
       // Publish beat the 5s linger (armed on the first row) with margin, so
-      // the worker's buffer held all 500 rows before the timer could fire —
-      // an early flush below is attributable to the size trigger.
+      // nothing can have flushed on the timer yet: rows visible before
+      // startTime + 5s got there on the byte trigger. The target is reached
+      // part way through the 500 rows, so the first batch lands early and
+      // the rows after it wait their own linger — the early batch is the
+      // proof; the integrity wait below covers the tail.
+      let seenAt = 0;
       await waitForCondition(
         async (signal) => {
           const r = await chQuery(
             `SELECT count() as cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
             signal,
           );
-          return Number((r[0] as any).cnt) === 500;
+          if (Number((r[0] as any).cnt) === 0) return false;
+          seenAt = Date.now();
+          return true;
         },
         5_000,
         100,
@@ -50,34 +61,34 @@ describe("Ingest Batching Triggers", () => {
       // is 5s − ackMs and would pass a bound anchored there. Visibility
       // strictly before the first-row linger deadline is what proves the
       // size trigger fired.
-      const elapsed = Date.now() - startTime;
-      console.log(`All 500 events visible (buffered CH insert) ${elapsed}ms after first publish`);
+      const elapsed = seenAt - startTime;
+      console.log(`First batch visible (buffered CH insert) ${elapsed}ms after first publish`);
       expect(elapsed).toBeLessThan(5000); // Prove it didn't wait for the 5s timer
     } else {
-      // Slow-disk run: the linger fired mid-publish and split the batch, so
-      // the buffer never held 500 rows and size-trigger timing is
-      // unobservable (the tail waits its own full linger — visibility lands
-      // ~10s from first row). Verify data integrity only.
+      // Slow-disk run: the linger fired mid-publish, so an early flush is not
+      // attributable to the byte trigger. Verify data integrity only.
       console.log(
         `ack took ${ackMs}ms (≥4s): linger fired mid-publish; size-trigger timing inconclusive — verifying integrity only`,
       );
-      await waitForCondition(
-        async (signal) => {
-          const r = await chQuery(
-            `SELECT count() as cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
-            signal,
-          );
-          return Number((r[0] as any).cnt) === 500;
-        },
-        15_000,
-        250,
-      );
     }
-    // Worst honest path: 15s ack bound + 15s integrity wait — clear of the
-    // 30s default testTimeout.
+    // Every row lands either way: the tail of the batch on its own linger at
+    // the latest (~10s from first row on a slow disk).
+    await waitForCondition(
+      async (signal) => {
+        const r = await chQuery(
+          `SELECT count() as cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
+          signal,
+        );
+        return Number((r[0] as any).cnt) === 500;
+      },
+      15_000,
+      250,
+    );
+    // Worst honest path: 15s ack bound + 5s first-batch wait + 15s integrity
+    // wait — clear of the 45s timeout.
   }, 45_000);
 
-  it("waits for the 5-second period if batch limit is not met", async () => {
+  it("waits for the 5-second period if the byte limit is not met", async () => {
     const runId = testId();
 
     const startTime = Date.now();

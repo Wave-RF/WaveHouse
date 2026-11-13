@@ -40,7 +40,7 @@ func registerSettingsMetrics(meter metric.Meter, stats func() settings.ReloadSta
 	reloads, errs[0] = meter.Int64ObservableCounter("wavehouse_settings_reloads_total",
 		metric.WithDescription("Settings reloads by trigger (boot, sighup, watch, api) and result: adopted (every tenant adopted and reconciled), partial (a tenant's folder rejected, or a component that failed to reconcile), rejected (refused: a flat directory with an error or a finding about the directory itself, nothing changed; or the one folder a ?tenant= reload read, whose tenant then stops being served; a nested reload rejecting every folder is partial)"))
 	failures, errs[1] = meter.Int64ObservableCounter("wavehouse_settings_reconcile_failures_total",
-		metric.WithDescription("Components that failed to reconcile with adopted settings, by component (clickhouse, dedupe, mq); the next reload retries"))
+		metric.WithDescription("Components that failed to reconcile with adopted settings, by component (clickhouse, dedupe, mq, ingest); the next reload retries"))
 	removed, errs[2] = meter.Int64ObservableCounter("wavehouse_settings_tenants_removed_total",
 		metric.WithDescription("Tenants a reload stopped serving because their folder was gone"))
 	tenants, errs[3] = meter.Int64ObservableGauge("wavehouse_settings_tenants",

@@ -421,11 +421,11 @@ func TestOTel_Headers_AppliedToAllSignals(t *testing.T) {
 
 // TestOTel_IngestTraceContinuity follows one ingest request's trace past the
 // queue through the wired app: the server span and the handler's span under
-// the caller's traceparent (the suite trusts loopback as a proxy), then, in
-// the ingest process, a flush span linked to the handler's span and an
-// INSERT span under the flush. The link is what ties a slow or failed insert
-// back to the request that produced its rows once the api and ingest roles
-// run in separate processes.
+// the caller's traceparent (the suite trusts loopback as a proxy) and the
+// row's mq.publish span under the handler's, then, in the ingest process, a
+// flush span linked to the publish span and an INSERT span under the flush.
+// The link is what ties a slow or failed insert back to the request that
+// produced its rows once the api and ingest roles run in separate processes.
 func TestOTel_IngestTraceContinuity(t *testing.T) {
 	// No t.Parallel: initAndShutdown mutates OTel globals, which the running
 	// app's handlers and worker read per request and per flush.
@@ -506,10 +506,17 @@ func TestOTel_IngestTraceContinuity(t *testing.T) {
 	require.NotNil(t, flush, "the INSERT span is a flush span's child")
 	assert.Empty(t, flush.GetParentSpanId(), "the flush is a root of its own: its rows came from many requests")
 	assert.Equal(t, table, stringAttr(flush, "table"))
+	var publish *tracepb.Span
+	for _, s := range spansNamed("mq.publish") {
+		if hex.EncodeToString(s.GetParentSpanId()) == hex.EncodeToString(handler.GetSpanId()) {
+			publish = s
+		}
+	}
+	require.NotNil(t, publish, "the row's publish is a span under the handler's")
 	linked := false
 	for _, l := range flush.GetLinks() {
 		linked = linked || (hex.EncodeToString(l.GetTraceId()) == traceID &&
-			hex.EncodeToString(l.GetSpanId()) == hex.EncodeToString(handler.GetSpanId()))
+			hex.EncodeToString(l.GetSpanId()) == hex.EncodeToString(publish.GetSpanId()))
 	}
-	assert.True(t, linked, "the flush links to the handler's span")
+	assert.True(t, linked, "the flush links to the row's publish span")
 }

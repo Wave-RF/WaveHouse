@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -464,6 +465,15 @@ func (v *validator) parsePipes(data []byte) []pipes.NamedQuery {
 		if strings.TrimSpace(q.SQL) == "" {
 			v.errorf(FilePipes, path+".sql", "pipe SQL must not be empty")
 		}
+		// A placeholder the binder would not recognize reaches ClickHouse as
+		// literal text, and a parameter named jwt would read as a
+		// request-supplied claim: rejected on every adoption, like a malformed
+		// policy template. The claims a pipe binds are legal config, not a
+		// finding: `wavehouse validate` lists them off the Document
+		// (NamedQuery.Claims) for a reviewer of the file.
+		if err := q.CheckTemplate(); err != nil {
+			v.errorf(FilePipes, path+".sql", "%v", err)
+		}
 		seenParams := map[string]bool{}
 		for j, param := range q.Parameters {
 			ppath := fmt.Sprintf("%s.parameters[%d]", path, j)
@@ -472,6 +482,8 @@ func (v *validator) parsePipes(data []byte) []pipes.NamedQuery {
 				v.errorf(FilePipes, ppath, "parameter name must not be empty")
 			case seenParams[param.Name]:
 				v.errorf(FilePipes, ppath, "duplicate parameter %q", param.Name)
+			case param.Name == pipes.ReservedParam:
+				v.errorf(FilePipes, ppath, "parameter name %q is reserved — {{ jwt.<path> }} reads a claim of the caller's token", param.Name)
 			}
 			seenParams[param.Name] = true
 			if !validParamType(param.Type) {
@@ -535,6 +547,16 @@ func (v *validator) checkTableName(mapPath, table string) {
 	}
 }
 
+// maxSeconds, maxMillis and maxMinutes bound the integer duration keys: a
+// larger count overflows the time.Duration the server converts it to,
+// wrapping to a duration nothing asked for (a clickhouse.insert_timeout of
+// 36028797018963969 seconds would wrap to one second), so it is refused.
+const (
+	maxSeconds = math.MaxInt64 / int64(time.Second)
+	maxMillis  = math.MaxInt64 / int64(time.Millisecond)
+	maxMinutes = math.MaxInt64 / int64(time.Minute)
+)
+
 // checkClickHouse validates the connection wiring: every field required, the
 // native address a host:port, the HTTP port in range, the scheme http or
 // https, and the timeout positive. Reachability is deliberately not checked
@@ -573,8 +595,13 @@ func (v *validator) checkClickHouse(ch *ClickHouseConfig) {
 	}
 	if ch.QueryTimeout == nil {
 		v.required("clickhouse.query_timeout")
-	} else if *ch.QueryTimeout < 1 {
-		v.errorf(FileConfig, "clickhouse.query_timeout", "must be >= 1 second, got %d", *ch.QueryTimeout)
+	} else if *ch.QueryTimeout < 1 || int64(*ch.QueryTimeout) > maxSeconds {
+		v.errorf(FileConfig, "clickhouse.query_timeout", "must be in 1-%d seconds, got %d", maxSeconds, *ch.QueryTimeout)
+	}
+	if ch.InsertTimeout == nil {
+		v.required("clickhouse.insert_timeout")
+	} else if *ch.InsertTimeout < 1 || int64(*ch.InsertTimeout) > maxSeconds {
+		v.errorf(FileConfig, "clickhouse.insert_timeout", "must be in 1-%d seconds, got %d", maxSeconds, *ch.InsertTimeout)
 	}
 	if ch.TLS == nil {
 		v.required("clickhouse.tls")
@@ -829,6 +856,25 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 			}
 		}
 	}
+	if i := c.Ingest; i == nil {
+		v.required("ingest")
+	} else {
+		if i.MaxBatchBytes == nil {
+			v.required("ingest.max_batch_bytes")
+		} else if *i.MaxBatchBytes < 1 {
+			v.errorf(FileConfig, "ingest.max_batch_bytes", "must be >= 1 byte, got %d", *i.MaxBatchBytes)
+		}
+		if i.MaxBatchWaitMS == nil {
+			v.required("ingest.max_batch_wait_ms")
+		} else if *i.MaxBatchWaitMS < 1 || int64(*i.MaxBatchWaitMS) > maxMillis {
+			v.errorf(FileConfig, "ingest.max_batch_wait_ms", "must be in 1-%d ms, got %d", maxMillis, *i.MaxBatchWaitMS)
+		}
+		if i.RetryBackoffMax == nil {
+			v.required("ingest.retry_backoff_max")
+		} else if *i.RetryBackoffMax < 1 || int64(*i.RetryBackoffMax) > maxSeconds {
+			v.errorf(FileConfig, "ingest.retry_backoff_max", "must be in 1-%d seconds, got %d", maxSeconds, *i.RetryBackoffMax)
+		}
+	}
 	if q := c.Query; q == nil {
 		v.required("query")
 	} else {
@@ -839,24 +885,24 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 		}
 		if q.TimestampBucketSeconds == nil {
 			v.required("query.timestamp_bucket_seconds")
-		} else if *q.TimestampBucketSeconds < 0 {
-			v.errorf(FileConfig, "query.timestamp_bucket_seconds", "must be >= 0 (0 disables bucketing), got %d", *q.TimestampBucketSeconds)
+		} else if *q.TimestampBucketSeconds < 0 || int64(*q.TimestampBucketSeconds) > maxSeconds {
+			v.errorf(FileConfig, "query.timestamp_bucket_seconds", "must be in 0-%d seconds (0 disables bucketing), got %d", maxSeconds, *q.TimestampBucketSeconds)
 		}
 	}
 	if s := c.Schema; s == nil {
 		v.required("schema")
 	} else if s.RefreshInterval == nil {
 		v.required("schema.refresh_interval")
-	} else if *s.RefreshInterval < 1 {
-		v.errorf(FileConfig, "schema.refresh_interval", "must be >= 1 second, got %d", *s.RefreshInterval)
+	} else if *s.RefreshInterval < 1 || int64(*s.RefreshInterval) > maxSeconds {
+		v.errorf(FileConfig, "schema.refresh_interval", "must be in 1-%d seconds, got %d", maxSeconds, *s.RefreshInterval)
 	}
 	if s := c.Stream; s == nil {
 		v.required("stream")
 	} else {
 		if s.KeepaliveInterval == nil {
 			v.required("stream.keepalive_interval")
-		} else if *s.KeepaliveInterval < 1 {
-			v.errorf(FileConfig, "stream.keepalive_interval", "must be >= 1 second, got %d", *s.KeepaliveInterval)
+		} else if *s.KeepaliveInterval < 1 || int64(*s.KeepaliveInterval) > maxSeconds {
+			v.errorf(FileConfig, "stream.keepalive_interval", "must be in 1-%d seconds, got %d", maxSeconds, *s.KeepaliveInterval)
 		}
 		if s.KeepaliveBuckets == nil {
 			v.required("stream.keepalive_buckets")
@@ -865,8 +911,13 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 		}
 		if s.GapWindowMinutes == nil {
 			v.required("stream.gap_window_minutes")
-		} else if *s.GapWindowMinutes < 0 {
-			v.errorf(FileConfig, "stream.gap_window_minutes", "must be >= 0, got %d", *s.GapWindowMinutes)
+		} else if *s.GapWindowMinutes < 0 || int64(*s.GapWindowMinutes) > maxMinutes {
+			v.errorf(FileConfig, "stream.gap_window_minutes", "must be in 0-%d minutes, got %d", maxMinutes, *s.GapWindowMinutes)
+		}
+		if s.SubscriberQueue == nil {
+			v.required("stream.subscriber_queue")
+		} else if *s.SubscriberQueue < 1 || *s.SubscriberQueue > MaxSubscriberQueue {
+			v.errorf(FileConfig, "stream.subscriber_queue", "must be in 1-%d, got %d", MaxSubscriberQueue, *s.SubscriberQueue)
 		}
 	}
 

@@ -35,7 +35,7 @@ flowchart TB
         direction TB
         CB["10,000 clients<br/>1 event each"]:::neutral
         CB --> WH["WaveHouse<br/>(NATS JetStream WAL)"]:::wh
-        WH --> FLUSH["flush every 5s"]:::wh
+        WH --> FLUSH["flush in batches<br/>(by bytes, or every 5s)"]:::wh
         FLUSH --> CHB[("ClickHouse")]:::win
         CHB --> OK["1 bulk insert<br/>= 1 part"]:::win
     end
@@ -219,7 +219,7 @@ flowchart TB
     NATS --> HUB["Hub broadcast"]:::wh
     HUB --> RT["SSE subscribers"]:::client
 
-    NATS --> BC["Buffer consumer<br/>5-second batches"]:::wh
+    NATS --> BC["Buffer consumer<br/>batches by bytes or every 5s"]:::wh
     BC --> CH[("ClickHouse")]:::store
     BC -. "rejected rows" .-> DLQ["dead-letter stream"]:::fail
 ```
@@ -243,7 +243,7 @@ flowchart TB
 | NATS JetStream publish | ~1 ms | ~5 ms |
 | API `200 OK` to client | ~2 ms | ~8 ms |
 | Hub broadcast to SSE subscriber | ~1 ms | ~10 ms |
-| Batch flush to ClickHouse | 5 s (configurable) | 5 s + ClickHouse insert time |
+| Batch flush to ClickHouse | up to 5 s (`ingest.max_batch_wait_ms`) | 5 s + ClickHouse insert time |
 | Query cache hit (L1) | < 0.5 ms | ~1 ms |
 | Query cache miss → ClickHouse | depends on query | depends on query |
 

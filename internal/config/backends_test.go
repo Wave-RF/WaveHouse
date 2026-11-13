@@ -15,6 +15,7 @@ import (
 func withDefaultBackends(c Config) *Config {
 	c.Roles = AllRoles()
 	c.MQ.Backend, c.Cache.Backend = MQEmbedded, CacheLocal
+	c.MQ.AckWait, c.MQ.MaxAckPending, c.MQ.Prefetch = defaultAckWait, defaultMaxAckPending, defaultPrefetch
 	c.Dedupe, c.Coord.Backend = defaults().Dedupe, CoordLocal
 	return &c
 }

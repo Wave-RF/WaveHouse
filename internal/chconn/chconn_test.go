@@ -500,8 +500,9 @@ func TestPools_TenantGoneReleasesItsPoolAfterGrace(t *testing.T) {
 }
 
 // TestPools_CeilingRefusesBoot: at boot the pools must fit the ceiling
-// together, and a refusal names the sum and the ceiling and leaves nothing
-// open.
+// together: a refusal names the sum and the ceiling, what fit is open for the
+// wiring to keep or close by the directory's shape, and Close — a flat
+// directory's refusal of boot — leaves nothing open.
 func TestPools_CeilingRefusesBoot(t *testing.T) {
 	t.Parallel()
 	rec := &dialRecorder{}

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"go.opentelemetry.io/otel"
 
 	"github.com/Wave-RF/WaveHouse/internal/api"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
@@ -216,12 +217,14 @@ func (a *App) wireObservability(ctx context.Context) {
 		return
 	}
 	shutdown, promHandler, err := observability.InitProvider(ctx, a.identity(), observability.ProviderConfig{
-		TracesEnabled:     cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
-		TracesSampleRate:  cfg.OTel.Traces.SampleRate,
-		MetricsEnabled:    cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
-		PrometheusEnabled: cfg.Prometheus.Enabled,
-		LogsEnabled:       cfg.OTel.Enabled && cfg.OTel.Logs.Enabled,
-		AggregateTables:   !cfg.Prometheus.PerTableMetrics,
+		TracesEnabled:       cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
+		TracesSampleRate:    cfg.OTel.Traces.SampleRate,
+		MetricsEnabled:      cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
+		PrometheusEnabled:   cfg.Prometheus.Enabled,
+		LogsEnabled:         cfg.OTel.Enabled && cfg.OTel.Logs.Enabled,
+		AggregateTables:     !cfg.Prometheus.PerTableMetrics,
+		AggregateTenants:    !cfg.Prometheus.PerTenantMetrics,
+		HTTPBodySizeMetrics: cfg.Prometheus.HTTPBodySizeMetrics,
 	})
 	if err != nil {
 		slog.Error("failed to initialize observability, falling back to stdout", "error", err)
@@ -259,17 +262,21 @@ func (a *App) wireObservability(ctx context.Context) {
 // wireClickHouse opens the ClickHouse pools: one per distinct address,
 // database, user, password and tls tuple among the served tenants' clickhouse
 // blocks, shared by the tenants naming it and
-// sized to their largest ask (#583 story 6). Every reload reconciles them —
-// a new tuple opens (no dial), a tenant whose tuple changed is repointed, a
-// tuple no tenant names is released after its grace — under the boot
-// config's clickhouse.max_total_conns, the ceiling on the open pools' sizes
-// together: capacity is sized once, per process, so pools above it refuse
-// boot like the rest of an impossible boot config (#530), and at a reload a
-// resize above it is refused with the pool kept at its size, and a tuple
-// that cannot be opened — the ceiling, a certificate file that cannot be
-// read, or options the driver refuses — leaves its tenants on the pool they
-// had, or on none when they had none; both logged, and retried by the next
-// reload. Reachability surfaces
+// sized to their largest ask (#583 story 6). Boot and every reload reconcile
+// them — a new tuple opens (no dial), a tenant whose tuple changed is
+// repointed, a tuple no tenant names is released after its grace — under the
+// boot config's clickhouse.max_total_conns, the ceiling on the open pools'
+// sizes together (capacity is sized once, per process): a resize above it
+// is refused with the pool kept at its size, and a tuple that cannot be
+// opened — the ceiling, a certificate file that cannot be read, or options
+// the driver refuses — leaves its tenants on the pool they had, or on none
+// when they had none; logged, and retried by the next reload. At boot a
+// refusal follows the registry's rule for the shape, as the ingest limits,
+// the queue budget and the dedupe stores do: over a flat directory it
+// refuses boot like the rest of an impossible boot config (#530), naming
+// the sum and the ceiling; over a nested one the tenant is served on no
+// pool, logged and counted as on a reload, and the other tenants boot
+// (#955). Reachability surfaces
 // where it already does (schema discovery retries, /readyz, query errors).
 // Every consumer resolves its tenant's pool per call (chConn, chTargetFor).
 func (a *App) wireClickHouse() error {
@@ -288,12 +295,19 @@ func (a *App) wireClickHouse() error {
 		}
 		return ms
 	}
-	pools, err := chconn.NewPools(a.cfg.ClickHouse.MaxTotalConns, members())
-	if err != nil {
-		return fmt.Errorf("clickhouse open: %w", err)
-	}
+	pools := chconn.NewPools(a.cfg.ClickHouse.MaxTotalConns)
 	a.pools = pools
 	a.add(component{name: "clickhouse", close: withoutContext(pools.Close)})
+	// No tenant has a cache or a schema yet, so the tenants the boot
+	// reconcile reports stale are nothing to orphan.
+	_, err := pools.Reconcile(members())
+	a.tenants.Reconciled("clickhouse", err)
+	if err != nil {
+		if !a.tenants.Nested() {
+			return fmt.Errorf("clickhouse open: %w", err)
+		}
+		slog.Error("clickhouse pools opened in part; each tenant named is on no pool until a reload opens one", "error", err)
+	}
 	a.tenants.AfterAdopt(func([]tenant.ID) {
 		stale, err := pools.Reconcile(members())
 		if err != nil {
@@ -802,19 +816,39 @@ func (a *App) wireStreaming() {
 // consumer is created when Run starts it; at shutdown the in-flight batches
 // drain within the shutdown timeout. Over a sharded queue (mq.backend: nats)
 // it consumes only the shards this process is assigned (ingest.ClaimShards),
-// so each table has one writer.
-func (a *App) wireIngestWorker() {
+// so each table has one writer. Each served tenant's batch limits are
+// adopted here, checked against the consumer's ack wait at boot and after
+// every reload (ingestLimits): a tenant whose limits do not fit refuses boot
+// over a flat directory, naming both values, and is served with none over a
+// nested one, the registry's rule for the shape.
+func (a *App) wireIngestWorker() error {
+	// The consumer settings are boot config's, one value per process: under
+	// nats the shard durables must agree with them (wireNATSMQ).
+	if a.cfg.MQ.AckWait <= 0 {
+		return errors.New("mq.ack_wait is zero: a Config built without config.Load must set mq.ack_wait, mq.max_ack_pending and mq.prefetch")
+	}
+	consumer := ingest.ConsumerSettings{AckWait: a.cfg.MQ.AckWait, MaxAckPending: a.cfg.MQ.MaxAckPending, Prefetch: a.cfg.MQ.Prefetch}
+	limits := newIngestLimits(a.tenants, consumer.AckWait)
+	err := limits.reconcile(true)
+	a.tenants.Reconciled("ingest", err)
+	if err != nil && !a.tenants.Nested() {
+		return fmt.Errorf("ingest limits: %w", err)
+	}
+	a.ingestLimits = limits
+	a.tenants.AfterAdopt(func([]tenant.ID) { a.tenants.Reconciled("ingest", limits.reconcile(false)) })
 	a.add(component{name: "ingest worker", run: func(ctx context.Context) error {
 		var queue ingest.Queue = a.mq
 		if _, ok := a.mq.(mq.Sharded); ok {
 			// One process per shard at a time, balanced over the ingest
-			// processes through the shared coordinator.
+			// processes through the shared coordinator, each holding at most
+			// its share of max_ack_pending rows and handing a shard over
+			// within the ack wait.
 			var err error
-			if queue, err = ingest.ClaimShards(a.mq, a.coord, ingest.ClaimConfig{}); err != nil {
+			if queue, err = ingest.ClaimShards(a.mq, a.coord, ingest.ClaimConfig{Handover: consumer.AckWait, MaxHeld: consumer.MaxAckPending, SlotExpiry: consumer.AckWait}); err != nil {
 				return err
 			}
 		}
-		stop, failed, err := ingest.StartIngestWorker(ctx, queue, sharedTables{Cache: a.cache, sharing: a.pools.SharingTables}, a.pools.Target, dlqFor(a.tenants))
+		stop, failed, err := ingest.StartIngestWorker(ctx, queue, sharedTables{Cache: a.cache, sharing: a.pools.SharingTables}, a.pools.Target, dlqFor(a.tenants), limits.For, consumer)
 		if err != nil {
 			return err
 		}
@@ -835,6 +869,7 @@ func (a *App) wireIngestWorker() {
 		}
 		return workerErr
 	}})
+	return nil
 }
 
 // wireAuth builds the JWT middleware: one verifier per tenant being served,
@@ -989,6 +1024,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	streamHandler := api.NewStreamHandler(a.hub, a.mq)
 	streamHandler.Metrics = a.sseMetrics
 	streamHandler.Heartbeater = a.keepaliveFor
+	streamHandler.SubscriberQueue = (*settings.Store).SubscriberQueue
 	streamHandler.Served = a.served
 	// Closed when the API server begins shutting down, ending every open
 	// stream at once (see serve).
@@ -997,6 +1033,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 
 	pipesHandler := api.NewPipesHandler(func(s *settings.Store) pipes.Source { return s }, (*settings.Store).Policy, a.chConnFor, a.cache, queryTimeout)
 	pipesHandler.Tenants = a.tenants
+	pipesHandler.CHTarget = a.chTargetFor
 
 	schemaHandler := api.NewSchemaHandler(a.registryFor)
 	schemaHandler.Tenants = a.tenants
@@ -1007,6 +1044,9 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	queryHandler := api.NewQueryHandler(a.chTargetFor, queryTimeout)
 	queryHandler.Tenants = a.tenants
 
+	structuredQueryHandler := api.NewStructuredQueryHandler(a.chConnFor, a.cache, a.registryFor, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, queryTimeout, (*settings.Store).DefaultMaxRows)
+	structuredQueryHandler.CHTarget = a.chTargetFor
+
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,
 		Query:           queryHandler,
@@ -1016,7 +1056,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 		Schema:          schemaHandler,
 		DLQ:             api.NewDLQHandler(a.mq),
 		Pipes:           pipesHandler,
-		StructuredQuery: api.NewStructuredQueryHandler(a.chConnFor, a.cache, a.registryFor, (*settings.Store).Policy, (*settings.Store).TimestampBucketSeconds, queryTimeout, (*settings.Store).DefaultMaxRows),
+		StructuredQuery: structuredQueryHandler,
 
 		AuthMW:       authMW,
 		Tenants:      a.tenants,
@@ -1047,7 +1087,22 @@ func (a *App) healthHandler() *api.HealthHandler {
 	}
 	h := api.NewHealthHandler(append(checks, a.readiness...)...)
 	h.Boot = a.bootState
+	a.wireReadinessMetrics(h)
 	return h
+}
+
+// wireReadinessMetrics exports what h's readiness checks last found (#901),
+// so a replica that left rotation says afterwards which dependency failed.
+func (a *App) wireReadinessMetrics(h *api.HealthHandler) {
+	if !a.cfg.OTel.Enabled && !a.cfg.Prometheus.Enabled {
+		return
+	}
+	reg, err := h.RegisterReadinessMetrics(otel.Meter("wavehouse-api"))
+	if err != nil {
+		slog.Error("failed to register readiness metrics", "error", err)
+		return
+	}
+	a.add(component{name: "readiness metrics", close: withoutContext(reg.Unregister)})
 }
 
 // inlineMetrics is the metrics endpoint to mount on the main router: with
@@ -1123,7 +1178,10 @@ func (a *App) serve(ctx context.Context, name string, srv *http.Server, ln net.L
 	}
 	slog.Info("starting "+name, "addr", ln.Addr().String())
 	served := make(chan error, 1)
-	go func() { served <- srv.Serve(ln) }()
+	go func() {
+		defer observability.Crash("http_server", slog.String("server", name))
+		served <- srv.Serve(ln)
+	}()
 	select {
 	case err := <-served:
 		if errors.Is(err, http.ErrServerClosed) {

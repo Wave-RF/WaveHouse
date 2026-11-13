@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 
@@ -244,6 +245,9 @@ type Source func() (driver.Conn, string)
 // schemas from system.columns over the connection and database source
 // yields.
 func NewSchemaRegistry(source Source, id tenant.ID, refreshInterval func(tenant.ID) time.Duration) *SchemaRegistry {
+	// It carries the tenant, so it reads 0 only where that label is dropped
+	// (#905).
+	observability.ZeroCounter(refreshFailures, observability.CarriesTenant)
 	return &SchemaRegistry{
 		source:          source,
 		tenant:          id,
@@ -300,6 +304,8 @@ func (sr *SchemaRegistry) refresh(ctx context.Context) error {
 	if conn == nil {
 		return fmt.Errorf("%w for tenant %s", ErrNoConnection, sr.tenant)
 	}
+	// Every query of the refresh carries the refresh span's trace context.
+	ctx = chconn.WithTraceContext(ctx)
 
 	// ClickHouse interprets zone-less timestamp strings in the server's default
 	// zone; canonicalization applies the same rule so the instant never changes (#372).
@@ -641,7 +647,7 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 
 // countFailure bumps the tenant's refresh-failure counter.
 func (sr *SchemaRegistry) countFailure(ctx context.Context) {
-	refreshFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("tenant", sr.tenant.String())))
+	refreshFailures.Add(ctx, 1, metric.WithAttributes(observability.TenantLabel(sr.tenant.String())))
 }
 
 // isNullable checks if a ClickHouse type string is Nullable.
