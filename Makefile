@@ -850,10 +850,8 @@ install-playwright-docs: pnpm-install
 # render + gate — `make cov` (scripts/cov report) then renders ONE consolidated
 # report and applies every gate at the end, so a full run prints a single
 # coverage block instead of a render after each suite. Unset (standalone
-# `make test-e2e` etc.) renders + gates inline as before. Exported so the
-# vitest configs can drop their console table under the same flag.
+# `make test-e2e` etc.) renders + gates inline as before.
 COV_DEFER ?=
-export COV_DEFER
 
 # UNIT_TIMEOUT: go test's limit for each package of the unit suite. 15s is the
 # budget a unit package has to fit when the suite runs on its own (#617), as

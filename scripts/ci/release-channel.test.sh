@@ -39,15 +39,15 @@ rejects() {
 
 # --- stable -> latest, for every tag family --------------------------------
 ok "v1.2.3" latest
-ok "clients/go/v1.2.3" latest
+ok "clients/ts/v1.2.3" latest
 ok "1.2.3" latest # bare version (release.sh passes the constructed tag)
 
 # --- prereleases own their own channel, never `latest` ---------------------
 ok "v0.1.0-alpha.1" alpha
 ok "v0.1.0-beta.2" beta
 ok "v1.3.0-rc.1" rc
-ok "clients/go/v0.2.0-rc.1" rc
-ok "clients/go/v2.0.0-beta.3" beta
+ok "clients/ts/v0.2.0-rc.1" rc
+ok "clients/ts/v2.0.0-beta.3" beta
 # Any other prerelease form lands on the catch-all rather than `latest`.
 ok "v1.0.0-canary.1" next
 ok "v1.0.0-next.4" next
@@ -67,7 +67,7 @@ ok "v1.2.3-alphafoo" next
 ok "v1.2.3-preview-rc.1" next
 ok "v1.2.3-betamax" next
 ok "v1.2.3-rcfoo" next
-ok "clients/go/v1.2.3-alpha-extra" next
+ok "clients/ts/v1.2.3-alpha-extra" next
 # ...while the real channels still resolve, with or without a numeric part.
 ok "v1.2.3-alpha" alpha
 ok "v1.2.3-beta" beta
@@ -88,7 +88,7 @@ rejects "v1.2.3-alpha+"
 rejects "v1.2"
 rejects "v1.2.3.4"
 rejects "latest"
-rejects "clients/go/latest"
+rejects "clients/ts/latest"
 rejects "dev"
 rejects ""
 rejects "v"

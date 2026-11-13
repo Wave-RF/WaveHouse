@@ -62,9 +62,8 @@ updates:
       npm-deps:
         patterns: ["*"]
     ignore:
-      # TypeScript 7 (the native port) stays held back: it broke the SDK's build
-      # tooling (since moved to wavehouse-sdk-js), and docs + e2e have not been
-      # checked on it. Drop this ignore once they have.
+      # TypeScript 7 (the native port) stays held back until docs + e2e are
+      # checked on it (#984). Its first reason, the SDK build, moved out.
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
       # The docs site pins the PUBLISHED @wavehouse/sdk (docs/package.json) so a

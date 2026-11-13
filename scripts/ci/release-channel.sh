@@ -19,7 +19,7 @@
 # tags the SDKs left in this repository's history before they moved out.
 #
 # Usage:  scripts/ci/release-channel.sh v1.2.3                -> latest
-#         scripts/ci/release-channel.sh clients/go/v1.2.3-rc.1 -> rc
+#         scripts/ci/release-channel.sh clients/ts/v1.2.3-rc.1 -> rc
 #         scripts/ci/release-channel.sh 0.1.0-alpha.1         -> alpha
 # Exit:   0 with the channel on stdout; 1 on a tag that isn't semver-shaped
 #         (fail loud — a typo'd tag must not silently publish as `latest`).
@@ -33,7 +33,7 @@ if [ -z "$tag" ]; then
 fi
 
 # Drop any component prefix, then the `v`. `${tag##*/}` takes everything after
-# the last slash, so it handles `clients/go/v1.2.3` and a bare `v1.2.3` alike
+# the last slash, so it handles `clients/ts/v1.2.3` and a bare `v1.2.3` alike
 # and needs no per-component list.
 version="${tag##*/}"
 version="${version#v}"

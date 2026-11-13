@@ -197,7 +197,7 @@ jobs:
       # what this job leaves behind. Main only: nothing is saved on other
       # refs. Runs after the artifact upload, so docs-preview starts without
       # waiting on it. Whether the saved entry is the pruned one depends on
-      # which job finishes first on main; lint and unit usually do.
+      # which job finishes first on main; lint usually does.
       - name: Prune pnpm store before save
         if: github.ref == 'refs/heads/main' && steps.setup.outputs.pnpm-cache-hit != 'true'
         run: pnpm store prune

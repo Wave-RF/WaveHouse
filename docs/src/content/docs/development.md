@@ -637,7 +637,7 @@ The one thing to do *before* tagging is promote the changelog: `AGENTS.md` requi
 
 **After** an SDK release is published, raise `docs/package.json`'s `@wavehouse/sdk` range to the new line. A caret range on a `0.x` version floats only within that minor (`^0.1.1` stops at `0.2.0`), so a new **minor** does not reach the docs site — including its live hero demo — until someone bumps it, which is the point: the bump is where you decide that the deployed demo backend and the site's SDK move together. `minimumReleaseAgeExclude` already exempts `@wavehouse/*` from pnpm's 7-day `minimumReleaseAge` (and the Dependabot `cooldown` excludes it too), so the freshly published version installs immediately. The e2e suite's exact pin in `tests/e2e/sdk/package.json` is raised the same way, deliberately. Dependabot will **not** propose a minor or major bump of either — those `@wavehouse/sdk` updates are in the npm `ignore` list in `.github/dependabot.yml` for exactly this reason, since a grouped Monday `deps:` PR is reviewed by someone thinking about dependency hygiene, not about which wire the demo backend speaks. It may propose a patch bump of the e2e suite's pin, which stays on the same wire.
 
-`make release-server` runs [`scripts/release.sh`](https://github.com/Wave-RF/WaveHouse/blob/main/scripts/release.sh), which preflights (on `main`, clean tree, in sync with `origin/main`, the tag free both locally and on the remote, the required `CI` check green on *this exact commit*), prints exactly what will be published, and asks before pushing. `DRY_RUN=1 make release-…` stops after the plan. Tag creation is admin-only via the `release tag protection` ruleset.
+`make release-server` runs [`scripts/release.sh`](https://github.com/Wave-RF/WaveHouse/blob/main/scripts/release.sh), which preflights (on `main`, clean tree, in sync with `origin/main`, the tag free both locally and on the remote, the required `CI` check green on *this exact commit*), prints exactly what will be published, and asks before pushing. `DRY_RUN=1 make release-server VERSION=X.Y.Z` stops after the plan. Tag creation is admin-only via the `release tag protection` ruleset.
 
 Releasing the server publishes no SDK, and the server's and the SDKs' version numbers need not match.
 
@@ -675,7 +675,7 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:v0.1.0 \
 `--signer-workflow` is not optional garnish: `--repo` alone accepts an attestation produced by *any* workflow in the repo. Same point, and the `:dev` equivalent, in [Deployment → Registry](/deployment#registry) and `SECURITY.md`.
 
 :::note[Releasing from the GitHub UI instead]
-Publishing a release from **Releases → Draft a new release** creates the tag, which fires the same workflow — so it works, and GoReleaser's default `mode: keep-existing` (the key is not set in `.goreleaser.yaml`) means it will not overwrite notes you wrote. Two things the `make` targets do for you and the UI does not: none of the preflight checks run, and you must click **Generate release notes** yourself, because a body you publish empty stays empty.
+Publishing a release from **Releases → Draft a new release** creates the tag, which fires the same workflow — so it works, and GoReleaser's default `mode: keep-existing` (the key is not set in `.goreleaser.yaml`) means it will not overwrite notes you wrote. Two things `make release-server` does for you and the UI does not: none of the preflight checks run, and you must click **Generate release notes** yourself, because a body you publish empty stays empty.
 :::
 
 ## The `dev` channel
@@ -684,7 +684,7 @@ Between releases, every push to `main` republishes the image so `:dev` always me
 
 - **`ghcr.io/wave-rf/wavehouse:dev`** — a rolling pointer, plus an immutable `:dev-<sha>` (pruned after 30 days by `cleanup-ghcr.yml`, newest 5 always kept). Built by the same GoReleaser pipeline with `WAVEHOUSE_DEV=1`, which suppresses the GitHub Release. Note a Docker tag is only a pointer: `docker run …:dev` reuses a stale local image unless you `docker pull` first or pass `--pull=always`.
 
-The TypeScript SDK's dev builds come from [its own repository](https://github.com/Wave-RF/wavehouse-sdk-js) once npm publishing is switched on there ([wavehouse-sdk-js#2](https://github.com/Wave-RF/wavehouse-sdk-js/issues/2)).
+The TypeScript SDK's dev builds are published from [its own repository](https://github.com/Wave-RF/wavehouse-sdk-js).
 
 ## CI & review automation
 
