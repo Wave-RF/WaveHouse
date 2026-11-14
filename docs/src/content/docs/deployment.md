@@ -88,7 +88,7 @@ Production images are published to GitHub Container Registry via GoReleaser:
 ghcr.io/wave-rf/wavehouse:<tag>
 ```
 
-`:vX.Y.Z` is the immutable per-release tag. A **stable** release also moves `:latest`; a **prerelease** moves `:alpha` / `:beta` / `:rc` / `:next` instead — chosen from the *first* prerelease identifier matched exactly, so `v0.2.0-rc.1` gives `:rc` while `-alpha1` or `-preview.1` give `:next` — one rule (`scripts/ci/release-channel.sh`), shared with the npm dist-tags — so a release candidate never displaces the `:latest` a shipped stable release owns. `:dev` is the rolling `main`-branch build, and `:dev-<full-commit-sha>` (immutable, pruned after 30 days) captures a single commit. To pin (see the [alpha-stage caution](https://github.com/Wave-RF/WaveHouse#-project-status) in the README), use a `:dev-<full-commit-sha>` tag — the full 40-character commit SHA, not the short form — or an image digest.
+`:vX.Y.Z` is the immutable per-release tag. A **stable** release also moves `:latest`; a **prerelease** moves `:alpha` / `:beta` / `:rc` / `:next` instead — chosen from the *first* prerelease identifier matched exactly, so `v0.2.0-rc.1` gives `:rc` while `-alpha1` or `-preview.1` give `:next` (the rule lives in `scripts/ci/release-channel.sh`), so a release candidate never displaces the `:latest` a shipped stable release owns. `:dev` is the rolling `main`-branch build, and `:dev-<full-commit-sha>` (immutable, pruned after 30 days) captures a single commit. To pin (see the [alpha-stage caution](https://github.com/Wave-RF/WaveHouse#-project-status) in the README), use a `:dev-<full-commit-sha>` tag — the full 40-character commit SHA, not the short form — or an image digest.
 
 Published images carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation (stored in the registry). Verify one before deploying, pinning the signer to the workflow that publishes the tag — `--repo` alone accepts an attestation from any workflow in the repo:
 
@@ -124,7 +124,7 @@ make release-server VERSION=0.1.0
 
 That runs the preflight checks (on `main`, clean tree, in sync with `origin`, tag free, CI green on this commit), shows what will be published, and prompts before creating and pushing the annotated `v0.1.0` tag — which is what triggers the release workflow. Tag creation is restricted to repo admins by the `release tag protection` ruleset.
 
-The TypeScript SDK releases separately under its own `clients/ts/v*` tag; a `v*` tag publishes only the binaries and the container image. Full walkthrough, including what each tag publishes and how to verify provenance: [Development → Cutting a release](/development#cutting-a-release).
+The SDKs release from their own repositories ([`wavehouse-sdk-js`](https://github.com/Wave-RF/wavehouse-sdk-js) and [`wavehouse-sdk-go`](https://github.com/Wave-RF/wavehouse-sdk-go)); a `v*` tag here publishes only the binaries and the container image. Full walkthrough, including what a release publishes and how to verify provenance: [Development → Cutting a release](/development#cutting-a-release).
 
 ## Environment Variables
 
@@ -1134,6 +1134,6 @@ docker compose -f deployments/compose/standalone.yaml up -d
 rm -rf data/         # Removes embedded NATS + Pebble data
                      # (run `make clean-all` to also drop docker volumes)
 make clean           # Removes build artifacts:
-                     # bin/, dist/, clients/ts/dist/, docs/dist/, docs/.dev-dist/
+                     # bin/, dist/, docs/dist/, docs/.dev-dist/
 make build && ./bin/wavehouse
 ```

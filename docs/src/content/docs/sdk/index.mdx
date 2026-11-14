@@ -58,7 +58,7 @@ deno add npm:@wavehouse/sdk
 </script>
 ```
 
-Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.2.0`); jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For pages that can't use ES modules, the bundled IIFE build at `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag. Streaming runs on `fetch`, so it needs no polyfill either way. A bare CDN URL tracks the latest published release; use a range (`@0`, `@0.2`) to float within a major or minor, or the `@dev` tag for unreleased builds from `main` (see [Cutting a release](/development#cutting-a-release)). The SDK and the server share the SSE wire protocol, so pin them as a **pair** — see [Upgrade the SDK and the server together](/sdk/streaming).
+Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.2.0`); jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For pages that can't use ES modules, the bundled IIFE build at `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag. Streaming runs on `fetch`, so it needs no polyfill either way. A bare CDN URL tracks the latest published release; use a range (`@0`, `@0.2`) to float within a major or minor, or the `@dev` tag for unreleased builds from the SDK repository's `main` ([`Wave-RF/wavehouse-sdk-js`](https://github.com/Wave-RF/wavehouse-sdk-js)). The SDK and the server share the SSE wire protocol, so pin them as a **pair** — see [Upgrade the SDK and the server together](/sdk/streaming).
 
   </TabItem>
 </Tabs>

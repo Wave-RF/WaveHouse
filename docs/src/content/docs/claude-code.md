@@ -37,7 +37,7 @@ Two scripts, both committed to the repo:
 | Hook | Behavior |
 | ---- | -------- |
 | `pre-commit` | Runs `make verify` (the static checks listed in [Development → Makefile Targets](/development#makefile-targets), ~30s) — **blocks on failure**. Skipped if `make ci` or `make verify` already ran for the current tree state (cached via `scripts/ci-marker.sh`). A worktree with no `Makefile` has nothing to verify and commits; a missing or failing `scripts/ci-marker.sh` is reported and `make verify` runs. |
-| `pre-push` | Scales the bar to the change set (same classifier CI uses, `scripts/classify-paths.sh`): a **code** change requires the `make ci` marker (`tmp/ci-passed-tree-<TREE-sha>`, from `make ci` or `make ci-remote`); a **docs/prose-only** push requires only the `make verify` marker (`tmp/verify-passed-tree-<TREE-sha>`) — CI classifies a PR by its full file list, so it skips the Go/SDK suites only when the whole PR is docs/prose. A tag of a commit `origin/main` already contains (a release tag) needs no marker. **Blocks** if the required marker is absent. Fail-closed: an unclassifiable push falls back to requiring `make ci`. A pushed commit with no `Makefile` goes through, having no code to validate; one with a `Makefile`, pushed from a worktree without `scripts/ci-marker.sh`, is blocked. |
+| `pre-push` | Scales the bar to the change set (same classifier CI uses, `scripts/classify-paths.sh`): a **code** change requires the `make ci` marker (`tmp/ci-passed-tree-<TREE-sha>`, from `make ci` or `make ci-remote`); a **docs/prose-only** push requires only the `make verify` marker (`tmp/verify-passed-tree-<TREE-sha>`) — CI classifies a PR by its full file list, so it skips the Go/e2e suites only when the whole PR is docs/prose. A tag of a commit `origin/main` already contains (a release tag) needs no marker. **Blocks** if the required marker is absent. Fail-closed: an unclassifiable push falls back to requiring `make ci`. A pushed commit with no `Makefile` goes through, having no code to validate; one with a `Makefile`, pushed from a worktree without `scripts/ci-marker.sh`, is blocked. |
 
 `--no-verify` is for intentional WIP / draft pushes. Agents should not use it — policy in AGENTS.md §"Agent PR Discipline", not regex-enforced.
 
@@ -73,7 +73,7 @@ Notably absent: no `.mcp.json`, no committed status line, no `permissions.allow`
 
 | Command | What it does |
 | ------- | ------------ |
-| `/cover [suite]` | Renders coverage for a suite (unit / integration / e2e / sdk / all / merge) and surfaces drops below threshold |
+| `/cover [suite]` | Renders coverage for a suite (unit / integration / e2e / all / merge) and surfaces drops below threshold |
 | `/docs-review [path\|all]` | Runs the `docs-reviewer` subagent — accuracy vs code, runnable examples, clarity, completeness, + code↔docs sync. No-arg gates the push (writes the docs marker on ship_it); a path/`all` is advisory. Complements misspell / markdownlint / links-validator |
 | `/prepush [all]` | The mandatory pre-push self-review — judges which reviewers in `scripts/pre-push-reviewers.sh` the change needs, runs those in parallel (fresh context), skips the rest on the record (logged), and loops until each reaches `ship_it`. `all` forces the full set |
 
@@ -84,7 +84,7 @@ To add a command: drop a `.md` file in `.claude/commands/`. Filename becomes the
 | Subagent | When to use |
 | -------- | ----------- |
 | `pre-push-reviewer` | **Mandatory before pushing to a PR branch** (enforced by `.claude/hooks/agent-bash-gate.sh`), run in parallel with the other reviewers in `scripts/pre-push-reviewers.sh` — all must reach `ship_it`. Also used for auditing someone else's PR after `wt switch pr:<N>`. Runs the canonical `.github/prompts/pr-review.md` workflow against the local branch in fresh context. Fetches PR comments + CI status + linked-issue acceptance criteria when on a PR branch. Returns `[MUST]`/`[SHOULD]`/`[MAY]` findings + parseable `REVIEWED: <sha>` and `VERDICT: ship_it\|iterate\|block` lines that drive the `tmp/pre-push-reviewer-passed-<sha>` marker. |
-| `docs-reviewer` | **Mandatory before pushing to a PR branch** — runs in parallel with the other pre-push reviewers (all enforced by `.claude/hooks/agent-bash-gate.sh`). Reviews docs **prose** (accuracy-vs-code, runnable examples, clarity, completeness) **and code↔docs sync** (code that changed but whose docs didn't), using `.github/prompts/docs-review.md` over the `scripts/docs-prose.sh` denylist set (Starlight site + governance docs incl. the SDK readme). Default (branch) scope emits `REVIEWED: <sha>` and `VERDICT: ship_it\|iterate\|block` → writes `tmp/docs-reviewer-passed-<sha>`; a path/`all` is advisory (no marker). Posts no PR comments, never edits docs. Complements misspell / markdownlint / starlight-links-validator, never duplicates them. |
+| `docs-reviewer` | **Mandatory before pushing to a PR branch** — runs in parallel with the other pre-push reviewers (all enforced by `.claude/hooks/agent-bash-gate.sh`). Reviews docs **prose** (accuracy-vs-code, runnable examples, clarity, completeness) **and code↔docs sync** (code that changed but whose docs didn't), using `.github/prompts/docs-review.md` over the `scripts/docs-prose.sh` denylist set (Starlight site + governance docs). Default (branch) scope emits `REVIEWED: <sha>` and `VERDICT: ship_it\|iterate\|block` → writes `tmp/docs-reviewer-passed-<sha>`; a path/`all` is advisory (no marker). Posts no PR comments, never edits docs. Complements misspell / markdownlint / starlight-links-validator, never duplicates them. |
 
 Invoke via the `Agent` tool with `subagent_type: pre-push-reviewer`, or via `/agents`.
 
@@ -235,7 +235,7 @@ Helpers along the way:
 - Stale PR ("out-of-date with base branch") → ask Claude to "fix the PR" (loads `pr-sync-with-main` skill — merges main, doesn't rebase or force-push).
 - Reviewing someone else's PR → "review PR 120 locally" / "audit PR 120" (loads `pr-review-locally` skill — `wt switch pr:120` + the relevant reviewers in parallel, no PR comments).
 - Re-trigger a bot reviewer → ask Claude to "ping coderabbit again" — Claude posts the appropriate `@<bot>` comment on the PR.
-- Coverage check on a specific suite → `/cover unit` (or `integration`, `e2e`, `sdk`, `all`).
+- Coverage check on a specific suite → `/cover unit` (or `integration`, `e2e`, `all`).
 
 **Memory**: Claude Code maintains per-project memory in `~/.claude/projects/<slug>/memory/`. `AGENTS.md` is the SHARED source of truth; memory is for personal observations / preferences that don't belong in committed config.
 

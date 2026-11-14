@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Behavioral test for scripts/ci/release-channel.sh — the single rule that maps
-# a release tag to its moving channel pointer. Three publishers depend on it
-# (release.yml's GHCR tag, publish-npm.yml's dist-tag, release.sh's preflight),
-# and its whole job is to keep `v1.3.0-rc.1` from taking `:latest`/`@latest`
+# a release tag to its moving channel pointer. Two callers depend on it
+# (release.yml's GHCR tag and release.sh's preflight), and its whole job is
+# to keep `v1.3.0-rc.1` from taking `:latest`
 # away from a shipped stable release — so the fail-closed cases below matter as
 # much as the happy path. Run by `make verify` (target: test-release-channel),
 # so it gates in CI exactly like a unit test. Dependency-free.
@@ -40,7 +40,6 @@ rejects() {
 # --- stable -> latest, for every tag family --------------------------------
 ok "v1.2.3" latest
 ok "clients/ts/v1.2.3" latest
-ok "clients/go/v1.2.3" latest
 ok "1.2.3" latest # bare version (release.sh passes the constructed tag)
 
 # --- prereleases own their own channel, never `latest` ---------------------
@@ -48,7 +47,7 @@ ok "v0.1.0-alpha.1" alpha
 ok "v0.1.0-beta.2" beta
 ok "v1.3.0-rc.1" rc
 ok "clients/ts/v0.2.0-rc.1" rc
-ok "clients/go/v2.0.0-beta.3" beta
+ok "clients/ts/v2.0.0-beta.3" beta
 # Any other prerelease form lands on the catch-all rather than `latest`.
 ok "v1.0.0-canary.1" next
 ok "v1.0.0-next.4" next

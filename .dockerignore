@@ -19,7 +19,6 @@ bin/
 dist/
 tmp/
 **/node_modules/
-clients/ts/dist/
 
 # --- Local dev state (created by `./bin/wavehouse` or compose runs) ----------
 data/

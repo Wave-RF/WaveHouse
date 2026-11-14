@@ -1,6 +1,6 @@
 module github.com/Wave-RF/WaveHouse
 
-go 1.26.10
+go 1.26.11
 
 tool (
 	github.com/Zxilly/go-size-analyzer/cmd/gsa
@@ -81,7 +81,7 @@ require (
 	github.com/alecthomas/kong v1.15.0 // indirect
 	github.com/alexflint/go-arg v1.6.0 // indirect
 	github.com/alexflint/go-scalar v1.2.0 // indirect
-	github.com/andybalholm/brotli v1.2.6 // indirect
+	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/antithesishq/antithesis-sdk-go v0.8.0-default-no-op // indirect
 	github.com/aws/aws-sdk-go v1.49.4 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.3 // indirect

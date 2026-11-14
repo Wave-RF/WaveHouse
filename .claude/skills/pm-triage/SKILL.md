@@ -52,7 +52,7 @@ Turn raw inputs — dogfooding logs, the open-issue backlog, code TODOs, PR/issu
 
 ## Mode: todos
 
-1. `rg -n "TODO|FIXME|HACK|XXX" internal/ cmd/ clients/ Makefile --glob '!**/node_modules/**'` (+ non-Go).
+1. `rg -n "TODO|FIXME|HACK|XXX" internal/ cmd/ pkg/ Makefile --glob '!**/node_modules/**'` (+ non-Go).
 2. Bucket: **untracked-worth-tracking** / **already-tracked** (map TODO→issue) / **stale** (already implemented → flag for removal) / **skip** (musings, micro-opts, false-positives). Read the few that need context (goroutine lifecycles, determinism, security).
 3. Watch for self-acknowledged security/correctness TODOs (`// TODO: prevent table-enumeration`, non-deterministic keys, unbounded growth, "fatal on boot") — those usually warrant issues.
 4. File the worthy ones; cite the exact TODO site + provenance.

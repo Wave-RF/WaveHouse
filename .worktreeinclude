@@ -1,5 +1,4 @@
 node_modules/
 .bin/
-clients/ts/dist/
 docs/dist/
 docs/.astro/

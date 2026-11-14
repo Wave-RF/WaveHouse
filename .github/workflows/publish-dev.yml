@@ -16,8 +16,6 @@ name: Publish dev image
 # `:alpha`/`:beta`/`:rc`/`:next` for a prerelease, which therefore never
 # touches `:latest`. Cleanup of old dev-<sha> tags is handled by
 # cleanup-ghcr.yml.
-#
-# The TypeScript SDK publishes separately — see publish-npm.yml.
 on:
   push:
     branches: [main]
