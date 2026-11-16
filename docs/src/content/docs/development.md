@@ -184,10 +184,10 @@ They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear
 
 ### Using the SDK against `make dev`
 
-There's no bundled playground — point an `@wavehouse/sdk` client at your local server (`baseURL: "http://localhost:8080"`); the trial policy `make dev` seeds into `./settings` authorizes the demo-table requests:
+There's no bundled playground — point an SDK client at your local server (`baseURL: "http://localhost:8080"` for `@wavehouse/sdk`, `wavehouse.New("http://localhost:8080")` for the Go SDK); the trial policy `make dev` seeds into `./settings` authorizes the demo-table requests:
 
-:::caution[For **streaming**, use `@wavehouse/sdk` 0.2.0 or later against a local server]
-A `make dev` server speaks the v2 SSE wire — an `event: schema` frame plus positional rows — which `@wavehouse/sdk` speaks from 0.2.0; the 0.1.x line speaks the pre-v2 one. Point a 0.1.x client at `/v1/stream` and every event arrives with `data: undefined`, with no `error` callback and nothing to catch, while REST and structured queries keep working — which makes it easy to misread as a server bug. Use 0.2.0 or later for streaming work. See [Transport Behavior](/sdk/streaming#transport-behavior), which carries the full danger note on upgrading the SDK and the server together.
+:::caution[For **streaming**, use `@wavehouse/sdk` 0.2.0 or later]
+A `make dev` server speaks the v2 SSE wire, an `event: schema` frame plus positional rows, which `@wavehouse/sdk` speaks from 0.2.0 and the Go SDK from its first release; the 0.1.x line of `@wavehouse/sdk` speaks the pre-v2 one, and against this server every event arrives with `data: undefined` while REST calls keep working. Use a current SDK; see [SDK Streaming](/sdk/streaming).
 :::
 
 ```bash

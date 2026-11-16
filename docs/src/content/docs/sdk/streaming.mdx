@@ -1,0 +1,313 @@
+---
+title: "SDK Streaming & Live Queries"
+description: "Real-time SSE streams, reconnects and resumption, and backfill-then-live queries in the TypeScript and Go SDKs."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Real-time consumption of the rows ingested into a table, over `GET /v1/stream` (server-sent events). Both SDKs reconnect on their own, resume from the last event they delivered, and turn the server's positional wire format back into rows. The TypeScript SDK adds client-side filtering and live queries, which backfill history before going live. The examples assume a client called `wh` (see [Creating a Client](/sdk#creating-a-client)) and, in Go, a `ctx`.
+
+## Opening a stream
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+const stream = wh.from('clicks').stream({ since: '2026-01-01T00:00:00Z' });
+
+const unsub = stream.subscribe({
+  next: (event) => console.log(event.table, event.timestamp, event.data),
+  status: (state) => updateIndicator(state), // 'connecting' | 'live' | 'reconnecting' | 'closed'
+  error: (err) => console.error(err.code, err.message),
+});
+
+// Later: closes the connection once no other subscriber remains
+unsub();
+```
+
+`.stream()` on a `TableRef` or a `QueryBuilder` returns a `StreamController`, which connects at once. It is **not** thenable.
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+// The ctx bounds the whole subscription, not only the connect: here, until Ctrl-C.
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+defer stop()
+
+sub, err := wh.Subscribe(ctx, "clicks", &wavehouse.SubscribeOptions{
+    Since: time.Now().Add(-time.Hour), // replay the last hour first
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer sub.Close()
+
+for sub.Next() {
+    ev := sub.Event()
+    fmt.Println(ev.ReceivedAt, ev.Row())
+}
+// Err is nil when the loop ended because ctx was canceled or Close was called.
+if err := sub.Err(); err != nil {
+    log.Fatal(err)
+}
+```
+
+`Subscribe` returns once the server has answered `200` with an event stream. It returns an error, and no subscription, when the first connection is refused for good, or when every attempt the [`RetryPolicy`](/sdk#go-options) allows has failed. After that, the subscription reconnects on its own until it is closed, its context is done, or the server refuses it for good, so **always `Close` it**: its goroutine and connection last until then.
+
+  </TabItem>
+</Tabs>
+
+**An unknown or misspelled table is not an error.** The server accepts the stream and matches no events, so the stream stays live and silent in both SDKs. Check the table first, with its [schema](/sdk/admin#schema) or a one-row query, if a typo is possible. An empty table name is refused: by the server with a terminal `400` in TypeScript, and by `Subscribe` before anything is sent in Go.
+
+## Consuming events
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+**Callbacks.** `.subscribe({ next, status?, error? })` returns an unsubscribe function. Each callback is isolated: one that throws is logged to the console and costs only its own delivery, never the stream, the other subscribers, or a concurrent `for await`. A throw is never routed to your `error` callback, so a handler that swallows its own failures fails silently; wrap the body in your own `try`/`catch` if you need to know. A subscriber that registers after the stream ended on an error receives that error, so it learns why the stream closed.
+
+**Async iteration.**
+
+```ts
+for await (const event of wh.from('clicks').stream()) {
+  console.log(event.table, event.data);
+  if (shouldStop) break; // breaking closes the stream
+}
+```
+
+Events that arrive before anyone consumes them are kept for an iterator, and dropped once a callback subscriber registers with no iterator started, so a callback-only stream doesn't grow in memory.
+
+**`.close()`** closes the stream and releases its connection. **`.status`** is the current state: `'connecting' | 'live' | 'reconnecting' | 'closed'`.
+
+**`.connected(timeoutMs?)`** resolves once the stream reaches `live`, and rejects if it is already `closed`, closes before connecting, or is not live after `timeoutMs` (default `5000`). Use it when something depends on the subscription being established:
+
+```ts
+const stream = wh.from('clicks').stream();
+stream.subscribe({ next: (e) => console.log(e) });
+await stream.connected();
+await wh.from('clicks').insert({ page: '/home' });
+```
+
+A *timeout* rejection does not stop the transport, which keeps re-dialing; it means "not live yet", so call `.close()` if you want it to stop. A rejection because the stream closed means the transport has already stopped.
+
+  </TabItem>
+  <TabItem label="Go">
+
+**`Next`, `Event`, `Err`, `Close`**, read like `database/sql.Rows`, as above. `Next` waits for the next event and returns `false` once the subscription is closed, its context is done, or it ended with an error; `Err` then says which (`nil` for a close or a canceled context). `Next` and `Event` belong to one goroutine; `Close` and `Err` may be called from any. `Close` is safe to call more than once and returns once the connection is closed.
+
+**A channel.** To select over the stream together with other sources, range over `sub.Events()` instead of calling `Next`. It is the same stream, not a copy, so use one or the other. The channel closes when the subscription ends; then `sub.Err()` says why.
+
+```go
+tick := time.NewTicker(time.Minute)
+defer tick.Stop()
+for events := sub.Events(); ; {
+    select {
+    case ev, ok := <-events:
+        if !ok {
+            if err := sub.Err(); err != nil {
+                log.Print(err)
+            }
+            return
+        }
+        fmt.Println(ev.Row())
+    case <-tick.C:
+        fmt.Println("still listening")
+    }
+}
+```
+
+**Keep reading.** The subscription buffers 64 events for a consumer that falls behind; past that it stops reading the connection, and the server then drops events for that connection without telling it.
+
+  </TabItem>
+</Tabs>
+
+## Options
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+`StreamOptions`:
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `since` | `string` | An RFC 3339 timestamp: replay the events the server received from then on, before the live ones |
+| `signal` | `AbortSignal` | Close the stream when aborted |
+| `headers` | `Record<string, string>` | Headers for this subscription's connections, over `options.headers` ([Custom headers](/sdk#custom-headers)) |
+| `attemptTimeoutMs` | `number` | A deadline for each connect, up to the response headers, over `options.attemptTimeoutMs`; `0` turns it off |
+
+  </TabItem>
+  <TabItem label="Go">
+
+`SubscribeOptions` (a `nil` pointer streams live events only):
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `Since` | `time.Time` | Replay the events the server received from this time on, before the live ones |
+| `ResumeID` | `string` | Resume after a checkpoint: a previous `Event.ID`, sent as `Last-Event-ID`. It wins over `Since` |
+| `Header` | `http.Header` | Headers for this subscription's connections, over the client's ([Custom headers](/sdk#custom-headers)) |
+| `OnState` | `func(State)` | Called with each change of connection state: `StateConnecting`, `StateLive`, `StateReconnecting`, `StateClosed` |
+| `OnDrop` | `func(error)` | Called when a frame is skipped for good ([Frames that can't be read](#frames-that-cant-be-read)) |
+
+`OnState` and `OnDrop` run in order, one call at a time, on a goroutine of their own and never under a lock of the SDK's, so a slow callback delays only later reports, never events or `Close`. The calls up to the first `StateLive` complete before `Subscribe` returns, so don't call `Subscribe` holding a lock `OnState` takes. `StateClosed` comes last, exactly once, and can come after `Close` has returned.
+
+A long-lived consumer can checkpoint the last event and resume from it after a restart:
+
+```go
+sub, err := wh.Subscribe(ctx, "clicks", &wavehouse.SubscribeOptions{
+    ResumeID: loadCheckpoint(), // "" on the first run
+    OnState:  func(s wavehouse.State) { log.Println("stream", s) },
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer sub.Close()
+for sub.Next() {
+    ev := sub.Event()
+    fmt.Println(ev.Row())
+    saveCheckpoint(ev.ID)
+}
+```
+
+  </TabItem>
+</Tabs>
+
+## Events
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+interface StreamEvent<T> {
+  table: string;     // the table name
+  timestamp: string; // when WaveHouse received the event (RFC 3339)
+  data: T;           // the row
+}
+```
+
+`data` is a row object with a **null prototype**: a ClickHouse column may legitimately be named `__proto__`, and on an ordinary object that assignment would hit the inherited setter and the value would vanish. Property access, spreading, `JSON.stringify` and destructuring behave normally; what doesn't is anything inherited from `Object.prototype`, so use `Object.hasOwn(row, 'x')` rather than `row.hasOwnProperty('x')`. A column the producer omitted arrives as an explicit `null`.
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+type Event struct {
+    ID         string    // the server's SSE id, when it received the row; a ResumeID
+    Table      string
+    ReceivedAt time.Time // the server's received_timestamp, parsed; zero if absent
+    Columns    []string  // the names, in order; shared between events, don't modify
+    Values     []any     // one per column; numbers are json.Number
+}
+```
+
+`ev.Row()` returns the values by column name as a `wavehouse.Row`, and `ev.Decode(&dst)` stores the row in a struct or map as `encoding/json` would, with integer fields (`uint64` included) exact. A column the row did not carry is `nil`.
+
+  </TabItem>
+</Tabs>
+
+The server sends the column list in an `event: schema` frame, before the first row and again when it changes, and each row as a positional array; both SDKs keep the announced list and zip each row against it, so you get rows by name. The list is already reduced to the columns the connection's role may read. Values are as the producer sent them, not as ClickHouse stored them, except that top-level `DateTime`/`DateTime64` values arrive in canonical RFC 3339 UTC (`2026-06-21T04:00:00.123Z`), matching what `/v1/query` returns. A value WaveHouse couldn't canonicalize (ingest is fail-open) streams in the producer's spelling ([Timestamp canonicalization](/api#timestamp-canonicalization)). A raw SSE consumer must do the zipping itself; see [the wire format](/api#get-v1stream--server-sent-events-stream).
+
+## Transport Behavior
+
+| | TypeScript | Go |
+| --- | --- | --- |
+| Reconnects | without limit, until `close()` or a terminal error | without limit once connected; the first connect is bounded by `RetryPolicy.MaxAttempts`, and `Subscribe` returns the last error |
+| Backoff | jittered exponential from 1 s, capped at 30 s; each wait is 50–100% of its nominal value | the `RetryPolicy`'s: `MinBackoff` (500 ms) doubling, ±20% jitter, capped at `MaxBackoff` (30 s) |
+| Backoff resets | after a connection held for 3 s | after a connection delivered an event or stayed up for 30 s |
+| `Retry-After` on a retryable answer | a floor under that wait, clamped to 30 s | the wait, capped at `MaxBackoff` |
+| A server's `retry:` field | a floor under every later wait, clamped to 30 s | a floor under every later wait |
+| Per-connect deadline | `attemptTimeoutMs`, up to the response headers (`SSE_ATTEMPT_TIMEOUT`, retried) | `RetryPolicy.AttemptTimeout`, up to the response headers |
+
+`options.maxRetries` (TypeScript) bounds REST calls only. Neither SDK puts a deadline on an established stream, which is long-lived. A schedule resets only after a connection has *held*, so a server that accepts and immediately closes (slow-consumer eviction, a half-broken upstream) can't pin the client at sub-second retries.
+
+**What re-dials.** A dropped connection, a network or read error, a per-connect timeout, a frame that can't be read ([below](#frames-that-cant-be-read)), and a retryable answer: a `5xx`, a `408` or a `429`, unless the body says `retryable: false`. A `429` from a rate limiter in front is honored the same way, with its `Retry-After`. The token provider and header function run on every connect: in TypeScript a rejection is a retryable `SSE_AUTH_ERROR`; in Go an error is returned by `Subscribe` on the first connect and retried once the stream has been live.
+
+**What ends a stream.** Any other `4xx`, a redirect while the request carries a credential ([Redirects](/sdk/reference#redirects)), a `200` that isn't `text/event-stream` (usually an auth gateway's login page), and, in TypeScript, an unusable base URL or an `options.fetch` that returns no readable body. TypeScript reports the error to the subscribers' `error` callbacks and closes the stream; Go returns it from `Subscribe`, or from `Err` once the subscription has ended. The codes are in [Error handling](/sdk/reference#error-handling).
+
+The `4xx` WaveHouse raises on this route are a `400` for a missing table or a malformed `X-Tenant-ID`, and the `404` of [tenant resolution](/deployment#multi-tenant-deployments) for a tenant it does not serve (a stream that sends no `X-Tenant-ID` is tenant `0`'s, and a [nested settings directory](/deployment#the-nested-settings-directory) may have no `0` folder). Any other `404` or `405` means the request never reached the route, usually a base-URL path prefix the proxy didn't strip. WaveHouse never rejects a stream for a **bad token**: `/v1/stream` is ungated, so an expired or missing token resolves to the `default_role` and gets a `200` with a filtered view, not a `401` ([#239](https://github.com/Wave-RF/WaveHouse/issues/239) tracks enforcing expiry). That is why the token provider runs on every connect. The token-related refusal it does raise is a retryable `503` with `Retry-After: 30`, for a token sent while the tenant's [JWKS has not been fetched yet](/api#authentication); a nested directory also answers a retryable `503` for a tenant whose settings folder was rejected. Any other `4xx` comes from something in front, such as an auth gateway or a proxy.
+
+In a browser going cross-origin, a rejection reaches you only when it passes CORS and the gateway answered whatever preflight the request triggers (`Authorization`, configured headers, or `Last-Event-ID` once the stream resumes). Otherwise it arrives as a retryable `SSE_NETWORK_ERROR`, indistinguishable from a drop, and is retried.
+
+:::note[SSE connection limit]
+The TypeScript SDK warns above 5 concurrent SSE connections, just under a browser's 6-per-host limit for HTTP/1.1. HTTP/2 multiplexes over one connection, so the limit doesn't apply there.
+:::
+
+### Resumption
+
+A reconnect resumes from the last event the SDK **delivered**: it sends that event's id as `Last-Event-ID`, and the server gap-fills what was missed. Before any event has been delivered, a reconnect replays from `since` / `Since` when you gave one, else from the start of the first live connection, taken from the server's `Date` header (or the local clock less 5 s when there is none), so rows ingested during the backoff are not lost. In Go, `ResumeID` starts a new subscription after a checkpointed event.
+
+:::caution[Resumption is at-least-once, and time-bounded]
+Delivery across a reconnect is **at-least-once**. The event id is the time the server received the event, and the server replays from that instant inclusively, so the last event you saw, and anything sharing its timestamp, arrives again; every row of one ingest request shares one id. Neither SDK deduplicates live events, so key on your own row identity if duplicates matter.
+
+Replay is also bounded by the [`stream.gap_window_minutes`](/settings-directory#streaming) of the tenant you stream from, 15 minutes by default. A drop longer than that resumes with a hole and **no signal**, because the purged messages are gone ([#951](https://github.com/Wave-RF/WaveHouse/issues/951)); so does a replay spanning the upgrade across the [v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope). Backfill over REST if you need those events.
+
+Two more server limitations: events published while a connection opens can be missed ([#784](https://github.com/Wave-RF/WaveHouse/issues/784)), and a column change across a gap-fill may not be re-announced ([#543](https://github.com/Wave-RF/WaveHouse/issues/543)). For the second, both SDKs refuse a row whose length disagrees with the announced columns and reconnect, which makes the server announce them again, so an added or removed column costs a reconnect rather than mislabeled values. A **same-length** change (a `RENAME COLUMN`, or a drop paired with an add) is the case a length check cannot see: values are zipped under the wrong names until the next announcement or reconnect.
+:::
+
+### Frames that can't be read
+
+A frame the SDK can't decode usually means a corrupted connection, so the first time, the stream reconnects from the last delivered event. If the same frame fails again at the same place after that reconnect, it is bad at the source: it is skipped, the resume point moves past it, and the stream goes on. Neither SDK ever reports a frame's payload, only the reason and the frame's id.
+
+| | TypeScript | Go |
+| --- | --- | --- |
+| Reported on the first failure | a retryable `SSE_PROTOCOL_ERROR`, then a reconnect | nothing; a reconnect |
+| Reported when skipped | `SSE_FRAME_DROPPED` on the `error` callback, which does **not** end the stream | `OnDrop` |
+| Frames this covers | a data frame that isn't JSON, arrives before any schema frame, has a row that isn't an array or whose length disagrees with the announced columns; a schema frame that is malformed or names a column twice | a data frame that isn't JSON or is over the 32 MiB cap; a schema frame that is malformed or names a column twice |
+| Buffer cap | 16 MiB: an overflow is reported as `SSE_PARSE_ERROR` and the connection reopened | 32 MiB, as above |
+
+In Go, a row that arrives before the schema frame or whose length disagrees with the columns is never skipped: each time, the connection is reopened from the last delivered event, so the server announces the columns again.
+
+### Server-side policy filtering
+
+Access-control policy applies on the server before anything reaches the client: tables the connection's role can't `select` are skipped, denied columns are stripped from each event, and the role's row-level `filter` is evaluated per subscriber against the connection's JWT claims. A stream on a row-policied table delivers only the rows the policy admits for that connection and, where the server's in-memory comparison can't prove a match, fewer; see [Access control — where each rule is enforced](/access-control#where-each-rule-is-enforced). Claims are captured when the connection opens: a policy change applies from the next event, replayed or live, while a token's expiry or a claim change takes effect on reconnect.
+
+## Client-side stream filtering
+
+TypeScript only. When a `QueryBuilder` with `.where()` filters or `.select()` columns calls `.stream()`, the returned stream applies them on the client:
+
+```ts
+const stream = wh.from('clicks')
+  .select('page', 'button')
+  .where('page', '=', '/home')
+  .stream();
+// Only events where page === '/home', with only page and button
+```
+
+Every [filter operator](/sdk/queries#filters) works here. Ordered comparisons (`>`, `>=`, `<`, `<=`) apply only when both sides are numbers or both are strings (strings compare lexicographically, which suits ISO-8601 timestamps); a mismatch doesn't match. `like` matches **case-insensitively** here, while ClickHouse's `LIKE` on the query path is case-sensitive, so inside one `liveQuery()` a pattern like `'/Home%'` can admit live events whose historical counterparts the backfill excluded.
+
+## Live queries
+
+TypeScript only. A live query combines a backfill (the builder's `.fetch()`) with the live stream: an initial snapshot, then updates.
+
+```ts
+const lq = wh.from('clicks')
+  .selectAll()
+  .where('page', '=', '/home')
+  .orderBy('received_timestamp', 'desc')
+  .limit(100)
+  .liveQuery({
+    initial: (result) => setRows(result.data ?? []), // once, with the backfill's Result
+    next: (event) => addRow(event.data),              // each live event
+    error: (err) => console.error(err),
+  });
+
+// Cleanup
+lq.close();
+```
+
+`liveQuery(subscriber, opts?)` takes a `StreamSubscriber` (`next`, plus optional `initial`, `status` and `error`) and the same `StreamOptions` as `.stream()`. Its `headers`, `attemptTimeoutMs` and `signal` apply to the backfill request as well as the stream, so a tenant header reaches both. An aborted `signal` ends the live query like `.close()`: neither `initial()` nor `next()` is called after it, even by a backfill still in flight.
+
+### How it works
+
+1. It opens the stream **first** and buffers the events that arrive.
+2. It runs the backfill and calls `initial()` with its `Result`.
+3. It drops the buffered events the backfill already covers: those whose `received_timestamp` is at or before the newest `received_timestamp` among the fetched rows, compared as instants. When an event's own row carries a `received_timestamp` column, that column is compared; otherwise the event's frame timestamp stands in for it.
+4. It delivers the rest through `next()` and switches to live delivery.
+
+Opening the stream first closes the window between the backfill and the stream starting: events arriving during the backfill are buffered rather than missed.
+
+**Deduplication is best-effort** until the server can say how far a read reaches into the stream ([#951](https://github.com/Wave-RF/WaveHouse/issues/951)). A table with no `received_timestamp` column, or a `.select()` that leaves it out, has nothing to compare against, so events that arrived during the backfill may repeat rows already in `initial()`. The frame timestamp (when WaveHouse received the event) is earlier than a column filled by `DEFAULT now64()` at insert, so where the row carries no column of its own, a row can repeat or be dropped near the boundary. And it compares raw rows only: an aggregating backfill can't tell whether a live event is already in its numbers.
+
+**When the backfill fails.** A backfill that returns an error `Result` still calls `initial()`, with `result.error` set, and every buffered event is then delivered. A backfill that throws instead (an `auth` callback that rejects, since a REST call has no `Result` for that) never calls `initial()`, but the buffered events are still delivered and the stream goes on, so treat an `initial()` that never fires as its own failure if a snapshot matters. A callback that throws during the flush is logged, like any other subscriber callback, and the flush continues.
+
+Events reach a stream before they reach ClickHouse: the stream reads them from the message queue, and the ingest worker writes them to ClickHouse later, in batches ([Ingest pipeline](/ingest-pipeline)). So a re-fetch made right after an event arrives can miss the newest rows.

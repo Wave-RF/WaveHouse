@@ -384,7 +384,7 @@ The e2e suite pins `@wavehouse/sdk` to an exact released version, bumped deliber
 
 | Backend change | SDK considerations (paths in the SDK repo) |
 | -------------- | ------------------------------------------ |
-| New user-facing API endpoint | Add a typed client method (in `src/client.ts` or the relevant subsystem file: `query-builder.ts`, `pipes.ts`, `stream/`, etc.); update the matching SDK doc page under `docs/src/content/docs/sdk/` here (`queries`, `streaming`, `pipes`, `admin`, or `reference` by topic — plus the API tree in `reference.md`) |
+| New user-facing API endpoint | Add a typed client method (in `src/client.ts` or the relevant subsystem file: `query-builder.ts`, `pipes.ts`, `stream/`, etc.); update the matching SDK doc page under `docs/src/content/docs/sdk/` here (`queries`, `streaming`, `pipes`, `admin`, or `reference` by topic — plus the API tree in `reference.mdx`) |
 | Change to JWT auth / role extraction | Update auth handling in `src/http.ts` and types in `src/client.ts` |
 | Change to `EventMessage` / ingest event format | Update payload types in `src/` (some are codegen-regenerated — re-run the SDK codegen CLI) |
 | New / changed structured query AST | Update `src/query-builder.ts` types + builder methods |
