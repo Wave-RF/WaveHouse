@@ -106,7 +106,7 @@ if err != nil {
 ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 defer cancel()
 if _, err := wh.From("clicks").Limit(10).Fetch(ctx); errors.Is(err, wavehouse.ErrAttemptTimeout) {
-    fmt.Println("every attempt stalled:", err)
+    fmt.Println("the last attempt stalled:", err)
 }
 ```
 
@@ -116,7 +116,7 @@ if _, err := wh.From("clicks").Limit(10).Fetch(ctx); errors.Is(err, wavehouse.Er
 - **What it bounds.** On a REST call, one attempt from sending to the end of the response body. On a stream, each connect up to the response headers, never an established stream.
 - **It is not your deadline.** The caller's signal or context is separate, and still ends the call at once, unretried.
 - **A timed-out attempt is retried** after a backoff while attempts remain, under the rules for a transport error above: a raw SQL or pipe call is not resent once its request may have reached the server. A stream re-dials it like any connect failure.
-- **The final error** names the attempt count: `ATTEMPT_TIMEOUT` in TypeScript (`SSE_ATTEMPT_TIMEOUT` on a stream), and in Go an error that matches `wavehouse.ErrAttemptTimeout` and does **not** match `context.DeadlineExceeded`.
+- **The final error**, when the last attempt timed out, names the attempt count: `ATTEMPT_TIMEOUT` in TypeScript (`SSE_ATTEMPT_TIMEOUT` on a stream), and in Go an error that matches `wavehouse.ErrAttemptTimeout` and does **not** match `context.DeadlineExceeded`.
 
 ## Redirects
 
@@ -158,7 +158,7 @@ A REST call never throws for anything the server returns: every API error comes 
 | 3xx (0 in a browser) | `REDIRECT` | No | A redirect not followed, because the request carries a credential ([Redirects](#redirects)) |
 | 2xx | `DECODE_ERROR` | No | A success whose body is not JSON, such as an intermediary's HTML page or a raw SQL `FORMAT` clause. Sent once, never resent |
 | 0 | `NETWORK_ERROR` | Yes | No answer arrived. Retried on reads and ingest; for raw SQL and pipes, see above |
-| 0 | `ATTEMPT_TIMEOUT` | Yes | Every attempt hit `attemptTimeoutMs`; the message names the count |
+| 0 | `ATTEMPT_TIMEOUT` | Yes | The last attempt hit `attemptTimeoutMs`; the message names how many attempts were made. Not retryable on raw SQL and pipes, which are not resent once the request may have left |
 | 0 | `ABORTED` | No | Canceled through the `AbortSignal` |
 | 0 | `INVALID_QUERY` | No | A builder misuse, refused before anything was sent |
 
