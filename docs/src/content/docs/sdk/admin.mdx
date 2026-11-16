@@ -268,4 +268,4 @@ fmt.Println(v.Version, v.GitCommit, v.BuildTime, v.GoVersion)
   </TabItem>
 </Tabs>
 
-`version` is the release without its leading `v`, or a pseudo-version for an untagged build; `git_commit` is `unknown` when the build carried no VCS stamp.
+`version` is the release without its leading `v` on a release build, or a git-describe string or pseudo-version otherwise; `git_commit` is `unknown` when the build carried no VCS stamp (the full table is in the [API reference](/api#get-version--build-info)).

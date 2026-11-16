@@ -107,7 +107,7 @@ For pages that cannot use ES modules, `dist/index.global.js` is a self-contained
 
 **Browsers.** Every TypeScript SDK feature works natively. `fetch`, `AbortController` and `ReadableStream` are built into every modern browser, so no polyfill is needed.
 
-**Node.js.** Every feature, streaming included, works in Node 22 and later (the package's minimum, per `engines.node`). 22 is the only line the SDK is tested against, and older releases are past end-of-life upstream. Streaming runs on the same `fetch` and `ReadableStream` globals as the rest of the SDK, so it needs no `EventSource` polyfill.
+**Node.js.** Every feature, streaming included, works in Node 22 and later (the package's minimum, per `engines.node`). Its unit tests run on Node 22, and the build is smoke-tested on 22 and 24; older releases are past end-of-life upstream. Streaming runs on the same `fetch` and `ReadableStream` globals as the rest of the SDK, so it needs no `EventSource` polyfill.
 
 **Go.** Go 1.26 or newer, on any platform the standard library supports. The SDK uses `net/http` and nothing outside the standard library.
 
