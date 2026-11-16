@@ -133,7 +133,7 @@ Cookies relied on through a browser's implicit `same-origin` credentials mode ar
 
 A REST call never throws for anything the server returns: every API error comes back in `Result.error`. A stream reports its errors to the subscribers' `error` callbacks instead, since it has no single result. The SDK does throw on caller and environment errors:
 
-- `createClient` throws a `TypeError` for a `baseURL` that names no host or carries a query or fragment, and for an invalid `options.maxRetries`. A REST call rejects with a `TypeError` for a base that is otherwise unusable; a stream reports it as a terminal `SSE_CONNECT_ERROR`.
+- `createClient` throws a `TypeError` for a `baseURL` that names no host, uses a scheme other than `http`/`https`, or carries a query or fragment, and for an invalid `options.maxRetries`. A REST call rejects with a `TypeError` for a base that is otherwise unusable; a stream reports it as a terminal `SSE_CONNECT_ERROR`.
 - A rejecting `auth` callback, or a rejecting `options.headers` function, propagates out of a REST call, unretried. On a stream it is a retryable `SSE_AUTH_ERROR`.
 - `.stream()` and `.liveQuery()` throw in a runtime with no global `fetch` and no `options.fetch`. A REST call in such a runtime returns a retried `NETWORK_ERROR` instead.
 

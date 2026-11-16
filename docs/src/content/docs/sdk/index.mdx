@@ -276,12 +276,12 @@ Every call that does I/O takes a `context.Context` first; bound or cancel the ca
 
 Both SDKs read the base URL by the same rules, so one input resolves to the same base in either:
 
-- **The scheme is optional.** Without one, a loopback host (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) gets `http://` and any other host gets `https://`, so `localhost:8080` and `wavehouse.example.com` both work. An explicit scheme is never changed, so an `http://` is never upgraded. It must be `http` or `https`: Go's `New` refuses any other, and a TypeScript stream ends with `SSE_CONNECT_ERROR`, but a TypeScript REST call with another scheme fails as a retried `NETWORK_ERROR`.
+- **The scheme is optional.** Without one, a loopback host (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) gets `http://` and any other host gets `https://`, so `localhost:8080` and `wavehouse.example.com` both work. An explicit scheme is never changed, so an `http://` is never upgraded. It must be `http` or `https`: Go's `New` and TypeScript's `createClient` both refuse any other, `ws://` and `wss://` included, since streaming is plain HTTP and there is no WebSocket endpoint.
 - **It must name a host.** A bare path such as `/api/wavehouse` names none, so it is refused rather than read as a host called `api`. A browser app that talks to a same-origin WaveHouse builds an absolute base: `` `${location.origin}/api/wavehouse` ``.
 - **No query string or fragment.** Request paths are joined onto the base, so either could only be dropped; both are refused.
 - **A path prefix is kept**, and a trailing slash is optional (see below).
 
-The TypeScript `createClient` throws a `TypeError` for a base with no host, a query or a fragment. A base that is otherwise unusable fails per call: a REST call rejects with a `TypeError`, and a stream reports a terminal `SSE_CONNECT_ERROR` to the subscriber's `error` callback. A `ws://` or `wss://` base ends a stream the same way: streaming is plain HTTP, and there is no WebSocket endpoint. Go's `New` returns an error for every one of these.
+The TypeScript `createClient` throws a `TypeError` for a base with no host, a scheme other than `http`/`https`, a query or a fragment. A base that is otherwise unusable fails per call: a REST call rejects with a `TypeError`, and a stream reports a terminal `SSE_CONNECT_ERROR` to the subscriber's `error` callback. Go's `New` returns an error for every one of these.
 
 #### Serving under a path prefix
 
