@@ -31,6 +31,10 @@ const r2 = await clicks.select('page').limit(10);
 ```go
 recent := wh.From("clicks").Where("score", wavehouse.Gt, 10).OrderBy("received_timestamp", wavehouse.Desc).Limit(100)
 rows, err := recent.Select("page", "score").Fetch(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(len(rows))
 ```
 
 `From()` returns a `*wavehouse.Query`. It is immutable: every method returns a modified copy and leaves its receiver alone, so a partly built query can be kept, shared between goroutines and extended in several directions. Nothing is sent until `Scan` or `Fetch`, and the same `From(table)` starts an [insert](#inserting-rows).
@@ -63,9 +67,15 @@ var top []struct {
     Views uint64 `json:"views"` // exact, even above 2^53
 }
 err := wh.From("clicks").Select("page").Count("*", "views").GroupBy("page").Scan(ctx, &top)
+if err != nil {
+    log.Fatal(err)
+}
 
 // Or as []wavehouse.Row, with typed accessors:
 rows, err := wh.From("clicks").Select("page", "score").Limit(10).Fetch(ctx)
+if err != nil {
+    log.Fatal(err)
+}
 for _, row := range rows {
     page, _ := row.String("page")
     score, err := row.Uint64("score") // exact, and an error rather than 0 for NULL
@@ -392,6 +402,10 @@ if err != nil {
 }
 defer f.Close()
 res, err := wh.From("clicks").InsertNDJSON(ctx, f)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(res.Succeeded, "published")
 ```
 
 `InsertNDJSON` reads the `io.Reader` to its end and buffers it, up to the 16 MiB cap, so a retry resends the same bytes. A body with no non-blank content sends nothing.

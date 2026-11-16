@@ -25,6 +25,9 @@ const ops = createClient({
 // Sent as "Authorization: Operator <key>".
 ops, err := wavehouse.New("https://wavehouse.example.com",
     wavehouse.WithOperatorKey(os.Getenv("WH_AUTH_OPERATOR_KEY")))
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
   </TabItem>
@@ -84,9 +87,17 @@ if errors.Is(err, wavehouse.ErrNotFound) {
 
 // Re-discover now, after a CREATE TABLE say; returns the new schemas.
 refreshed, err := wh.RefreshSchema(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(len(refreshed), "tables")
 
 // Another tenant's
 acme, err := wh.Tables(ctx, wavehouse.ForTenant("acme"))
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(len(acme), "tables in acme")
 ```
 
   </TabItem>
@@ -130,6 +141,9 @@ if err != nil {
 
 // One tenant's folder alone
 _, err = wh.ReloadSettings(ctx, wavehouse.ForTenant("acme"))
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
   </TabItem>
@@ -168,6 +182,10 @@ for table, n := range s.Tables {
 }
 
 acme, err := wh.DLQStats(ctx, wavehouse.ForTenant("acme"))
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(acme.Total, "parked in acme")
 ```
 
   </TabItem>

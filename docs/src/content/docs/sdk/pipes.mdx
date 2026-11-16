@@ -90,6 +90,10 @@ for _, param := range p.Parameters {
 
 // Another tenant's:
 acmePipes, err := wh.Pipes(ctx, wavehouse.ForTenant("acme"))
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(len(acmePipes))
 ```
 
   </TabItem>

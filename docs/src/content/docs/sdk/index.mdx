@@ -301,6 +301,9 @@ const wh = createClient({ baseURL: 'https://app.example.com/api/wavehouse' });
 
 ```go
 wh, err := wavehouse.New("https://app.example.com/api/wavehouse")
+if err != nil {
+    log.Fatal(err)
+}
 // queries  → https://app.example.com/api/wavehouse/v1/query
 // streams  → https://app.example.com/api/wavehouse/v1/stream
 ```
@@ -333,6 +336,9 @@ const wh = createClient({
 fetchToken := func(context.Context) (string, error) { return tokens.Current(), nil }
 
 wh, err := wavehouse.New("https://wavehouse.example.com", wavehouse.WithTokenSource(fetchToken))
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 The token source gets the context of the call it authorizes, so a server that forwards each user's own token can put it in the context and read it back there. A returned `""` sends no `Authorization` header. A returned error fails the attempt without sending it: a REST call returns it, `Subscribe` returns it from the first connect, and once a stream has been live it is retried like a dropped connection. `WithToken` sends a fixed token, and `WithOperatorKey` the [operator key](/api#authentication).
@@ -396,6 +402,10 @@ if err != nil {
 
 // One call's own headers:
 rows, err := wh.From("clicks").Header("X-Trace-Id", "abc123").Limit(10).Fetch(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(len(rows))
 ```
 
 `PipeCall.Header`, `SQLCall.Header` and `SubscribeOptions.Header` do the same for a pipe call, a SQL call and a stream. An invalid header name or value is an error before anything is sent: from `New` for `WithHeader`, from the call for a per-call header.
@@ -448,6 +458,10 @@ if err := wh.Health(ctx); errors.Is(err, wavehouse.ErrNotFound) {
 
 // The admin routes ignore the header; ForTenant sends ?tenant=.
 tables, err := wh.Tables(ctx, wavehouse.ForTenant("acme"))
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(len(tables))
 ```
 
   </TabItem>
@@ -560,6 +574,9 @@ Go only. `WithHTTPClient` sets the `*http.Client` requests go through, for a cus
 ```go
 hc := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 32}}
 wh, err := wavehouse.New("http://localhost:8080", wavehouse.WithHTTPClient(hc))
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 The default client has no overall `Timeout`, because streams are long-lived; bound each call with its context instead, or give each attempt a deadline with `RetryPolicy.AttemptTimeout`. Don't set `Timeout` on a client you hand to the SDK, since it would also end a stream. The client's own `CheckRedirect` applies to requests that carry no credential; a credentialed request never follows a redirect ([Redirects](/sdk/reference#redirects)).
@@ -596,6 +613,9 @@ var top []struct {
     Views uint64 `json:"views"` // exact, even above 2^53
 }
 err := wh.From("clicks").Select("page").Count("*", "views").GroupBy("page").Scan(ctx, &top)
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 Or `Fetch` rows as `[]wavehouse.Row` and read them with typed accessors ([Reading rows](/sdk/queries#reading-rows)). The Go SDK has no codegen.
