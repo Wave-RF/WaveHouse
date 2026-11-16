@@ -153,7 +153,7 @@ Each finding carries its severity (`error` or `warning`), the file it is about (
 
 ## DLQ
 
-Counts of the rows parked in a tenant's dead-letter queue. Each tenant has a queue of its own, and a tenant whose folder was rejected or removed can still be read, since its queue is kept. A tenant with no dead-letter queue is a `404`.
+Counts of the rows parked in a tenant's dead-letter queue. A tenant whose folder was rejected or removed can still be read. Under the embedded broker each tenant has a queue of its own, kept when its folder goes, and a tenant with none is a `404`; under [`mq.backend: nats`](/deployment#external-nats) every tenant is counted on one shared dead-letter stream, so any tenant id reads `200`, with zeros when it has parked nothing.
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">

@@ -167,6 +167,9 @@ for sub.Next() {
     fmt.Println(ev.Row())
     saveCheckpoint(ev.ID)
 }
+if err := sub.Err(); err != nil {
+    log.Fatal(err)
+}
 ```
 
   </TabItem>
