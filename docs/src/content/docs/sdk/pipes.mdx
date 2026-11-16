@@ -30,7 +30,7 @@ var rows []struct {
     Page  string `json:"page"`
     Views int64  `json:"views"`
 }
-err := wh.Pipe("top_pages").Param("limit", 10).Param("pages", []string{"/home", "/about"}).Scan(ctx, &rows)
+err := wh.Pipe("top_pages").Params(map[string]any{"start_date": "2026-01-01", "limit": 50}).Scan(ctx, &rows)
 if err != nil {
     log.Fatal(err)
 }
