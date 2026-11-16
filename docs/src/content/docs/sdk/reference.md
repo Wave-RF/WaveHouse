@@ -133,9 +133,6 @@ Generate TypeScript types from a running WaveHouse instance. The package ships a
 
 ```bash
 npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
-
-# Or, working inside this repo (clients/ts/):
-pnpm codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
 Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev server of the four settings files, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`. Over [a nested settings directory](/deployment#the-nested-settings-directory) its `/v1/ops/*` routes admit the [operator key](/api#authentication) alone (an admin-role token gets `403`), so pass it with `--operator-key <key>` and name the tenant with `--tenant <id>`; without `--tenant` the request reads tenant `0`'s schema on either shape:
@@ -182,16 +179,16 @@ export interface ClicksRow {
 |----------------|-----------------|
 | `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Enum*`, `IPv4/6` | `string` |
 | `UInt*`, `Int*`, `Decimal*` | `number` — 64-bit and wider integers and `Decimal*` come back as JSON numbers, not strings, so `JSON.parse` rounds a value past 2^53 — store an id that large as a `String` column to keep every digit|
-| `Float32`, `Float64`, `BFloat16` | `number \| "nan" \| "inf" \| "-inf"` — a NaN or infinity comes back as the string `"nan"`, `"inf"` or `"-inf"` from queries, pipes and streams alike, so narrow with `typeof v === "number"` before doing arithmetic; `Nullable` adds `\| null`, which stays a SQL `NULL` only |
+| `Float32`, `Float64`, `BFloat16` | `number` — but a NaN or infinity comes back as the string `"nan"`, `"inf"` or `"-inf"` from queries, pipes and streams alike, which this type does not include, so check `typeof v === "number"` before doing arithmetic on a column that can hold one |
 | `Bool` | `boolean` |
 | `Nullable(T)` | `T \| null` |
-| `Array(T)` | `T[]` (`(T)[]` parenthesized when `T` is a union, as for floats) |
+| `Array(T)` | `T[]` |
 | `Map(K, V)` | `Record<K, V>` |
 | `LowCardinality(T)` | same as `T` |
 
 ## E2E Testing
 
-The SDK doubles as the E2E integration test harness. Tests in `tests/e2e/sdk/` exercise the full pipeline (ingest → ClickHouse → query) through the SDK, validating both the backend and the client library in one pass.
+The server's E2E suite runs through the SDK. Tests in `tests/e2e/sdk/` exercise the full pipeline (ingest → ClickHouse → query) with the published `@wavehouse/sdk`, pinned exactly in `tests/e2e/sdk/package.json`, so they test the server against a released client. The SDK's own tests live in [`Wave-RF/wavehouse-sdk-js`](https://github.com/Wave-RF/wavehouse-sdk-js).
 
 ```bash
 # Run all E2E tests: the orchestrator boots ClickHouse and Redis

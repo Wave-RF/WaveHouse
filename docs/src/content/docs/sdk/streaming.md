@@ -150,8 +150,6 @@ const stream = wh.from('clicks')
 
 Supported operators: `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `like`, `not_like` — the same `FilterOp` set `.where()` takes everywhere (the SDK maps them to wire tokens such as `eq`/`neq` internally).
 
-Client-side `where` filters compare two timestamps as instants, to the nanosecond (`=`, `!=`, `in`, `>`, `>=`, `<`, `<=`), so `.where('received_timestamp', '>', '2026-03-24T12:00:00Z')` matches `2026-03-24T12:00:00.001Z` and `=` matches `…00.000Z`. A value with no zone is read as UTC (the server reads it in the column's zone). Other strings compare as strings.
-
 Two operators, `like` and `not_like`, need care, for different reasons. `like` matches **case-insensitively** here, while ClickHouse's `LIKE` on the query path is case-sensitive — so inside a single `liveQuery()` the backfill rows arrive through the server's case-sensitive filter and the live frames through this one, and a pattern like `'/Home%'` can admit live events whose historical counterparts the backfill excluded. `not_like` has no server-side counterpart at all: `/v1/query` rejects it with a `400` (see the operator table in [Queries](/sdk/queries)), so a `liveQuery()` filtered on it gets an error `Result` in `initial()`, drops whatever was buffered during the backfill window, and runs live-only from there.
 
 ---
@@ -197,7 +195,7 @@ interface StreamSubscriber<T> {
 
 1. Opens the stream **immediately** and buffers incoming events.
 2. Runs the `.fetch()` query for historical data, calls `subscriber.initial()` with the result — unless the fetch itself throws, in which case neither happens (see below).
-3. Deduplicates buffered events against the **last row** of the backfill result — which is the newest only when the query orders ascending. A `desc` query (like the example above) puts the oldest row last, so for live frames the boundary is the oldest timestamp and this step filters nothing. With a `since` gap-fill in flight it works the other way — replay lands in the same buffer, so replayed events at or older than that row are dropped before reaching `next()`. The comparison is by instant, at the coarser of the two precisions, so an event in the boundary row's own millisecond counts as covered. A projection that omits `received_timestamp` skips the pass entirely. Tracked in [#449](https://github.com/Wave-RF/WaveHouse/issues/449).
+3. Deduplicates buffered events against the **last row** of the backfill result — which is the newest only when the query orders ascending. A `desc` query (like the example above) puts the oldest row last, so for live frames the boundary is the oldest timestamp and this step filters nothing. With a `since` gap-fill in flight it works the other way — replay lands in the same buffer, so replayed events at or older than that row are dropped before reaching `next()`. A projection that omits `received_timestamp` skips the pass entirely. Tracked in [#449](https://github.com/Wave-RF/WaveHouse/issues/449).
 4. Flushes remaining buffered events and switches to live mode.
 
 This "stream-first" approach is what closes the window between the fetch and the stream starting — events arriving during the fetch are buffered rather than missed. It holds only when the backfill completes cleanly.

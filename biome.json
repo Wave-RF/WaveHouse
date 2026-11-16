@@ -7,9 +7,6 @@
   },
   "files": {
     "includes": [
-      "clients/ts/src/**",
-      "clients/ts/*.{ts,js,mjs,cjs,json}",
-      "clients/ts/scripts/**/*.{ts,js,mjs,cjs}",
       "tests/e2e/sdk/**/*.{ts,js,mjs,cjs,json}",
       "docs/**/*.{ts,js,mjs,cjs,json}",
       "scripts/**/*.{ts,js,mjs,cjs}"
@@ -51,16 +48,6 @@
     }
   },
   "overrides": [
-    {
-      "includes": ["clients/ts/src/query-builder.ts", "clients/ts/src/pipes.ts"],
-      "linter": {
-        "rules": {
-          "suspicious": {
-            "noThenProperty": "off"
-          }
-        }
-      }
-    },
     {
       "includes": ["**/*.test.ts", "tests/**"],
       "linter": {

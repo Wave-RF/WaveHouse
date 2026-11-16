@@ -199,7 +199,7 @@ Returns the build metadata embedded in the running binary — `version`, `git_co
   "version": "1.2.3",
   "git_commit": "a1b2c3d",
   "build_time": "2026-06-02T12:00:00Z",
-  "go_version": "go1.27.3"
+  "go_version": "go1.27.4"
 }
 ```
 

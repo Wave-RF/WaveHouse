@@ -2,30 +2,20 @@
 # Cut a release by creating and pushing one tag. Nothing else — no version
 # bump, no commit, no release PR.
 #
-# That is a property of the repo, not a shortcut this script takes: every
-# component derives its version from the tag. The server gets it via
-# GoReleaser's ldflags, the Go SDK because a Go module's version simply IS its
-# tag, and @wavehouse/sdk because publish-npm.yml stamps package.json from the
-# tag before publishing. Which is just as well — the branch ruleset forbids
-# pushing to `main`, so a bump commit would need its own reviewed PR merged
-# before every single release.
+# That is a property of the repo, not a shortcut this script takes: the server
+# derives its version from the tag, through GoReleaser's ldflags. Which is just
+# as well — the branch ruleset forbids pushing to `main`, so a bump commit
+# would need its own reviewed PR merged before every single release.
 #
-#   scripts/release.sh <component> <version>
+#   scripts/release.sh server <version>   -> v<version>: binaries + ghcr.io/wave-rf/wavehouse
 #
-#   server  -> v<version>              binaries + ghcr.io/wave-rf/wavehouse
-#   ts      -> clients/ts/v<version>   @wavehouse/sdk on npm
-#   go      -> clients/go/v<version>   go get .../clients/go@v<version>
-#
-# The `clients/<lang>/` prefix is required, not chosen: Go resolves a module in
-# a subdirectory only against a tag carrying that subdirectory as a prefix
-# (https://go.dev/ref/mod). The other clients follow the same shape so one
-# convention covers all of them.
+# The SDKs release from their own repositories, Wave-RF/wavehouse-sdk-js and
+# Wave-RF/wavehouse-sdk-go.
 #
 # Everything here is a preflight check plus two git commands. The point is that
 # the checks are the part worth automating: each one is a mistake that is
 # expensive to undo once a tag is public, because tags are immutable in
-# practice (the ruleset blocks updates and deletes) and npm's unpublish window
-# is 72 hours.
+# practice (the ruleset blocks updates and deletes).
 
 set -euo pipefail
 
@@ -44,11 +34,9 @@ info() { printf '  %s\n' "$1"; }
 
 usage() {
   cat >&2 <<EOF
-usage: $0 <server|ts|go> <version>
+usage: $0 server <version>
 
   $0 server 0.1.0     -> tag v0.1.0
-  $0 ts     0.1.0     -> tag clients/ts/v0.1.0
-  $0 go     0.1.0     -> tag clients/go/v0.1.0
 
 Version is bare semver, with no leading 'v'. A prerelease suffix is allowed
 (0.2.0-rc.1) and selects the rc/alpha/beta/next channel instead of latest.
@@ -64,10 +52,8 @@ version="${2:-}"
 [ -n "$component" ] && [ -n "$version" ] || usage
 
 case "$component" in
-  server) tag="v${version}"; desc="server (binaries + container image)"; guard="" ;;
-  ts) tag="clients/ts/v${version}"; desc="@wavehouse/sdk (npm)"; guard="clients/ts/package.json" ;;
-  go) tag="clients/go/v${version}"; desc="Go SDK (go get)"; guard="clients/go/go.mod" ;;
-  *) die "unknown component '$component' (expected server, ts, or go)" ;;
+  server) tag="v${version}"; desc="server (binaries + container image)" ;;
+  *) die "unknown component '$component' (expected server; the SDKs release from their own repositories)" ;;
 esac
 
 # Reject a version with a leading `v` up front rather than minting `vv0.1.0`.
@@ -83,9 +69,6 @@ channel="$("$here/ci/release-channel.sh" "$tag" 2>/dev/null)" \
 printf '\n%sReleasing %s %s%s\n\n' "$BOLD" "$desc" "$version" "$RESET"
 
 # --- preflight --------------------------------------------------------------
-
-[ -z "$guard" ] || [ -f "$guard" ] \
-  || die "$guard not found — is the $component client actually in this repo yet?"
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
 
@@ -159,14 +142,6 @@ case "$component" in
   server)
     info "publishes  GitHub Release (binaries + checksums, provenance-attested)"
     info "           ghcr.io/wave-rf/wavehouse:$tag and :$channel"
-    ;;
-  ts)
-    info "publishes  @wavehouse/sdk@$version on npm under the '$channel' dist-tag"
-    info "           + a GitHub Release"
-    ;;
-  go)
-    info "publishes  go get github.com/Wave-RF/WaveHouse/clients/go@v$version"
-    info "           (no build step — the Go module proxy serves the tag)"
     ;;
 esac
 [ "$channel" = "latest" ] \

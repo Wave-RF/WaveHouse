@@ -1,5 +1,11 @@
 blank_issues_enabled: false
 contact_links:
+  - name: TypeScript SDK (@wavehouse/sdk) bug or feature request
+    url: https://github.com/Wave-RF/wavehouse-sdk-js/issues
+    about: The TypeScript SDK has its own repository. File SDK issues there.
+  - name: Go SDK bug or feature request
+    url: https://github.com/Wave-RF/wavehouse-sdk-go/issues
+    about: The Go SDK has its own repository. File SDK issues there.
   - name: Question or "how do I…?" — GitHub Discussions
     url: https://github.com/Wave-RF/WaveHouse/discussions/categories/q-a
     about: Usage questions belong in Discussions → Q&A, not Issues. Filing a bug report for a usage question will get redirected here.

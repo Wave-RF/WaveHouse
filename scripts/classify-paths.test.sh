@@ -32,7 +32,7 @@ check() {
 check docs-only         false  true   false  docs/src/content/docs/intro.md
 check prose-only        false  false  false  README.md CHANGELOG.md
 check go-only           true   false  false  internal/api/handler.go
-check sdk               true   true   false  clients/ts/src/client.ts
+check e2e-suite         true   false  false  tests/e2e/sdk/helpers.ts
 check workflow-ci       true   true   false  .github/workflows/ci.yml
 check workflow-other    true   false  false  .github/workflows/housekeeping.yml
 check setup-env         true   true   false  .github/actions/setup-env/action.yml

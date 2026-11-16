@@ -53,7 +53,8 @@ git -C "$repo" commit -q -m code
 
 # ── Stand-ins ──
 #   bin/ssh, bin/docker  record their arguments, then run the host side in
-#                        a process group of its own, as sshd would
+#                        a process group of its own, as sshd would; they exit
+#                        with the code in transport-exit, if there is one
 #   host-bin/make        records each call with the tree of the checkout it
 #                        runs in; `make ci` exits with the code in make-exit
 #                        after running the during-ci script, if there is one
@@ -69,6 +70,9 @@ cd "$scratch/home" || exit 1
 set -m
 HOME="$scratch/home" PATH="$scratch/host-bin:\$PATH" bash -s &
 wait \$!
+rc=\$?
+[ ! -f "$scratch/transport-exit" ] || exit "\$(cat "$scratch/transport-exit")"
+exit \$rc
 EOF
 done
 cat > "$scratch/host-bin/make" << EOF
@@ -98,7 +102,7 @@ fail() {
 
 # reset: a clean slate for the next case.
 reset() {
-  rm -rf "$repo/tmp" "${scratch:?}/home" "$scratch/runs" "$scratch/during-ci" "$scratch/wrong-commit"
+  rm -rf "$repo/tmp" "${scratch:?}/home" "$scratch/runs" "$scratch/during-ci" "$scratch/wrong-commit" "$scratch/transport-exit"
   mkdir -p "$scratch/home"
   : > "$scratch/transport.log"
   : > "$scratch/make.log"
@@ -202,11 +206,26 @@ else
   fail "KEEP=1 run exits 0" "$(cat "$scratch/out")"
 fi
 
+# ── The host's report decides, not the transport's exit status (#987) ──
+reset
+echo 1 > "$scratch/transport-exit"
+if run devbox; then
+  expect_marker "a passing run whose transport exits 1 still writes the markers" "$T"
+else
+  fail "a passing run whose transport exits 1 exits 0" "$(cat "$scratch/out")"
+fi
+
+reset
+echo 2 > "$scratch/make-exit"
+echo 0 > "$scratch/transport-exit"
+if run devbox; then fail "a failing make ci whose transport exits 0 exits non-zero"; fi
+expect_nothing "a failing make ci whose transport exits 0 writes nothing" "devbox did not report that make ci passed" "$T"
+
 # ── Failures write nothing ──
 reset
 echo 2 > "$scratch/make-exit"
 if run devbox; then fail "a failing make ci exits non-zero"; fi
-expect_nothing "a failing make ci writes nothing" "make ci failed on devbox (exit 2)" "$T"
+expect_nothing "a failing make ci writes nothing" "devbox did not report that make ci passed" "$T"
 expect_eq "…and still cleans up the host" "$(leftover_runs)" ""
 
 reset

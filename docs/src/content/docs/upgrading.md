@@ -35,7 +35,7 @@ This section covers the unreleased changes on `main`, and may change before the 
 ### Versions
 
 - **ClickHouse:** this release is tested against ClickHouse 26.8.34.13.
-- **Go:** building from source or with `go install` needs Go 1.27.3 or later.
+- **Go:** building from source or with `go install` needs Go 1.27.4 or later.
 
 ## From 0.2.0 to 0.2.1
 

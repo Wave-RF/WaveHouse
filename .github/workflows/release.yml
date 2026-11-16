@@ -222,7 +222,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -270,9 +270,9 @@ jobs:
       # assets and leave the notes alone.
       #
       # `--notes-start-tag` is not optional. GitHub's own generator picks the
-      # previous release itself, and this repo publishes `clients/ts/v*`
-      # releases too — so without it a server release's notes can be diffed
-      # against an SDK release. `git describe --match 'v*'` is the same rule
+      # previous release itself, and this repo still holds the `clients/ts/v*`
+      # releases from when the TypeScript SDK released here — so without it a
+      # server release's notes can be diffed against an SDK release. `git describe --match 'v*'` is the same rule
       # .goreleaser.yaml's `git.ignore_tags` applied.
       - name: Create or update the GitHub Release
         shell: bash

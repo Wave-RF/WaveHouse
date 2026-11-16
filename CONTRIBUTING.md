@@ -29,6 +29,10 @@ Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?t
 - Your proposed solution
 - Any alternatives you've considered
 
+### The SDKs
+
+The client SDKs have their own repositories: [wavehouse-sdk-js](https://github.com/Wave-RF/wavehouse-sdk-js) (`@wavehouse/sdk`) and [wavehouse-sdk-go](https://github.com/Wave-RF/wavehouse-sdk-go). Report SDK bugs, request SDK features and send SDK code changes there.
+
 ### Submitting Pull Requests
 
 1. Ensure your changes pass all checks:

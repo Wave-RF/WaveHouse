@@ -41,11 +41,12 @@ version: 2
 project_name: wavehouse
 
 # GoReleaser's tag detection — which tag it is building from — walks git
-# history without caring which tag family it lands on. This repo has several:
-# `v*` for the server and `clients/<lang>/v*` for each client SDK. Without
-# this, a snapshot build cut after an SDK release stamps itself from
-# `clients/ts/v0.1.0`. release.yml applies the same rule to the release notes
-# by deriving `--notes-start-tag` from `git describe --match 'v*'`.
+# history without caring which tag family it lands on. The history still
+# carries `clients/<lang>/v*` tags from when the client SDKs lived here, next to
+# the server's `v*`. Without this, a snapshot build cut after one of those tags
+# stamps itself from it (`clients/ts/v0.1.0`, say). release.yml applies the
+# same rule to the release notes by deriving `--notes-start-tag` from
+# `git describe --match 'v*'`.
 git:
   ignore_tags:
     - "clients/*"
