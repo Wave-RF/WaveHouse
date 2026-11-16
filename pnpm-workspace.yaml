@@ -36,13 +36,21 @@ engineStrict: true
 
 catalog:
   typescript: "^6.0.3"
-  vitest: "^5.0.4"
-  "@types/node": "^26.6.5"
+  vitest: "^5.1.0"
+  "@types/node": "^26.6.6"
 
 # Disable the virtual store's hoisted fallback (node_modules/.pnpm/node_modules),
 # so a dependency that imports something it doesn't declare fails to resolve
 # instead of silently picking up a transitive copy.
 hoist: false
+
+# @napi-rs/wasm-runtime accepts @emnapi/core and @emnapi/runtime 1.x or the 2.0
+# beta, and pnpm resolved a mismatched pair (core 1.x, runtime 2.0.0-beta.2) under
+# @astrojs/check, which crashes on import, so astro check reported it missing.
+# Keep both on the stable line until 2.0 ships.
+overrides:
+  "@emnapi/core": "^1.11.3"
+  "@emnapi/runtime": "^1.11.3"
 
 # node_modules is derived state: re-link on a layout change (such as the hoist
 # setting above) instead of prompting, because a prompt aborts with no TTY.
