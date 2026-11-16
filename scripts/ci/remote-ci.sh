@@ -20,7 +20,7 @@
 # is checked out in a fresh directory under REMOTE_DIR, which is removed after
 # the run unless KEEP=1. When this script exits, however it is stopped, the
 # host stops the run within about a second.
-# The markers are written only if the host exits 0, the tree it reports having
+# The markers are written only if the host reports exit 0, the tree it reports having
 # tested is HEAD^{tree} here, and this worktree is still clean.
 
 set -uo pipefail
@@ -73,6 +73,9 @@ remote_main() {
     git status --short --untracked-files=normal
     exit 1
   fi
+  # Only success is reported, and the local side requires it: a transport can lose
+  # the host's exit status (#987). A failure exits above, before writing anything.
+  say "exit 0"
 }
 
 host=${1:-}
@@ -133,7 +136,7 @@ uname_sm=$(report uname)
 remote_dir=$(report dir)
 tested=$(report tree)
 
-[ "${status[1]}" = 0 ] || die "make ci failed on $host (exit ${status[1]}); no marker written. Log: $log"
+[ "$(report exit)" = 0 ] || die "$host did not report that make ci passed (transport exit ${status[1]}); no marker written. Log: $log"
 [ "${status[2]}" = 0 ] || die "can't write $log; no marker written."
 [ "$tested" = "$tree" ] || die "$host reported testing tree '${tested:0:8}', not ${tree:0:8}; no marker written."
 now=$(git rev-parse "HEAD^{tree}") || die "can't resolve HEAD"
