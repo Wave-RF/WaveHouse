@@ -109,7 +109,7 @@ The server sends each row as a JSON object, so both SDKs see the same values:
 
 ```ts
 clicks.select('page').select('button'); // SELECT page, button: calls accumulate
-clicks.selectAll().where('country', '=', 'US'); // every column the role may read
+clicks.selectAll().where('page', '=', '/home'); // every column the role may read
 ```
 
   </TabItem>
@@ -117,7 +117,7 @@ clicks.selectAll().where('country', '=', 'US'); // every column the role may rea
 
 ```go
 wh.From("clicks").Select("page").Select("button")    // SELECT page, button: calls accumulate
-wh.From("clicks").SelectAll().Where("country", wavehouse.Eq, "US") // every column the role may read
+wh.From("clicks").SelectAll().Where("page", wavehouse.Eq, "/home") // every column the role may read
 ```
 
   </TabItem>
@@ -132,7 +132,7 @@ A literal `'*'` is the column *named* `*`, not a wildcard: use `selectAll()` / `
 
 ```ts
 clicks.select('page').where('score', '>', 10).where('page', 'like', '/home%');
-clicks.select('page').where('country', 'in', ['US', 'CA']);
+clicks.select('page').where('button', 'in', ['signup', 'nav']);
 ```
 
   </TabItem>
@@ -140,7 +140,7 @@ clicks.select('page').where('country', 'in', ['US', 'CA']);
 
 ```go
 wh.From("clicks").Select("page").Where("score", wavehouse.Gt, 10).Where("page", wavehouse.Like, "/home%")
-wh.From("clicks").Select("page").Where("country", wavehouse.In, []string{"US", "CA"})
+wh.From("clicks").Select("page").Where("button", wavehouse.In, []string{"signup", "nav"})
 ```
 
   </TabItem>
@@ -171,8 +171,8 @@ clicks.select('page')
   .count('*', 'total')                               // count(*) AS total
   .sum('score', 'total_score')                       // sum(score) AS total_score
   .avg('score')                                      // avg(score) AS avg_score
-  .countDistinct('user_id')                          // countDistinct(user_id) AS count_distinct_user_id
-  .aggregate('uniqExact', 'user_id', 'unique_users') // any function the server allows
+  .countDistinct('button')                             // countDistinct(button) AS count_distinct_button
+  .aggregate('uniqExact', 'button', 'unique_buttons')  // any function the server allows
   .groupBy('page');
 ```
 
@@ -186,8 +186,8 @@ wh.From("clicks").Select("page").
     Count("*", "total").                         // count(*) AS total
     Sum("score", "total_score").                 // sum(score) AS total_score
     Avg("score", "").                            // avg(score) AS avg_score
-    CountDistinct("user_id", "").                // countDistinct(user_id) AS count_distinct_user_id
-    Aggregate("uniqExact", "user_id", "unique_users"). // any function the server allows
+    CountDistinct("button", "").                     // countDistinct(button) AS count_distinct_button
+    Aggregate("uniqExact", "button", "unique_buttons"). // any function the server allows
     GroupBy("page")
 ```
 

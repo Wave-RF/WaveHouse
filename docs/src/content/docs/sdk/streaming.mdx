@@ -223,7 +223,7 @@ The server sends the column list in an `event: schema` frame, before the first r
 | A server's `retry:` field | a floor under every later wait, clamped to 30 s | a floor under every later wait |
 | Per-connect deadline | `attemptTimeoutMs`, up to the response headers (`SSE_ATTEMPT_TIMEOUT`, retried) | `RetryPolicy.AttemptTimeout`, up to the response headers |
 
-`options.maxRetries` (TypeScript) bounds REST calls only. Neither SDK puts a deadline on an established stream, which is long-lived. A schedule resets only after a connection has *held*, so a server that accepts and immediately closes (slow-consumer eviction, a half-broken upstream) can't pin the client at sub-second retries.
+`options.maxRetries` (TypeScript) bounds REST calls only. Neither SDK puts a deadline on an established stream, which is long-lived. In TypeScript the schedule resets only after a connection has held for 3 s, so a server that accepts and immediately closes (slow-consumer eviction, a half-broken upstream) can't pin the client at sub-second retries. Go also resets after a connection that delivered an event, so a server that evicts a consumer after sending it events is re-dialed from `MinBackoff` each time.
 
 **What re-dials.** A dropped connection, a network or read error, a per-connect timeout, a frame that can't be read ([below](#frames-that-cant-be-read)), and a retryable answer: a `5xx`, a `408` or a `429`, unless the body says `retryable: false`. A `429` from a rate limiter in front is honored the same way, with its `Retry-After`. The token provider and header function run on every connect: in TypeScript a rejection is a retryable `SSE_AUTH_ERROR`; in Go an error is returned by `Subscribe` on the first connect and retried once the stream has been live.
 
