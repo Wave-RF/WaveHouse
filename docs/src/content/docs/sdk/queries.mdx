@@ -78,7 +78,7 @@ if err != nil {
 }
 for _, row := range rows {
     page, _ := row.String("page")
-    score, err := row.Uint64("score") // exact, and an error rather than 0 for NULL
+    score, err := row.Float64("score") // an error rather than 0 for NULL
     if err != nil {
         log.Fatal(err)
     }
@@ -348,10 +348,11 @@ A single object is sent as `application/json`; an **array** is serialized to NDJ
 
 ```go
 type click struct {
-    EventID string `json:"event_id"` // the server's dedupe id field, when it has one
-    Page    string `json:"page"`
+    Page   string  `json:"page"`
+    Button string  `json:"button"`
+    Score  float64 `json:"score"`
 }
-res, err := wh.From("clicks").Insert(ctx, []click{{"e1", "/home"}, {"e2", "/about"}})
+res, err := wh.From("clicks").Insert(ctx, []click{{"/home", "cta", 42.5}, {"/about", "nav", 3}})
 // The server answers 200 even when it rejects records: the result comes back
 // with an *InsertError saying which.
 if ie, ok := errors.AsType[*wavehouse.InsertError](err); ok {

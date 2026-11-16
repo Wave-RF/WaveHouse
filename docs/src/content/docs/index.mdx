@@ -123,7 +123,7 @@ The [TypeScript SDK](/sdk) wraps the whole surface — typed inserts, a chainabl
 
   // Returns immediately — buffered in the WAL, schema-validated
   // at the edge, batch-flushed to ClickHouse behind the scenes.
-  await wh.from('clicks').insert({ page: '/home', button: 'signup' });
+  await wh.from('clicks').insert({ page: '/home', button: 'signup', score: 1 });
   ```
 
  </TabItem>

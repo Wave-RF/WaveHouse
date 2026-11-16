@@ -128,7 +128,7 @@ const wh = createClient({
 const { data, error } = await wh.from('clicks').select('page').limit(10);
 
 // Insert
-await wh.from('clicks').insert({ page: '/home', button: 'signup' });
+await wh.from('clicks').insert({ page: '/home', button: 'signup', score: 1 });
 
 // Stream
 const stream = wh.from('clicks').stream();
@@ -162,19 +162,20 @@ func main() {
     ctx := context.Background()
 
     type click struct {
-        Page  string `json:"page"`
-        Score uint64 `json:"score"`
+        Page   string  `json:"page"`
+        Button string  `json:"button"`
+        Score  float64 `json:"score"`
     }
 
     // Insert: a struct, a map, or a slice of either.
-    if _, err := wh.From("clicks").Insert(ctx, []click{{"/home", 3}, {"/about", 7}}); err != nil {
+    if _, err := wh.From("clicks").Insert(ctx, []click{{"/home", "signup", 3}, {"/about", "nav", 7}}); err != nil {
         log.Fatal(err)
     }
 
     // Query: a chain that ends in Scan, into structs or maps.
     var top []click
     err = wh.From("clicks").
-        Select("page", "score").
+        Select("page", "button", "score").
         Where("score", wavehouse.Gt, 5).
         OrderBy("score", wavehouse.Desc).
         Limit(10).

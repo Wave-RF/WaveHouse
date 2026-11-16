@@ -88,7 +88,7 @@ Events that arrive before anyone consumes them are kept for an iterator, and dro
 const stream = wh.from('clicks').stream();
 stream.subscribe({ next: (e) => console.log(e) });
 await stream.connected();
-await wh.from('clicks').insert({ page: '/home' });
+await wh.from('clicks').insert({ page: '/home', button: 'signup', score: 1 });
 ```
 
 A *timeout* rejection does not stop the transport, which keeps re-dialing; it means "not live yet", so call `.close()` if you want it to stop. A rejection because the stream closed means the transport has already stopped.
