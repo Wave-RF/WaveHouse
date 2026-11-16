@@ -36,7 +36,8 @@ ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 defer stop()
 
 sub, err := wh.Subscribe(ctx, "clicks", &wavehouse.SubscribeOptions{
-    Since: time.Now().Add(-time.Hour), // replay the last hour first
+    // Replay reaches back at most the server's gap window, 15 minutes by default.
+    Since: time.Now().Add(-10 * time.Minute), // replay the last 10 minutes first
 })
 if err != nil {
     log.Fatal(err)
