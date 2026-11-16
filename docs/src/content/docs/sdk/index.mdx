@@ -453,7 +453,7 @@ tables, err := wh.Tables(ctx, wavehouse.ForTenant("acme"))
   </TabItem>
 </Tabs>
 
-**The admin routes (`/v1/ops/*`) ignore `X-Tenant-ID`.** They take the tenant per call instead: `{ tenant: 'acme' }` on a TypeScript admin call, `wavehouse.ForTenant("acme")` on a Go one (`wh.SQL(…).ForTenant("acme")` for SQL), both sent as `?tenant=`. Without it they address tenant `0`, and a settings reload reloads every tenant. In TypeScript an empty `tenant: ''` is sent, and the server refuses it with `400` rather than falling back to tenant `0`; in Go an empty `ForTenant("")` sends nothing. Over a nested directory the admin routes admit the [operator key](/api#authentication) alone, and a token carrying an admin role gets `403`. See [SDK Admin & System](/sdk/admin).
+**The admin routes (`/v1/ops/*`) ignore `X-Tenant-ID`.** They take the tenant per call instead: `{ tenant: 'acme' }` on a TypeScript admin call, `wavehouse.ForTenant("acme")` on a Go one (`wh.SQL(…).ForTenant("acme")` for SQL), both sent as `?tenant=`. Without it they address tenant `0`, and a settings reload reloads every tenant. In TypeScript an empty `tenant: ''` is sent, and the server refuses it with `400` rather than falling back to tenant `0`; in Go an empty `ForTenant("")` sends nothing, so an unset id addresses tenant `0`, and on `ReloadSettings` reloads every tenant: check it before calling. Over a nested directory the admin routes admit the [operator key](/api#authentication) alone, and a token carrying an admin role gets `403`. See [SDK Admin & System](/sdk/admin).
 
 `X-Tenant-ID` is on WaveHouse's CORS allow-list, so a browser can send it cross-origin. Behind the fronting proxy of a nested deployment the proxy usually sets it for you ([Multi-tenant deployments](/deployment#multi-tenant-deployments)).
 
@@ -613,7 +613,7 @@ Every async REST call returns a `Result<T>`, a discriminated union that never th
 ```ts
 type Result<T> =
   | { ok: true;  data: T;    error: null; hasMore?: boolean; next?: () => Promise<Result<T>> }
-  | { ok: false; data: null; error: WaveHouseError }
+  | { ok: false; data: null; error: WaveHouseError; hasMore?: false; next?: undefined }
 
 interface WaveHouseError {
   status: number;     // HTTP status (0 when no response arrived)
@@ -663,11 +663,13 @@ The codes, the sentinels and what each SDK retries are in [Error handling](/sdk/
 
 ## Where the SDKs differ
 
-The SDKs mean to behave the same. These are the differences by design:
+The SDKs mean to behave the same. The main differences by design (others are noted where they apply):
 
 - **A single-row insert** is sent as JSON by the TypeScript SDK and as one line of NDJSON by the Go SDK, so Go returns the per-record summary for one row as for many ([Inserting rows](/sdk/queries#inserting-rows)).
 - **The default row limit** is 1000 in TypeScript, which sends it on every query that sets none; Go sends none, and the server's `query.default_max_rows` (10,000 by default) applies ([Limit](/sdk/queries#limit)).
 - **Times are typed in Go**: `TimeRange` takes `time.Time`, `Last` a `time.Duration`, and `Row.Time` and `Event.ReceivedAt` parse what the server sends. TypeScript takes a `Date` or a string and hands timestamps back as strings.
+- **An empty tenant id** on an admin call is sent by TypeScript, which the server refuses with `400`; Go's `ForTenant("")` sends nothing, so the call addresses tenant `0` ([Multi-tenant servers](#multi-tenant-servers)).
+- **The operator key** is a first-class option in Go (`WithOperatorKey`, sent as `Authorization: Operator <key>`); TypeScript sends it as an `X-Operator-Key` header through `options.headers`.
 - **Live queries** (`liveQuery`) are TypeScript only. So are pagination (`hasMore`/`next`), client-side stream filtering, and the codegen CLI. The Go SDK has none of these in 0.1.0: live queries and pagination wait for server support ([#951](https://github.com/Wave-RF/WaveHouse/issues/951), [#452](https://github.com/Wave-RF/WaveHouse/issues/452)).
 
 ## Known server limitations

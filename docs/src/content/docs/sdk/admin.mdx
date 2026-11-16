@@ -94,7 +94,7 @@ acme, err := wh.Tables(ctx, wavehouse.ForTenant("acme"))
 
 Each column carries its name, its ClickHouse type, whether it is nullable, whether it declares a default, and its 1-based `position`. `default_kind` (`DefaultKind`) and `default_expression` (`DefaultExpression`) appear only when the column declares a default: `DEFAULT`, `MATERIALIZED`, `ALIAS` or `EPHEMERAL`. A `MATERIALIZED` or `ALIAS` column is computed by ClickHouse and cannot be inserted.
 
-A `503` with `Retry-After` is a tenant whose first discovery has not succeeded yet (`Retry-After: 5`), or, on the refresh, a tenant on no ClickHouse pool, for which [no pool could be opened](/settings-directory#clickhouse) (`Retry-After: 30`). Both SDKs wait the `Retry-After` and retry it.
+A `503` with `Retry-After` is a tenant whose first discovery has not succeeded yet (`Retry-After: 5`), or, on the refresh, a tenant on no ClickHouse pool, for which [no pool could be opened](/settings-directory#clickhouse) (`Retry-After: 30`), or a ClickHouse that is unavailable (`Retry-After: 5`). Both SDKs wait the `Retry-After` and retry it.
 
 ## Settings
 
