@@ -371,7 +371,7 @@ fmt.Println(res.Succeeded, "published,", res.Duplicates, "duplicates")
 
 **The body cap.** One ingest request is bound by the server's 16 MiB [request-body cap](/reverse-proxy#request-body-size-limits). Over it, the TypeScript SDK's request gets a `413` with nothing ingested, and the Go SDK refuses the call before sending it; either way, split the batch. Chunking a large array automatically is tracked in [`wavehouse-sdk-js#11`](https://github.com/Wave-RF/wavehouse-sdk-js/issues/11). The server truncates the per-record list to its first 10,000 entries for a very large batch; the counts stay authoritative.
 
-**Retries and duplicates.** Ingest is retried like a read ([Retries and timeouts](/sdk/reference#retries-and-timeouts)), so it is at-least-once: a retried batch can publish a record twice. Where the tenant has [deduplication](/settings-directory#deduplication) on and the rows carry its id field, the retry's copy is reported as a duplicate instead.
+**Retries and duplicates.** Ingest is retried like a read ([Retries and timeouts](/sdk/reference#retries-and-timeouts)), so it is at-least-once: a retried batch can publish a record twice. Where the server has [deduplication](/settings-directory#deduplication) on and the rows carry its id field, the retry's copy is reported as a duplicate instead.
 
 ### Inserting NDJSON you already have
 
@@ -426,9 +426,6 @@ It returns the same per-record summary as an insert of many rows. The server buf
 
 ```ts
 const { data, error } = await wh.sql('SELECT page, count() AS n FROM clicks GROUP BY page LIMIT 10');
-
-// Against another tenant's ClickHouse:
-const { data: rows } = await wh.sql('SELECT count() FROM clicks', { tenant: 'acme' });
 ```
 
   </TabItem>
@@ -444,11 +441,6 @@ var out []struct {
 if err := wh.SQL("SELECT count() AS n FROM t").Scan(ctx, &out); err != nil {
     log.Fatal(err)
 }
-
-// Against another tenant's ClickHouse:
-if err := wh.SQL("SELECT 1").ForTenant("acme").Exec(ctx); err != nil {
-    log.Fatal(err)
-}
 ```
 
 `Scan` and `Fetch` read rows; `Exec` discards the body, for DDL and mutations.
@@ -456,7 +448,7 @@ if err := wh.SQL("SELECT 1").ForTenant("acme").Exec(ctx); err != nil {
   </TabItem>
 </Tabs>
 
-`POST /v1/ops/query` runs the statement verbatim against ClickHouse, so anything ClickHouse accepts works, DDL and mutations included. It is **admin-only**: over a settings directory of the four files the caller must resolve to the policy admin role (`admin_role`, `"admin"` by default) or present the [operator key](/api#authentication); over [a nested one](/deployment#the-nested-settings-directory) only the operator key is admitted, and a token carrying an admin role gets `403`. A tokenless request falls back to the `default_role`, so it gets `403` unless that is deliberately the admin role (a loudly-warned dev-only setting), and an invalid or expired token gets `401`. The tenant is chosen per call (`{ tenant }`, `ForTenant`), since this route ignores `X-Tenant-ID`.
+`POST /v1/ops/query` runs the statement verbatim against ClickHouse, so anything ClickHouse accepts works, DDL and mutations included. It is **admin-only**: the caller must resolve to the policy admin role (`admin_role`, `"admin"` by default) or present the [operator key](/api#authentication). A tokenless request falls back to the `default_role`, so it gets `403` unless that is deliberately the admin role (a loudly-warned dev-only setting), and an invalid or expired token gets `401`.
 
 - **No parameter binding.** Positional `?` substitution is not supported, and neither SDK forwards ClickHouse's named parameters (`{id:UInt32}` with `param_id=42`). Inline literals, never from untrusted input; for binding user input safely, use the structured query builder.
 - **Never resent once it may have run.** A raw SQL call is retried only when the connection was certainly never made; a timeout once the request may have been sent, a dropped connection or any answer from the server is returned as the error ([Retries and timeouts](/sdk/reference#retries-and-timeouts)).
@@ -479,7 +471,7 @@ A builder's `.fetch(opts)` takes `RequestOptions`:
 | `fetchOptions` | `RequestInit` | This call's `RequestInit` fields, merged over `options.fetchOptions` |
 | `fetch` | `FetchLike` | This call's `fetch`, over `options.fetch` |
 
-Every other REST call takes the same fields but `limit`: `insert()`, `insertNDJSON()`, `wh.version()` and `wh.sys.health()` take `CallOptions`, a pipe's `.fetch()` takes [`PipeRequestOptions`](/sdk/pipes#running-a-pipe), and the admin calls and `wh.sql()` take `OpsRequestOptions`, which adds `tenant`. `await`ing a builder directly takes no options, so pass them through `.fetch({ … })`.
+Every other REST call takes the same fields but `limit`: `insert()`, `insertNDJSON()`, `wh.version()` and `wh.sys.health()` take `CallOptions`, a pipe's `.fetch()` takes [`PipeRequestOptions`](/sdk/pipes#running-a-pipe), and the admin calls and `wh.sql()` take the same fields. `await`ing a builder directly takes no options, so pass them through `.fetch({ … })`.
 
   </TabItem>
   <TabItem label="Go">

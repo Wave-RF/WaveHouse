@@ -1,6 +1,6 @@
 ---
 title: "SDKs"
-description: "The TypeScript and Go clients for WaveHouse: installation, creating a client, authentication, headers, tenants and results."
+description: "The TypeScript and Go clients for WaveHouse: installation, creating a client, authentication, headers and results."
 ---
 
 import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components";
@@ -422,54 +422,9 @@ The layers, lowest to highest:
 | 3 | `auth`'s `Authorization` | the token's or operator key's `Authorization` |
 | 4 | the SDK's own `Content-Type` and `Accept` (and `Last-Event-ID` on a stream) | the SDK's own `Content-Type`, `Accept` and `User-Agent` (and `Last-Event-ID` on a stream) |
 
-Names match **case-insensitively**, as HTTP requires, so `authorization` and `Authorization` are one header. A higher layer **replaces** a header of the same name and is never joined with it: a header joined rather than replaced is how a request ends up sending `Content-Type: application/json, image/png`. So a custom header can't displace the credential: set it with the token provider. The SDKs differ on a custom `Authorization` with no credential configured: Go always drops it, so use `WithToken`, `WithTokenSource` or `WithOperatorKey`, while TypeScript sends it when `auth` supplies no token. Any custom header counts as a credential when the SDK decides whether to follow a redirect ([Redirects](/sdk/reference#redirects)).
+Names match **case-insensitively**, as HTTP requires, so `authorization` and `Authorization` are one header. A higher layer **replaces** a header of the same name and is never joined with it: a header joined rather than replaced is how a request ends up sending `Content-Type: application/json, image/png`. So a custom header can't displace the credential: when the SDK has a token to send, its `Authorization` wins. When it has none, a custom `Authorization` header is sent as given, in both SDKs. Any custom header counts as a credential when the SDK decides whether to follow a redirect ([Redirects](/sdk/reference#redirects)).
 
-From a **browser**, a cross-origin custom header must also survive the CORS preflight, and WaveHouse allow-lists a fixed set (`Accept`, `Authorization`, `Content-Type`, `Last-Event-ID`, `X-Request-ID`, `X-Tenant-ID`) with no setting to change it. So any other header works server-side, or from a browser when a proxy in front answers the preflight itself, which is usually the same proxy the header is for. Server-side callers never preflight.
-
-### Multi-tenant servers
-
-Over a [nested settings directory](/deployment#the-nested-settings-directory) a server serves several [tenants](/deployment#multi-tenant-deployments), selected per request by the `X-Tenant-ID` header; with none, a request addresses tenant `0`. Neither SDK has a tenant option for the data routes: send the header yourself, and it reaches every REST call and the stream unchanged.
-
-<Tabs syncKey="lang">
-  <TabItem label="TypeScript">
-
-```ts
-const acme = createClient({
-  baseURL: 'https://wavehouse.example.com',
-  options: { headers: { 'X-Tenant-ID': 'acme' } },
-});
-
-// The admin routes ignore the header; they take the tenant per call, sent as ?tenant=.
-const { data: schemas } = await acme.schema.list({ tenant: 'acme' });
-```
-
-  </TabItem>
-  <TabItem label="Go">
-
-```go
-wh, err := wavehouse.New("https://wavehouse.example.com", wavehouse.WithHeader("X-Tenant-ID", "acme"))
-if err != nil {
-    log.Fatal(err)
-}
-// An unknown tenant is a 404 on every data route, the health ping included.
-if err := wh.Health(ctx); errors.Is(err, wavehouse.ErrNotFound) {
-    log.Fatal("tenant not served")
-}
-
-// The admin routes ignore the header; ForTenant sends ?tenant=.
-tables, err := wh.Tables(ctx, wavehouse.ForTenant("acme"))
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Println(len(tables))
-```
-
-  </TabItem>
-</Tabs>
-
-**The admin routes (`/v1/ops/*`) ignore `X-Tenant-ID`.** They take the tenant per call instead: `{ tenant: 'acme' }` on a TypeScript admin call, `wavehouse.ForTenant("acme")` on a Go one (`wh.SQL(…).ForTenant("acme")` for SQL), both sent as `?tenant=`. Without it they address tenant `0`, and a settings reload reloads every tenant. In TypeScript an empty `tenant: ''` is sent, and the server refuses it with `400` rather than falling back to tenant `0`; in Go an empty `ForTenant("")` sends nothing, so an unset id addresses tenant `0`, and on `ReloadSettings` reloads every tenant: check it before calling. Over a nested directory the admin routes admit the [operator key](/api#authentication) alone, and a token carrying an admin role gets `403`. See [SDK Admin & System](/sdk/admin).
-
-`X-Tenant-ID` is on WaveHouse's CORS allow-list, so a browser can send it cross-origin. Behind the fronting proxy of a nested deployment the proxy usually sets it for you ([Multi-tenant deployments](/deployment#multi-tenant-deployments)).
+From a **browser**, a cross-origin custom header must also survive the CORS preflight, and WaveHouse allow-lists a fixed set (`Accept`, `Authorization`, `Content-Type`, `Last-Event-ID` and `X-Request-ID` among them) with no setting to change it. So any other header works server-side, or from a browser when a proxy in front answers the preflight itself, which is usually the same proxy the header is for. Server-side callers never preflight.
 
 ### Extra `RequestInit` fields
 
@@ -688,7 +643,6 @@ The SDKs mean to behave the same. The main differences by design (others are not
 - **A single-row insert** is sent as JSON by the TypeScript SDK and as one line of NDJSON by the Go SDK, so Go returns the per-record summary for one row as for many ([Inserting rows](/sdk/queries#inserting-rows)).
 - **The default row limit** is 1000 in TypeScript, which sends it on every query that sets none; Go sends none, and the server's `query.default_max_rows` (10,000 by default) applies ([Limit](/sdk/queries#limit)).
 - **Times are typed in Go**: `TimeRange` takes `time.Time`, `Last` a `time.Duration`, and `Row.Time` and `Event.ReceivedAt` parse what the server sends. TypeScript takes a `Date` or a string and hands timestamps back as strings.
-- **An empty tenant id** on an admin call is sent by TypeScript, which the server refuses with `400`; Go's `ForTenant("")` sends nothing, so the call addresses tenant `0` ([Multi-tenant servers](#multi-tenant-servers)).
 - **The operator key** is a first-class option in Go (`WithOperatorKey`, sent as `Authorization: Operator <key>`); TypeScript sends it as an `X-Operator-Key` header through `options.headers`.
 - **Live queries** (`liveQuery`) are TypeScript only. So are pagination (`hasMore`/`next`), client-side stream filtering, and the codegen CLI. The Go SDK has none of these in 0.1.0: live queries and pagination wait for server support ([#951](https://github.com/Wave-RF/WaveHouse/issues/951), [#452](https://github.com/Wave-RF/WaveHouse/issues/452)).
 

@@ -48,7 +48,7 @@ Parameters are JSON-encoded: an array (a Go slice) becomes an `IN`-style list on
 A pipe may write, so both SDKs resend a pipe call only when it can't have run, or when the server says it is safe:
 
 - **A transport error** (a dropped connection, a timeout) is retried only when the connection was certainly never made. Once the request may have reached the server, it is returned as the error, marked not retryable.
-- **An answer** is retried only when the server's body says `retryable: true`, or it is a `429`, or a `503` with `Retry-After` (as for a tenant on no ClickHouse pool, refused before anything ran). A bare `5xx`, which a proxy in front can send after the write ran, is returned as the error.
+- **An answer** is retried only when the server's body says `retryable: true`, or it is a `429`, or a `503` with `Retry-After` (as for a server with no ClickHouse connection open, refused before anything ran). A bare `5xx`, which a proxy in front can send after the write ran, is returned as the error.
 
 A pipe that writes answers every ClickHouse failure `retryable: false`, so a failed write is never resent: check whether it landed before you send it again. A proxy that answers `503` with a `Retry-After` after the write ran is the one case where a write could still run twice. See [Retries and timeouts](/sdk/reference#retries-and-timeouts) for the waits.
 
@@ -63,9 +63,6 @@ The admin routes list the adopted pipes. They need the admin gate: the admin rol
 const { data: pipes } = await wh.pipes.list();
 const { data: pipe } = await wh.pipes.get('top_pages');
 // pipe: { name, sql, parameters, description, allowed_roles }
-
-// Another tenant's:
-const { data: acmePipes } = await wh.pipes.list({ tenant: 'acme' });
 ```
 
   </TabItem>
@@ -87,16 +84,7 @@ if err != nil {
 for _, param := range p.Parameters {
     fmt.Println(param.Name, param.Type, param.Required)
 }
-
-// Another tenant's:
-acmePipes, err := wh.Pipes(ctx, wavehouse.ForTenant("acme"))
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Println(len(acmePipes))
 ```
 
   </TabItem>
 </Tabs>
-
-Without a tenant they read tenant `0`'s pipes. The admin routes ignore the `X-Tenant-ID` header, so a client's headers cannot select a tenant here: pass it per call, sent as `?tenant=` ([Multi-tenant servers](/sdk#multi-tenant-servers)). Over a [nested settings directory](/deployment#the-nested-settings-directory) these routes admit the operator key alone, and an admin-role token gets `403`.

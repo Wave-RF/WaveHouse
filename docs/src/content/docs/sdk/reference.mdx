@@ -57,7 +57,7 @@ Both SDKs retry a failed REST call, but only where resending is safe. Which fail
 | Pipes | only when the connection was certainly never made | only on the server's own `retryable: true`, a `429`, or a `503` with `Retry-After` |
 | Raw SQL | only when the connection was certainly never made | never |
 
-**A retryable answer** is one whose body says `retryable: true`, or, when the body says nothing, a `5xx`, a `408` or a `429`. A failed ClickHouse query carries the server's own verdict ([ClickHouse errors](/api#clickhouse-errors-on-the-query-paths)); any other `4xx` with no such body is never retried. Ingest is at-least-once, so a resent batch can publish a record twice unless the tenant has [deduplication](/settings-directory#deduplication) on and the rows carry its id field. A pipe or a raw SQL statement may write, and a proxy can answer `5xx` after the write ran, so those are resent only on the server's word that it is safe, or when nothing left the client.
+**A retryable answer** is one whose body says `retryable: true`, or, when the body says nothing, a `5xx`, a `408` or a `429`. A failed ClickHouse query carries the server's own verdict ([ClickHouse errors](/api#clickhouse-errors-on-the-query-paths)); any other `4xx` with no such body is never retried. Ingest is at-least-once, so a resent batch can publish a record twice unless the server has [deduplication](/settings-directory#deduplication) on and the rows carry its id field. A pipe or a raw SQL statement may write, and a proxy can answer `5xx` after the write ran, so those are resent only on the server's word that it is safe, or when nothing left the client.
 
 **"Never made"** is judged differently. TypeScript counts only the Node errors that mean no connection was opened (`ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`, `ENETUNREACH`, `EHOSTUNREACH`, `UND_ERR_CONNECT_TIMEOUT`); a browser's bare `TypeError`, and any attempt timeout, count as possibly sent. Go counts a failed dial, or any failure before the request headers were written, an attempt timeout while still connecting included.
 
@@ -71,7 +71,7 @@ Both SDKs retry a failed REST call, but only where resending is safe. Which fail
 | `Retry-After: 0` | retries at once | the normal backoff |
 | An unreadable `Retry-After` | the normal backoff | the normal backoff |
 
-`Retry-After` is read as delta-seconds or an HTTP-date, and honored on every retryable answer, `5xx`, `408` and `429` alike. A wait longer than the cap is shortened to the cap (in TypeScript, plus the jitter), and the call still retries while attempts remain. That bounds, for example, a health ping against a tenant whose JWKS is still being fetched (`503`, `Retry-After: 30`). When a call has used its attempts, it returns the last error.
+`Retry-After` is read as delta-seconds or an HTTP-date, and honored on every retryable answer, `5xx`, `408` and `429` alike. A wait longer than the cap is shortened to the cap (in TypeScript, plus the jitter), and the call still retries while attempts remain. That bounds, for example, a health ping against a server whose JWKS is still being fetched (`503`, `Retry-After: 30`). When a call has used its attempts, it returns the last error.
 
 Canceling a call (an aborted signal, a done context) ends a wait at once. In Go the error then wraps the context's error and only quotes the last failure, so `errors.As` won't find an `*APIError` for a call you abandoned.
 
@@ -144,7 +144,7 @@ A REST call never throws for anything the server returns: every API error comes 
 | 400 | `HTTP_400` | No | Bad request (validation, missing fields) |
 | 401 | `HTTP_401` | No | A present-but-invalid or expired JWT that a gate then denied. WaveHouse never returns `401` for a *missing* token, which resolves to `default_role`, so a denial is `403` |
 | 403 | `HTTP_403` | No | Insufficient permissions |
-| 404 | `HTTP_404` | No | Table, pipe or tenant not found |
+| 404 | `HTTP_404` | No | Table or pipe not found |
 | 408 | `HTTP_408` | Yes | A request timeout, from something in front |
 | 429 | `HTTP_429` | Yes | Rate limited, by something in front; resent on every call but raw SQL |
 | 400 | `clickhouse.rejected` / `clickhouse.limit_exceeded` | No | ClickHouse refused the query (bad SQL, an unknown column, a type mismatch) or it outran a limit, the role's own caps included |
@@ -154,7 +154,7 @@ A REST call never throws for anything the server returns: every API error comes 
 | 502 | `clickhouse.misconfigured` | No | ClickHouse refused WaveHouse's own credentials or database, or the route to it is wrong: an operator fix |
 | 502 | `clickhouse.response_too_large` | No | A raw-SQL response over the 64 MiB cap |
 | 503 | `clickhouse.unavailable` | Yes | ClickHouse is down, unreachable or overloaded; `Retry-After: 5` |
-| 503 | `HTTP_503` | Yes | Service unavailable: a tenant whose settings folder was rejected, a schema not discovered yet, a tenant on no ClickHouse pool, a dedupe store that cannot answer, a token sent while the tenant's JWKS has not been fetched yet (`Retry-After: 30`), or a record whose dedupe id another request is still publishing. Each `Retry-After` is honored between attempts |
+| 503 | `HTTP_503` | Yes | Service unavailable: a schema not discovered yet, no ClickHouse connection open, a dedupe store that cannot answer, a token sent while the server's JWKS has not been fetched yet (`Retry-After: 30`), or a record whose dedupe id another request is still publishing. Each `Retry-After` is honored between attempts |
 | 3xx (0 in a browser) | `REDIRECT` | No | A redirect not followed, because the request carries a credential ([Redirects](#redirects)) |
 | 2xx | `DECODE_ERROR` | No | A success whose body is not JSON, such as an intermediary's HTML page or a raw SQL `FORMAT` clause. Sent once, never resent |
 | 0 | `NETWORK_ERROR` | Yes | No answer arrived. Retried on reads and ingest; for raw SQL and pipes, see above |
@@ -205,7 +205,7 @@ Its message reads `wavehouse: POST /v1/query: 400 clickhouse.rejected: <message>
 | `wavehouse.ErrBadRequest` | 400 |
 | `wavehouse.ErrUnauthorized` | 401 |
 | `wavehouse.ErrForbidden` | 403 |
-| `wavehouse.ErrNotFound` | 404: an unknown table, pipe or tenant |
+| `wavehouse.ErrNotFound` | 404: an unknown table or pipe |
 | `wavehouse.ErrRateLimited` | 429 |
 | `wavehouse.ErrUnavailable` | 503 |
 
@@ -293,21 +293,20 @@ wavehouse.New(baseURL, opts...) → (*Client, error)
 │   ├── Param  Params  Header
 │   └── Scan(ctx, &dst)  Fetch(ctx)  Exec(ctx)
 ├── SQL(query) → *SQLCall   (admin)
-│   ├── ForTenant  Header
+│   ├── Header
 │   └── Scan(ctx, &dst)  Fetch(ctx)  Exec(ctx)
 ├── Subscribe(ctx, table, *SubscribeOptions) → (*Subscription, error)
 │   └── Next  Event  Events  Err  Close
-├── Tables(ctx, ...AdminOption) → ([]TableSchema, error)   (admin)
-├── TableSchema(ctx, name, ...AdminOption) → (*TableSchema, error)   (admin)
-├── RefreshSchema(ctx, ...AdminOption) → ([]TableSchema, error)   (admin)
-├── ReloadSettings(ctx, ...AdminOption) → (*ReloadResult, error)   (admin)
-├── DLQStats(ctx, ...AdminOption) → (*DLQStats, error)   (admin)
-├── Pipes(ctx, ...AdminOption) → ([]PipeDefinition, error)   (admin)
-├── PipeDefinition(ctx, name, ...AdminOption) → (*PipeDefinition, error)   (admin)
+├── Tables(ctx) → ([]TableSchema, error)   (admin)
+├── TableSchema(ctx, name) → (*TableSchema, error)   (admin)
+├── RefreshSchema(ctx) → ([]TableSchema, error)   (admin)
+├── ReloadSettings(ctx) → (*ReloadResult, error)   (admin)
+├── DLQStats(ctx) → (*DLQStats, error)   (admin)
+├── Pipes(ctx) → ([]PipeDefinition, error)   (admin)
+├── PipeDefinition(ctx, name) → (*PipeDefinition, error)   (admin)
 ├── Health(ctx) → error
 └── Version(ctx) → (*VersionInfo, error)
 
-ForTenant(id) → AdminOption
 IsRetryable(err) → bool
 ```
 
@@ -324,11 +323,7 @@ TypeScript only. The package ships a `wavehouse-codegen` bin that generates a `D
 WAVEHOUSE_ADMIN_TOKEN="$TOKEN" npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-Codegen reads `/v1/ops/schema`, which is **admin-only**: against a non-dev server of the four settings files, give it an admin-role token, in the `WAVEHOUSE_ADMIN_TOKEN` environment variable or on stdin with `--auth-stdin`, or the request is denied with `403`. Over [a nested settings directory](/deployment#the-nested-settings-directory) its `/v1/ops/*` routes admit the [operator key](/api#authentication) alone (an admin-role token gets `403`), so pass the key, in `WAVEHOUSE_OPERATOR_KEY` or with `--operator-key`, and name the tenant with `--tenant`; without `--tenant` it reads tenant `0`'s schema on either shape:
-
-```bash
-WAVEHOUSE_OPERATOR_KEY="$WH_AUTH_OPERATOR_KEY" npx wavehouse-codegen --url https://wh.example.com --tenant acme --out ./src/db.d.ts
-```
+Codegen reads `/v1/ops/schema`, which is **admin-only**: against a non-dev server, give it an admin-role token, in the `WAVEHOUSE_ADMIN_TOKEN` environment variable or on stdin with `--auth-stdin`, or the request is denied with `403`. The [operator key](/api#authentication) works too, in `WAVEHOUSE_OPERATOR_KEY` or with `--operator-key`.
 
 **Options:**
 
@@ -339,7 +334,6 @@ WAVEHOUSE_OPERATOR_KEY="$WH_AUTH_OPERATOR_KEY" npx wavehouse-codegen --url https
 | `--auth-stdin` | Read the bearer token from stdin (`WAVEHOUSE_ADMIN_TOKEN` sets it too); neither shows in the process list or shell history | — |
 | `--auth`, `-a` | The bearer token as an argument. **Deprecated**, since an argument is visible in the process list and shell history: it still works and prints a warning | — |
 | `--operator-key`, `-k` | Operator key, sent as `X-Operator-Key` (`WAVEHOUSE_OPERATOR_KEY` sets it too) | — |
-| `--tenant`, `-t` | Tenant whose schema to read, sent as `?tenant=` | tenant `0` |
 | `--help`, `-h` | Show the help | — |
 
 An argument codegen does not recognize (a mistyped flag, a bare positional, `--flag=value`) is an error, not skipped. A request carrying a token or an operator key does not follow a redirect, for the reason in [Redirects](#redirects): codegen stops and names the target, so point `--url` at the final address.
