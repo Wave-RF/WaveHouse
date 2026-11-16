@@ -7,14 +7,14 @@
   },
   "scripts": {
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@wavehouse/sdk": "workspace:*"
+    "@wavehouse/sdk": "0.2.0"
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "@vitest/coverage-v8": "^5.0.4",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

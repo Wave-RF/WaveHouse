@@ -19,7 +19,7 @@
 # change (its old key was pruned, so it saves it again), and a revert
 # landing while its bump's prune runs. A pull request still on an older
 # go.sum restores the newest by prefix instead of its exact key. Other keys
-# (smoke-node) are left alone.
+# are left alone.
 #
 # Usage: scripts/ci/prune-main-cache.sh [--dry-run] [--from <file>]
 #   --dry-run    list what would be deleted; delete nothing

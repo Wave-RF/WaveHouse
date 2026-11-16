@@ -298,7 +298,7 @@ describe("Ingest", () => {
         Authorization: `Bearer ${makeJWT({ sub: "test", role: "viewer" })}`,
         "Content-Type": "text/csv",
       },
-    ]) {
+    ] as Record<string, string>[]) {
       const res = await fetch(`${WH_URL}/v1/ingest?table=${T.clicks}`, {
         method: "POST",
         headers,

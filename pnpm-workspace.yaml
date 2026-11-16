@@ -1,12 +1,11 @@
 # pnpm workspace root for WaveHouse.
 #
-# Three TypeScript packages live in this repo:
-#   - clients/ts        — @wavehouse/sdk (the SDK we publish to npm)
-#   - tests/e2e/sdk     — wavehouse-e2e (E2E suite that exercises the SDK)
+# Two TypeScript packages live in this repo (the SDK itself lives in
+# Wave-RF/wavehouse-sdk-js and is consumed from the registry):
+#   - tests/e2e/sdk     — wavehouse-e2e (E2E suite that exercises the published SDK)
 #   - docs              — wavehouse-docs (Astro Starlight site)
 
 packages:
-  - "clients/ts"
   - "tests/e2e/sdk"
   - "docs"
 
@@ -22,17 +21,17 @@ minimumReleaseAge: 10080
 # packages we publish ourselves are trusted immediately, and gating them would
 # block consuming a freshly tagged release for 7 days. Both our scopes belong
 # here: @wave-rf/* are the plugins, and @wavehouse/* is the product — the docs
-# site consumes @wavehouse/sdk from the registry rather than the workspace
-# (see docs/package.json), precisely so it tracks a published release, and the
-# cooldown would otherwise hold that release back a week after every tag.
+# site and the e2e suite consume @wavehouse/sdk from the registry (see their
+# package.json files), and the cooldown would otherwise hold a fresh release
+# back a week after every tag.
 minimumReleaseAgeExclude:
   - "@wave-rf/*"
   - "@wavehouse/*"
 
 # Fail an install when the active Node doesn't satisfy a package's engines.node.
-# Every workspace package — including the published SDK (clients/ts) — declares
-# ">=22", matching the dev/CI version pinned in .nvmrc. That is the only line CI
-# exercises, and Node 18/20 are past upstream end-of-life.
+# Every workspace package declares ">=22", matching the dev/CI version pinned in
+# .nvmrc. That is the only line CI exercises, and Node 18/20 are past upstream
+# end-of-life.
 engineStrict: true
 
 catalog:

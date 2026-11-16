@@ -10,12 +10,11 @@ project_name: wavehouse
 
 # GoReleaser's tag detection — which tag it is releasing, and which one the
 # release notes are diffed from — walks git history without caring which tag
-# family it lands on. This repo has several: `v*` for the server and
-# `clients/<lang>/v*` for each client SDK. Without this, cutting `v0.1.0` after
-# an SDK release describes the server release as "everything since
-# clients/ts/v0.1.0" — verified: `previous=clients/ts/v0.1.0 current=v0.1.0`.
-# Ignoring the client families makes the built-in detection correct, which is
-# why no workflow needs to pass GORELEASER_PREVIOUS_TAG.
+# family it lands on. The history still carries `clients/<lang>/v*` tags from
+# when the client SDKs lived here, next to the server's `v*`. Without this, the
+# release notes would diff from the nearest of those. Ignoring the client
+# families keeps the built-in detection correct, which is why no workflow needs
+# to pass GORELEASER_PREVIOUS_TAG.
 git:
   ignore_tags:
     - "clients/*"

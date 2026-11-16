@@ -57,7 +57,6 @@
 "area/sdk":
   - changed-files:
     - any-glob-to-any-file:
-      - "clients/ts/**"
       - "tests/e2e/sdk/**"
 
 "area/docs":
