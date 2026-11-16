@@ -294,7 +294,7 @@ wh.From("clicks").Select("page").TimeRange("received_timestamp", from, time.Time
   </TabItem>
 </Tabs>
 
-A window keeps rows where `column >= since AND column <= until`. A relative window (`last()` / `Last`) means that long before **the server's** clock, so a client with a skewed clock still gets the right window. The server rounds each bound down to `query.timestamp_bucket_seconds` (60 s by default), so a window can reach up to a bucket further back than asked. A later time window replaces an earlier one on the same builder.
+A window keeps rows where `column >= since AND column <= until`. A relative window (`last()` / `Last`) means that long before **the server's** clock, so a client with a skewed clock still gets the right window. The server rounds each bound down to `query.timestamp_bucket_seconds` (60 s by default), so a window can start, and end, up to a bucket earlier than asked; leave the end open (or use `last()` / `Last`) to keep the newest rows. A later time window replaces an earlier one on the same builder.
 
 ## Pagination
 
@@ -359,7 +359,7 @@ fmt.Println(res.Succeeded, "published,", res.Duplicates, "duplicates")
   </TabItem>
 </Tabs>
 
-**The body cap.** One ingest request is bound by the server's 16 MiB [request-body cap](/reverse-proxy#request-body-size-limits). Over it, the TypeScript SDK's request gets a `413` with nothing ingested, and the Go SDK refuses the call before sending it; either way, split the batch. Chunking a large array automatically is tracked in [`wavehouse-sdk-js#11`](https://github.com/Wave-RF/wavehouse-sdk-js/issues/11). The per-record list can be truncated for a very large batch (Go: to the first 10,000 records); the counts stay authoritative.
+**The body cap.** One ingest request is bound by the server's 16 MiB [request-body cap](/reverse-proxy#request-body-size-limits). Over it, the TypeScript SDK's request gets a `413` with nothing ingested, and the Go SDK refuses the call before sending it; either way, split the batch. Chunking a large array automatically is tracked in [`wavehouse-sdk-js#11`](https://github.com/Wave-RF/wavehouse-sdk-js/issues/11). The server truncates the per-record list to its first 10,000 entries for a very large batch; the counts stay authoritative.
 
 **Retries and duplicates.** Ingest is retried like a read ([Retries and timeouts](/sdk/reference#retries-and-timeouts)), so it is at-least-once: a retried batch can publish a record twice. Where the tenant has [deduplication](/settings-directory#deduplication) on and the rows carry its id field, the retry's copy is reported as a duplicate instead.
 
@@ -445,8 +445,8 @@ if err := wh.SQL("SELECT 1").ForTenant("acme").Exec(ctx); err != nil {
 `POST /v1/ops/query` runs the statement verbatim against ClickHouse, so anything ClickHouse accepts works, DDL and mutations included. It is **admin-only**: over a settings directory of the four files the caller must resolve to the policy admin role (`admin_role`, `"admin"` by default) or present the [operator key](/api#authentication); over [a nested one](/deployment#the-nested-settings-directory) only the operator key is admitted, and a token carrying an admin role gets `403`. A tokenless request falls back to the `default_role`, so it gets `403` unless that is deliberately the admin role (a loudly-warned dev-only setting), and an invalid or expired token gets `401`. The tenant is chosen per call (`{ tenant }`, `ForTenant`), since this route ignores `X-Tenant-ID`.
 
 - **No parameter binding.** Positional `?` substitution is not supported, and neither SDK forwards ClickHouse's named parameters (`{id:UInt32}` with `param_id=42`). Inline literals, never from untrusted input; for binding user input safely, use the structured query builder.
-- **Never resent once it may have run.** A raw SQL call is retried only when the connection was certainly never made; a timeout, a dropped connection or any answer from the server is returned as the error ([Retries and timeouts](/sdk/reference#retries-and-timeouts)).
-- **JSON rows only.** An inline `FORMAT` clause (`… FORMAT CSV`) replaces the JSON envelope. TypeScript then returns a non-retryable `DECODE_ERROR`; Go's `Scan` and `Fetch` return an error naming the response's `Content-Type`, and `Exec` discards the body without reading it. For a CSV or TSV export, call `/v1/ops/query` directly and read the body as text.
+- **Never resent once it may have run.** A raw SQL call is retried only when the connection was certainly never made; a timeout once the request may have been sent, a dropped connection or any answer from the server is returned as the error ([Retries and timeouts](/sdk/reference#retries-and-timeouts)).
+- **JSON rows only.** An inline `FORMAT` clause (`… FORMAT CSV`) replaces the JSON envelope. TypeScript then returns a non-retryable `DECODE_ERROR`; Go's `Scan` and `Fetch` return an error naming the response's `Content-Type`, and `Exec` reads the body and discards it. For a CSV or TSV export, call `/v1/ops/query` directly and read the body as text.
 - A response over the 64 MiB cap is `502 clickhouse.response_too_large`.
 
 ## Per-call options

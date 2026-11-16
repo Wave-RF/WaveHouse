@@ -67,11 +67,11 @@ Both SDKs retry a failed REST call, but only where resending is safe. Which fail
 |---|---|---|
 | Attempts | `1 + options.maxRetries`: 3 by default | `RetryPolicy.MaxAttempts`: 3 by default |
 | Wait with no `Retry-After` | 1 s, 2 s, 4 s, … capped at 30 s | `MinBackoff` (500 ms), doubling, ±20% jitter, capped at `MaxBackoff` (30 s) |
-| Wait with a `Retry-After` | what it asks, plus up to 20% + 100 ms of jitter, clamped to `options.maxRetryAfterMs` (30 s by default) | what it asks, capped at `MaxBackoff` |
+| Wait with a `Retry-After` | what it asks, clamped to `options.maxRetryAfterMs` (30 s by default), plus up to 20% + 100 ms of jitter | what it asks, capped at `MaxBackoff` |
 | `Retry-After: 0` | retries at once | the normal backoff |
 | An unreadable `Retry-After` | the normal backoff | the normal backoff |
 
-`Retry-After` is read as delta-seconds or an HTTP-date, and honored on every retryable answer, `5xx`, `408` and `429` alike. A wait longer than the cap is shortened to the cap, and the call still retries while attempts remain. That bounds, for example, a health ping against a tenant whose JWKS is still being fetched (`503`, `Retry-After: 30`). When a call has used its attempts, it returns the last error.
+`Retry-After` is read as delta-seconds or an HTTP-date, and honored on every retryable answer, `5xx`, `408` and `429` alike. A wait longer than the cap is shortened to the cap (in TypeScript, plus the jitter), and the call still retries while attempts remain. That bounds, for example, a health ping against a tenant whose JWKS is still being fetched (`503`, `Retry-After: 30`). When a call has used its attempts, it returns the last error.
 
 Canceling a call (an aborted signal, a done context) ends a wait at once. In Go the error then wraps the context's error and only quotes the last failure, so `errors.As` won't find an `*APIError` for a call you abandoned.
 
