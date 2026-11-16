@@ -272,8 +272,9 @@ jobs:
       # `--notes-start-tag` is not optional. GitHub's own generator picks the
       # previous release itself, and this repo still holds the `clients/ts/v*`
       # releases from when the TypeScript SDK released here — so without it a
-      # server release's notes can be diffed against an SDK release. `git describe --match 'v*'` is the same rule
-      # .goreleaser.yaml's `git.ignore_tags` applied.
+      # server release's notes can be diffed against an SDK release.
+      # `git describe --match 'v*'` is the same rule .goreleaser.yaml's
+      # `git.ignore_tags` applied.
       - name: Create or update the GitHub Release
         shell: bash
         env:
