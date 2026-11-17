@@ -26,7 +26,7 @@
     "@wave-rf/cloudflare-md-router": "^0.3.0",
     "@wave-rf/starlight-llm-tools": "^0.3.2",
     "@wavehouse/sdk": "^0.3.0",
-    "astro": "^7.4.7",
+    "astro": "^7.4.8",
     "astro-vtbot": "^3.1.0",
     "katex": "^0.19.1",
     "rehype-katex": "^7.0.1",
@@ -40,9 +40,9 @@
     "typescript": "^6.0.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261109.1",
+    "@cloudflare/workers-types": "^5.20261110.1",
     "playwright": "^1.65.0",
-    "wrangler": "^4.158.0"
+    "wrangler": "^4.160.0"
   },
   "engines": {
     "node": ">=22"
