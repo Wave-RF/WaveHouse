@@ -783,7 +783,7 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 
 // flushTable inserts one table's batch into ClickHouse, then (on success) kicks
 // off cache invalidation + backgrounded acks via handleSuccess. On bulk failure
-// it asks what the failure was (chconn.Classify):
+// it asks what the failure was (insertClass, chconn.Classify with 452 a denial):
 //
 //   - ClickHouse REJECTED the batch — it read it and refused something in it:
 //     row-by-row isolation. Each row that re-inserts cleanly is acked, each
