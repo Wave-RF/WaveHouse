@@ -44,8 +44,9 @@ type IngestOptions struct {
 	Window Limits
 	// TimeLimit bounds Engine.IngestRole's walk over the body, from when it
 	// takes its parse slot: past it, the walk stops before its next window
-	// with ErrTimeLimit. A window already running finishes (a chtypes call
-	// cannot be canceled), so the first always does. 0 is no limit.
+	// with ErrTimeLimit. A window already running finishes, since the
+	// published chtypes library builds decline a cancellable call
+	// (option-not-implemented), so the first always does. 0 is no limit.
 	TimeLimit time.Duration
 }
 

@@ -191,9 +191,10 @@ func TestIngest_CheckConstraint_IsolatesTheBadRow(t *testing.T) {
 
 // TestIngest_CheckConstraint_ConcurrentWriterParksOnlyItsOwnRow: two workers
 // write one table at once, one batch all good and the other with a violating
-// row. Their batch INSERTs can share an async flush, so the good batch can
-// fail too; its isolation must then store every row of it rather than park
-// one that met the other worker's bad row in a shared flush.
+// row. Under the server's async default their INSERTs would share a flush, so
+// the good batch would fail too and its isolation could park a row that met
+// the other worker's bad one; the worker's synchronous INSERTs store every
+// good row and park only the bad one.
 func TestIngest_CheckConstraint_ConcurrentWriterParksOnlyItsOwnRow(t *testing.T) {
 	requireServerAsyncInsert(t)
 	table := createTable(t, checkColumns, "ORDER BY id")

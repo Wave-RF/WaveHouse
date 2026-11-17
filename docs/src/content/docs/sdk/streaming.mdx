@@ -303,7 +303,7 @@ const stream = wh.from('clicks')
 // Only events where page === '/home', with only page and button
 ```
 
-Every [filter operator](/sdk/queries#filters) works here, and two of them, `like` and `not_like`, need care for different reasons. Ordered comparisons (`>`, `>=`, `<`, `<=`) apply only when both sides are numbers or both are strings (strings compare lexicographically, which suits ISO-8601 timestamps); a mismatch doesn't match. `like` matches **case-insensitively** here, while ClickHouse's `LIKE` on the query path is case-sensitive, so inside one `liveQuery()` a pattern like `'/Home%'` can admit live events whose historical counterparts the backfill excluded. `not_like` has no server-side counterpart at all: `/v1/query` rejects it with a `400` (the server accepts only the eight operators in the [Queries](/sdk/queries#filters) table), so a `liveQuery()` filtered on it gets an error `Result` in `initial()`, drops whatever was buffered during the backfill window, and runs live-only from there.
+Every [filter operator](/sdk/queries#filters) works here. Ordered comparisons (`>`, `>=`, `<`, `<=`) apply only when both sides are numbers or both are strings (strings compare lexicographically, which suits ISO-8601 timestamps written at one scale: this server keeps a `DateTime64`'s trailing zeros, so compare a `DateTime64(3)` column against `2026-03-24T12:00:00.000Z`, not `…12:00:00Z`); a mismatch doesn't match. `like` matches **case-insensitively** here, while ClickHouse's `LIKE` on the query path is case-sensitive, so inside one `liveQuery()` a pattern like `'/Home%'` can admit live events whose historical counterparts the backfill excluded.
 
   </TabItem>
   <TabItem label="Go">

@@ -191,8 +191,8 @@ type ClickHouse struct {
 type Ingest struct {
 	// ParseTimeout is the limit for a tenant that sets none. A body still
 	// being read past it stops at the next parse window and is a 422; a
-	// window already running finishes, since a chtypes call cannot be
-	// canceled.
+	// window already running finishes, since the published chtypes library
+	// builds decline a cancellable call (option-not-implemented).
 	ParseTimeout time.Duration `yaml:"parse_timeout" env:"WH_INGEST_PARSE_TIMEOUT"`
 	// MaxParseTimeout is the most a tenant's ingest.parse_timeout may be.
 	MaxParseTimeout time.Duration `yaml:"max_parse_timeout" env:"WH_INGEST_MAX_PARSE_TIMEOUT"`

@@ -77,8 +77,13 @@ func (p *parseTimeouts) reconcile(boot bool) error {
 		if boot && !p.tenants.Nested() {
 			continue // the caller refuses boot on the error, which names both values
 		}
-		slog.Error("ingest.parse_timeout refused; keeping the tenant's previous limit, the next reload retries",
-			"tenant", id, "error", err, "limit", prev)
+		if had {
+			slog.Error("ingest.parse_timeout refused; keeping the tenant's previous limit, the next reload retries",
+				"tenant", id, "error", err, "limit", prev)
+		} else {
+			slog.Error("ingest.parse_timeout refused; the tenant gets the boot config's ingest.parse_timeout, the next reload retries",
+				"tenant", id, "error", err, "limit", prev)
+		}
 	}
 	p.cur.Store(&next)
 	return errors.Join(errs...)
