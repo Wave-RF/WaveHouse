@@ -67,8 +67,8 @@ importers:
         specifier: ^0.3.2
         version: 0.3.2(@astrojs/starlight@0.42.10(@astrojs/markdown-remark@7.3.6(supports-color@10.2.2))(astro@7.4.7(@astrojs/markdown-remark@7.3.6(supports-color@10.2.2))(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1))(supports-color@10.2.2)(typescript@6.0.3))(astro@7.4.7(@astrojs/markdown-remark@7.3.6(supports-color@10.2.2))(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1))
       '@wavehouse/sdk':
-        specifier: ^0.2.0
-        version: 0.2.0
+        specifier: ^0.3.0
+        version: 0.3.0
       astro:
         specifier: ^7.4.7
         version: 7.4.7(@astrojs/markdown-remark@7.3.6(supports-color@10.2.2))(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1)
@@ -119,8 +119,8 @@ importers:
   tests/e2e/sdk:
     dependencies:
       '@wavehouse/sdk':
-        specifier: 0.2.0
-        version: 0.2.0
+        specifier: 0.3.0
+        version: 0.3.0
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
@@ -1642,8 +1642,8 @@ packages:
       starlight-glossary:
         optional: true
 
-  '@wavehouse/sdk@0.2.0':
-    resolution: {integrity: sha512-okYDhCYRfVwSyjiEG5ODaV0eaWOHETUj8/n/WnR57XtTtaB1O/QgwlrlzNEA53/dYulVeChTLl9nf+neK/qb8g==}
+  '@wavehouse/sdk@0.3.0':
+    resolution: {integrity: sha512-M+qaKrNdrxE/zF/pw0n8sxEJrz7dkAxPas7pUNAF0hgbJLlTTauE3PpsNLmXjjdIQBC7NinCZ9PnDSoQSischw==}
     engines: {node: '>=22'}
     hasBin: true
 
@@ -5061,7 +5061,7 @@ snapshots:
       '@astrojs/starlight': 0.42.10(@astrojs/markdown-remark@7.3.6(supports-color@10.2.2))(astro@7.4.7(@astrojs/markdown-remark@7.3.6(supports-color@10.2.2))(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1))(supports-color@10.2.2)(typescript@6.0.3)
       astro: 7.4.7(@astrojs/markdown-remark@7.3.6(supports-color@10.2.2))(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1)
 
-  '@wavehouse/sdk@0.2.0':
+  '@wavehouse/sdk@0.3.0':
     dependencies:
       eventsource-parser: 3.1.1
 

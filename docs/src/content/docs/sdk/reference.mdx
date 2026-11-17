@@ -1,0 +1,403 @@
+---
+title: "SDK Reference & CLI"
+description: "Cancellation, retries and Retry-After, attempt timeouts, redirects, error codes, the API at a glance, the codegen CLI and E2E testing."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Cross-cutting reference for both SDKs: cancellation, what each one retries and how long it waits, redirects, the error model behind every call, the API at a glance, and the TypeScript SDK's codegen CLI.
+
+## Cancellation
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+Every async call takes an `AbortSignal`, and a stream takes one in `StreamOptions.signal`:
+
+```ts
+const controller = new AbortController();
+setTimeout(() => controller.abort(), 5000);
+
+const { data, error } = await wh.from('clicks').fetch({ signal: controller.signal });
+if (error?.code === 'ABORTED') {
+  console.log('Request canceled');
+}
+```
+
+An abort ends the call at once with `ABORTED`, a retry wait included, and is never retried. It is decided from the signal rather than from what `fetch` threw, so `AbortSignal.timeout()` reports `ABORTED` too. For a deadline per attempt rather than per call, use [`attemptTimeoutMs`](#attempt-timeouts).
+
+  </TabItem>
+  <TabItem label="Go">
+
+Every call that does I/O takes a `context.Context` first:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+if err := wh.Health(ctx); errors.Is(err, context.DeadlineExceeded) {
+    log.Print("timed out")
+}
+```
+
+Canceling the context, or reaching its deadline, ends the call at once, a retry wait included, and is never retried. For `Subscribe` the context bounds the whole subscription, not only the connect. For a deadline per attempt rather than per call, use [`RetryPolicy.AttemptTimeout`](#attempt-timeouts).
+
+  </TabItem>
+</Tabs>
+
+## Retries and timeouts
+
+Both SDKs retry a failed REST call, but only where resending is safe. Which failures count is the same in both; the waits differ.
+
+### Which calls are resent
+
+| Call | After a transport error (no answer) | After a retryable answer |
+|------|-------------------------------------|--------------------------|
+| Reads: queries, admin calls, health, version, schema refresh, settings reload | retried | retried |
+| Ingest: `insert`, `insertNDJSON` / `Insert`, `InsertNDJSON` | retried | retried |
+| Pipes | only when the connection was certainly never made | only on the server's own `retryable: true`, a `429`, or a `503` with `Retry-After` |
+| Raw SQL | only when the connection was certainly never made | never |
+
+**A retryable answer** is one whose body says `retryable: true`, or, when the body says nothing, a `5xx`, a `408` or a `429`. A failed ClickHouse query carries the server's own verdict ([ClickHouse errors](/api#clickhouse-errors-on-the-query-paths)); any other `4xx` with no such body is never retried. Ingest is at-least-once, so a resent batch can publish a record twice unless the server has [deduplication](/settings-directory#deduplication) on and the rows carry its id field. A pipe or a raw SQL statement may write, and a proxy can answer `5xx` after the write ran, so those are resent only on the server's word that it is safe, or when nothing left the client.
+
+**"Never made"** is judged differently. TypeScript counts only the Node errors that mean no connection was opened (`ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`, `ENETUNREACH`, `EHOSTUNREACH`, `UND_ERR_CONNECT_TIMEOUT`); a browser's bare `TypeError`, and any attempt timeout, count as possibly sent. Go counts a failed dial, or any failure before the request headers were written, an attempt timeout while still connecting included.
+
+### How long a retry waits
+
+| | TypeScript | Go |
+|---|---|---|
+| Attempts | `1 + options.maxRetries`: 3 by default | `RetryPolicy.MaxAttempts`: 3 by default |
+| Wait with no `Retry-After` | 1 s, 2 s, 4 s, … capped at 30 s | `MinBackoff` (500 ms), doubling, ±20% jitter, capped at `MaxBackoff` (30 s) |
+| Wait with a `Retry-After` | what it asks, clamped to `options.maxRetryAfterMs` (30 s by default), plus up to 20% + 100 ms of jitter | what it asks, capped at `MaxBackoff` |
+| `Retry-After: 0` | retries at once | the normal backoff |
+| An unreadable `Retry-After` | the normal backoff | the normal backoff |
+
+`Retry-After` is read as delta-seconds or an HTTP-date, and honored on every retryable answer, `5xx`, `408` and `429` alike. A wait longer than the cap is shortened to the cap (in TypeScript, plus the jitter), and the call still retries while attempts remain. That bounds, for example, a health ping against a server whose JWKS is still being fetched (`503`, `Retry-After: 30`). When a call has used its attempts, it returns the last error.
+
+Canceling a call (an aborted signal, a done context) ends a wait at once. In Go the error then wraps the context's error and only quotes the last failure, so `errors.As` won't find an `*APIError` for a call you abandoned.
+
+### Streams
+
+A stream reconnects on its own schedule rather than this one: without limit, on a jittered backoff, resuming from the last delivered event. A retryable answer on a connect (`5xx`, `408` or `429`, unless the body says `retryable: false`) is re-dialed, and its `Retry-After` is honored: TypeScript waits at least that long, clamped to 30 s, and Go waits it, capped at `MaxBackoff`. See [Transport behavior](/sdk/streaming#transport-behavior) for the schedule and what ends a stream.
+
+### Attempt timeouts
+
+A per-attempt deadline, off by default, so an attempt that stalls is retried instead of holding the whole call:
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+const wh = createClient({ baseURL, options: { attemptTimeoutMs: 5_000 } });
+
+// Per call: over the client's; 0 turns it off for this call.
+const { error } = await wh.from('clicks').selectAll().fetch({ attemptTimeoutMs: 2_000 });
+if (error?.code === 'ATTEMPT_TIMEOUT') console.log(error.message); // names the attempt count
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+wh, err := wavehouse.New("http://localhost:8080",
+    wavehouse.WithRetry(wavehouse.RetryPolicy{MaxAttempts: 3, AttemptTimeout: 5 * time.Second}))
+if err != nil {
+    log.Fatal(err)
+}
+ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+defer cancel()
+if _, err := wh.From("clicks").Limit(10).Fetch(ctx); errors.Is(err, wavehouse.ErrAttemptTimeout) {
+    fmt.Println("the last attempt stalled:", err)
+}
+```
+
+  </TabItem>
+</Tabs>
+
+- **What it bounds.** On a REST call, one attempt from sending to the end of the response body. On a stream, each connect up to the response headers, never an established stream.
+- **It is not your deadline.** The caller's signal or context is separate, and still ends the call at once, unretried.
+- **A timed-out attempt is retried** after a backoff while attempts remain, under the rules for a transport error above: a raw SQL or pipe call is not resent once its request may have reached the server. A stream re-dials it like any connect failure.
+- **The final error** of a REST call, when its last attempt timed out, names the attempt count: `ATTEMPT_TIMEOUT` in TypeScript, and in Go an error that matches `wavehouse.ErrAttemptTimeout` and does **not** match `context.DeadlineExceeded`. A TypeScript stream reports each timed-out connect as a retryable `SSE_ATTEMPT_TIMEOUT` and re-dials; it names no attempt count.
+
+## Redirects
+
+**A request that carries a credential never follows a redirect**, in either SDK. A credential is a token (`auth`, `WithToken`, `WithTokenSource`) or the operator key, any custom header (the client's or the call's), and, in a browser, a TypeScript `fetchOptions` with `credentials: 'include'`. Following one would hand the credential, the custom headers and the body (a raw SQL statement included) to whatever the redirect names, and a cross-origin hop strips `Authorization`, which `/v1/stream` answers with a reduced `default_role` view rather than an error.
+
+So the redirect is reported instead, and never retried: as a `REDIRECT` error naming the status and `Location` on a TypeScript REST call (a browser hides an opaque redirect's target and reports status `0`), `SSE_REDIRECT` on a TypeScript stream, and in Go an error that matches `wavehouse.ErrRedirect` and names the `Location`. The fix is to set the base URL to the final URL: most often the redirect is an http→https upgrade or a canonical-host rule at a proxy. A request with no credential follows redirects normally, so CDN canonicalization and an http→https upgrade still work. In TypeScript, an `options.fetch` that sets its own `redirect` can follow a credentialed one anyway; in Go, the `WithHTTPClient` client's `CheckRedirect` applies only to uncredentialed requests.
+
+Cookies relied on through a browser's implicit `same-origin` credentials mode are invisible to the test, since nothing distinguishes that from a deployment with no cookies. A cookie is re-derived at each hop rather than carried, so a redirect keeps it only while the hop stays inside both the request's origin and the cookie's `Path`; outside either, a stream arrives with no cookie and gets a `default_role` view.
+
+## Error Handling
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+A REST call never throws for anything the server returns: every API error comes back in `Result.error`. A stream reports its errors to the subscribers' `error` callbacks instead, since it has no single result. The SDK does throw on caller and environment errors:
+
+- `createClient` throws a `TypeError` for a `baseURL` that names no host, uses a scheme other than `http`/`https`, or carries a query or fragment, and for an invalid `options.maxRetries`. A REST call rejects with a `TypeError` for a base that is otherwise unusable; a stream reports it as a terminal `SSE_CONNECT_ERROR`.
+- A rejecting `auth` callback, or a rejecting `options.headers` function, propagates out of a REST call, unretried. On a stream it is a retryable `SSE_AUTH_ERROR`.
+- `.stream()` and `.liveQuery()` throw in a runtime with no global `fetch` and no `options.fetch`. A REST call in such a runtime returns a retried `NETWORK_ERROR` instead.
+
+`code` and `retryable` are the server's own when its error body carries them, as a failed ClickHouse query's does ([the full list](/api#clickhouse-errors-on-the-query-paths)). Otherwise `code` is `HTTP_<status>`, and `retryable` is `true` for a `5xx`, a `408` or a `429`. On an answer, `retryable` is that verdict on the failure: a raw SQL or pipe call can return `retryable: true` that the SDK did not act on, because the call may have run ([Which calls are resent](#which-calls-are-resent)). On a transport error or an attempt timeout, a call that may have run is returned with `retryable: false`.
+
+| Status | Code | Retryable | Description |
+|--------|------|-----------|-------------|
+| 400 | `HTTP_400` | No | Bad request (validation, missing fields) |
+| 401 | `HTTP_401` | No | A present-but-invalid or expired JWT that a gate then denied. WaveHouse never returns `401` for a *missing* token, which resolves to `default_role`, so a denial is `403` |
+| 403 | `HTTP_403` | No | Insufficient permissions |
+| 404 | `HTTP_404` | No | Table or pipe not found |
+| 408 | `HTTP_408` | Yes | A request timeout, from something in front |
+| 429 | `HTTP_429` | Yes | Rate limited, by something in front; resent on every call but raw SQL |
+| 422 | `HTTP_422` | No | Ingest only: the validation engine could not judge the body or a record (`validation engine declined: …`), or an insert check could not be evaluated. It says neither that the data is bad nor that it was accepted; a body it could not judge is the call's error, a record in a batch a per-record `error`. Not retried |
+| 400 | `clickhouse.rejected` / `clickhouse.limit_exceeded` | No | ClickHouse refused the query (bad SQL, an unknown column, a type mismatch) or it outran a limit, the role's own caps included. On ingest, `clickhouse.rejected` is ClickHouse's parser refusing the body: the first record it cannot read refuses the whole insert, the message names the record (`record 2: …`), and `exception_code` carries its code |
+| 403 | `clickhouse.access_denied` | No | ClickHouse's user lacks a grant the statement needs |
+| 500 | `HTTP_500` | Yes, unless the body says `retryable: false` | Server error. An ingest `500` carrying `retryable: false` (a role whose insert permissions cannot be enforced on the table) is final, and returned on the first attempt |
+| 500 / 502 | `clickhouse.unknown` | Yes | ClickHouse failed with no verdict; `502` on `wh.sql` |
+| 502 | `clickhouse.misconfigured` | No | ClickHouse refused WaveHouse's own credentials or database, a read ran under a `readonly=1` profile and was refused as a write, the route to it is wrong, or a pipe's SQL chooses an output format other than `JSONEachRow`: an operator fix |
+| 502 | `clickhouse.response_too_large` | No | A response over the 64 MiB cap, on any query path (structured query, pipe or raw SQL) |
+| 503 | `clickhouse.unavailable` | Yes | ClickHouse is down, unreachable or overloaded; `Retry-After: 5` |
+| 503 | `HTTP_503` | Yes | Service unavailable: a schema not discovered yet, no ClickHouse connection open, a tenant or table the type layer cannot serve (`ingest validation is unavailable`, `Retry-After: 5`; [causes](/deployment#chtypes-artifacts)), a dedupe store that cannot answer, a token sent while the server's JWKS has not been fetched yet (`Retry-After: 30`), or a record whose dedupe id another request is still publishing. Each `Retry-After` is honored between attempts |
+| 3xx (0 in a browser) | `REDIRECT` | No | A redirect not followed, because the request carries a credential ([Redirects](#redirects)) |
+| 2xx | `DECODE_ERROR` | No | A success whose body is not JSON, such as an intermediary's HTML page or a raw SQL `FORMAT` clause. Sent once, never resent |
+| 0 | `NETWORK_ERROR` | Yes | No answer arrived. Retried on reads and ingest; for raw SQL and pipes, see above |
+| 0 | `ATTEMPT_TIMEOUT` | Yes | The last attempt hit `attemptTimeoutMs`; the message names how many attempts were made. Not retryable on raw SQL and pipes, which are not resent once the request may have left |
+| 0 | `ABORTED` | No | Canceled through the `AbortSignal` |
+| 0 | `INVALID_QUERY` | No | A builder misuse, refused before anything was sent |
+
+A stream's codes, on the `error` callback:
+
+| Status | Code | Retryable | Description |
+|--------|------|-----------|-------------|
+| 0 | `SSE_CONNECT_ERROR` | No | The stream could not be started: an unusable `baseURL` |
+| 0 | `SSE_AUTH_ERROR` | Yes | `auth` or the `options.headers` function rejected for this connect |
+| 0 | `SSE_NETWORK_ERROR` | Yes | The connect failed to reach the server |
+| 0 | `SSE_ATTEMPT_TIMEOUT` | Yes | No response headers within `attemptTimeoutMs` |
+| 0 | `SSE_READ_ERROR` | Yes | The connection was interrupted mid-read |
+| 0 | `SSE_PROTOCOL_ERROR` | Yes | A frame could not be read; the stream reconnects from the last delivered event ([Frames that can't be read](/sdk/streaming#frames-that-cant-be-read)) |
+| 0 | `SSE_FRAME_DROPPED` | No | The same frame failed again and was skipped. **The stream goes on**: this code is the one non-retryable error that doesn't end it |
+| 0 | `SSE_PARSE_ERROR` | Yes | The SSE framing itself was malformed. Reported and skipped in place, except a frame over the 16 MiB buffer cap, which reopens the connection |
+| *(response status)* | `SSE_NO_STREAM_BODY` | No | A configured `options.fetch` returned a response with no readable body |
+| *(0 in a browser, the 3xx in Node)* | `SSE_REDIRECT` | No | The stream endpoint redirected while the request carries a credential |
+| *(response status)* | `SSE_BAD_CONTENT_TYPE` | No | A `200` that wasn't `text/event-stream`, usually a gateway's login page |
+| *(response status)* | `HTTP_<status>` or the server's code | `5xx`, `408`, `429`: Yes | The connect was rejected. A retryable one re-dials; any other ends the stream |
+
+On REST, a retryable error has already been retried as far as the call allows by the time you see it, and a non-retryable one is returned on the first attempt. On a stream, a retryable error is reported *before* the transport re-dials, which it does indefinitely, and a non-retryable one is reported once as the stream closes, `SSE_FRAME_DROPPED` excepted.
+
+**If your own callback throws.** Every `next`, `status` and `error` callback is isolated, the first `status` call `.subscribe()` makes included: a throw is logged to the console and costs only that delivery, never the stream, the other subscribers or a `for await`. Inside `liveQuery()`, a throwing `initial()` or `next()` is logged the same way and the buffered events are still delivered. A throw is never routed to your `error` callback, so wrap your handler bodies in your own `try`/`catch` if you need to know.
+
+  </TabItem>
+  <TabItem label="Go">
+
+A call returns an `error`, and every answer the server gave is an `*wavehouse.APIError`:
+
+| Field | Description |
+|-------|-------------|
+| `StatusCode` | The HTTP status |
+| `Code` | The server's machine-readable `code`, such as `clickhouse.rejected` ([the full list](/api#clickhouse-errors-on-the-query-paths)); `""` when the body carries none |
+| `Message` | The server's error text, or the status text when the body has none |
+| `Retryable` | The server's `retryable` verdict when the body carries one, else `true` for a `408`, a `429` or any `5xx`. A verdict on the failure, not the call: ask `IsRetryable` whether resending *this* call is safe |
+| `RetryAfter` | The parsed `Retry-After` (seconds or an HTTP-date); `0` when absent |
+| `RequestID` | The `X-Request-Id` the server logged the request under: quote it when reporting a failure |
+| `Method`, `Path` | The request's, for the message |
+
+Its message reads `wavehouse: POST /v1/query: 400 clickhouse.rejected: <message> (request <id>)`. Match a status with `errors.Is`:
+
+| Sentinel | Status |
+|----------|--------|
+| `wavehouse.ErrBadRequest` | 400 |
+| `wavehouse.ErrUnauthorized` | 401 |
+| `wavehouse.ErrForbidden` | 403 |
+| `wavehouse.ErrNotFound` | 404: an unknown table or pipe |
+| `wavehouse.ErrRateLimited` | 429 |
+| `wavehouse.ErrUnavailable` | 503 |
+
+**`wavehouse.IsRetryable(err)`** reports whether resending the call that failed is safe, by the rule the SDK itself retries by ([Which calls are resent](#which-calls-are-resent)): never for a raw SQL call after an answer, for a pipe only on the server's own `retryable: true`, a `429` or a `503` with `Retry-After`, and for a read or an ingest on any retryable `*APIError`. A transport error is retryable when the request certainly never left or the call is a read or an ingest. A canceled or expired context is never retryable.
+
+The other errors:
+
+- **A transport error** (no HTTP answer) unwraps to its cause, so `*url.Error` and `errors.Is(err, context.Canceled)` work.
+- **`wavehouse.ErrRedirect`** matches a redirect that was not followed ([Redirects](#redirects)); **`wavehouse.ErrAttemptTimeout`** a call whose last attempt hit the [attempt timeout](#attempt-timeouts).
+- **`*wavehouse.InsertError`** comes with the `*InsertResult` when the server accepted an insert but rejected some records ([Inserting rows](/sdk/queries#inserting-rows)).
+- **A builder misuse**, an invalid header, or an empty table, pipe or statement is an error before anything is sent. `New` reports every invalid option at once.
+- **A token source or header function error** fails the attempt without sending it, and is returned unretried. A `Subscribe` that has been live retries it.
+- **A success that won't decode** (a body that is not JSON) is an error saying `decode response`, returned without a retry.
+
+</TabItem>
+</Tabs>
+
+## API at a glance
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```text
+createClient<DB>(config) → WaveHouseClient
+├── .from(table) → TableRef (NOT thenable)
+│   ├── .fetch(opts?) → Promise<Result<Row[]>>
+│   ├── .select(...cols) → QueryBuilder (PromiseLike)
+│   │   ├── .select() .selectAll() .where() .count() .sum() .avg() .min() .max()
+│   │   │   .countDistinct() .aggregate() .groupBy() .orderBy()
+│   │   │   .limit() .timeRange() .last()
+│   │   ├── .fetch(opts?) → Promise<Result<Row[]>>
+│   │   ├── .stream(opts?) → StreamController
+│   │   └── .liveQuery(subscriber, opts?) → LiveQuery
+│   ├── .selectAll() → QueryBuilder (PromiseLike)
+│   ├── .insert(data, opts?) → Promise<Result<InsertResult>>
+│   ├── .insertNDJSON(source, opts?) → Promise<Result<InsertResult>>
+│   ├── .schema(opts?) → Promise<Result<TableSchema>>   (admin)
+│   └── .stream(opts?) → StreamController
+├── .pipe(name, params?) → PipeRef (PromiseLike)
+│   └── .fetch(opts?) → Promise<Result<Row[]>>   // no limit
+├── .pipes (admin)
+│   ├── .list(opts?) → Promise<Result<Pipe[]>>
+│   └── .get(name, opts?) → Promise<Result<Pipe>>
+├── .sql(query, opts?) → Promise<Result<Row[]>>   (admin)
+├── .schema (admin)
+│   ├── .list(opts?) → Promise<Result<Schemas>>
+│   └── .refresh(opts?) → Promise<Result<void>>
+├── .settings (admin)
+│   └── .reload(opts?) → Promise<Result<SettingsReloadResult>>
+├── .dlq (admin)
+│   ├── .list(opts?) → Promise<Result<DLQStats>>
+│   └── .table(name, opts?) → Promise<Result<DLQStats>>
+├── .sys
+│   └── .health(opts?) → Promise<Result<void>>
+└── .version(opts?) → Promise<Result<VersionInfo>>
+
+StreamController (NOT thenable)
+├── .subscribe({ next, status?, error? }) → unsubscribe()
+├── .connected(timeoutMs?) → Promise<void>
+├── .close()
+├── .status → StreamStatus
+└── [Symbol.asyncIterator]() → AsyncIterableIterator<StreamEvent>
+
+LiveQuery
+└── .close()
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```text
+wavehouse.New(baseURL, opts...) → (*Client, error)
+  WithToken  WithTokenSource  WithOperatorKey  WithHeader  WithHeaderFunc
+  WithRetry(RetryPolicy)  WithHTTPClient  WithUserAgent
+
+(*Client)
+├── From(table) → *Query (immutable)
+│   ├── Select  SelectAll  Where  OrderBy  GroupBy  Limit  TimeRange  Last
+│   │   Count  Sum  Avg  Min  Max  CountDistinct  Aggregate  Header
+│   ├── Scan(ctx, &dst) → error
+│   ├── Fetch(ctx) → ([]Row, error)
+│   ├── Insert(ctx, rows) → (*InsertResult, error)
+│   └── InsertNDJSON(ctx, io.Reader) → (*InsertResult, error)
+├── Pipe(name) → *PipeCall
+│   ├── Param  Params  Header
+│   └── Scan(ctx, &dst)  Fetch(ctx)  Exec(ctx)
+├── SQL(query) → *SQLCall   (admin)
+│   ├── Header
+│   └── Scan(ctx, &dst)  Fetch(ctx)  Exec(ctx)
+├── Subscribe(ctx, table, *SubscribeOptions) → (*Subscription, error)
+│   └── Next  Event  Events  Err  Close
+├── Tables(ctx) → ([]TableSchema, error)   (admin)
+├── TableSchema(ctx, name) → (*TableSchema, error)   (admin)
+├── RefreshSchema(ctx) → ([]TableSchema, error)   (admin)
+├── ReloadSettings(ctx) → (*ReloadResult, error)   (admin)
+├── DLQStats(ctx) → (*DLQStats, error)   (admin)
+├── Pipes(ctx) → ([]PipeDefinition, error)   (admin)
+├── PipeDefinition(ctx, name) → (*PipeDefinition, error)   (admin)
+├── Health(ctx) → error
+└── Version(ctx) → (*VersionInfo, error)
+
+IsRetryable(err) → bool
+```
+
+The package's doc comments and examples are on [pkg.go.dev](https://pkg.go.dev/github.com/Wave-RF/wavehouse-sdk-go).
+
+  </TabItem>
+</Tabs>
+
+## Codegen CLI
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+The package ships a `wavehouse-codegen` bin that generates a `Database` interface from a running server, for [`createClient<Database>()`](/sdk#type-safe-tables):
+
+```bash
+WAVEHOUSE_ADMIN_TOKEN="$TOKEN" npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
+```
+
+Codegen reads `/v1/ops/schema`, which is **admin-only**: against a non-dev server, give it an admin-role token, in the `WAVEHOUSE_ADMIN_TOKEN` environment variable or on stdin with `--auth-stdin`, or the request is denied with `403`. The [operator key](/api#authentication) works too, in `WAVEHOUSE_OPERATOR_KEY` or with `--operator-key`.
+
+**Options:**
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--url`, `-u` | WaveHouse base URL | `http://localhost:8080` |
+| `--out`, `-o` | Output `.d.ts` file path | `./wavehouse.d.ts` |
+| `--auth-stdin` | Read the bearer token from stdin (`WAVEHOUSE_ADMIN_TOKEN` sets it too); neither shows in the process list or shell history | — |
+| `--auth`, `-a` | The bearer token as an argument. **Deprecated**, since an argument is visible in the process list and shell history: it still works and prints a warning | — |
+| `--operator-key`, `-k` | Operator key, sent as `X-Operator-Key` (`WAVEHOUSE_OPERATOR_KEY` sets it too) | — |
+| `--help`, `-h` | Show the help | — |
+
+An argument codegen does not recognize (a mistyped flag, a bare positional, `--flag=value`) is an error, not skipped. A request carrying a token or an operator key does not follow a redirect, for the reason in [Redirects](#redirects): codegen stops and names the target, so point `--url` at the final address.
+
+The generated row type is the **read** shape, with one exception running the other way: an `EPHEMERAL` column declares a default, so codegen emits it, though no query can return it. `MATERIALIZED` and `ALIAS` columns declare defaults too, so they are emitted as optional, but supplying either on `insert` is a `400` carrying ClickHouse's own code 117 (`Unknown field found while parsing JSONEachRow format: x`), and the type won't catch it. An `EPHEMERAL` value is accepted on a JSON `insert` when the role may write the column, a `DEFAULT` column reads it and no `MATERIALIZED`, `ALIAS` or other `EPHEMERAL` column does; it feeds that default and is never stored or returned. Otherwise it is a `400` with code 117, like an unknown column. Omit computed columns; the server fills them in. A table or column name that is not an identifier (`user-id`, `2fa`, `order id`) is quoted, and tables whose names differ only in case, or start with a digit, get distinct valid interface names.
+
+**Example output:**
+
+```ts
+// Auto-generated by @wavehouse/sdk codegen
+export interface Database {
+  orders: OrdersRow;
+}
+
+export interface OrdersRow {
+  order_id: string;
+  customer: string;
+  items: number;
+  /**
+   * A Decimal. The codegen types it as `string`, but queries, pipes and
+   * streams send it as a JSON number, so `JSON.parse` rounds a value past 2^53.
+   */
+  amount: string;
+  received_timestamp?: string;
+}
+```
+
+**ClickHouse → TypeScript type mapping:**
+
+| ClickHouse Type | TypeScript Type |
+|----------------|-----------------|
+| `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Enum*`, `IPv4/6` | `string` |
+| `Decimal*` | `string`, with the comment above: the server sends a JSON number |
+| `UInt*`, `Int*` | `number`: 64-bit and wider integers come back as JSON numbers, not strings, so `JSON.parse` rounds a value past 2^53 (store an id that large as a `String` column to keep every digit) |
+| `Float32`, `Float64`, `BFloat16` | `number`, but a NaN or infinity comes back as the string `"nan"`, `"inf"` or `"-inf"` from queries, pipes and streams alike, which this type does not include: check `typeof v === 'number'` before doing arithmetic on a column that can hold one |
+| `Bool` | `boolean` |
+| `Nullable(T)` | `T \| null` |
+| `Array(T)` | `T[]` |
+| `Map(K, V)` | `Record<K, V>` |
+| `LowCardinality(T)` | same as `T` |
+| `Tuple(…)` | `unknown[]` |
+
+  </TabItem>
+  <TabItem label="Go">
+
+The Go SDK has no codegen: scan into your own structs ([Reading rows](/sdk/queries#reading-rows)).
+
+  </TabItem>
+</Tabs>
+
+## E2E Testing
+
+The server's E2E suite runs through the TypeScript SDK. Tests in `tests/e2e/sdk/` exercise the full pipeline (ingest → ClickHouse → query) with the published `@wavehouse/sdk`, pinned exactly in `tests/e2e/sdk/package.json`, so they test the server against a released client. Each SDK's own tests live in its repository.
+
+```bash
+# Run all E2E tests: the orchestrator boots ClickHouse and Redis
+# testcontainers + the wavehouse-cov binary, then runs the SDK suite
+make test-e2e
+```
+
+Test files live in `tests/e2e/sdk/` (each `*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers`, a stack-free unit test of the harness's own `waitForCondition` poll helper rather than a pipeline test.
+
+See [Development Guide — E2E Tests via SDK](/development#e2e-tests-via-sdk) for the architecture and workflow tips.

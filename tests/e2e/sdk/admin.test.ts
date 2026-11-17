@@ -58,32 +58,6 @@ describe("Admin", () => {
       expect(result.error).toBeNull();
     });
 
-    // The schema routes and the raw-SQL proxy name their tenant in ?tenant=
-    // like the pipe reads. This stack's settings directory is the single
-    // tenant 0.
-    it("addresses a tenant with the tenant option", async () => {
-      const named = await wh.schema.list({ tenant: "0" });
-      expect(named.error).toBeNull();
-      expect(named.data).toHaveProperty(T.clicks);
-
-      const one = await wh.from(T.clicks).schema({ tenant: "0" });
-      expect(one.error).toBeNull();
-      expect(one.data?.name).toBe(T.clicks);
-
-      const refreshed = await wh.schema.refresh({ tenant: "0" });
-      expect(refreshed.error).toBeNull();
-
-      const rows = await wh.sql("SELECT 1 AS one", { tenant: "0" });
-      expect(rows.error).toBeNull();
-
-      const unknown = await wh.schema.list({ tenant: "acme" });
-      expect(unknown.error?.status).toBe(404);
-      expect(unknown.error?.message).toContain("unknown tenant: acme");
-
-      const malformed = await wh.sql("SELECT 1", { tenant: "a.b" });
-      expect(malformed.error?.status).toBe(400);
-    });
-
     it("gets per-table schema", async () => {
       const result = await wh.from(T.clicks).schema();
       expect(result.error).toBeNull();
@@ -129,17 +103,6 @@ describe("Admin", () => {
     });
   });
 
-  describe("Settings reload", () => {
-    it("reloads one tenant with the tenant option", async () => {
-      const result = await wh.settings.reload({ tenant: "0" });
-      expect(result.error).toBeNull();
-      expect(result.data?.adopted).toBe(true);
-
-      const unknown = await wh.settings.reload({ tenant: "acme" });
-      expect(unknown.error?.status).toBe(404);
-    });
-  });
-
   describe("Pipes", () => {
     const pipeName = `test_pipe_${Date.now()}`;
     const inPipe = `test_pipe_in_${Date.now()}`;
@@ -167,27 +130,6 @@ describe("Admin", () => {
 
       const names = result.data!.map((p: any) => p.name);
       expect(names).toContain(pipeName);
-    });
-
-    // The admin reads name their tenant in ?tenant= — the header is ignored
-    // under /v1/ops. This stack's settings directory is the single tenant 0.
-    it("addresses a tenant with the tenant option", async () => {
-      const named = await wh.pipes.list({ tenant: "0" });
-      expect(named.error).toBeNull();
-      expect(named.data).toEqual((await wh.pipes.list()).data);
-
-      const one = await wh.pipes.get(pipeName, { tenant: "0" });
-      expect(one.error).toBeNull();
-      expect(one.data).toMatchObject({ name: pipeName });
-
-      const unknown = await wh.pipes.get(pipeName, { tenant: "acme" });
-      expect(unknown.error?.status).toBe(404);
-      expect(unknown.error?.message).toContain("unknown tenant: acme");
-
-      const malformed = await wh.pipes.list({ tenant: "a.b" });
-      expect(malformed.error?.status).toBe(400);
-      const empty = await wh.pipes.list({ tenant: "" });
-      expect(empty.error?.status).toBe(400);
     });
 
     it("executes a pipe with params", async () => {

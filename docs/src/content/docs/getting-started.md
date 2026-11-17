@@ -80,7 +80,7 @@ curl -s -X POST "http://localhost:8080/v1/query?table=clicks" \
 `POST /v1/query?table={table}` and `GET/POST /v1/pipes/{name}` are cached — in-process by default, or in a Redis shared by every instance with [`cache.backend: redis`](/configuration#cache) — with singleflight coalescing, so duplicate concurrent queries hit ClickHouse once. For raw SQL there's `POST /v1/ops/query` (an admin escape hatch that never caches, emitting `Cache-Control: no-store`), but it's **admin-only** — the trial `public` role can't reach it. To use it, swap the public default for real auth: configure a JWT secret and present a token whose role is the policy [`admin_role`](/access-control#admin_role--the-privileged-role).
 
 :::tip[Prefer a type-safe client?]
-The [TypeScript SDK](/sdk) wraps this endpoint in a chainable query builder with autocomplete on your table names and row types — plus live queries and streaming. The raw shapes are in the [structured query reference](/api#post-v1querytabletable--structured-query).
+The [SDKs](/sdk) wrap this endpoint in a chainable query builder, plus streaming; the TypeScript one adds autocomplete on your table names and row types, and live queries. The raw shapes are in the [structured query reference](/api#post-v1querytabletable--structured-query).
 :::
 
 ## 5. Subscribe to real-time updates
@@ -97,7 +97,7 @@ curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z
 
 Rows arrive **positionally**, so raw `curl` output looks like `"row":["/home","signup",42.5,"2026-03-24T11:59:58.512Z"]` rather than named fields. The stream sends an `event: schema` frame before the first row and again when the column list changes, and a raw client must pair each row against the **most recent** frame rather than the first.
 
-That re-announcement is not guaranteed in one case: after a gap-fill across a column change, live rows can arrive without a fresh frame ([#543](https://github.com/Wave-RF/WaveHouse/issues/543)). Drop a row whose length disagrees with the last announced list rather than zipping it, and reconnect to resynchronize — an arity check cannot see a same-length change such as a `RENAME COLUMN`. See [the wire format](/api#get-v1stream--server-sent-events-stream) for the frame sequence and the full rule; the [TypeScript SDK](/sdk/streaming) does all of this for you.
+That re-announcement is not guaranteed in one case: after a gap-fill across a column change, live rows can arrive without a fresh frame ([#543](https://github.com/Wave-RF/WaveHouse/issues/543)). Drop a row whose length disagrees with the last announced list rather than zipping it, and reconnect to resynchronize — an arity check cannot see a same-length change such as a `RENAME COLUMN`. See [the wire format](/api#get-v1stream--server-sent-events-stream) for the frame sequence and the full rule; both [SDKs](/sdk/streaming) do all of this for you.
 
 ## Troubleshooting first runs
 
@@ -114,7 +114,7 @@ The handful of things that most often trip up a first session — each is expect
 
 - **[Architecture](/architecture)** — how ingest, query, cache, and streaming fit together.
 - **[API Reference](/api)** — every endpoint, request/response shape, and error code.
-- **[TypeScript SDK](/sdk)** — client with query builder, live queries, and codegen; one runtime dependency.
+- **[SDKs](/sdk)** — TypeScript (`@wavehouse/sdk`: query builder, live queries, codegen; one runtime dependency) and Go (standard library only).
 - **[Configuration](/configuration)** — full YAML + environment variable reference.
 - **[Deployment](/deployment)** — Docker images, releases, health checks.
 - **[Development](/development)** — building from source, running tests, hot-reload workflow.

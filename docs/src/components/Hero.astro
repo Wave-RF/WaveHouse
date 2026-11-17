@@ -242,9 +242,8 @@ if (import.meta.env.DEV && !heroTitle) {
   // The install chip follows the reader's package-manager choice from the
   // docs' synced install tabs (Starlight persists the selected tab LABEL in
   // localStorage under its syncKey — see /sdk's <Tabs syncKey="pkg">). The
-  // keys here must match those tab labels exactly. "CDN" (and anything
-  // unknown) keeps the pnpm default — there's no one-liner shell command for
-  // a script tag.
+  // keys here must match those tab labels exactly. Anything unknown keeps
+  // the pnpm default.
   function syncHeroInstallCmd() {
     var PKG_PREFIX = {
       pnpm: 'pnpm add ',

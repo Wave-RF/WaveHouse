@@ -1,0 +1,271 @@
+---
+title: "SDK Admin & System"
+description: "Schema introspection, settings reload, DLQ stats, health and version with the TypeScript and Go SDKs."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+The operational calls. Everything on this page but the [health ping](#health) and the [server version](#version) sits behind the server's admin gate: the caller must resolve to the admin role (`policy.admin_role`) or present the non-JWT [operator key](/api#authentication). See [Access Control](/access-control) for how roles resolve. The examples assume a client called `wh` and, in Go, a `ctx`.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+// The SDK has no operator-key option; send the key as a header.
+const ops = createClient({
+  baseURL: 'https://wavehouse.example.com',
+  options: { headers: { 'X-Operator-Key': process.env.WH_AUTH_OPERATOR_KEY! } },
+});
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+// Sent as "Authorization: Operator <key>".
+ops, err := wavehouse.New("https://wavehouse.example.com",
+    wavehouse.WithOperatorKey(os.Getenv("WH_AUTH_OPERATOR_KEY")))
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+  </TabItem>
+</Tabs>
+
+All of these calls are retried like reads ([Retries and timeouts](/sdk/reference#retries-and-timeouts)).
+
+## Schema
+
+The tables the server discovered in ClickHouse, with their columns in declaration order.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+// Every table: { clicks: { name: 'clicks', columns: [...] }, users: { ... } }
+const { data: schemas } = await wh.schema.list();
+
+// One table
+const { data: clicks } = await wh.from('clicks').schema();
+// clicks: { name: 'clicks', columns: [
+//   { name: 'page', type: 'String', is_nullable: false, has_default: false, position: 1 }, ...
+//   { name: 'received_timestamp', type: "DateTime64(3, 'UTC')", is_nullable: false,
+//     has_default: true, default_kind: 'DEFAULT',
+//     default_expression: "now64(3, 'UTC')", position: 4 }
+// ] }
+
+// Re-discover now, rather than at the next interval
+await wh.schema.refresh();
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+tables, err := wh.Tables(ctx) // []wavehouse.TableSchema
+if err != nil {
+    log.Fatal(err)
+}
+for _, t := range tables {
+    fmt.Println(t.Name, len(t.Columns))
+}
+
+t, err := wh.TableSchema(ctx, "clicks")
+if errors.Is(err, wavehouse.ErrNotFound) {
+    fmt.Println("no such table")
+} else if err != nil {
+    log.Fatal(err)
+} else {
+    for _, col := range t.Columns {
+        fmt.Println(col.Position, col.Name, col.Type, col.Nullable, col.DefaultKind)
+    }
+}
+
+// Re-discover now, after a CREATE TABLE say; returns the new schemas.
+refreshed, err := wh.RefreshSchema(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(len(refreshed), "tables")
+```
+
+  </TabItem>
+</Tabs>
+
+Each column carries its name, its ClickHouse type, whether it is nullable, whether it declares a default, and its 1-based `position`. `default_kind` (`DefaultKind`) and `default_expression` (`DefaultExpression`) appear only when the column declares a default: `DEFAULT`, `MATERIALIZED`, `ALIAS` or `EPHEMERAL`. A `MATERIALIZED` or `ALIAS` column is computed by ClickHouse and cannot be inserted.
+
+A `503` with `Retry-After` is a server whose first schema discovery has not succeeded yet (`Retry-After: 5`), or, on the refresh, a server with no ClickHouse connection open, for which [no pool could be opened](/settings-directory#clickhouse) (`Retry-After: 30`), or a ClickHouse that is unavailable (`Retry-After: 5`). Both SDKs wait the `Retry-After` and retry it.
+
+## Settings
+
+Reload the server's [settings directory](/settings-directory) (`roles.json`, `policies.json`, `pipes.json`, `config.json`), the same path the file watcher and `SIGHUP` use.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+const { data, error } = await wh.settings.reload();
+// data: { adopted: true, findings: [...] } — warnings are included on success
+// error: a 422 when the directory was rejected; error.details carries
+//        { adopted: false, findings } and the previous settings stay in effect
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+// On a rejected directory both are set: the findings say why.
+res, err := wh.ReloadSettings(ctx)
+if res != nil {
+    for _, f := range res.Findings {
+        fmt.Printf("%s: %s: %s\n", f.Severity, f.File, f.Message)
+    }
+}
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+  </TabItem>
+</Tabs>
+
+Each finding carries its severity (`error` or `warning`), the file it is about, the key within it, and a message.
+
+## DLQ
+
+Counts of the rows parked in the server's dead-letter queue, per table.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+// A table appears once it has a parked row
+const { data } = await wh.dlq.list();
+// data: { tables: { clicks: 3 }, total: 3 }
+
+// One table's count; total stays the whole parked count
+const { data: clicks } = await wh.dlq.table('clicks');
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+s, err := wh.DLQStats(ctx) // *wavehouse.DLQStats{Tables: map[string]int64, Total: int64}
+if err != nil {
+    log.Fatal(err)
+}
+for table, n := range s.Tables {
+    fmt.Println(table, n)
+}
+```
+
+  </TabItem>
+</Tabs>
+
+There is no stream of dead-lettered events: the server's stream route carries ingest tables only. Live DLQ streaming is tracked in [#197](https://github.com/Wave-RF/WaveHouse/issues/197).
+
+## Health
+
+A content-free check that the server is up, on the public `/v1/health` route: `200`, or `503` while it is degraded (boot-time schema discovery still failing). It needs no credentials.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+const result = await wh.sys.health();
+if (result.ok) {
+  // the server is up and past boot
+}
+// on failure, result.error carries the reason (network vs. server error)
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+// nil means 200.
+if err := wh.Health(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+  </TabItem>
+</Tabs>
+
+It checks neither the credential nor ClickHouse, so success proves only that the server is up. For a datasource-style health check, follow it with an authenticated read:
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+const health = await wh.sys.health();
+if (!health.ok) throw new Error(`server: ${health.error.message}`);
+
+// An authenticated read proves the credential and the path to ClickHouse.
+const { error } = await wh.from('clicks').select().limit(1).fetch();
+if (error?.status === 401) throw new Error('the credential is invalid or expired');
+if (error?.status === 403) throw new Error('the credential may not read this table');
+if (error) throw new Error(`query: ${error.message}`);
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+check := func() error {
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+
+    if err := wh.Health(ctx); err != nil { // the server is up
+        return fmt.Errorf("server: %w", err)
+    }
+    // An authenticated read proves the credential and the path to ClickHouse.
+    _, err := wh.From("clicks").Limit(1).Fetch(ctx)
+    switch {
+    case errors.Is(err, wavehouse.ErrUnauthorized):
+        return errors.New("the credential is invalid or expired")
+    case errors.Is(err, wavehouse.ErrForbidden):
+        return errors.New("the credential is valid but may not read this table")
+    case err != nil:
+        return fmt.Errorf("query: %w", err)
+    }
+    return nil
+}
+```
+
+  </TabItem>
+</Tabs>
+
+A request with no token resolves to the `default_role`, which gets `403` (not `401`) where it may not read. With a token configured, the ping carries it, so while the server's JWKS has not been fetched yet it answers `503` (`token verifier not ready`) with `Retry-After: 30`, and each retry waits that long: the server is up but cannot check the token yet. Shorten the wait with `options.maxRetryAfterMs` (TypeScript) or `RetryPolicy.MaxBackoff` (Go), or bound the call with a signal or context ([API → Authentication](/api#authentication)).
+
+> Readiness (`/readyz`) is deliberately **not** exposed through the SDKs. It consults every backend the process cannot work without on each call (ClickHouse, and the external queue under `mq.backend: nats`) and is a load balancer's or reverse proxy's concern, not a client's. Probe `/readyz` directly from your orchestrator if you need it.
+
+## Version
+
+The server's build, from `GET /version`, which needs no credentials.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+const { data } = await wh.version();
+// data: { version, git_commit, build_time, go_version }
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+v, err := wh.Version(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(v.Version, v.GitCommit, v.BuildTime, v.GoVersion)
+```
+
+  </TabItem>
+</Tabs>
+
+`version` is the release without its leading `v` on a release build, or a git-describe string or pseudo-version otherwise; `git_commit` is `unknown` when the build carried no VCS stamp (the full table is in the [API reference](/api#get-version--build-info)).
