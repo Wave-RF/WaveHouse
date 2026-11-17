@@ -24,10 +24,10 @@ import (
 // A CHECK constraint chtypes does not see (a table compiled from its columns,
 // #727) lets a row that violates it reach the worker and fail its batch's
 // INSERT; these tests drive the worker with such rows directly. They
-// run the worker against the shared ClickHouse with the server's own
-// async_insert default, which is on for 26.8: the batch INSERT is async, and
-// an async flush merges every concurrent INSERT of the same statement into one
-// block, which a constraint fails as a whole.
+// run the worker against the shared ClickHouse, whose own async_insert
+// default is on for 26.8: the worker's INSERTs must turn it off, or an async
+// flush merges every concurrent INSERT of the same statement into one block,
+// which a constraint fails as a whole.
 
 const checkColumns = "id UInt32, n Int32, CONSTRAINT c CHECK n > 0"
 
@@ -102,8 +102,8 @@ func idRange(from, n int) []int {
 }
 
 // requireServerAsyncInsert fails unless the shared ClickHouse defaults to
-// async inserts, so these tests cannot pass by silently testing synchronous
-// ones after an image bump.
+// async inserts, so these tests keep proving that the worker's own
+// async_insert=0 is what makes them pass, even after an image bump.
 func requireServerAsyncInsert(t *testing.T) {
 	t.Helper()
 	var on uint64

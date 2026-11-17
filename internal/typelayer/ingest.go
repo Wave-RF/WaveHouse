@@ -12,12 +12,15 @@ import (
 	"github.com/wave-rf/chtypes/go/v2/chtypes"
 )
 
-// InsertSettings are the parsing settings the ingest worker pins on the real
-// INSERT, and which chtypes must therefore see — otherwise it answers a
-// different question than the server will be asked. Returned fresh so a caller
-// may add its own non-parsing pins (wait_for_async_insert=1) without mutating ours.
+// InsertSettings are the settings the ingest worker pins on the real INSERT,
+// and which chtypes must therefore see — otherwise it answers a different
+// question than the server will be asked. async_insert=0: the worker does the
+// batching, so every INSERT is synchronous, and chtypes is told so rather than
+// assuming the line's default (on, from 26.8). Returned fresh so a caller may
+// add its own pins without mutating ours.
 func InsertSettings() map[string]string {
 	return map[string]string{
+		"async_insert":                 "0",
 		"date_time_input_format":       "best_effort",
 		"input_format_null_as_default": "1",
 	}

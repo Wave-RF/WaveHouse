@@ -446,7 +446,7 @@ func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
 
 // insertBatch is one bulk INSERT, as flushGroup's first attempt makes it.
 func (w *IngestWorker) insertBatch(ctx context.Context, table string, cols []string, msgs []parsedMsg, timeout time.Duration) error {
-	return w.insertToClickHouse(ctx, table, cols, msgs, timeout, false)
+	return w.insertToClickHouse(ctx, table, cols, msgs, timeout)
 }
 
 // ---------------------------------------------------------------------------
@@ -463,14 +463,12 @@ func TestInsertToClickHouse_BuildsCorrectRequest(t *testing.T) {
 			assert.Equal(t, "test_db", q.Get("database"))
 			assert.Equal(t, "events", q.Get("param_target_table"))
 			assert.Equal(t, "INSERT INTO {target_table:Identifier} (`id`) FORMAT JSONCompactEachRow", q.Get("query"))
-			// The parsing settings are exactly the ones the API judged the
-			// rows under, plus wait_for_async_insert=1, and nothing else (async_insert
-			// is left to the server).
+			// The settings are exactly the ones the API judged the rows
+			// under (async_insert=0 among them), and nothing else.
 			want := map[string]string{
-				"database":              "test_db",
-				"param_target_table":    "events",
-				"query":                 q.Get("query"),
-				"wait_for_async_insert": "1",
+				"database":           "test_db",
+				"param_target_table": "events",
+				"query":              q.Get("query"),
 			}
 			for k, v := range typelayer.InsertSettings() {
 				want[k] = v
@@ -1048,10 +1046,10 @@ func TestFlushTable_BulkFails_FallsBackToOneByOne(t *testing.T) {
 	assert.Empty(t, pub.Published(), "no DLQ publishes when 1-by-1 retries all succeed")
 }
 
-// TestFlushTable_IsolatedRowsInsertSynchronously: the batch leaves async_insert
-// to the server, and each isolated row turns it off, so its verdict is its own
-// rather than that of an async flush it shared with another writer's rows.
-func TestFlushTable_IsolatedRowsInsertSynchronously(t *testing.T) {
+// TestFlushTable_EveryInsertIsSynchronous: the batch and each isolated row
+// turn async_insert off, so a verdict is the INSERT's own rather than that of
+// an async flush it shared with another writer's rows.
+func TestFlushTable_EveryInsertIsSynchronous(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
 	var seen []string // "<rows>:<async_insert>" per request
@@ -1062,7 +1060,7 @@ func TestFlushTable_IsolatedRowsInsertSynchronously(t *testing.T) {
 			mu.Lock()
 			seen = append(seen, fmt.Sprintf("%d:%s", rows, req.URL.Query().Get("async_insert")))
 			mu.Unlock()
-			assert.Equal(t, "1", req.URL.Query().Get("wait_for_async_insert"))
+			assert.False(t, req.URL.Query().Has("wait_for_async_insert"))
 			if rows > 1 {
 				return chAnswer(http.StatusInternalServerError, 469, "Constraint `c` is violated at row 2"), nil
 			}
@@ -1076,7 +1074,7 @@ func TestFlushTable_IsolatedRowsInsertSynchronously(t *testing.T) {
 		newIngestMsg(t, "events", "", map[string]any{"id": 2})))
 	wait()
 
-	assert.Equal(t, []string{"2:", "1:0", "1:0"}, seen)
+	assert.Equal(t, []string{"2:0", "1:0", "1:0"}, seen)
 }
 
 func TestFlushTable_BadRow_Isolated_GoesToDLQ(t *testing.T) {

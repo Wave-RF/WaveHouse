@@ -428,6 +428,7 @@ func TestInsertSettings_ReturnsAFreshMap(t *testing.T) {
 	a["wait_for_async_insert"] = "1"
 	assert.NotContains(t, InsertSettings(), "wait_for_async_insert")
 	assert.Equal(t, map[string]string{
+		"async_insert":                 "0",
 		"date_time_input_format":       "best_effort",
 		"input_format_null_as_default": "1",
 	}, InsertSettings())
