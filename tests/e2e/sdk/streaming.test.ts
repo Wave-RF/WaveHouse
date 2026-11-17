@@ -20,7 +20,7 @@ describe("Streaming", () => {
     // Explicitly allow the 'anon' role to SELECT (stream) from this suite's tables.
     // 'scoped' additionally carries a per-subscriber row filter — streamed rows are
     // limited to the caller's own country claim — so the SSE fan-out exercises the
-    // row-level-security path (ResolvedPermissions.RowVisible) end to end, not just
+    // row-level-security path (the type layer's compiled filters) end to end, not just
     // column projection.
     Object.assign(publicPolicy.tables[T.clicks], {
       anon: { select: { allow_columns: ["*"] } },
@@ -31,8 +31,8 @@ describe("Streaming", () => {
         },
       },
       // 'metered' carries a numeric literal bound, so the SSE fan-out exercises
-      // the storage-domain numeric comparison (canonical decimal + integer range
-      // gate) end to end, not just String equality scoping.
+      // the storage-domain numeric comparison (the strict integer cast on an
+      // integer column) end to end, not just String equality scoping.
       metered: {
         select: {
           allow_columns: ["*"],
@@ -105,9 +105,11 @@ describe("Streaming", () => {
 
     it("row DateTime columns arrive canonicalized, matching /v1/query (#372)", async () => {
       // Ingest spells the row timestamp with an offset; the wire form everywhere
-      // downstream must be canonical RFC 3339 UTC, so the SSE frame and the
-      // /v1/query rendering of the same stored instant are byte-identical — the
-      // query/stream clock drift #372 reported.
+      // downstream is ClickHouse's OWN rendering of the stored instant, so the
+      // SSE frame and the /v1/query rendering are byte-identical — the
+      // query/stream clock drift #372 reported. Since the row is produced by the
+      // server's writer at validation time, that identity now holds by
+      // construction rather than by a canonicalizer agreeing with the server.
       const whPublic = publicClient();
       const whAuth = dataClient();
       const receivedEvents: any[] = [];
@@ -133,6 +135,8 @@ describe("Streaming", () => {
 
         await waitForCondition(() => receivedEvents.some((e) => e.data?.event_id === id), 10_000);
         const frame = receivedEvents.find((e) => e.data?.event_id === id);
+        // RFC 3339 in UTC at the column's scale (DateTime64(3) here), the
+        // spelling /v1/query renders too.
         expect(frame?.data.received_timestamp).toBe("2026-06-21T04:00:00.123Z");
 
         // The ClickHouse insert is async behind the stream event — poll the query
@@ -298,9 +302,9 @@ describe("Streaming", () => {
 
     it("evaluates a numeric row filter in the column's storage domain (UInt32 threshold)", async () => {
       // 'metered' scopes delivery to duration_ms > 100 over a UInt32 column: the
-      // constant routes through the canonical-decimal reading and the integer
-      // range gate, and both operands compare in the column's storage domain —
-      // the #381 storage-domain path, pinned end to end on SSE.
+      // constant is read through the strict integer cast for the column's type,
+      // and both operands compare in the column's storage domain — the #381
+      // storage-domain path, pinned end to end on SSE.
       const inserter = dataClient();
       const client = authClient("metered");
       const events: any[] = [];

@@ -57,6 +57,11 @@ app="gobuild-v3-Linux-go-integration-app"
   row 44 $main "$ov-go-2.27.2-8b37a2a2c49c4a405a0a56f50f8d84ca0db2b6d8-38564481869-2" 2026-10-14T12:33:00Z
   row 45 $main "$ov-javascript-2.27.2-4ad8d8b5838b72c34a302e19ee7924e476d760ff-38565329743-1" 2026-10-14T12:39:00Z
   row 46 $main "$ov-go-2.27.3-4ad8d8b5838b72c34a302e19ee7924e476d760ff-38565329743-1" 2026-10-14T12:00:00Z
+  # chtypes artifacts: one family per os, arch and line, the 16-hex build
+  # dropped. The older build of a family goes; another arch is its own.
+  row 60 $main "chtypes-v2-Linux-X64-26.8-0123456789abcdef" 2026-10-12T00:00:00Z
+  row 61 $main "chtypes-v2-Linux-X64-26.8-fedcba9876543210" 2026-10-14T00:00:00Z
+  row 62 $main "chtypes-v2-Linux-ARM64-26.8-0123456789abcdef" 2026-10-12T00:00:00Z
   # A commit-sha tail outside the overlay family is not a generation.
   row 47 $main "other-4ad8d8b5838b72c34a302e19ee7924e476d760ff-38565329743-1" 2026-10-01T00:00:00Z
   row 48 $main "other-68578046021af94ca3564369127e82158d672191-38567452949-1" 2026-10-02T00:00:00Z
@@ -87,7 +92,7 @@ exit 0
 EOF
 chmod +x "$dir/bin/gh"
 
-want="1 2 10 12 14 20 43 44"
+want="1 2 10 12 14 20 43 44 60"
 
 # selects <name> <want ids, sorted>: a dry run's picks.
 selects() {

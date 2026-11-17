@@ -5,7 +5,7 @@ import { suiteTables } from "./tables.js";
 /**
  * End-to-end coverage for NDJSON batch ingest (issue #195): the API
  * `application/x-ndjson` path, the SDK array `insert([...])` path that now rides
- * it, and the raw `insertNDJSON()` helper — including partial-failure handling.
+ * it, and the raw `insertNDJSON()` helper — including a body ClickHouse refuses.
  */
 describe("NDJSON ingest", () => {
   const wh = dataClient();
@@ -33,14 +33,11 @@ describe("NDJSON ingest", () => {
     }, 10_000);
   });
 
-  it("surfaces per-record validation failures while still persisting the good rows", async () => {
+  it("refuses a batch with an unknown column, persisting none of it", async () => {
     const runId = testId();
-    const goodA = `${runId}-good-a`;
-    const goodB = `${runId}-good-b`;
-
     const rows = [
-      { event_id: goodA, page: "/ok", user_id: `user-${runId}`, session_id: `s-${runId}` },
-      // Unknown column → the server rejects this one line only.
+      { event_id: `${runId}-a`, page: "/ok", user_id: `user-${runId}`, session_id: `s-${runId}` },
+      // Unknown column: ClickHouse refuses it, which refuses the whole batch.
       {
         event_id: `${runId}-bad`,
         page: "/bad",
@@ -48,20 +45,21 @@ describe("NDJSON ingest", () => {
         session_id: `s-${runId}`,
         totally_fake_field: "nope",
       },
-      { event_id: goodB, page: "/ok", user_id: `user-${runId}`, session_id: `s-${runId}` },
+      { event_id: `${runId}-b`, page: "/ok", user_id: `user-${runId}`, session_id: `s-${runId}` },
     ];
 
     const result = await wh.from(T.clicks).insert(rows);
-    // The request itself succeeded — the bad record is reported, not thrown.
-    expect(result.error).toBeNull();
-    expect(result.data?.ok).toBe(false);
-    expect(result.data?.total).toBe(3);
-    expect(result.data?.succeeded).toBe(2);
-    expect(result.data?.failed).toBe(1);
-    const failed = result.data?.results?.find((r) => r.error);
-    expect(failed?.index).toBe(2);
+    expect(result.error).not.toBeNull();
+    expect(result.error!.status).toBe(400);
+    expect(result.error!.code).toBe("clickhouse.rejected");
+    expect((result.error!.details as { exception_code?: number }).exception_code).toBe(117);
+    expect(result.error!.message).toMatch(/^record 2: /);
 
-    // Exactly the two good rows reach ClickHouse; the bad one does not.
+    // Without the bad record, the batch lands whole: the refusal claimed none
+    // of its ids.
+    const retry = await wh.from(T.clicks).insert([rows[0], rows[2]]);
+    expect(retry.error).toBeNull();
+    expect(retry.data).toMatchObject({ ok: true, total: 2, succeeded: 2, failed: 0 });
     await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT event_id FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
@@ -69,11 +67,10 @@ describe("NDJSON ingest", () => {
       );
       return r.length === 2;
     }, 10_000);
-
     const inCH = await chQuery<{ event_id: string }>(
       `SELECT event_id FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
     );
-    expect(inCH.map((r) => r.event_id).sort()).toEqual([goodA, goodB].sort());
+    expect(inCH.map((r) => r.event_id).sort()).toEqual([`${runId}-a`, `${runId}-b`].sort());
   });
 
   it("insertNDJSON() sends a raw NDJSON string", async () => {
@@ -102,7 +99,7 @@ describe("NDJSON ingest", () => {
     }, 10_000);
   });
 
-  it("reports a malformed NDJSON line and still ingests the rest", async () => {
+  it("refuses an NDJSON body with a malformed line, ingesting none of it", async () => {
     const runId = testId();
     const good = `${runId}-ok`;
     const ndjson = [
@@ -115,15 +112,22 @@ describe("NDJSON ingest", () => {
       "{ this is not valid json",
     ].join("\n");
 
+    // ClickHouse's own parse refusal, with its exception_code and the record it
+    // failed on; the good line is not inserted either, as with a ClickHouse
+    // INSERT.
     const result = await wh.from(T.clicks).insertNDJSON(ndjson);
-    expect(result.error).toBeNull();
-    expect(result.data?.total).toBe(2);
-    expect(result.data?.succeeded).toBe(1);
-    expect(result.data?.failed).toBe(1);
-    const failed = result.data?.results?.find((r) => r.error);
-    expect(failed?.index).toBe(2);
-    expect(failed?.error).toContain("invalid json");
+    expect(result.error).not.toBeNull();
+    expect(result.error!.status).toBe(400);
+    expect(result.error!.code).toBe("clickhouse.rejected");
+    expect(typeof (result.error!.details as { exception_code?: number }).exception_code).toBe(
+      "number",
+    );
+    expect(result.error!.message).toMatch(/^record 2: /);
 
+    // Resent without the bad line, the good record lands: the refused body
+    // claimed nothing.
+    const retry = await wh.from(T.clicks).insertNDJSON(ndjson.split("\n")[0]);
+    expect(retry.error).toBeNull();
     await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT event_id FROM default.${T.clicks} WHERE event_id = '${good}'`,
@@ -131,6 +135,64 @@ describe("NDJSON ingest", () => {
       );
       return r.length === 1;
     }, 10_000);
+  });
+
+  // A SINGLE-LINE JSON array with one bad record is refused whole, as a
+  // ClickHouse INSERT of the array is: none of its records land.
+  it("refuses a compact JSON array with one bad record, ingesting none of it", async () => {
+    const runId = testId();
+    const body =
+      "[" +
+      [
+        { event_id: `${runId}-a`, page: "/a", user_id: `user-${runId}`, session_id: `s-${runId}` },
+        {
+          event_id: `${runId}-b`,
+          page: "/b",
+          user_id: `user-${runId}`,
+          session_id: `s-${runId}`,
+          totally_fake_field: "nope",
+        },
+        { event_id: `${runId}-c`, page: "/c", user_id: `user-${runId}`, session_id: `s-${runId}` },
+      ]
+        .map((r) => JSON.stringify(r))
+        .join(",") +
+      "]";
+    expect(body.includes("\n")).toBe(false);
+
+    const res = await fetch(`${WH_URL}/v1/ingest?table=${T.clicks}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${makeJWT({ sub: "test-viewer", role: "viewer", tenant_id: "acme" })}`,
+      },
+      body,
+    });
+    expect(res.status).toBe(400);
+    const parsed = (await res.json()) as { error?: string; code?: string; exception_code?: number };
+    expect(parsed.code).toBe("clickhouse.rejected");
+    expect(parsed.exception_code).toBe(117);
+    expect(parsed.error).toMatch(/^record 2: /);
+
+    // A record sent after it lands; none of the array does.
+    const after = `${runId}-after`;
+    const ok = await wh.from(T.clicks).insert({
+      event_id: after,
+      page: "/after",
+      user_id: `user-${runId}`,
+      session_id: `s-${runId}`,
+    });
+    expect(ok.error).toBeNull();
+    await waitForCondition(async (signal) => {
+      const r = await chQuery(
+        `SELECT event_id FROM default.${T.clicks} WHERE event_id = '${after}'`,
+        signal,
+      );
+      return r.length === 1;
+    }, 10_000);
+    const inCH = await chQuery<{ event_id: string }>(
+      `SELECT event_id FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
+    );
+    expect(inCH.map((r) => r.event_id)).toEqual([after]);
   });
 
   it("accepts a raw JSON array body (Content-Type: application/json) and lands every row", async () => {

@@ -210,7 +210,9 @@ type Event struct {
   </TabItem>
 </Tabs>
 
-The server sends the column list in an `event: schema` frame, before the first row and again when it changes, and each row as a positional array; both SDKs keep the announced list and zip each row against it, so you get rows by name. The list is already reduced to the columns the connection's role may read. Values are as the producer sent them, not as ClickHouse stored them, except that top-level `DateTime`/`DateTime64` values arrive in canonical RFC 3339 UTC (`2026-06-21T04:00:00.123Z`), matching what `/v1/query` returns. A value WaveHouse couldn't canonicalize (ingest is fail-open) streams in the producer's spelling ([Timestamp canonicalization](/api#timestamp-canonicalization)). A raw SSE consumer must do the zipping itself; see [the wire format](/api#get-v1stream--server-sent-events-stream).
+The server sends the column list in an `event: schema` frame, before the first row and again when it changes, and each row as a positional array; both SDKs keep the announced list and zip each row against it, so you get rows by name. The list is already reduced to the columns the connection's role may read. Rows are what ClickHouse's own parser made of the body, so a column the producer omitted holds its evaluated `DEFAULT` (or its type's default, `null` only for a `Nullable` column with none), as a native `INSERT` naming fewer columns would store it. `DateTime`/`DateTime64` values, nested ones in an `Array`, `Map` or `Tuple` included, arrive as RFC 3339 UTC at the column's scale (`2026-06-21T04:00:00.123Z`, `…:00.000Z` on a whole second), matching what `/v1/query` returns byte for byte ([Timestamp rendering](/api#timestamp-rendering)). Float NaN and infinities arrive as the strings `"nan"`, `"inf"` and `"-inf"`, and 64-bit integers and `Decimal` values as JSON numbers. An event published before an upgrade, or by an older instance during a rolling deploy, replays in the spelling it was published in.
+
+Compare timestamps by instant, never as strings: the stream's `timestamp` field trims trailing zeros, a column keeps its scale. In Go, decode a `DateTime` into a `time.Time` field, a `Date` (`"2026-06-21"`) into a `string` field or through `Row.Time`, a `Decimal` into a `json.Number`, and a float column that can hold `"nan"` into an `any` rather than a `float64`, which fails on it. A raw SSE consumer must do the zipping itself; see [the wire format](/api#get-v1stream--server-sent-events-stream).
 
 ## Transport Behavior
 
@@ -284,7 +286,7 @@ In Go, a row that arrives before the schema frame or whose length disagrees with
 
 ### Server-side policy filtering
 
-Access-control policy applies on the server before anything reaches the client: tables the connection's role can't `select` are skipped, denied columns are stripped from each event, and the role's row-level `filter` is evaluated per subscriber against the connection's JWT claims. A stream on a row-policied table delivers only the rows the policy admits for that connection and, where the server's in-memory comparison can't prove a match, fewer; see [Access control — where each rule is enforced](/access-control#where-each-rule-is-enforced). Claims are captured when the connection opens: a policy change applies from the next event, replayed or live, while a token's expiry or a claim change takes effect on reconnect.
+Access-control policy applies on the server before anything reaches the client: tables the connection's role can't `select` are skipped, denied columns are stripped from each event, and the role's row-level `filter` is evaluated per subscriber against the connection's JWT claims. A stream on a row-policied table delivers only the rows the policy admits for that connection and, where ClickHouse's own in-process evaluation does not answer a definite true (a predicate error, a filter on a `MATERIALIZED` or `ALIAS` column, an unbound tenant, schema drift), fewer; see [Access control — where each rule is enforced](/access-control#where-each-rule-is-enforced). Claims are captured when the connection opens: a policy change applies from the next event, replayed or live, while a token's expiry or a claim change takes effect on reconnect.
 
 ## Client-side stream filtering
 
@@ -301,7 +303,7 @@ const stream = wh.from('clicks')
 // Only events where page === '/home', with only page and button
 ```
 
-Every [filter operator](/sdk/queries#filters) works here. Ordered comparisons (`>`, `>=`, `<`, `<=`) apply only when both sides are numbers or both are strings (strings compare lexicographically, which suits ISO-8601 timestamps); a mismatch doesn't match. `like` matches **case-insensitively** here, while ClickHouse's `LIKE` on the query path is case-sensitive, so inside one `liveQuery()` a pattern like `'/Home%'` can admit live events whose historical counterparts the backfill excluded.
+Every [filter operator](/sdk/queries#filters) works here. Ordered comparisons (`>`, `>=`, `<`, `<=`) apply only when both sides are numbers or both are strings (strings compare lexicographically, which suits ISO-8601 timestamps written at one scale: this server keeps a `DateTime64`'s trailing zeros, so compare a `DateTime64(3)` column against `2026-03-24T12:00:00.000Z`, not `…12:00:00Z`); a mismatch doesn't match. `like` matches **case-insensitively** here, while ClickHouse's `LIKE` on the query path is case-sensitive, so inside one `liveQuery()` a pattern like `'/Home%'` can admit live events whose historical counterparts the backfill excluded.
 
   </TabItem>
   <TabItem label="Go">

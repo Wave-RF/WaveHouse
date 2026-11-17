@@ -79,8 +79,9 @@ type PipesFile struct {
 // A tenant's own secrets — `clickhouse.password`, `auth.jwt_secret` — live
 // here with the wiring they belong to, so they reload with it (#529). Every
 // block and every top-level key inside it is REQUIRED, but dedupe.retention
-// (missing means "0", forever): the binary carries no other compiled default,
-// so the adopted snapshot is exactly what the files say.
+// (missing means "0", forever) and ingest.parse_timeout (missing means boot
+// config's ingest.parse_timeout): the binary carries no other compiled
+// default, so the adopted snapshot is exactly what the files say.
 // Defaults live in the seed directory (see Seed) that `wavehouse
 // bootstrap` writes. The fields are pointers only so Validate can tell
 // "absent" from the zero value and report it by path.
@@ -109,11 +110,11 @@ type TenantConfig struct {
 // boot refuses over a flat settings directory or serves the tenant on no
 // pool over a nested one.
 type ClickHouseConfig struct {
-	// Addr is the native-protocol host:port (schema discovery, structured
-	// queries, pipes, /readyz).
+	// Addr is the native-protocol host:port (schema discovery, /readyz, the
+	// storage metrics); queries and inserts go over the HTTP interface.
 	Addr *string `json:"addr"`
-	// HTTPPort and HTTPScheme address the HTTP interface (ingest INSERTs and
-	// the raw-SQL proxy) on the same host as Addr.
+	// HTTPPort and HTTPScheme address the HTTP interface (structured queries,
+	// pipes, ingest INSERTs and the raw-SQL proxy) on the same host as Addr.
 	HTTPPort   *int    `json:"http_port"`
 	HTTPScheme *string `json:"http_scheme"`
 	Database   *string `json:"database"`
@@ -135,12 +136,14 @@ type ClickHouseConfig struct {
 	// material applies to whichever hop uses TLS. Paths, checked for shape
 	// only — the files are read when the connection is (re)built.
 	TLS *ClickHouseTLS `json:"tls"`
-	// Headers are set on every HTTP-interface request (ingest INSERTs, the
-	// raw-SQL proxy) ahead of WaveHouse's own credential and content-type
-	// headers, which therefore win. The native protocol carries none.
+	// Headers are set on every HTTP-interface request (structured queries,
+	// pipes, ingest INSERTs, the raw-SQL proxy) ahead of WaveHouse's own
+	// credential and content-type headers, which therefore win. The native
+	// protocol (discovery, /readyz) carries none.
 	Headers map[string]string `json:"headers"`
 	// MaxOpenConns and MaxIdleConns size the native driver's pool: each
-	// >= 1, open >= idle.
+	// >= 1, open >= idle. MaxOpenConns also caps the HTTP connections
+	// structured queries and pipes hold.
 	MaxOpenConns *int `json:"max_open_conns"`
 	MaxIdleConns *int `json:"max_idle_conns"`
 }
@@ -237,7 +240,7 @@ type TableDLQ struct {
 // right values depend on the tenant's row width and rate, which is why they
 // are the tenant's; the consumer the batches come through — the redelivery
 // timeout, the rows delivered and unacked, the prefetch — is boot config
-// (`mq.*`), sized once per process.
+// (`mq.*`), sized once per process. ParseTimeout alone is the API's.
 type IngestConfig struct {
 	// MaxBatchBytes is the size at which a table's batch is flushed: the
 	// sum of its rows' JSON (each envelope's `row`, one JSONCompactEachRow
@@ -259,6 +262,12 @@ type IngestConfig struct {
 	// that cannot take the tenant's inserts is retried under: the delay
 	// doubles from a second up to it, jittered.
 	RetryBackoffMax *int `json:"retry_backoff_max"`
+	// ParseTimeout is the API's, not the worker's: how long, in seconds
+	// (>= 1), validating one of the tenant's ingest request bodies may take.
+	// Optional: absent, boot config's ingest.parse_timeout applies. It may
+	// not exceed boot config's ingest.max_parse_timeout, which only the
+	// server can check: see internal/app.
+	ParseTimeout *int `json:"parse_timeout,omitempty"`
 }
 
 // QueryConfig holds query-shaping defaults. Server-wide *resource* limits

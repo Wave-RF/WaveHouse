@@ -55,7 +55,7 @@ const { data, error, hasMore, next } = await clicks.fetch();
 const { data: page } = await clicks.fetch({ limit: 50, signal: controller.signal });
 ```
 
-`tableRef.fetch()` is the shortcut for "select every column" with the [default limit](#limit). Rows are plain objects parsed with `JSON.parse`, so a `UInt64` or `Int64` value above 2^53 loses precision, and a `Decimal` arrives as a string ([Column values](#column-values)).
+`tableRef.fetch()` is the shortcut for "select every column" with the [default limit](#limit). Rows are plain objects parsed with `JSON.parse`, so a `UInt64`, `Int64` or `Decimal` value above 2^53 loses precision, and a float NaN or infinity arrives as a string ([Column values](#column-values)).
 
   </TabItem>
   <TabItem label="Go">
@@ -97,9 +97,10 @@ With nothing selected and no aggregate, a query selects every column the role ma
 
 The server sends each row as a JSON object, so both SDKs see the same values:
 
-- **`DateTime` and `DateTime64`** columns arrive as RFC 3339 UTC strings (`2026-06-21T04:00:00.123Z`), which `new Date(value)` and Go's `Row.Time` parse with no zone fix-up ([Timestamp canonicalization](/api#timestamp-canonicalization)).
-- **`Decimal`** arrives as a quoted string, which keeps its precision. The TypeScript [codegen](/sdk/reference#codegen-cli) types it as `string`; in Go give it a `string` field (or the `json:",string"` tag for a numeric one), and `Row.Float64` parses it, losing digits a `float64` can't hold.
-- **`UInt64` and `Int64`** arrive as JSON numbers: exact in Go, and above 2^53 rounded by `JSON.parse` in TypeScript.
+- **`DateTime` and `DateTime64`** columns arrive as RFC 3339 UTC strings (`2026-06-21T04:00:00.123Z`), which `new Date(value)` and Go's `Row.Time` parse with no zone fix-up ([Timestamp canonicalization](/api#timestamp-rendering)).
+- **Timestamps** keep the column's scale: a `DateTime64(3)` on a whole second arrives as `2026-06-21T04:00:00.000Z`, and a timestamp nested in an `Array`, `Map` or `Tuple` is rendered the same way. Compare timestamps as instants (`new Date(value)` in TypeScript, `time.Time` in Go), never as strings, since two spellings of one instant differ in length. A `Date` column arrives as `"2026-06-21"`, which `new Date(value)` reads as UTC but a Go `time.Time` field refuses (RFC 3339 needs a time of day): use a `string` field or `Row.Time` there.
+- **`Decimal`, `UInt64` and `Int64`** arrive as JSON numbers, not strings: exact in Go, and above 2^53 rounded by `JSON.parse` in TypeScript, so store an id that large as a `String` column to keep every digit. The TypeScript [codegen](/sdk/reference#codegen-cli) types a `Decimal` as `string`, which is wrong for these responses; treat it as a `number`. In Go, read a `Decimal` into a [`json.Number`](https://pkg.go.dev/encoding/json#Number) field, which accepts both a number and a quoted string and keeps every digit; a `string` field or the `json:",string"` tag fails on a number, and a `float64` loses digits it can't hold.
+- **Float `NaN` and infinities** arrive as the strings `"nan"`, `"inf"` and `"-inf"`, on queries, pipes and streams alike. The TypeScript `number` type does not include them, so check `typeof v === 'number'` before doing arithmetic on a column that can hold one. In Go, a `float64` struct field fails `Scan` on `"nan"`: read such a column into an `any` field and check for the string before converting it.
 - **Column order and types are not sent** ([#1000](https://github.com/Wave-RF/WaveHouse/issues/1000)). Each row is an object whose keys come back in alphabetical order, not select order, and an empty result says nothing about its columns. Read the order and types from the [table's schema](/sdk/admin#schema) if you need them.
 
 ## Projection
@@ -354,7 +355,7 @@ const { data: batch } = await clicks.insert([
 // batch: { ok, total, succeeded, failed, duplicates, results? }
 ```
 
-A single object is sent as `application/json`; an **array** is serialized to NDJSON and sent as one `application/x-ndjson` request, so a bad record doesn't fail or hide the rest of the batch. For an array, `data.ok` is `true` only when every record succeeded (`failed === 0`); inspect `failed` and `results` (each `{ index, ok | duplicate | error }`, with a 1-based `index`) for the rest. The call's `error` is reserved for whole-request failures: the network, an unknown table (`404`), a forbidden insert (`403`), backpressure (`503`). An empty array is a no-op and sends nothing.
+A single object is sent as `application/json`; an **array** is serialized to NDJSON and sent as one `application/x-ndjson` request. A record ClickHouse's parser refuses (a value its column cannot read, an unknown column) refuses the whole request, as a ClickHouse `INSERT` does: the call's `error` has `code` `"clickhouse.rejected"`, a message naming the record (`record 2: …`) and ClickHouse's `exception_code` in `error.details`, and nothing is inserted ([Batch ingest](/api#batch-ingest)). Once the body parses, per-record outcomes (a failed policy `check`, a missing dedupe id, a record the validation engine declined) come back in the result. For an array, `data.ok` is `true` only when every record succeeded (`failed === 0`); inspect `failed` and `results` (each `{ index, ok | duplicate | error }`, with a 1-based `index`) for the rest. The call's `error` is reserved for whole-request failures: the network, a ClickHouse refusal of the body (`400`), an unknown table (`404`), a forbidden insert (`403`), a body the validation engine declined or that took longer than the [time limit](/configuration#ingest-validation) (`422`), backpressure (`503`). An empty array is a no-op and sends nothing. Per-record parse verdicts may return through [Wave-RF/chtypes#497](https://github.com/Wave-RF/chtypes/issues/497).
 
   </TabItem>
   <TabItem label="Go">
@@ -366,8 +367,10 @@ type click struct {
     Score  float64 `json:"score"`
 }
 res, err := wh.From("clicks").Insert(ctx, []click{{"/home", "cta", 42.5}, {"/about", "nav", 3}})
-// The server answers 200 even when it rejects records: the result comes back
-// with an *InsertError saying which.
+// The server answers 200 when it rejects some records after parsing the body
+// (a failed policy check, a dedupe problem): the result comes back with an
+// *InsertError saying which. A body ClickHouse cannot parse is refused whole,
+// as an *APIError with Code "clickhouse.rejected" and nothing inserted.
 if ie, ok := errors.AsType[*wavehouse.InsertError](err); ok {
     for _, f := range ie.Failed {
         fmt.Printf("record %d rejected: %s\n", f.Index, f.Error)
@@ -378,7 +381,7 @@ if ie, ok := errors.AsType[*wavehouse.InsertError](err); ok {
 fmt.Println(res.Succeeded, "published,", res.Duplicates, "duplicates")
 ```
 
-`Insert` takes one struct or map, or a slice or array of them, each encoded with `encoding/json`, and **always sends NDJSON**, so one row gets the same `*InsertResult` (`Total`, `Succeeded`, `Failed`, `Duplicates`, `Records`) as a batch. When the server rejects some records, the call returns the result **and** an `*InsertError` (`Count`, `Failed`), so check both. An empty slice sends nothing. `Insert` belongs on a bare `From(table)`: a query that carries any read state (a `Select`, `Where`, limit, time range…) is an error before anything is sent.
+`Insert` takes one struct or map, or a slice or array of them, each encoded with `encoding/json`, and **always sends NDJSON**, so one row gets the same `*InsertResult` (`Total`, `Succeeded`, `Failed`, `Duplicates`, `Records`) as a batch. When the server rejects some records, the call returns the result **and** an `*InsertError` (`Count`, `Failed`), so check both. A record ClickHouse's parser refuses (a value its column cannot read, an unknown column) refuses the whole request instead: the call returns an `*APIError` with `Code` `"clickhouse.rejected"`, a message naming the record (`record 2: …`) and nothing inserted, so a refused record never shows up in `Failed`. An empty slice sends nothing. `Insert` belongs on a bare `From(table)`: a query that carries any read state (a `Select`, `Where`, limit, time range…) is an error before anything is sent.
 
   </TabItem>
 </Tabs>
@@ -427,10 +430,10 @@ fmt.Println(res.Succeeded, "published")
   </TabItem>
 </Tabs>
 
-It returns the same per-record summary as an insert of many rows. The server buffers the whole body too, so the 16 MiB cap applies exactly as above ([Batch ingest](/api#batch-ingest)).
+It returns the same per-record summary as an insert of many rows, and a record ClickHouse cannot parse refuses the whole body the same way. The server buffers the whole body too, so the 16 MiB cap applies exactly as above ([Batch ingest](/api#batch-ingest)).
 
 :::note[The `Content-Type` decides the format]
-`POST /v1/ingest` takes a single object, a JSON array or NDJSON, and the declared `Content-Type` (`application/json` or `application/x-ndjson`) chooses which; a request without one is a `415`. Both SDKs always set it. See the [API reference](/api#post-v1ingesttabletable--ingest-data).
+`POST /v1/ingest` takes a single object, a JSON array, NDJSON, or positional CSV or TSV (`text/csv`, `text/tab-separated-values`; add `; header=present` to send a header line of column names, or `; header=absent` to turn ClickHouse's header detection off), and the declared `Content-Type` chooses which; a request without one is a `415`. Both SDKs send JSON or NDJSON and always set it. See the [API reference](/api#post-v1ingesttabletable--ingest-data).
 :::
 
 ## Raw SQL

@@ -102,7 +102,7 @@ func TestMetrics_Tenant(t *testing.T) {
 	acme.FrameSent(KindEvent, 42)
 	acme.FrameDropped("events", KindEvent, DropClientGone)
 	acme.ConnClosed(time.Second)
-	m.RowWithheld("acme", "events", "viewer")
+	m.RowWithheld("acme", "events", "viewer", ReasonFilter)
 	m.FrameSent(KindKeepalive, 3)
 
 	for name, md := range collectByName(collect(t, reader)) {

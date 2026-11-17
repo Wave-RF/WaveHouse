@@ -169,7 +169,7 @@ func (w *IngestWorker) insert(ctx context.Context, tableName string, columns []s
 	}
 	result := "ok"
 	if err != nil {
-		result = chconn.Classify(err).String()
+		result = insertClass(err).String()
 	}
 	workerMetrics.insertSeconds.Record(ctx, time.Since(start).Seconds(), observability.MetricAttrs(ctx,
 		attribute.String("mode", mode),

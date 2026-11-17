@@ -47,8 +47,10 @@ human() {
 # Heads-up on a single common point of confusion in the gsa output.
 # Section-name reference lives in docs/, not reprinted every run.
 printf '%s==> Reading the gsa output:%s\n' "$CYAN" "$RESET"
-printf '  %s"CGO" rows are mostly Go reflection metadata, not C code%s — this build is CGO_ENABLED=0.\n' \
+printf '  %s"CGO" rows are mostly Go reflection metadata, not linked C code%s — chtypes needs cgo for\n' \
 	"$YELLOW" "$RESET"
+printf '  dlfcn, but it dlopens its artifact at runtime rather than linking a C library, so it adds\n'
+printf '  only a thin shim to this bucket.\n'
 printf '  Focus on large NAMED packages (vendor / std); treat CGO/Unknown rows as noise.\n\n'
 
 # ── Side-by-side debug / release comparison.
