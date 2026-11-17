@@ -172,7 +172,8 @@ func main() {
         log.Fatal(err)
     }
 
-    // Query: a chain that ends in Scan, into structs or maps.
+    // Query: a chain that ends in Scan, into structs or maps. Rows reach ClickHouse
+    // in batches (up to 5 s after the insert by default), so this read may not see them yet.
     var top []click
     err = wh.From("clicks").
         Select("page", "button", "score").

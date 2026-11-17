@@ -116,7 +116,7 @@ if _, err := wh.From("clicks").Limit(10).Fetch(ctx); errors.Is(err, wavehouse.Er
 - **What it bounds.** On a REST call, one attempt from sending to the end of the response body. On a stream, each connect up to the response headers, never an established stream.
 - **It is not your deadline.** The caller's signal or context is separate, and still ends the call at once, unretried.
 - **A timed-out attempt is retried** after a backoff while attempts remain, under the rules for a transport error above: a raw SQL or pipe call is not resent once its request may have reached the server. A stream re-dials it like any connect failure.
-- **The final error**, when the last attempt timed out, names the attempt count: `ATTEMPT_TIMEOUT` in TypeScript (`SSE_ATTEMPT_TIMEOUT` on a stream), and in Go an error that matches `wavehouse.ErrAttemptTimeout` and does **not** match `context.DeadlineExceeded`.
+- **The final error** of a REST call, when its last attempt timed out, names the attempt count: `ATTEMPT_TIMEOUT` in TypeScript, and in Go an error that matches `wavehouse.ErrAttemptTimeout` and does **not** match `context.DeadlineExceeded`. A TypeScript stream reports each timed-out connect as a retryable `SSE_ATTEMPT_TIMEOUT` and re-dials; it names no attempt count.
 
 ## Redirects
 
