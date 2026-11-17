@@ -1,0 +1,496 @@
+---
+title: "SDK Queries"
+description: "The structured query builder, filters, time windows, inserts, pagination and raw SQL in the TypeScript and Go SDKs."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Reading and writing data: the structured query builder (`POST /v1/query`), inserts (`POST /v1/ingest`), and the admin-only raw-SQL route. A TypeScript call returns a [`Result<T>`](/sdk#result-type) and never throws for anything the server returns; a Go call returns its value and an `error`. The examples assume a client called `wh` (see [Creating a Client](/sdk#creating-a-client)) and, in Go, a `ctx`.
+
+## Starting a query
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+const clicks = wh.from('clicks'); // a TableRef
+const { data, error } = await clicks.select('page', 'button').where('page', '=', '/home').limit(10);
+```
+
+`from()` returns a `TableRef`, a reference to a table. It is **not** thenable, so it is safe to keep in a variable or pass around without sending anything. `.select()` and `.selectAll()` start a `QueryBuilder`, which is immutable (every method returns a new builder) and **PromiseLike**: `await builder` runs `.fetch()` with no options.
+
+```ts
+// These are equivalent:
+const r1 = await clicks.select('page').limit(10).fetch();
+const r2 = await clicks.select('page').limit(10);
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+recent := wh.From("clicks").Where("score", wavehouse.Gt, 10).OrderBy("received_timestamp", wavehouse.Desc).Limit(100)
+rows, err := recent.Select("page", "score").Fetch(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(len(rows))
+```
+
+`From()` returns a `*wavehouse.Query`. It is immutable: every method returns a modified copy and leaves its receiver alone, so a partly built query can be kept, shared between goroutines and extended in several directions. Nothing is sent until `Scan` or `Fetch`, and the same `From(table)` starts an [insert](#inserting-rows).
+
+  </TabItem>
+</Tabs>
+
+**A builder misuse is an error before anything is sent.** An unknown sort direction, `selectAll()` together with columns or aggregates, an invalid time bound: TypeScript resolves the call to an `INVALID_QUERY` error `Result`, and Go returns the error from `Scan` or `Fetch`. The first misuse is the one reported. Go also refuses an unknown operator, an empty column name, an empty `In` list and a negative limit.
+
+## Reading rows
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+// Every column your role may read, 1000 rows unless you say otherwise:
+const { data, error, hasMore, next } = await clicks.fetch();
+const { data: page } = await clicks.fetch({ limit: 50, signal: controller.signal });
+```
+
+`tableRef.fetch()` is the shortcut for "select every column" with the [default limit](#limit). Rows are plain objects parsed with `JSON.parse`, so a `UInt64` or `Int64` value above 2^53 loses precision, and a `Decimal` arrives as a string ([Column values](#column-values)).
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+// Into structs, matched by `json` tag (else case-insensitively by field name), or maps:
+var top []struct {
+    Page  string `json:"page"`
+    Views uint64 `json:"views"` // exact, even above 2^53
+}
+err := wh.From("clicks").Select("page").Count("*", "views").GroupBy("page").Scan(ctx, &top)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Or as []wavehouse.Row, with typed accessors:
+rows, err := wh.From("clicks").Select("page", "score").Limit(10).Fetch(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+for _, row := range rows {
+    page, _ := row.String("page")
+    score, err := row.Float64("score") // an error rather than 0 for NULL
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println(page, score)
+}
+```
+
+`Scan` takes a non-nil pointer to a slice of structs or maps. JSON is decoded with `UseNumber`, so an `int64` or `uint64` field is exact, and a number decoded into a map or an `any` is a `json.Number`. A `Row` is a `map[string]any` with `String`, `Int64`, `Uint64`, `Float64`, `Bool` and `Time` accessors; each returns an error naming the column when it is missing, null, or of a shape that can't hold the type, so a NULL is never read as zero.
+
+  </TabItem>
+</Tabs>
+
+With nothing selected and no aggregate, a query selects every column the role may read, in both SDKs. When an access-control policy restricts the role's columns, the server returns only the columns it may read: a full-row read is never a way around `deny_columns` or `allow_columns` ([Access control](/access-control#column-permissions)). Ordering, grouping or filtering by a column the role can't read is refused, so a column-restricted role must name only readable columns in those clauses.
+
+### Column values
+
+The server sends each row as a JSON object, so both SDKs see the same values:
+
+- **`DateTime` and `DateTime64`** columns arrive as RFC 3339 UTC strings (`2026-06-21T04:00:00.123Z`), which `new Date(value)` and Go's `Row.Time` parse with no zone fix-up ([Timestamp canonicalization](/api#timestamp-canonicalization)).
+- **`Decimal`** arrives as a quoted string, which keeps its precision. The TypeScript [codegen](/sdk/reference#codegen-cli) types it as `string`; in Go give it a `string` field (or the `json:",string"` tag for a numeric one), and `Row.Float64` parses it, losing digits a `float64` can't hold.
+- **`UInt64` and `Int64`** arrive as JSON numbers: exact in Go, and above 2^53 rounded by `JSON.parse` in TypeScript.
+- **Column order and types are not sent** ([#1000](https://github.com/Wave-RF/WaveHouse/issues/1000)). Each row is an object whose keys come back in alphabetical order, not select order, and an empty result says nothing about its columns. Read the order and types from the [table's schema](/sdk/admin#schema) if you need them.
+
+## Projection
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+clicks.select('page').select('button'); // SELECT page, button: calls accumulate
+clicks.selectAll().where('page', '=', '/home'); // every column the role may read
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+wh.From("clicks").Select("page").Select("button")    // SELECT page, button: calls accumulate
+wh.From("clicks").SelectAll().Where("page", wavehouse.Eq, "/home") // every column the role may read
+```
+
+  </TabItem>
+</Tabs>
+
+A literal `'*'` is the column *named* `*`, not a wildcard: use `selectAll()` / `SelectAll()` for every readable column. The server expands it to the role's allowed columns, never to a raw `SELECT *`. It can't be combined with selected columns or aggregates.
+
+## Filters
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+clicks.select('page').where('score', '>', 10).where('page', 'like', '/home%');
+clicks.select('page').where('button', 'in', ['signup', 'nav']);
+```
+
+The SDK also applies `.where()` filters to a builder's stream on the client, where `like` matches case-**insensitively** ([Client-side stream filtering](/sdk/streaming#client-side-stream-filtering)).
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+wh.From("clicks").Select("page").Where("score", wavehouse.Gt, 10).Where("page", wavehouse.Like, "/home%")
+wh.From("clicks").Select("page").Where("button", wavehouse.In, []string{"signup", "nav"})
+```
+
+Go encodes filter values with `encoding/json`, so a `time.Time` value is sent as RFC 3339.
+
+  </TabItem>
+</Tabs>
+
+Filters accumulate and are ANDed. The operators are the eight the server's structured query accepts:
+
+| TypeScript | Go | Wire | Meaning |
+|------------|----|------|---------|
+| `'='` | `wavehouse.Eq` | `eq` | Equal |
+| `'!='` | `wavehouse.Neq` | `neq` | Not equal |
+| `'>'` | `wavehouse.Gt` | `gt` | Greater than |
+| `'>='` | `wavehouse.Gte` | `gte` | Greater than or equal |
+| `'<'` | `wavehouse.Lt` | `lt` | Less than |
+| `'<='` | `wavehouse.Lte` | `lte` | Less than or equal |
+| `'in'` | `wavehouse.In` | `in` | Value in a list: an array in TypeScript, a non-empty slice in Go |
+| `'like'` | `wavehouse.Like` | `like` | SQL `LIKE` pattern, case-**sensitive** on the server |
+
+There is no negated `like`: filter the rows you get back instead.
+
+## Aggregations
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+clicks.select('page')
+  .count('*', 'total')                               // count(*) AS total
+  .sum('score', 'total_score')                       // sum(score) AS total_score
+  .avg('score')                                      // avg(score) AS avg_score
+  .countDistinct('button')                             // countDistinct(button) AS count_distinct_button
+  .aggregate('uniqExact', 'button', 'unique_buttons')  // any function the server allows
+  .groupBy('page');
+```
+
+`count()` defaults to `count('*', 'count')`; `sum`, `avg`, `min`, `max` and `countDistinct` take `(column, alias?)`.
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+wh.From("clicks").Select("page").
+    Count("*", "total").                         // count(*) AS total
+    Sum("score", "total_score").                 // sum(score) AS total_score
+    Avg("score", "").                            // avg(score) AS avg_score
+    CountDistinct("button", "").                     // countDistinct(button) AS count_distinct_button
+    Aggregate("uniqExact", "button", "unique_buttons"). // any function the server allows
+    GroupBy("page")
+```
+
+Every method takes `(column, alias)`; an empty alias takes the default.
+
+  </TabItem>
+</Tabs>
+
+An aggregate with no alias is named the same way in both SDKs: `count`, `sum_<column>`, `avg_<column>`, `min_<column>`, `max_<column>` and `count_distinct_<column>`. `aggregate()` / `Aggregate()` with an empty alias sends none, and the server names the result column. A policy may restrict which functions a role may use ([Access control](/access-control)).
+
+## Group by
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+clicks.select('page').count().groupBy('page');
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+wh.From("clicks").Select("page").Count("*", "").GroupBy("page")
+```
+
+  </TabItem>
+</Tabs>
+
+**Select the grouping key too.** `groupBy()` / `GroupBy()` sends `group_by` and nothing else, and the server returns only the selected columns and the aggregates, so `groupBy('page')` without `select('page')` returns unlabeled counts ([#295](https://github.com/Wave-RF/WaveHouse/issues/295)).
+
+## Order by
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+clicks.select('page').count('*', 'total').groupBy('page').orderBy('total', 'desc');
+```
+
+`dir` defaults to `'asc'`. It is lowercased, as the server does, and anything other than `asc` or `desc` is an `INVALID_QUERY` error before anything is sent.
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+wh.From("clicks").Select("page").Count("*", "total").GroupBy("page").OrderBy("total", wavehouse.Desc)
+```
+
+An empty direction sorts ascending; `"DESC"` and `"Asc"` are normalized, and any other value is an error from `Scan` or `Fetch`.
+
+  </TabItem>
+</Tabs>
+
+The column may be a table column or an aggregate's alias. Calls accumulate into a multi-column sort.
+
+## Limit
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+clicks.select('page').limit(100);
+await clicks.select('page').fetch({ limit: 50 }); // this call only
+```
+
+With no limit, the SDK sends `QueryBuilder.DEFAULT_LIMIT` (1000) on every query. It does so because it needs a limit it knows to compute [`hasMore`](#pagination), and it stays until the server reports the limit a query ran with ([#999](https://github.com/Wave-RF/WaveHouse/issues/999)).
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+wh.From("clicks").Select("page").Limit(100)
+```
+
+With no `Limit` (or `Limit(0)`), the SDK sends none and the server's own cap applies. A negative limit is an error from `Scan` or `Fetch`.
+
+  </TabItem>
+</Tabs>
+
+The server caps every result at the smallest of the requested limit, its `query.default_max_rows` (10,000 by default) and the role's `max_rows`, **and nothing says it did** ([#999](https://github.com/Wave-RF/WaveHouse/issues/999)): a result of exactly the cap's size may be cut. Set a limit you can recognize.
+
+## Time windows
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+// The last hour, by the server's clock: a number of milliseconds or a duration string.
+clicks.select('page').last('received_timestamp', '1h');
+clicks.select('page').last('received_timestamp', 90_000);
+
+// A fixed window: Dates, sent as UTC ISO-8601, or strings, sent as given.
+clicks.select('page').timeRange('received_timestamp', new Date('2026-01-01T00:00:00Z'), new Date('2026-02-01T00:00:00Z'));
+clicks.select('page').timeRange('received_timestamp', '2026-01-01T00:00:00Z');
+```
+
+`last(column, duration)` takes milliseconds above 0, or a `Duration` string (`'90s'`, `'1h'`, `'7d'`, `'2w'`; units `ms`, `s`, `m`, `h`, `d`, `w`). A zero, negative or unparseable duration is an `INVALID_QUERY` error. `timeRange(column, since, until?)` takes a `Date` or a string for each bound; an invalid `Date` is an `INVALID_QUERY` error. A string is sent unchecked, so prefer a `Date` or `last()` to a hand-built one: `'now-1h'` is a `400`, and `'-1h'` is accepted as a negative duration, which puts the bound in the future and matches nothing.
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+// The last hour, by the server's clock.
+wh.From("clicks").Select("page").Last("received_timestamp", time.Hour)
+
+// A fixed window; a zero end leaves it open until now.
+from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+wh.From("clicks").Select("page").TimeRange("received_timestamp", from, time.Time{})
+```
+
+`Last(column, d)` takes a positive `time.Duration`. `TimeRange(column, from, to)` takes `time.Time` values, sent in UTC with nanosecond precision; a zero `to` sends no end, and a zero `from` is an error (use `Last` for a window ending now).
+
+  </TabItem>
+</Tabs>
+
+A window keeps rows where `column >= since AND column <= until`. A relative window (`last()` / `Last`) means that long before **the server's** clock, so a client with a skewed clock still gets the right window. The server rounds each bound down to `query.timestamp_bucket_seconds` (60 s by default), so a window can start, and end, up to a bucket earlier than asked; leave the end open (or use `last()` / `Last`) to keep the newest rows. A later time window replaces an earlier one on the same builder.
+
+## Pagination
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+When a result has at least `limit` rows, `hasMore` is `true`. `next()` builds a keyset cursor on the first `.orderBy()` column, filtering past the last row's value, so it is only attached when the query has an explicit order. With no order column the result still reports `hasMore`, but `next` is `undefined`.
+
+```ts
+let result = await clicks.select().orderBy('received_timestamp', 'desc').limit(100).fetch();
+
+const allRows = [...(result.data ?? [])];
+while (result.hasMore && result.next) {
+  result = await result.next();
+  if (result.data) allRows.push(...result.data);
+}
+```
+
+Because the cursor filters strictly past the boundary value, rows that tie the last row's value on the order column are skipped ([#452](https://github.com/Wave-RF/WaveHouse/issues/452)). Order by a column that is unique, or nearly so, when you paginate.
+
+  </TabItem>
+  <TabItem label="Go">
+
+The Go SDK has no pagination yet; it waits for server support ([#452](https://github.com/Wave-RF/WaveHouse/issues/452)).
+
+  </TabItem>
+</Tabs>
+
+## Inserting rows
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+// One row: a JSON request → { ok: true }, or { ok: true, duplicate: true } when dedupe skipped it
+const { data, error } = await clicks.insert({ page: '/home', button: 'cta', score: 42.5 });
+
+// Many rows: one NDJSON request with a per-record summary
+const { data: batch } = await clicks.insert([
+  { page: '/home', button: 'cta', score: 42.5 },
+  { page: '/about', button: 'nav', score: 3 },
+]);
+// batch: { ok, total, succeeded, failed, duplicates, results? }
+```
+
+A single object is sent as `application/json`; an **array** is serialized to NDJSON and sent as one `application/x-ndjson` request, so a bad record doesn't fail or hide the rest of the batch. For an array, `data.ok` is `true` only when every record succeeded (`failed === 0`); inspect `failed` and `results` (each `{ index, ok | duplicate | error }`, with a 1-based `index`) for the rest. The call's `error` is reserved for whole-request failures: the network, an unknown table (`404`), a forbidden insert (`403`), backpressure (`503`). An empty array is a no-op and sends nothing.
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+type click struct {
+    Page   string  `json:"page"`
+    Button string  `json:"button"`
+    Score  float64 `json:"score"`
+}
+res, err := wh.From("clicks").Insert(ctx, []click{{"/home", "cta", 42.5}, {"/about", "nav", 3}})
+// The server answers 200 even when it rejects records: the result comes back
+// with an *InsertError saying which.
+if ie, ok := errors.AsType[*wavehouse.InsertError](err); ok {
+    for _, f := range ie.Failed {
+        fmt.Printf("record %d rejected: %s\n", f.Index, f.Error)
+    }
+} else if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(res.Succeeded, "published,", res.Duplicates, "duplicates")
+```
+
+`Insert` takes one struct or map, or a slice or array of them, each encoded with `encoding/json`, and **always sends NDJSON**, so one row gets the same `*InsertResult` (`Total`, `Succeeded`, `Failed`, `Duplicates`, `Records`) as a batch. When the server rejects some records, the call returns the result **and** an `*InsertError` (`Count`, `Failed`), so check both. An empty slice sends nothing. `Insert` belongs on a bare `From(table)`: a query that carries any read state (a `Select`, `Where`, limit, time range…) is an error before anything is sent.
+
+  </TabItem>
+</Tabs>
+
+**The body cap.** One ingest request is bound by the server's 16 MiB [request-body cap](/reverse-proxy#request-body-size-limits). Over it, the TypeScript SDK's request gets a `413` with nothing ingested, and the Go SDK refuses the call before sending it; either way, split the batch. Chunking a large array automatically is tracked in [`wavehouse-sdk-js#11`](https://github.com/Wave-RF/wavehouse-sdk-js/issues/11). The server truncates the per-record list to its first 10,000 entries for a very large batch; the counts stay authoritative.
+
+**Retries and duplicates.** Ingest is retried like a read ([Retries and timeouts](/sdk/reference#retries-and-timeouts)), so it is at-least-once: a retried batch can publish a record twice. Where the server has [deduplication](/settings-directory#deduplication) on and the rows carry its id field, the retry's copy is reported as a duplicate instead.
+
+### Inserting NDJSON you already have
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+// From a string
+await clicks.insertNDJSON('{"page":"/a","button":"cta","score":1}\n{"page":"/b","button":"nav","score":2}\n');
+
+// From a browser <input type="file"> (a File is a Blob)
+await clicks.insertNDJSON(fileInput.files[0]);
+
+// From a Node file
+import { openAsBlob } from 'node:fs';
+await clicks.insertNDJSON(await openAsBlob('events.ndjson'));
+```
+
+`insertNDJSON()` takes a `string`, `Uint8Array`, `Blob`/`File` or `ReadableStream<Uint8Array>`; a non-string source is read fully into memory before sending.
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+f, err := os.Open("events.ndjson")
+if err != nil {
+    log.Fatal(err)
+}
+defer f.Close()
+res, err := wh.From("clicks").InsertNDJSON(ctx, f)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(res.Succeeded, "published")
+```
+
+`InsertNDJSON` reads the `io.Reader` to its end and buffers it, up to the 16 MiB cap, so a retry resends the same bytes. A body with no non-blank content sends nothing.
+
+  </TabItem>
+</Tabs>
+
+It returns the same per-record summary as an insert of many rows. The server buffers the whole body too, so the 16 MiB cap applies exactly as above ([Batch ingest](/api#batch-ingest)).
+
+:::note[The `Content-Type` decides the format]
+`POST /v1/ingest` takes a single object, a JSON array or NDJSON, and the declared `Content-Type` (`application/json` or `application/x-ndjson`) chooses which; a request without one is a `415`. Both SDKs always set it. See the [API reference](/api#post-v1ingesttabletable--ingest-data).
+:::
+
+## Raw SQL
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```ts
+const { data, error } = await wh.sql('SELECT page, count() AS n FROM clicks GROUP BY page LIMIT 10');
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+if err := wh.SQL("CREATE TABLE IF NOT EXISTS t (a UInt64) ENGINE = Memory").Exec(ctx); err != nil {
+    log.Fatal(err)
+}
+var out []struct {
+    N uint64 `json:"n"`
+}
+if err := wh.SQL("SELECT count() AS n FROM t").Scan(ctx, &out); err != nil {
+    log.Fatal(err)
+}
+```
+
+`Scan` and `Fetch` read rows; `Exec` discards the body, for DDL and mutations.
+
+  </TabItem>
+</Tabs>
+
+`POST /v1/ops/query` runs the statement verbatim against ClickHouse, so anything ClickHouse accepts works, DDL and mutations included. It is **admin-only**: the caller must resolve to the policy admin role (`admin_role`, `"admin"` by default) or present the [operator key](/api#authentication). A tokenless request falls back to the `default_role`, so it gets `403` unless that is deliberately the admin role (a loudly-warned dev-only setting), and an invalid or expired token gets `401`.
+
+- **No parameter binding.** Positional `?` substitution is not supported, and neither SDK forwards ClickHouse's named parameters (`{id:UInt32}` with `param_id=42`). Inline literals, never from untrusted input; for binding user input safely, use the structured query builder.
+- **Never resent once it may have run.** A raw SQL call is retried only when the connection was certainly never made; a timeout once the request may have been sent, a dropped connection or any answer from the server is returned as the error ([Retries and timeouts](/sdk/reference#retries-and-timeouts)).
+- **JSON rows only.** An inline `FORMAT` clause (`… FORMAT CSV`) replaces the JSON envelope. TypeScript then returns a non-retryable `DECODE_ERROR`; Go's `Scan` and `Fetch` return an error naming the response's `Content-Type`, and `Exec` reads the body and discards it. For a CSV or TSV export, call `/v1/ops/query` directly and read the body as text.
+- A response over the 64 MiB cap is `502 clickhouse.response_too_large`.
+
+## Per-call options
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+A builder's `.fetch(opts)` takes `RequestOptions`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `signal` | `AbortSignal` | Cancel the call; it ends at once with `ABORTED` ([Cancellation](/sdk/reference#cancellation)) |
+| `limit` | `number` | This fetch's limit, over the builder's |
+| `attemptTimeoutMs` | `number` | This call's per-attempt deadline, over `options.attemptTimeoutMs`; `0` turns it off |
+| `headers` | `Record<string, string>` | This call's headers, over `options.headers` ([Custom headers](/sdk#custom-headers)) |
+| `fetchOptions` | `RequestInit` | This call's `RequestInit` fields, merged over `options.fetchOptions` |
+| `fetch` | `FetchLike` | This call's `fetch`, over `options.fetch` |
+
+Every other REST call takes the same fields but `limit`: `insert()`, `insertNDJSON()`, `wh.version()` and `wh.sys.health()` take `CallOptions`, a pipe's `.fetch()` takes [`PipeRequestOptions`](/sdk/pipes#running-a-pipe), and the admin calls and `wh.sql()` take the same fields. `await`ing a builder directly takes no options, so pass them through `.fetch({ … })`.
+
+  </TabItem>
+  <TabItem label="Go">
+
+Each call takes a `context.Context`: canceling it, or reaching its deadline, ends the call at once, a retry wait included, and is never retried. A per-call header is `Header(key, value)` on the `Query`, `PipeCall` or `SQLCall`, over the client's headers; an invalid name or value is an error before anything is sent. The retry policy and attempt timeout are the client's, from `WithRetry`.
+
+  </TabItem>
+</Tabs>

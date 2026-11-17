@@ -102,8 +102,8 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
  <Card title="Hasura-style access control" icon="seti:lock">
   Per-table, per-role column and row-level policies with JWT claim templating, defined in the hot-reloadable settings directory.
  </Card>
- <Card title="TypeScript SDK" icon="seti:typescript">
-  `@wavehouse/sdk` — a type-safe query builder, live queries, real-time streaming, and codegen from your schemas, with one runtime dependency of ~1.4 KB gzipped.
+ <Card title="SDKs" icon="seti:typescript">
+  `@wavehouse/sdk` — a type-safe query builder, live queries, real-time streaming, and codegen from your schemas, with one runtime dependency of ~1.4 KB gzipped — and a Go SDK with no dependencies outside the standard library.
  </Card>
 </CardGrid>
 
@@ -123,7 +123,7 @@ The [TypeScript SDK](/sdk) wraps the whole surface — typed inserts, a chainabl
 
   // Returns immediately — buffered in the WAL, schema-validated
   // at the edge, batch-flushed to ClickHouse behind the scenes.
-  await wh.from('clicks').insert({ page: '/home', button: 'signup' });
+  await wh.from('clicks').insert({ page: '/home', button: 'signup', score: 1 });
   ```
 
  </TabItem>
@@ -212,8 +212,8 @@ Self-hosting WaveHouse is deliberately boring — one binary, one dependency. Bu
   href="/api"
  />
  <LinkCard
-  title="TypeScript SDK"
-  description="Query builder, live queries, streaming, and schema codegen."
+  title="SDKs"
+  description="TypeScript and Go clients: query builders and streaming in both, plus live queries and codegen in TypeScript."
   href="/sdk"
  />
 </CardGrid>
