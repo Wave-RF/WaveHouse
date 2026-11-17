@@ -10,12 +10,11 @@ WaveHouse has two client SDKs. They share no code, but they follow the same serv
 | | TypeScript | Go |
 | --- | --- | --- |
 | Package | `@wavehouse/sdk` on npm | `github.com/Wave-RF/wavehouse-sdk-go`, package `wavehouse` |
-| Release these pages describe | 0.3.0 | 0.1.0, the first release |
 | Runtime | Node 22 or newer, modern browsers, Deno, Bun | Go 1.26 or newer |
 | Runtime dependencies | one: `eventsource-parser` (~1.4 KB gzipped, itself dependency-free), which frames the SSE stream | none: the standard library only |
 | Source, issues and releases | [`Wave-RF/wavehouse-sdk-js`](https://github.com/Wave-RF/wavehouse-sdk-js) | [`Wave-RF/wavehouse-sdk-go`](https://github.com/Wave-RF/wavehouse-sdk-go) |
 
-The server's [API reference](/api) defines the protocol both follow. Report an SDK bug in its own repository, and a server bug in [`Wave-RF/WaveHouse`](https://github.com/Wave-RF/WaveHouse/issues).
+The server's [API reference](/api) defines the protocol both follow. Each SDK's changelog and releases page, linked above, say what changed in a given version. Report an SDK bug in its own repository, and a server bug in [`Wave-RF/WaveHouse`](https://github.com/Wave-RF/WaveHouse/issues).
 
 ## Installation
 
@@ -26,27 +25,13 @@ The server's [API reference](/api) defines the protocol both follow. Report an S
 npm install @wavehouse/sdk
 ```
 
-`pnpm add @wavehouse/sdk`, `yarn add @wavehouse/sdk`, `bun add @wavehouse/sdk` and `deno add npm:@wavehouse/sdk` install the same package. For a page with no build step, load it from a CDN instead ([below](#no-build-step-cdn)).
+`pnpm add @wavehouse/sdk`, `yarn add @wavehouse/sdk`, `bun add @wavehouse/sdk` and `deno add npm:@wavehouse/sdk` install the same package.
 
-  </TabItem>
-  <TabItem label="Go">
-
-```bash
-go get github.com/Wave-RF/wavehouse-sdk-go@v0.1.0
-```
-
-The module needs Go 1.26 or newer. Its import path is `github.com/Wave-RF/wavehouse-sdk-go` and its package name is `wavehouse`.
-
-  </TabItem>
-</Tabs>
-
-### No build step (CDN)
-
-The TypeScript SDK also loads straight into an HTML page, with no bundler or package manager. Modern browsers run the ES module natively:
+**No build step (CDN).** The SDK also loads straight into an HTML page, with no bundler or package manager. Modern browsers run the ES module natively:
 
 ```html
 <script type="module">
-  import { createClient } from 'https://esm.sh/@wavehouse/sdk@0.3.0';
+  import { createClient } from 'https://esm.sh/@wavehouse/sdk';
 
   const wh = createClient({ baseURL: 'https://<project_id>.wavehouse.app' });
   const { data, error } = await wh.from('clicks').select('page').limit(10);
@@ -54,9 +39,31 @@ The TypeScript SDK also loads straight into an HTML page, with no bundler or pac
 </script>
 ```
 
-jsDelivr (`https://cdn.jsdelivr.net/npm/@wavehouse/sdk/+esm`) and unpkg (`https://unpkg.com/@wavehouse/sdk?module`) serve the same module. A bare CDN URL serves the latest release; pin a version for production, as above, or float on a range (`@0.3` for 0.3.x). The `@dev` tag serves unreleased builds from the SDK repository's `main`. Before 1.0 a minor release may break the API, which 0.3.0 does (see its [changelog](https://github.com/Wave-RF/wavehouse-sdk-js/blob/main/CHANGELOG.md)), so don't float across minors.
+jsDelivr (`https://cdn.jsdelivr.net/npm/@wavehouse/sdk/+esm`) and unpkg (`https://unpkg.com/@wavehouse/sdk?module`) serve the same module. A bare CDN URL serves the latest release, so pin a version on a production page (`@<version>`): before 1.0 a minor release may break the API (see the SDK's [changelog](https://github.com/Wave-RF/wavehouse-sdk-js/blob/main/CHANGELOG.md)). The `@dev` tag serves unreleased builds from the SDK repository's `main`. Streaming runs on `fetch`, so a CDN page needs no polyfill.
 
-For pages that can't use ES modules, the bundled IIFE build exposes every export on a `WaveHouse` global (see [IIFE global](#iife-global-script-src)). Streaming runs on `fetch`, so neither form needs a polyfill.
+**IIFE global (`<script src>`).** For pages that cannot use ES modules, `dist/index.global.js` is a self-contained minified bundle that exposes every export on a `WaveHouse` global (`window.WaveHouse`). CDNs serve it through the `unpkg`/`jsdelivr` fields in `package.json`:
+
+```html
+<script src="https://cdn.jsdelivr.net/npm/@wavehouse/sdk"></script>
+<script>
+  const wh = WaveHouse.createClient({ baseURL: 'https://your-wavehouse.example.com' });
+  wh.from('clicks').select('page').limit(10).then(({ data }) => console.log(data));
+</script>
+```
+
+Pin a version here too, on a production page.
+
+  </TabItem>
+  <TabItem label="Go">
+
+```bash
+go get github.com/Wave-RF/wavehouse-sdk-go@latest
+```
+
+The module needs Go 1.26 or newer. Its import path is `github.com/Wave-RF/wavehouse-sdk-go` and its package name is `wavehouse`.
+
+  </TabItem>
+</Tabs>
 
 ## Imports & Runtimes
 
@@ -67,7 +74,15 @@ For pages that can't use ES modules, the bundled IIFE build exposes every export
 import { createClient } from '@wavehouse/sdk';
 ```
 
-The same line works with every package manager, Deno included (it resolves the bare specifier from `deno.json` after `deno add`). From a CDN, import the URL: `import { createClient } from 'https://esm.sh/@wavehouse/sdk@0.3.0'`. The package works in any bundler-based framework: React, Vue, Svelte, Angular, Astro, SolidJS or plain Vite.
+The same line works with every package manager, Deno included (it resolves the bare specifier from `deno.json` after `deno add`). From a CDN, import the URL (see [Installation](#installation)). The package works in any bundler-based framework: React, Vue, Svelte, Angular, Astro, SolidJS or plain Vite.
+
+**Node CommonJS (`require`).** The package ships a CommonJS build at `dist/index.cjs` (the `"require"` condition in the exports map), so a Node project that has not adopted `"type": "module"` can use:
+
+```js
+const { createClient } = require('@wavehouse/sdk');
+```
+
+TypeScript projects under `node16`/`nodenext` resolution get the matching `dist/index.d.cts` declarations through the same `require` condition, so a CommonJS project type-checks without importing ESM-typed declarations.
 
   </TabItem>
   <TabItem label="Go">
@@ -81,35 +96,22 @@ The package name is `wavehouse`, so the alias only makes it explicit. One `*wave
   </TabItem>
 </Tabs>
 
-### Node CJS (`require`)
-
-The TypeScript package ships a CommonJS build at `dist/index.cjs` (the `"require"` condition in the exports map), so a Node project that has not adopted `"type": "module"` can use:
-
-```js
-const { createClient } = require('@wavehouse/sdk');
-```
-
-TypeScript projects under `node16`/`nodenext` resolution get the matching `dist/index.d.cts` declarations through the same `require` condition, so a CommonJS project type-checks without importing ESM-typed declarations.
-
-### IIFE global (`<script src>`)
-
-For pages that cannot use ES modules, `dist/index.global.js` is a self-contained minified bundle that exposes every export on a `WaveHouse` global (`window.WaveHouse`). CDNs serve it through the `unpkg`/`jsdelivr` fields in `package.json`:
-
-```html
-<script src="https://cdn.jsdelivr.net/npm/@wavehouse/sdk@0.3.0"></script>
-<script>
-  const wh = WaveHouse.createClient({ baseURL: 'https://your-wavehouse.example.com' });
-  wh.from('clicks').select('page').limit(10).then(({ data }) => console.log(data));
-</script>
-```
-
 ### Runtime support
 
-**Browsers.** Every TypeScript SDK feature works natively. `fetch`, `AbortController` and `ReadableStream` are built into every modern browser, so no polyfill is needed.
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+**Browsers.** Every feature works natively. `fetch`, `AbortController` and `ReadableStream` are built into every modern browser, so no polyfill is needed.
 
 **Node.js.** Every feature, streaming included, works in Node 22 and later (the package's minimum, per `engines.node`). Its unit tests run on Node 22, and the build is smoke-tested on 22 and 24; older releases are past end-of-life upstream. Streaming runs on the same `fetch` and `ReadableStream` globals as the rest of the SDK, so it needs no `EventSource` polyfill.
 
-**Go.** Go 1.26 or newer, on any platform the standard library supports. The SDK uses `net/http` and nothing outside the standard library.
+  </TabItem>
+  <TabItem label="Go">
+
+Go 1.26 or newer, on any platform the standard library supports. The SDK uses `net/http` and nothing outside the standard library.
+
+  </TabItem>
+</Tabs>
 
 ## Quick Start
 
@@ -242,9 +244,12 @@ if err != nil {
   </TabItem>
 </Tabs>
 
-### `ClientConfig<DB>`
+### Client options
 
-The TypeScript client's configuration:
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+`ClientConfig<DB>`, the configuration `createClient` takes:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -254,12 +259,15 @@ The TypeScript client's configuration:
 | `options.attemptTimeoutMs` | `number` | off | A deadline for each attempt on its own, so a stalled attempt is retried instead of holding the call ([Attempt timeouts](/sdk/reference#attempt-timeouts)) |
 | `options.maxRetryAfterMs` | `number` | `30000` | The longest `Retry-After` a REST call waits before resending; a longer ask is clamped to it |
 | `options.headers` | `Record<string, string>` or a function returning one | — | Headers added to every request ([Custom headers](#custom-headers)) |
-| `options.fetchOptions` | `RequestInit` | — | Extra `RequestInit` fields merged into every request ([details](#extra-requestinit-fields)) |
-| `options.fetch` | `FetchLike` | the global `fetch` | The HTTP implementation for every request ([details](#supplying-your-own-fetch)) |
+| `options.fetchOptions` | `RequestInit` | — | Extra `RequestInit` fields merged into every request ([details](#request-and-transport-options)) |
+| `options.fetch` | `FetchLike` | the global `fetch` | The HTTP implementation for every request ([details](#request-and-transport-options)) |
 
 Every REST call's options also take `headers`, `fetchOptions`, `fetch` and `attemptTimeoutMs` for that call alone; see [Per-call options](/sdk/queries#per-call-options).
 
-### Go options
+  </TabItem>
+  <TabItem label="Go">
+
+`New` takes these options:
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -269,10 +277,13 @@ Every REST call's options also take `headers`, `fetchOptions`, `fetch` and `atte
 | `WithHeader(key, value)` | — | A header on every request ([Custom headers](#custom-headers)) |
 | `WithHeaderFunc(fn)` | — | Headers from `fn(ctx) (http.Header, error)`, called before every attempt |
 | `WithRetry(RetryPolicy{…})` | `MaxAttempts` 3, `MinBackoff` 500ms, `MaxBackoff` 30s, `AttemptTimeout` 0 (off) | How often and how patiently a failed call is retried ([Retries and timeouts](/sdk/reference#retries-and-timeouts)). A zero field keeps its default; a negative field, or `MinBackoff` above `MaxBackoff`, is an error from `New` |
-| `WithHTTPClient(hc)` | an `*http.Client` with no overall timeout | The client requests go through ([details](#supplying-your-own-httpclient)) |
+| `WithHTTPClient(hc)` | an `*http.Client` with no overall timeout | The client requests go through ([details](#request-and-transport-options)) |
 | `WithUserAgent(ua)` | — | Prepended to the SDK's own `User-Agent`, `wavehouse-sdk-go/<version>` |
 
 Every call that does I/O takes a `context.Context` first; bound or cancel the call with it. Queries, pipe calls and SQL calls take a per-call `Header(key, value)`, and a subscription takes `SubscribeOptions.Header`.
+
+  </TabItem>
+</Tabs>
 
 ### Base URL
 
@@ -382,6 +393,8 @@ await wh.from('clicks').selectAll().fetch({ headers: { 'X-Trace-Id': traceId } }
 
 A stream takes per-subscription headers in `StreamOptions.headers`. A rejecting header function throws out of a REST call and is a retryable `SSE_AUTH_ERROR` on a stream, like `auth`.
 
+From a **browser**, a cross-origin custom header must also survive the CORS preflight, and WaveHouse allow-lists a fixed set (`Accept`, `Authorization`, `Content-Type`, `Last-Event-ID` and `X-Request-ID` among them) with no setting to change it. Any other header works server-side, or from a browser when a proxy in front answers the preflight itself, which is usually the same proxy the header is for. Server-side callers never preflight.
+
   </TabItem>
   <TabItem label="Go">
 
@@ -426,11 +439,12 @@ The layers, lowest to highest:
 
 Names match **case-insensitively**, as HTTP requires, so `authorization` and `Authorization` are one header. A higher layer **replaces** a header of the same name and is never joined with it: a header joined rather than replaced is how a request ends up sending `Content-Type: application/json, image/png`. So a custom header can't displace the credential: when the SDK has a token to send, its `Authorization` wins. When it has none, a custom `Authorization` header is sent as given, in both SDKs. Any custom header counts as a credential when the SDK decides whether to follow a redirect ([Redirects](/sdk/reference#redirects)).
 
-From a **browser**, a cross-origin custom header must also survive the CORS preflight, and WaveHouse allow-lists a fixed set (`Accept`, `Authorization`, `Content-Type`, `Last-Event-ID` and `X-Request-ID` among them) with no setting to change it. So any other header works server-side, or from a browser when a proxy in front answers the preflight itself, which is usually the same proxy the header is for. Server-side callers never preflight.
+### Request and transport options
 
-### Extra `RequestInit` fields
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
 
-TypeScript only. `options.fetchOptions` is merged into the `RequestInit` of every request, streams included, for settings that aren't headers and don't warrant replacing the whole transport:
+**Extra `RequestInit` fields.** `options.fetchOptions` is merged into the `RequestInit` of every request, streams included, for settings that aren't headers and don't warrant replacing the whole transport:
 
 ```ts
 const wh = createClient({
@@ -452,9 +466,7 @@ On `.stream()` and `.liveQuery()`'s live connection the transport keeps `cache` 
 Sending cookies cross-origin is a common reason to reach for this, but it can't work against WaveHouse's own CORS: it deliberately never emits `Access-Control-Allow-Credentials` (it is a bearer-token API), so a browser blocks the response. It works where a fronting proxy answers CORS itself; see [Behind a reverse proxy](/reverse-proxy#header-and-auth-forwarding). Same-origin deployments already send cookies without it.
 :::
 
-### Supplying your own `fetch`
-
-TypeScript only. `options.fetch` replaces the HTTP implementation the SDK uses, and a per-call `fetch` replaces it for one call (a framework's request-scoped `fetch`, such as SvelteKit's in `load()`). Reach for it to route through a proxy, attach client certificates, wrap requests in your own middleware (logging, tracing, circuit breaking), stub HTTP in tests without monkey-patching a global, or work around a transport bug in the runtime:
+**Supplying your own `fetch`.** `options.fetch` replaces the HTTP implementation the SDK uses, and a per-call `fetch` replaces it for one call (a framework's request-scoped `fetch`, such as SvelteKit's in `load()`). Reach for it to route through a proxy, attach client certificates, wrap requests in your own middleware (logging, tracing, circuit breaking), stub HTTP in tests without monkey-patching a global, or work around a transport bug in the runtime:
 
 ```ts
 const wh = createClient({
@@ -482,9 +494,7 @@ The SDK always calls your function with a **string** URL and a plain `RequestIni
 
 The option's type is exported as `FetchLike`. It is written out rather than as `typeof fetch`, which resolves differently depending on whether your TypeScript `lib` includes DOM. Its URL parameter is `string`, all the SDK ever passes, which, because function parameters are contravariant, accepts *more* implementations than the wider spelling would: the global `fetch` fits, and so does hand-written `(url: string, init?: RequestInit) => Promise<Response>` middleware. Let TypeScript infer the parameters (`(url, init) => …`) and it fits without annotation.
 
-#### Swapping in undici
-
-The motivating case is a transport bug in the runtime's own HTTP stack, which you can't fix from inside the SDK: for example [undici #5600](https://github.com/nodejs/undici/issues/5600), where reusing a keep-alive socket while the event loop is idle stalls the request before it goes out. How bad it gets varies with the runtime and the idle gap: the upstream report measured ~450–465 ms against a 10 ms server, and we have measured anything from ~100 ms to tens of seconds on a server answering instantly. It affects undici 8.8.0–8.9.0, and Node 26 bundles 8.9.0.
+**Swapping in undici.** The motivating case is a transport bug in the runtime's own HTTP stack, which you can't fix from inside the SDK: for example [undici #5600](https://github.com/nodejs/undici/issues/5600), where reusing a keep-alive socket while the event loop is idle stalls the request before it goes out. How bad it gets varies with the runtime and the idle gap: the upstream report measured ~450–465 ms against a 10 ms server, and we have measured anything from ~100 ms to tens of seconds on a server answering instantly. It affects undici 8.8.0–8.9.0, and Node 26 bundles 8.9.0.
 
 **Upgrading undici is the actual fix**: it landed in 8.10.0. What `options.fetch` buys you is a way to get there without waiting for a new runtime: install undici yourself and route requests through it. The one non-obvious part is that you must pass its dispatcher **explicitly**.
 
@@ -524,9 +534,10 @@ If you're genuinely pinned to an affected undici, the same snippet fixes it with
 
 To change the transport process-wide instead of per client, an installed undici's `setGlobalDispatcher(new Agent())` is picked up by Node's built-in global `fetch`, with no `options.fetch` needed. That is an explicit write, so it wins the race described above, but only if the *installed* undici is 8.10.0 or later.
 
-### Supplying your own `http.Client`
+  </TabItem>
+  <TabItem label="Go">
 
-Go only. `WithHTTPClient` sets the `*http.Client` requests go through, for a custom transport, proxy or TLS setup:
+**Supplying your own `http.Client`.** `WithHTTPClient` sets the `*http.Client` requests go through, for a custom transport, proxy or TLS setup:
 
 ```go
 hc := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 32}}
@@ -537,6 +548,9 @@ if err != nil {
 ```
 
 The default client has no overall `Timeout`, because streams are long-lived; bound each call with its context instead, or give each attempt a deadline with `RetryPolicy.AttemptTimeout`. Don't set `Timeout` on a client you hand to the SDK, since it would also end a stream. The client's own `CheckRedirect` applies to requests that carry no credential; a credentialed request never follows a redirect ([Redirects](/sdk/reference#redirects)).
+
+  </TabItem>
+</Tabs>
 
 ### Type-Safe Tables
 
@@ -646,7 +660,7 @@ The SDKs mean to behave the same. The main differences by design (others are not
 - **The default row limit** is 1000 in TypeScript, which sends it on every query that sets none; Go sends none, and the server's `query.default_max_rows` (10,000 by default) applies ([Limit](/sdk/queries#limit)).
 - **Times are typed in Go**: `TimeRange` takes `time.Time`, `Last` a `time.Duration`, and `Row.Time` and `Event.ReceivedAt` parse what the server sends. TypeScript takes a `Date` or a string and hands timestamps back as strings.
 - **The operator key** is a first-class option in Go (`WithOperatorKey`, sent as `Authorization: Operator <key>`); TypeScript sends it as an `X-Operator-Key` header through `options.headers`.
-- **Live queries** (`liveQuery`) are TypeScript only. So are pagination (`hasMore`/`next`), client-side stream filtering, and the codegen CLI. The Go SDK has none of these in 0.1.0: live queries and pagination wait for server support ([#951](https://github.com/Wave-RF/WaveHouse/issues/951), [#452](https://github.com/Wave-RF/WaveHouse/issues/452)).
+- **Live queries** (`liveQuery`) are TypeScript only. So are pagination (`hasMore`/`next`), client-side stream filtering, and the codegen CLI. The Go SDK has none of these yet: live queries and pagination wait for server support ([#951](https://github.com/Wave-RF/WaveHouse/issues/951), [#452](https://github.com/Wave-RF/WaveHouse/issues/452)).
 
 ## Known server limitations
 

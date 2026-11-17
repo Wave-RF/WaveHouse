@@ -135,6 +135,8 @@ clicks.select('page').where('score', '>', 10).where('page', 'like', '/home%');
 clicks.select('page').where('button', 'in', ['signup', 'nav']);
 ```
 
+The SDK also applies `.where()` filters to a builder's stream on the client, where `like` matches case-**insensitively** ([Client-side stream filtering](/sdk/streaming#client-side-stream-filtering)).
+
   </TabItem>
   <TabItem label="Go">
 
@@ -142,6 +144,8 @@ clicks.select('page').where('button', 'in', ['signup', 'nav']);
 wh.From("clicks").Select("page").Where("score", wavehouse.Gt, 10).Where("page", wavehouse.Like, "/home%")
 wh.From("clicks").Select("page").Where("button", wavehouse.In, []string{"signup", "nav"})
 ```
+
+Go encodes filter values with `encoding/json`, so a `time.Time` value is sent as RFC 3339.
 
   </TabItem>
 </Tabs>
@@ -159,7 +163,7 @@ Filters accumulate and are ANDed. The operators are the eight the server's struc
 | `'in'` | `wavehouse.In` | `in` | Value in a list: an array in TypeScript, a non-empty slice in Go |
 | `'like'` | `wavehouse.Like` | `like` | SQL `LIKE` pattern, case-**sensitive** on the server |
 
-There is no negated `like`: filter the rows you get back instead. Go encodes filter values with `encoding/json`, so a `time.Time` value is sent as RFC 3339. The TypeScript SDK also applies `.where()` filters to a builder's stream on the client, where `like` matches case-**insensitively** ([Client-side stream filtering](/sdk/streaming#client-side-stream-filtering)).
+There is no negated `like`: filter the rows you get back instead.
 
 ## Aggregations
 
@@ -308,7 +312,8 @@ A window keeps rows where `column >= since AND column <= until`. A relative wind
 
 ## Pagination
 
-TypeScript only; the Go SDK has no pagination yet.
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
 
 When a result has at least `limit` rows, `hasMore` is `true`. `next()` builds a keyset cursor on the first `.orderBy()` column, filtering past the last row's value, so it is only attached when the query has an explicit order. With no order column the result still reports `hasMore`, but `next` is `undefined`.
 
@@ -323,6 +328,14 @@ while (result.hasMore && result.next) {
 ```
 
 Because the cursor filters strictly past the boundary value, rows that tie the last row's value on the order column are skipped ([#452](https://github.com/Wave-RF/WaveHouse/issues/452)). Order by a column that is unique, or nearly so, when you paginate.
+
+  </TabItem>
+  <TabItem label="Go">
+
+The Go SDK has no pagination yet; it waits for server support ([#452](https://github.com/Wave-RF/WaveHouse/issues/452)).
+
+  </TabItem>
+</Tabs>
 
 ## Inserting rows
 

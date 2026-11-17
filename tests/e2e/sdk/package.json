@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@wavehouse/sdk": "0.2.0"
+    "@wavehouse/sdk": "0.3.0"
   },
   "devDependencies": {
     "@types/node": "catalog:",

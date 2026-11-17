@@ -317,7 +317,10 @@ The package's doc comments and examples are on [pkg.go.dev](https://pkg.go.dev/g
 
 ## Codegen CLI
 
-TypeScript only. The package ships a `wavehouse-codegen` bin that generates a `Database` interface from a running server, for [`createClient<Database>()`](/sdk#type-safe-tables):
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+The package ships a `wavehouse-codegen` bin that generates a `Database` interface from a running server, for [`createClient<Database>()`](/sdk#type-safe-tables):
 
 ```bash
 WAVEHOUSE_ADMIN_TOKEN="$TOKEN" npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
@@ -376,7 +379,13 @@ export interface OrdersRow {
 | `LowCardinality(T)` | same as `T` |
 | `Tuple(…)` | `unknown[]` |
 
+  </TabItem>
+  <TabItem label="Go">
+
 The Go SDK has no codegen: scan into your own structs ([Reading rows](/sdk/queries#reading-rows)).
+
+  </TabItem>
+</Tabs>
 
 ## E2E Testing
 

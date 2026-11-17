@@ -55,7 +55,7 @@ if err := sub.Err(); err != nil {
 }
 ```
 
-`Subscribe` returns once the server has answered `200` with an event stream. It returns an error, and no subscription, when the first connection is refused for good, or when every attempt the [`RetryPolicy`](/sdk#go-options) allows has failed. After that, the subscription reconnects on its own until it is closed, its context is done, or the server refuses it for good, so **always `Close` it**: its goroutine and connection last until then.
+`Subscribe` returns once the server has answered `200` with an event stream. It returns an error, and no subscription, when the first connection is refused for good, or when every attempt the [`RetryPolicy`](/sdk#client-options) allows has failed. After that, the subscription reconnects on its own until it is closed, its context is done, or the server refuses it for good, so **always `Close` it**: its goroutine and connection last until then.
 
   </TabItem>
 </Tabs>
@@ -231,11 +231,20 @@ The server sends the column list in an `event: schema` frame, before the first r
 
 The `4xx` WaveHouse raises on this route is a `400` for a missing table. A `404` or `405` means the request never reached the route, usually a base-URL path prefix the proxy didn't strip. WaveHouse never rejects a stream for a **bad token**: `/v1/stream` is ungated, so an expired or missing token resolves to the `default_role` and gets a `200` with a filtered view, not a `401` ([#239](https://github.com/Wave-RF/WaveHouse/issues/239) tracks enforcing expiry). That is why the token provider runs on every connect. The token-related refusal it does raise is a retryable `503` with `Retry-After: 30`, for a token sent while the server's [JWKS has not been fetched yet](/api#authentication). Any other `4xx` comes from something in front, such as an auth gateway or a proxy.
 
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
 In a browser going cross-origin, a rejection reaches you only when it passes CORS and the gateway answered whatever preflight the request triggers (`Authorization`, configured headers, or `Last-Event-ID` once the stream resumes). Otherwise it arrives as a retryable `SSE_NETWORK_ERROR`, indistinguishable from a drop, and is retried.
 
-:::note[SSE connection limit]
-The TypeScript SDK warns above 5 concurrent SSE connections, just under a browser's 6-per-host limit for HTTP/1.1. HTTP/2 multiplexes over one connection, so the limit doesn't apply there.
-:::
+**SSE connection limit.** The TypeScript SDK warns above 5 concurrent SSE connections, just under a browser's 6-per-host limit for HTTP/1.1. HTTP/2 multiplexes over one connection, so the limit doesn't apply there.
+
+  </TabItem>
+  <TabItem label="Go">
+
+A Go client is not subject to CORS or to a browser's per-host connection limit.
+
+  </TabItem>
+</Tabs>
 
 ### Resumption
 
@@ -260,7 +269,18 @@ A frame the SDK can't decode usually means a corrupted connection, so the first 
 | Frames this covers | a data frame that isn't JSON, arrives before any schema frame, has a row that isn't an array or whose length disagrees with the announced columns; a schema frame that is malformed or names a column twice | a data frame that isn't JSON or is over the 32 MiB cap; a schema frame that is malformed or names a column twice |
 | Buffer cap | 16 MiB: an overflow is reported as `SSE_PARSE_ERROR` and the connection reopened | 32 MiB, as above |
 
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+A row that arrives before the schema frame or whose length disagrees with the columns is one of the frames in the table above: the stream reconnects once, then skips it if it fails again.
+
+  </TabItem>
+  <TabItem label="Go">
+
 In Go, a row that arrives before the schema frame or whose length disagrees with the columns is never skipped: each time, the connection is reopened from the last delivered event, so the server announces the columns again.
+
+  </TabItem>
+</Tabs>
 
 ### Server-side policy filtering
 
@@ -268,7 +288,10 @@ Access-control policy applies on the server before anything reaches the client: 
 
 ## Client-side stream filtering
 
-TypeScript only. When a `QueryBuilder` with `.where()` filters or `.select()` columns calls `.stream()`, the returned stream applies them on the client:
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+When a `QueryBuilder` with `.where()` filters or `.select()` columns calls `.stream()`, the returned stream applies them on the client:
 
 ```ts
 const stream = wh.from('clicks')
@@ -280,9 +303,20 @@ const stream = wh.from('clicks')
 
 Every [filter operator](/sdk/queries#filters) works here. Ordered comparisons (`>`, `>=`, `<`, `<=`) apply only when both sides are numbers or both are strings (strings compare lexicographically, which suits ISO-8601 timestamps); a mismatch doesn't match. `like` matches **case-insensitively** here, while ClickHouse's `LIKE` on the query path is case-sensitive, so inside one `liveQuery()` a pattern like `'/Home%'` can admit live events whose historical counterparts the backfill excluded.
 
+  </TabItem>
+  <TabItem label="Go">
+
+The Go SDK has no client-side stream filtering; a subscription receives every event the server sends for its table.
+
+  </TabItem>
+</Tabs>
+
 ## Live queries
 
-TypeScript only. A live query combines a backfill (the builder's `.fetch()`) with the live stream: an initial snapshot, then updates.
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+A live query combines a backfill (the builder's `.fetch()`) with the live stream: an initial snapshot, then updates.
 
 ```ts
 const lq = wh.from('clicks')
@@ -302,7 +336,7 @@ lq.close();
 
 `liveQuery(subscriber, opts?)` takes a `StreamSubscriber` (`next`, plus optional `initial`, `status` and `error`) and the same `StreamOptions` as `.stream()`. Its `headers`, `attemptTimeoutMs` and `signal` apply to the backfill request as well as the stream. An aborted `signal` ends the live query like `.close()`: neither `initial()` nor `next()` is called after it, even by a backfill still in flight.
 
-### How it works
+**How it works.**
 
 1. It opens the stream **first** and buffers the events that arrive.
 2. It runs the backfill and calls `initial()` with its `Result`.
@@ -316,3 +350,11 @@ Opening the stream first closes the window between the backfill and the stream s
 **When the backfill fails.** A backfill that returns an error `Result` still calls `initial()`, with `result.error` set, and every buffered event is then delivered. A backfill that throws instead (an `auth` callback that rejects, since a REST call has no `Result` for that) never calls `initial()`, but the buffered events are still delivered and the stream goes on, so treat an `initial()` that never fires as its own failure if a snapshot matters. A callback that throws during the flush is logged, like any other subscriber callback, and the flush continues.
 
 Events reach a stream before they reach ClickHouse: the stream reads them from the message queue, and the ingest worker writes them to ClickHouse later, in batches ([Ingest pipeline](/ingest-pipeline)). So a re-fetch made right after an event arrives can miss the newest rows.
+
+  </TabItem>
+  <TabItem label="Go">
+
+The Go SDK has no live queries yet; they wait for server support ([#951](https://github.com/Wave-RF/WaveHouse/issues/951)).
+
+  </TabItem>
+</Tabs>
