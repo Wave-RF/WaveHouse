@@ -1,6 +1,6 @@
 import type { Pipe, Policy } from "@wavehouse/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { adminClient } from "./helpers.js";
+import { adminClient, chQuery, testId, WH_URL } from "./helpers.js";
 import { readPipesFile, readPolicyFile, setPipes, setPolicy } from "./settings.js";
 import { suiteTables } from "./tables.js";
 
@@ -265,6 +265,56 @@ describe("Admin", () => {
       expect(result.error!.code).toBe("clickhouse.rejected");
       expect(result.error!.retryable).toBe(false);
       expect(result.error!.message).toContain("SYNTAX_ERROR");
+    });
+  });
+
+  // Server plumbing the SDK does not call: the readiness probe, the request
+  // id, and a body chtypes cannot answer for.
+  describe("server plumbing", () => {
+    it("answers the readiness probe once every check passes", async () => {
+      const res = await fetch(`${WH_URL}/readyz`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ status: "ready" });
+    });
+
+    it("keeps a valid X-Request-Id and replaces an invalid one", async () => {
+      const kept = await fetch(`${WH_URL}/v1/health`, {
+        headers: { "X-Request-Id": "e2e-request-1" },
+      });
+      expect(kept.headers.get("x-request-id")).toBe("e2e-request-1");
+      const replaced = await fetch(`${WH_URL}/v1/health`, {
+        headers: { "X-Request-Id": "has a space" },
+      });
+      const id = replaced.headers.get("x-request-id");
+      expect(id).toBeTruthy();
+      expect(id).not.toBe("has a space");
+    });
+
+    // A column whose DEFAULT the server fills (generateSnowflakeID()) cannot
+    // be computed in-process, so a body omitting it is declined whole: a 422
+    // that is no verdict on the data. A body that supplies it is accepted.
+    it("declines a body omitting a server-generated column with a 422", async () => {
+      const t = `snow_${testId().replace(/-/g, "_")}`;
+      await chQuery(
+        `CREATE TABLE IF NOT EXISTS default.\`${t}\` (page String, sid UInt64 DEFAULT generateSnowflakeID()) ENGINE = MergeTree ORDER BY page`,
+      );
+      try {
+        await wh.schema.refresh();
+        const declined = await wh.from(t).insert([{ page: "/a" }, { page: "/b" }]);
+        expect(declined.error).not.toBeNull();
+        expect(declined.error!.status).toBe(422);
+        expect(declined.error!.message).toMatch(/^validation engine declined: /);
+        expect(declined.error!.retryable).toBe(false);
+
+        const accepted = await wh.from(t).insert([
+          { page: "/a", sid: 1 },
+          { page: "/b", sid: 2 },
+        ]);
+        expect(accepted.error).toBeNull();
+        expect(accepted.data?.succeeded).toBe(2);
+      } finally {
+        await chQuery(`DROP TABLE IF EXISTS default.\`${t}\``);
+      }
     });
   });
 });
