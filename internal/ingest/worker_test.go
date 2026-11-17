@@ -2434,6 +2434,9 @@ func TestFlushTable_ClickHouseUnavailable_RetriedNeverDeadLettered(t *testing.T)
 		{"TOO_MANY_PARTS", func() (*http.Response, error) { return chAnswer(500, 252, "Too many parts"), nil }, true},
 		{"KEEPER_EXCEPTION", func() (*http.Response, error) { return chAnswer(500, 999, "Coordination error"), nil }, false},
 		{"AUTHENTICATION_FAILED", func() (*http.Response, error) { return chAnswer(403, 516, "Authentication failed"), nil }, false},
+		{"SETTING_CONSTRAINT_VIOLATION", func() (*http.Response, error) {
+			return chAnswer(500, 452, "Setting async_insert should not be changed"), nil
+		}, false},
 		{"proxy 502", func() (*http.Response, error) {
 			return &http.Response{StatusCode: 502, Body: io.NopCloser(bytes.NewBufferString("Bad Gateway"))}, nil
 		}, false},

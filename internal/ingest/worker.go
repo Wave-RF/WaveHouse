@@ -863,7 +863,7 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 		for _, later := range groups[i+1:] {
 			unsettled = append(unsettled, later...)
 		}
-		class := chconn.Classify(err)
+		class := insertClass(err)
 		failed, scope := pool, "ClickHouse"
 		if chconn.TableScoped(err) {
 			// The server answered for the table alone: the pool is up.
@@ -939,7 +939,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 		w.handleSuccess(ctx, tableName, group)
 		return nil, nil
 	}
-	if chconn.Classify(err) != chconn.Rejected && (len(group) == 1 || !chconn.Splittable(err)) {
+	if insertClass(err) != chconn.Rejected && (len(group) == 1 || !chconn.Splittable(err)) {
 		return group, err
 	}
 
@@ -954,7 +954,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 		switch {
 		case singleErr == nil:
 			w.handleSuccess(ctx, tableName, []parsedMsg{pm})
-		case chconn.Classify(singleErr) != chconn.Rejected:
+		case insertClass(singleErr) != chconn.Rejected:
 			// ClickHouse cannot take this row now — it went away mid-isolation,
 			// or a split batch's failure was the server's after all: this row
 			// and the rest were never judged, so none of them is dead-lettered.
@@ -991,6 +991,20 @@ func (w *IngestWorker) retryLater(ctx context.Context, tableName string, msgs []
 		attribute.String("table", tableName),
 		attribute.String("reason", reason),
 	))
+}
+
+// settingConstraintViolation is ClickHouse's SETTING_CONSTRAINT_VIOLATION.
+const settingConstraintViolation int32 = 452
+
+// insertClass is chconn.Classify for the worker's INSERTs, but with 452 as
+// Denied: every setting an INSERT sends is WaveHouse's own, so a profile
+// constraint refusing one refuses every INSERT alike. That is the operator's to
+// fix, not a verdict on a row, so the rows wait under the backoff unparked.
+func insertClass(err error) chconn.Class {
+	if code, ok := chconn.ExceptionCode(err); ok && code == settingConstraintViolation {
+		return chconn.Denied
+	}
+	return chconn.Classify(err)
 }
 
 // insertToClickHouse writes one group as a single INSERT naming columns
