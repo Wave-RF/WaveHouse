@@ -96,6 +96,7 @@ func TestCoordNATS_MissingBucketRefusesBoot(t *testing.T) {
 		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
 		Dedupe:     config.Dedupe{Backend: config.DedupePebble, Lease: 30 * time.Second, ReserveConcurrency: 64},
 		Coord:      config.Coord{Backend: config.CoordNATS},
+		Ingest:     parseLimits(),
 		Roles:      config.AllRoles(),
 		InstanceID: "boot",
 		Settings:   config.Settings{Dir: root},

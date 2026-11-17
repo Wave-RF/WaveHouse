@@ -40,6 +40,11 @@ services:
       # (`docker compose run --rm --no-deps --entrypoint /app/chtypes wavehouse fetch 26.8`)
       # and turn autofetch off:
       # WH_CHTYPES_AUTOFETCH: "false"
+      # How long validating one ingest body may take (a 422 past it, checked
+      # between parse windows), and the most a tenant's own
+      # ingest.parse_timeout in ./settings/config.json may raise it to.
+      # WH_INGEST_PARSE_TIMEOUT: "30s"
+      # WH_INGEST_MAX_PARSE_TIMEOUT: "5m"
       # No auth on/off switch: set auth.jwt_secret in ./settings/config.json
       # to validate tokens; without it (or a jwks_url), every request
       # resolves to the policy default_role.

@@ -79,7 +79,7 @@ To roll back to 0.2.0, first remove `server.trusted_proxies`, `prometheus.per_ta
 ### Build the settings directory
 
 1. **Write a starter directory** with `wavehouse bootstrap <dir>`. It writes `config.json`, `roles.json`, `policies.json` and `pipes.json` with every key at its default. Its `policies.json` is `{}`, which denies every request until you replace it; only the operator key gets through.
-2. **Port your settings into `config.json`.** Every key except `dedupe.retention` and the per-table overrides (`dedupe.tables`, `dlq.tables`) is required. Copy each value from your 0.1.0 `config.yaml` or environment variable:
+2. **Port your settings into `config.json`.** Every key except `dedupe.retention`, `ingest.parse_timeout` and the per-table overrides (`dedupe.tables`, `dlq.tables`) is required. Copy each value from your 0.1.0 `config.yaml` or environment variable:
 
    | 0.1.0 key (variable) | 0.2.0 `config.json` key | Change |
    | --- | --- | --- |

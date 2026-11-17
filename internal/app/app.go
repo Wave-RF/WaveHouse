@@ -124,7 +124,11 @@ type App struct {
 	// ingestLimits is each served tenant's batch limits as the ingest
 	// worker applies them, checked against mq.ack_wait at adoption.
 	ingestLimits *ingestLimits
-	handler      http.Handler
+	// parseTimeouts is each served tenant's limit on validating one ingest
+	// body, checked against ingest.max_parse_timeout at adoption. API role
+	// only.
+	parseTimeouts *parseTimeouts
+	handler       http.Handler
 	// readiness is what /readyz consults beyond the ClickHouse pools, added
 	// by the wiring of a backend that can stop answering: the external NATS.
 	readiness []api.Check
@@ -203,6 +207,9 @@ func New(ctx context.Context, opts Options) (app *App, err error) {
 	}
 	if apiRole {
 		if err := a.wireTypes(); err != nil {
+			return nil, err
+		}
+		if err := a.wireParseTimeouts(); err != nil {
 			return nil, err
 		}
 		a.wireDiscovery(ctx)

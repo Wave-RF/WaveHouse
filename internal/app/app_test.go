@@ -121,6 +121,7 @@ func testConfig(t *testing.T, settingsDir string) *config.Config {
 		DataDir:  storedir.New(t),
 		Server:   config.Server{Port: closedPort(t), ShutdownTimeout: 2},
 		MQ:       config.MQ{Backend: config.MQEmbedded, AckWait: mq.DefaultAckWait, MaxAckPending: mq.DefaultMaxAckPending, Prefetch: mq.DefaultPrefetch},
+		Ingest:   config.Ingest{ParseTimeout: 30 * time.Second, MaxParseTimeout: 5 * time.Minute},
 		Cache:    config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 20},
 		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
 		Coord:    config.Coord{Backend: config.CoordLocal},

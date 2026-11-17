@@ -42,6 +42,11 @@ type IngestOptions struct {
 	Now time.Time
 	// Window bounds each parse call; the zero value is defaultLimits.
 	Window Limits
+	// TimeLimit bounds Engine.IngestRole's walk over the body, from when it
+	// takes its parse slot: past it, the walk stops before its next window
+	// with ErrTimeLimit. A window already running finishes (a chtypes call
+	// cannot be canceled), so the first always does. 0 is no limit.
+	TimeLimit time.Duration
 }
 
 // parseSettings is what a body is parsed under: the insert pins, plus header

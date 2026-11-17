@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/Wave-RF/WaveHouse/internal/typelayer"
@@ -145,4 +146,60 @@ func TestIngest_ParseSlotWaitDeadline(t *testing.T) {
 	assert.Contains(t, buf.String(), `"level":"DEBUG","msg":"record validation stopped: request context ended"`)
 	assert.NotContains(t, buf.String(), `"level":"ERROR"`)
 	assert.Empty(t, pub.Messages)
+}
+
+// TestIngest_ParseTimeLimit: a body still being read past its tenant's time
+// limit stops at the next parse window and is a 422 naming the limit, with no
+// Retry-After and nothing published, logged at WARN; one read within it is
+// served. Not t.Parallel: it captures the process-wide default logger.
+func TestIngest_ParseTimeLimit(t *testing.T) {
+	tests := []struct {
+		name   string
+		limit  time.Duration
+		status int
+	}{
+		{"past the limit", time.Nanosecond, http.StatusUnprocessableEntity},
+		{"within the limit", time.Minute, http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := logtest.Capture(t, slog.LevelWarn)
+			pub := &testutil.MockPublisher{}
+			h := newTestIngestHandler(t, testRegistry(t), pub)
+			h.ParseTimeout = func(*settings.Store) time.Duration { return tt.limit }
+			// More records than one default window holds, so the limit is
+			// checked between two.
+			body := manyClicks(9000, 0, "")
+			w := httptest.NewRecorder()
+			h.Handle(w, withTenant(rawIngestRequest(t, "clicks", "application/x-ndjson", body)))
+			require.Equal(t, tt.status, w.Code, w.Body.String())
+			if tt.status == http.StatusOK {
+				assert.Len(t, pub.Messages, 9000)
+				return
+			}
+			testutil.AssertJSONResponse(t, w, http.StatusUnprocessableEntity, map[string]any{"error": "ingest validation took longer than the time limit (0.000000001s)"})
+			assert.Empty(t, w.Header().Get("Retry-After"))
+			assert.Empty(t, pub.Messages)
+			assert.Contains(t, buf.String(), `"level":"WARN","msg":"ingest refused: validating the body took longer than its time limit"`)
+			assert.NotContains(t, buf.String(), `"level":"ERROR"`)
+		})
+	}
+}
+
+func TestTimeLimitAbort_NamesTheLimit(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		limit time.Duration
+		want  string
+	}{
+		{30 * time.Second, "(30s)"},
+		{5 * time.Minute, "(300s)"},
+		{1500 * time.Millisecond, "(1.5s)"},
+	}
+	for _, tt := range tests {
+		abort := timeLimitAbort(tt.limit)
+		assert.Equal(t, http.StatusUnprocessableEntity, abort.Status)
+		assert.Equal(t, "ingest validation took longer than the time limit "+tt.want, abort.Message)
+		assert.Empty(t, abort.RetryAfter)
+	}
 }

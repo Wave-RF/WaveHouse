@@ -530,6 +530,11 @@ func (t *Table) closeAt(c *cursor, res chtypes.BatchResult, lead, j int, chk *ch
 // request should be retried shortly, as backpressure, not as an outage.
 var ErrBusy = errors.New("typelayer: every ingest parse slot is in use")
 
+// ErrTimeLimit is Engine.IngestRole's answer for a body whose walk passed
+// IngestOptions.TimeLimit: the verdicts of the windows read are dropped, and
+// a retry would take as long.
+var ErrTimeLimit = errors.New("typelayer: ingest validation took longer than its time limit")
+
 // parseSlots is how many bodies Engine.IngestRole parses at once when
 // Config.ParseSlots is 0: one per processor, at most eight. A parse is CPU in
 // C, so more than one per processor only queues, and eight default windows
@@ -574,7 +579,9 @@ func (e *Engine) TakeParseSlot(ctx context.Context) (release func(), err error) 
 // memory all ingest parses hold together is bounded; with none free within
 // slotWait it returns ErrBusy. A context that ends stops the wait for a slot
 // and the walk between windows; with a slot free at once, the first window
-// runs whatever its state, as one call did.
+// runs whatever its state, as one call did. opts.TimeLimit starts once the
+// slot is taken, so it bounds the parse and not the wait, and stops the walk
+// the same way, with ErrTimeLimit rather than the context's error.
 func (e *Engine) IngestRole(ctx context.Context, id tenant.ID, table string, shape RoleShape, format Format, opts IngestOptions, body []byte, checks ...Predicate) (Batch, error) {
 	c, err := newCursor(format, opts, body)
 	if err != nil {
@@ -585,11 +592,21 @@ func (e *Engine) IngestRole(ctx context.Context, id tenant.ID, table string, sha
 		return Batch{}, err
 	}
 	defer release()
+	if opts.TimeLimit > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, opts.TimeLimit, ErrTimeLimit)
+		defer cancel()
+	}
 
 	var out Batch
 	var handle *compiled
 	for !c.done {
 		if err := ctx.Err(); err != nil && handle != nil {
+			// The cause tells the limit apart from the caller's own context
+			// ending, which keeps its error.
+			if cause := context.Cause(ctx); errors.Is(cause, ErrTimeLimit) {
+				return Batch{}, cause
+			}
 			return Batch{}, err
 		}
 		tbl, err := e.RoleTable(id, table, shape)

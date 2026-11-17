@@ -74,6 +74,7 @@ func TestDynamoDBDedupe_TwoInstancesShareSeenIDs(t *testing.T) {
 				Timeout: 5 * time.Second, CreateTable: true,
 			}},
 			Coord:    config.Coord{Backend: config.CoordLocal},
+			Ingest:   parseLimits(),
 			Roles:    config.AllRoles(),
 			Settings: config.Settings{Dir: dir},
 		}

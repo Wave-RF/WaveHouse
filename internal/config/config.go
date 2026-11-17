@@ -31,6 +31,7 @@ type Config struct {
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`
 	MQ         MQ         `yaml:"mq"`
+	Ingest     Ingest     `yaml:"ingest"`
 	Cache      Cache      `yaml:"cache"`
 	Dedupe     Dedupe     `yaml:"dedupe"`
 	Coord      Coord      `yaml:"coord"`
@@ -182,6 +183,34 @@ type ClickHouse struct {
 	ChtypesArtifactsURL string `yaml:"chtypes_artifacts_url" env:"WH_CHTYPES_ARTIFACTS_URL"`
 }
 
+// Ingest bounds how long an API process spends validating one ingest
+// request's body, counted from when the body takes a parse slot. A tenant's
+// own ingest.parse_timeout (the settings directory) replaces ParseTimeout for
+// its requests, up to MaxParseTimeout; the rest of the settings directory's
+// ingest block is the worker's batching.
+type Ingest struct {
+	// ParseTimeout is the limit for a tenant that sets none. A body still
+	// being read past it stops at the next parse window and is a 422; a
+	// window already running finishes, since a chtypes call cannot be
+	// canceled.
+	ParseTimeout time.Duration `yaml:"parse_timeout" env:"WH_INGEST_PARSE_TIMEOUT"`
+	// MaxParseTimeout is the most a tenant's ingest.parse_timeout may be.
+	MaxParseTimeout time.Duration `yaml:"max_parse_timeout" env:"WH_INGEST_MAX_PARSE_TIMEOUT"`
+}
+
+func (i Ingest) validate() error {
+	if i.ParseTimeout <= 0 {
+		return fmt.Errorf("ingest.parse_timeout (WH_INGEST_PARSE_TIMEOUT) must be > 0, got %s", i.ParseTimeout)
+	}
+	if i.MaxParseTimeout <= 0 {
+		return fmt.Errorf("ingest.max_parse_timeout (WH_INGEST_MAX_PARSE_TIMEOUT) must be > 0, got %s", i.MaxParseTimeout)
+	}
+	if i.ParseTimeout > i.MaxParseTimeout {
+		return fmt.Errorf("ingest.parse_timeout (WH_INGEST_PARSE_TIMEOUT) %s is over ingest.max_parse_timeout (WH_INGEST_MAX_PARSE_TIMEOUT) %s", i.ParseTimeout, i.MaxParseTimeout)
+	}
+	return nil
+}
+
 // ChtypesBases is ChtypesArtifactsURL split on commas, blanks dropped; nil
 // when empty.
 func (c ClickHouse) ChtypesBases() []string {
@@ -309,6 +338,7 @@ func defaults() Config {
 		Server:     Server{Port: 8080, ShutdownTimeout: 10},
 		ClickHouse: ClickHouse{ChtypesAutofetch: true},
 		MQ:         MQ{Backend: MQEmbedded, AckWait: defaultAckWait, MaxAckPending: defaultMaxAckPending, Prefetch: defaultPrefetch, NATS: defaultMQNATS()},
+		Ingest:     Ingest{ParseTimeout: 30 * time.Second, MaxParseTimeout: 5 * time.Minute},
 		Cache: Cache{
 			Backend: CacheLocal, L1MaxCost: 64 << 20,
 			Redis: CacheRedisConfig{
@@ -415,7 +445,10 @@ func (c *Config) Validate() error {
 	if err := c.validateBackends(); err != nil {
 		return err
 	}
-	return c.validateTopology()
+	if err := c.validateTopology(); err != nil {
+		return err
+	}
+	return c.Ingest.validate()
 }
 
 // Load reads config from a YAML file (if it exists) with env var overrides.

@@ -225,6 +225,7 @@ func setup() (int, func()) {
 		Cache:      config.Cache{Backend: config.CacheLocal, L1MaxCost: 1 << 30}, // 1 GB
 		Dedupe:     config.Dedupe{Backend: config.DedupePebble},
 		Coord:      config.Coord{Backend: config.CoordLocal},
+		Ingest:     parseLimits(),
 		Roles:      config.AllRoles(),
 		Settings:   config.Settings{Dir: settingsDir},
 	}
@@ -723,6 +724,11 @@ func seedLimits(tenant.ID) (ingest.Limits, bool) {
 // without them).
 func embeddedMQ() config.MQ {
 	return config.MQ{Backend: config.MQEmbedded, AckWait: mq.DefaultAckWait, MaxAckPending: mq.DefaultMaxAckPending, Prefetch: mq.DefaultPrefetch}
+}
+
+// parseLimits is the boot ingest block config.Load would give an API process.
+func parseLimits() config.Ingest {
+	return config.Ingest{ParseTimeout: 30 * time.Second, MaxParseTimeout: 5 * time.Minute}
 }
 
 func mustTempDir() string {

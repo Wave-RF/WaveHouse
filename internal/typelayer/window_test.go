@@ -1,6 +1,8 @@
 package typelayer
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -314,4 +316,57 @@ func TestIngest_DefaultWindowsRefuseAMidBodyBOM(t *testing.T) {
 	b, err := tbl.IngestWith(FormatJSONEachRow, IngestOptions{Now: now, Window: Limits{Bytes: defaultLimits.Bytes, Records: cut}}, []byte(body.String()))
 	require.NoError(t, err)
 	assert.Equal(t, answer(one), answer(b))
+}
+
+// TestIngestRole_TimeLimit: past IngestOptions.TimeLimit the walk stops before
+// its next window with ErrTimeLimit, and a context the caller ends keeps its
+// own error. The first window always runs, so a body it holds whole is
+// answered whatever the limit; with no limit, or one not reached, every window
+// is read, as IngestWith reads them.
+func TestIngestRole_TimeLimit(t *testing.T) {
+	t.Parallel()
+	eng := testEngine(t, pairTable())
+	var many strings.Builder
+	for i := 1; i <= 20; i++ {
+		fmt.Fprintf(&many, `{"a":"%d","b":"x"}`+"\n", i)
+	}
+	// Two records a window, one kept: about twenty windows, so a limit that
+	// has passed is seen between two of them.
+	small := Limits{Bytes: 1 << 30, Records: 2}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	tests := []struct {
+		name  string
+		ctx   context.Context
+		body  string
+		limit time.Duration
+		want  error // nil: answered, every record accepted
+		rows  int
+	}{
+		{"past the limit", context.Background(), many.String(), time.Nanosecond, ErrTimeLimit, 0},
+		{"within the limit", context.Background(), many.String(), time.Minute, nil, 20},
+		{"no limit", context.Background(), many.String(), 0, nil, 20},
+		{"one window, past the limit", context.Background(), `{"a":"1","b":"x"}` + "\n", time.Nanosecond, nil, 1},
+		{"the caller's context ended", canceled, many.String(), time.Minute, context.Canceled, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			b, err := eng.IngestRole(tt.ctx, tenant.Default, "pair", RoleShape{}, FormatJSONEachRow,
+				IngestOptions{Window: small, TimeLimit: tt.limit}, []byte(tt.body))
+			if tt.want != nil {
+				require.ErrorIs(t, err, tt.want)
+				if !errors.Is(tt.want, ErrTimeLimit) {
+					assert.NotErrorIs(t, err, ErrTimeLimit)
+				}
+				assert.Empty(t, b.Rows)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, b.Rows, tt.rows)
+			for _, r := range b.Rows {
+				assert.True(t, r.Accepted)
+			}
+		})
+	}
 }

@@ -79,6 +79,8 @@ var refusedZeros = []struct {
 	{"mq.ack_wait", "0s", "mq.ack_wait (WH_MQ_ACK_WAIT) must be > 0", nil},
 	{"mq.max_ack_pending", 0, "mq.max_ack_pending (WH_MQ_MAX_ACK_PENDING) must be at least mq.prefetch (500), got 0", nil},
 	{"mq.prefetch", 0, "mq.prefetch (WH_MQ_PREFETCH) must be at least 1", nil},
+	{"ingest.parse_timeout", "0s", "ingest.parse_timeout (WH_INGEST_PARSE_TIMEOUT) must be > 0", nil},
+	{"ingest.max_parse_timeout", "0s", "ingest.max_parse_timeout (WH_INGEST_MAX_PARSE_TIMEOUT) must be > 0", nil},
 	{"dedupe.lease", "0s", "dedupe.lease (WH_DEDUPE_LEASE) must be > 0", nil},
 	{"dedupe.reserve_concurrency", 0, "dedupe.reserve_concurrency (WH_DEDUPE_RESERVE_CONCURRENCY) must be > 0", nil},
 	{"dedupe.dynamodb.timeout", "0s", "dedupe.dynamodb.timeout (WH_DEDUPE_DYNAMODB_TIMEOUT) must be > 0", dynamoSelected},

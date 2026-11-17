@@ -874,6 +874,9 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 		} else if *i.RetryBackoffMax < 1 || int64(*i.RetryBackoffMax) > maxSeconds {
 			v.errorf(FileConfig, "ingest.retry_backoff_max", "must be in 1-%d seconds, got %d", maxSeconds, *i.RetryBackoffMax)
 		}
+		if p := i.ParseTimeout; p != nil && (*p < 1 || int64(*p) > maxSeconds) {
+			v.errorf(FileConfig, "ingest.parse_timeout", "must be in 1-%d seconds, got %d", maxSeconds, *p)
+		}
 	}
 	if q := c.Query; q == nil {
 		v.required("query")

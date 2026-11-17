@@ -86,6 +86,7 @@ func bootRedisApp(t *testing.T, redisAddr, prefix string, timeout time.Duration)
 		}},
 		Dedupe:   config.Dedupe{Backend: config.DedupePebble},
 		Coord:    config.Coord{Backend: config.CoordLocal},
+		Ingest:   parseLimits(),
 		Roles:    config.AllRoles(),
 		Settings: config.Settings{Dir: settingsDir},
 	}

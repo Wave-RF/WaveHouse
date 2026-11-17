@@ -416,6 +416,27 @@ func (a *App) wireTypes() error {
 	return nil
 }
 
+// wireParseTimeouts adopts each served tenant's limit on validating one
+// ingest request's body, checked against boot config's ceiling at boot and
+// after every reload (parseTimeouts): a tenant over it refuses boot over a
+// flat directory, naming both values, and is served with the default over a
+// nested one, the registry's rule for the shape.
+func (a *App) wireParseTimeouts() error {
+	ing := a.cfg.Ingest
+	if ing.ParseTimeout <= 0 || ing.MaxParseTimeout <= 0 {
+		return errors.New("ingest.parse_timeout or ingest.max_parse_timeout is zero: a Config built without config.Load must set both")
+	}
+	p := newParseTimeouts(a.tenants, ing)
+	err := p.reconcile(true)
+	a.tenants.Reconciled("parse_timeout", err)
+	if err != nil && !a.tenants.Nested() {
+		return fmt.Errorf("ingest parse timeout: %w", err)
+	}
+	a.parseTimeouts = p
+	a.tenants.AfterAdopt(func([]tenant.ID) { a.tenants.Reconciled("parse_timeout", p.reconcile(false)) })
+	return nil
+}
+
 // wireDiscovery builds one schema registry per served tenant, each with a
 // refresh loop of its own (discoveries), and the boot state /livez reports:
 // 503 with the latest discovery failure while no tenant has completed a
@@ -1057,6 +1078,7 @@ func (a *App) wireHTTP(authMW func(http.Handler) http.Handler) {
 	ingestHandler.DedupeSettings = (*settings.Store).DedupeFor
 	ingestHandler.DedupeLease = a.cfg.Dedupe.Lease
 	ingestHandler.Types = a.types
+	ingestHandler.ParseTimeout = a.parseTimeouts.For
 
 	healthHandler := a.healthHandler()
 

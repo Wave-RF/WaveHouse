@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,6 +40,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, 8080, cfg.Server.Port)
 	assert.Equal(t, 10, cfg.Server.ShutdownTimeout)
 	assert.Equal(t, 0, cfg.ClickHouse.MaxTotalConns, "no connection ceiling by default")
+	assert.Equal(t, Ingest{ParseTimeout: 30 * time.Second, MaxParseTimeout: 5 * time.Minute}, cfg.Ingest)
 	assert.Empty(t, cfg.ClickHouse.ChtypesCache, "the SDK's own cache by default")
 	assert.True(t, cfg.ClickHouse.ChtypesAutofetch, "a missing line is fetched by default")
 	assert.Nil(t, cfg.ClickHouse.ChtypesBases(), "the SDK's own registry by default")
@@ -441,4 +443,41 @@ func TestValidate_NegativeMaxTotalConns(t *testing.T) {
 	err := cfg.Validate()
 	require.ErrorContains(t, err, "clickhouse.max_total_conns must be >= 0")
 	require.ErrorContains(t, err, "got -1")
+}
+
+func TestValidate_Ingest(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		parse, limit time.Duration
+		want         string // "" = valid
+	}{
+		{"the defaults", 30 * time.Second, 5 * time.Minute, ""},
+		{"at the ceiling", time.Minute, time.Minute, ""},
+		{"over the ceiling", 2 * time.Minute, time.Minute, "ingest.parse_timeout (WH_INGEST_PARSE_TIMEOUT) 2m0s is over ingest.max_parse_timeout (WH_INGEST_MAX_PARSE_TIMEOUT) 1m0s"},
+		{"negative", -time.Second, time.Minute, "ingest.parse_timeout (WH_INGEST_PARSE_TIMEOUT) must be > 0, got -1s"},
+		{"negative ceiling", time.Second, -time.Second, "ingest.max_parse_timeout (WH_INGEST_MAX_PARSE_TIMEOUT) must be > 0, got -1s"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := defaultBackends()
+			cfg.Ingest = Ingest{ParseTimeout: tt.parse, MaxParseTimeout: tt.limit}
+			err := cfg.Validate()
+			if tt.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+// Not parallel: t.Setenv.
+func TestLoad_Ingest_FromEnv(t *testing.T) {
+	t.Setenv("WH_INGEST_PARSE_TIMEOUT", "45s")
+	t.Setenv("WH_INGEST_MAX_PARSE_TIMEOUT", "10m")
+	cfg, err := Load("nonexistent.yaml")
+	require.NoError(t, err)
+	assert.Equal(t, Ingest{ParseTimeout: 45 * time.Second, MaxParseTimeout: 10 * time.Minute}, cfg.Ingest)
 }

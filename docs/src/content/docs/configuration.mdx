@@ -243,6 +243,17 @@ Each tenant's queue has its own disk budget, `mq.max_bytes_gb`, a hot-reloadable
 
 **Durability.** The embedded server runs with JetStream `SyncAlways`, so every event is `fsync`'d to disk before `POST /v1/ingest` returns `200`. This makes your storage's `fsync` latency your ingest latency floor — see [Durability & Storage](/durability) to check whether your substrate can sustain it. There is no knob to relax this today ([#139](https://github.com/Wave-RF/WaveHouse/issues/139) tracks a configurable group-commit interval).
 
+### Ingest validation
+
+How long a process running the `api` [role](#process-roles) spends validating one `POST /v1/ingest` body. The clock starts once the body has a parse slot, so the wait for one (100 ms at most) is not counted. The body is parsed in windows of up to 4,096 records and 4 MiB, and the limit is checked between them: a body still being read once it has passed stops at the next window and is answered `422` (`ingest validation took longer than the time limit (30s)`), with nothing published and no `Retry-After`, since a retry would take as long. A window already running finishes, because a chtypes call cannot be canceled, so the first window of every body is always read whole, and a body that fits in one window is never stopped. An ordinary table parses a default window in tens of milliseconds, so what reaches the limit is a table whose `DEFAULT` expressions are heavy to compute. A tenant can set its own limit, above or below the default, with [`ingest.parse_timeout`](/settings-directory#ingest).
+
+| YAML Key | Env Var | Default | Description |
+| --- | --- | ------- | ----------- |
+| `ingest.parse_timeout` | `WH_INGEST_PARSE_TIMEOUT` | `30s` | The limit for a tenant whose `config.json` sets no `ingest.parse_timeout`. At most `ingest.max_parse_timeout`. |
+| `ingest.max_parse_timeout` | `WH_INGEST_MAX_PARSE_TIMEOUT` | `5m` | The most a tenant's `ingest.parse_timeout` may be. `wavehouse validate` cannot see boot config, so API processes check a tenant's value against it when they adopt the tenant's settings. At boot over a flat settings directory a value above it refuses to start, naming both values; over a nested one that tenant is served with `ingest.parse_timeout`, logged at `ERROR`. On a reload the tenant keeps the limit it had (or `ingest.parse_timeout` if it had none of its own), logged at `ERROR` and counted under `wavehouse_settings_reconcile_failures_total{component="parse_timeout"}`. |
+
+Both must be above zero, and `ingest.parse_timeout` at most `ingest.max_parse_timeout`, or boot refuses.
+
 ### Cache
 
 | YAML Key | Env Var | Default | Description |
@@ -433,6 +444,10 @@ mq:
   #   partitions: 4        # the number of ingest partition streams
   #   shards: 8            # shards per partition, as generated (default 32)
 
+ingest:
+  parse_timeout: 30s     # validating one ingest body, checked between parse windows; a tenant's ingest.parse_timeout replaces it
+  max_parse_timeout: 5m  # the most a tenant's ingest.parse_timeout may be
+
 cache:
   backend: local         # local | redis
   l1_max_cost: 67108864  # the local backend's size
@@ -549,6 +564,8 @@ WH_MQ_PREFETCH=500
 # WH_MQ_NATS_PASSWORD_FILE=/var/run/secrets/nats/password
 # WH_MQ_NATS_PARTITIONS=4
 # WH_MQ_NATS_SHARDS=8
+WH_INGEST_PARSE_TIMEOUT=30s
+WH_INGEST_MAX_PARSE_TIMEOUT=5m
 WH_CACHE_BACKEND=local
 WH_CACHE_L1_MAX_COST=67108864
 # Read only with WH_CACHE_BACKEND=redis; WH_CACHE_REDIS_ADDRS is then required.

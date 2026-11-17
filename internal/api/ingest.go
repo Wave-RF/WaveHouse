@@ -73,6 +73,11 @@ type IngestHandler struct {
 	DedupeLease  time.Duration
 	Publisher    mq.Publisher
 	PolicySource PolicySource
+	// ParseTimeout resolves how long validating the body of a request of the
+	// store's tenant may take (typelayer.IngestOptions.TimeLimit): the
+	// tenant's own ingest.parse_timeout within boot config's ceiling, else
+	// boot config's default. nil is no limit (tests).
+	ParseTimeout func(store *settings.Store) time.Duration
 
 	// maxRequestBytes optionally overrides the default inbound request body cap
 	// (maxRequestBodyBytes). When 0, the default applies. Exists so same-package
@@ -199,7 +204,8 @@ type recordReject struct {
 //
 // A body the type layer declined as a whole — a shape chtypes does not
 // support — is a 422: no verdict on the data, and retrying it unchanged gets
-// the same answer.
+// the same answer. So is a body whose validation ran past its tenant's time
+// limit, which a retry takes as long over.
 type requestAbort struct {
 	Status        int
 	Message       string
@@ -464,8 +470,8 @@ func (h *IngestHandler) typesReady(ctx context.Context, id tenant.ID, table stri
 // A Go-level failure is an unavailable handle (the type layer's outage, a
 // 503 the caller can retry unchanged) or ours, and neither is the caller's
 // record to fix. A body ClickHouse refused is the caller's to fix, and is a
-// 400 with its code and the record it failed on; a body chtypes declined is a
-// 422.
+// 400 with its code and the record it failed on; a body chtypes declined, or
+// one still being read past the tenant's time limit, is a 422.
 func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelayer.RoleShape, format IngestFormat, body []byte, preds []policy.Predicate) *requestAbort {
 	id := run.store.Tenant()
 	if h.Types == nil {
@@ -474,6 +480,9 @@ func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelay
 	}
 	opts := format.options()
 	opts.Now = run.now
+	if h.ParseTimeout != nil {
+		opts.TimeLimit = h.ParseTimeout(run.store)
+	}
 	batch, err := h.ingestAs(ctx, id, run.table, shape, format, opts, body, preds)
 	if _, refused := errors.AsType[*typelayer.RoleRefused](err); refused && len(shape.Defaults) > 0 {
 		cause := err
@@ -501,6 +510,14 @@ func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelay
 				slog.WarnContext(ctx, "ingest refused: every parse slot stayed in use", "tenant", id, "table", run.table)
 			}
 			return &requestAbort{Status: http.StatusServiceUnavailable, Message: "ingest validation is busy", RetryAfter: retryAfterBusy}
+		}
+		if errors.Is(err, typelayer.ErrTimeLimit) {
+			// The tenant's table or data is why, so a WARN, not an ERROR.
+			if h.noticeDue("time limit:" + id.String() + "/" + run.table) {
+				slog.WarnContext(ctx, "ingest refused: validating the body took longer than its time limit",
+					"tenant", id, "table", run.table, "limit", opts.TimeLimit)
+			}
+			return timeLimitAbort(opts.TimeLimit)
 		}
 		if clientGone(ctx) {
 			return clientClosedAbort()
@@ -542,6 +559,16 @@ func (h *IngestHandler) judge(ctx context.Context, run *ingestRun, shape typelay
 // at a time.
 func (h *IngestHandler) ingestAs(ctx context.Context, id tenant.ID, table string, shape typelayer.RoleShape, format IngestFormat, opts typelayer.IngestOptions, body []byte, preds []policy.Predicate) (typelayer.Batch, error) {
 	return h.Types.IngestRole(ctx, id, table, shape, format.wire(), opts, body, preds...)
+}
+
+// timeLimitAbort is the answer for a body still being read past limit: a 422
+// carrying no Retry-After, since the same body takes as long again. Like a
+// body declined whole, it counts no record.
+func timeLimitAbort(limit time.Duration) *requestAbort {
+	return &requestAbort{
+		Status:  http.StatusUnprocessableEntity,
+		Message: "ingest validation took longer than the time limit (" + strconv.FormatFloat(limit.Seconds(), 'f', -1, 64) + "s)",
+	}
 }
 
 // retryAfterBusy is the Retry-After for a body that waited for a parse slot
