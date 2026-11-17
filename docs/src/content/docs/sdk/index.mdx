@@ -21,11 +21,45 @@ The server's [API reference](/api) defines the protocol both follow. Each SDK's 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
 
+<Tabs syncKey="pkg">
+  <TabItem label="pnpm">
+
+```bash
+pnpm add @wavehouse/sdk
+```
+
+  </TabItem>
+  <TabItem label="npm">
+
 ```bash
 npm install @wavehouse/sdk
 ```
 
-`pnpm add @wavehouse/sdk`, `yarn add @wavehouse/sdk`, `bun add @wavehouse/sdk` and `deno add npm:@wavehouse/sdk` install the same package.
+  </TabItem>
+  <TabItem label="yarn">
+
+```bash
+yarn add @wavehouse/sdk
+```
+
+  </TabItem>
+  <TabItem label="bun">
+
+```bash
+bun add @wavehouse/sdk
+```
+
+  </TabItem>
+  <TabItem label="deno">
+
+```bash
+deno add npm:@wavehouse/sdk
+```
+
+  </TabItem>
+</Tabs>
+
+All five install the same package.
 
 **No build step (CDN).** The SDK also loads straight into an HTML page, with no bundler or package manager. Modern browsers run the ES module natively:
 

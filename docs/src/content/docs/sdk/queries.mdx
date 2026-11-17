@@ -221,7 +221,7 @@ wh.From("clicks").Select("page").Count("*", "").GroupBy("page")
   </TabItem>
 </Tabs>
 
-**Select the grouping key too.** `groupBy()` sends `group_by` and nothing else, and the server returns only the selected columns and the aggregates, so `groupBy('page')` without `select('page')` returns unlabeled counts ([#295](https://github.com/Wave-RF/WaveHouse/issues/295)).
+**Select the grouping key too.** `groupBy()` / `GroupBy()` sends `group_by` and nothing else, and the server returns only the selected columns and the aggregates, so `groupBy('page')` without `select('page')` returns unlabeled counts ([#295](https://github.com/Wave-RF/WaveHouse/issues/295)).
 
 ## Order by
 
