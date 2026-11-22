@@ -90,6 +90,9 @@ func NewMetrics() *Metrics {
 	observability.ZeroCounter(bytes, observability.CarriesTenant, observability.LabelSets(kinds)...)
 	observability.ZeroCounter(dropped, observability.CarriesTable|observability.CarriesTenant, observability.LabelSets(
 		observability.Values("reason", DropBufferFull, DropClientGone, DropStreamClosed), kinds)...)
+	// active follows the same rule, so a process that has served no stream
+	// yet reads 0 open streams rather than exporting no series (#1003).
+	observability.ZeroCounter(active, observability.CarriesTenant)
 	return &Metrics{
 		active: active, duration: duration, frames: frames, bytes: bytes, dropped: dropped, withheld: withheld,
 		meter: meter, queuePeak: queuePeak,

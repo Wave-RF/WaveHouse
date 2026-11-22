@@ -25,18 +25,25 @@ const (
 // last built drops; zero before it has built one.
 var labelsDropped atomic.Uint32
 
+// Int64Adder is the Add a metric.Int64Counter and a metric.Int64UpDownCounter
+// share, so ZeroCounter takes either.
+type Int64Adder interface {
+	Add(ctx context.Context, incr int64, options ...metric.AddOption)
+}
+
 // ZeroCounter adds 0 to c under each of sets, so each series is exported from
-// the next collection on and an alert on increase() sees the first event
-// rather than the series' appearance (#905). Call it once the counter is
-// built, after InitProvider, since the global provider drops what is added
-// before it is set.
+// the next collection on: an alert on a counter's increase() sees the first
+// event rather than the series' appearance (#905), and an up-down counter
+// reads 0 rather than being absent until its first change (#1003). Call it
+// once the counter is built, after InitProvider, since the global provider
+// drops what is added before it is set.
 //
 // A set names only the counter's closed labels. A counter that also records
 // table or tenant (carries) is zero-published only while every one of those
 // is dropped: then the set is exactly the series the counter exports, where
 // with the label kept a set without it would be a stray series no
 // measurement ever adds to.
-func ZeroCounter(c metric.Int64Counter, carries Carries, sets ...attribute.Set) {
+func ZeroCounter(c Int64Adder, carries Carries, sets ...attribute.Set) {
 	if c == nil || Carries(labelsDropped.Load())&carries != carries {
 		return
 	}
