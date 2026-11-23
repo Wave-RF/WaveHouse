@@ -26,14 +26,23 @@ func dropLabels(t *testing.T, dropped Carries) {
 	t.Cleanup(func() { labelsDropped.Store(saved) })
 }
 
-// zeroSums builds a counter on a ManualReader, zero-publishes sets on it and
-// returns the exported points as attribute set → value.
-func zeroSums(t *testing.T, carries Carries, sets ...attribute.Set) map[string]int64 {
+// The two kinds of instrument ZeroCounter takes.
+func newCounter(m metric.Meter) (Int64Adder, error) {
+	return m.Int64Counter("wavehouse_zero_test_total")
+}
+
+func newUpDownCounter(m metric.Meter) (Int64Adder, error) {
+	return m.Int64UpDownCounter("wavehouse_zero_test_open")
+}
+
+// zeroSums builds an instrument on a ManualReader, zero-publishes sets on it
+// and returns the exported points as attribute set → value.
+func zeroSums(t *testing.T, build func(metric.Meter) (Int64Adder, error), carries Carries, sets ...attribute.Set) map[string]int64 {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
-	counter, err := mp.Meter("test").Int64Counter("wavehouse_zero_test_total")
+	counter, err := build(mp.Meter("test"))
 	require.NoError(t, err)
 	ZeroCounter(counter, carries, sets...)
 	var rm metricdata.ResourceMetrics
@@ -51,7 +60,7 @@ func zeroSums(t *testing.T, carries Carries, sets ...attribute.Set) map[string]i
 
 func TestZeroCounter_PublishesEachSetAtZero(t *testing.T) {
 	dropLabels(t, 0)
-	got := zeroSums(t, 0, LabelSets(Values("op", "get", "put"), Values("outcome", "ok", "error"))...)
+	got := zeroSums(t, newCounter, 0, LabelSets(Values("op", "get", "put"), Values("outcome", "ok", "error"))...)
 	assert.Equal(t, map[string]int64{
 		"op=get,outcome=ok": 0, "op=get,outcome=error": 0,
 		"op=put,outcome=ok": 0, "op=put,outcome=error": 0,
@@ -60,7 +69,16 @@ func TestZeroCounter_PublishesEachSetAtZero(t *testing.T) {
 
 func TestZeroCounter_NoSetsIsTheUnlabeledSeries(t *testing.T) {
 	dropLabels(t, 0)
-	assert.Equal(t, map[string]int64{"": 0}, zeroSums(t, 0))
+	assert.Equal(t, map[string]int64{"": 0}, zeroSums(t, newCounter, 0))
+}
+
+// TestZeroCounter_UpDownCounter: an up-down counter is zero-published by the
+// same rule, so it reads 0 before its first change (#1003).
+func TestZeroCounter_UpDownCounter(t *testing.T) {
+	dropLabels(t, CarriesTenant)
+	assert.Equal(t, map[string]int64{"": 0}, zeroSums(t, newUpDownCounter, CarriesTenant))
+	dropLabels(t, 0)
+	assert.Empty(t, zeroSums(t, newUpDownCounter, CarriesTenant), "tenant kept")
 }
 
 func TestZeroCounter_OnlyWhereEveryCarriedLabelIsDropped(t *testing.T) {
@@ -80,7 +98,7 @@ func TestZeroCounter_OnlyWhereEveryCarriedLabelIsDropped(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dropLabels(t, tc.dropped)
-			got := zeroSums(t, tc.carries, sets...)
+			got := zeroSums(t, newCounter, tc.carries, sets...)
 			if tc.publish {
 				assert.Equal(t, map[string]int64{"reason=a": 0, "reason=b": 0}, got)
 			} else {

@@ -2,9 +2,14 @@ package stream
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -128,4 +133,70 @@ func TestMetrics_Tenant(t *testing.T) {
 		}
 	}
 	assert.Nil(t, (*Metrics)(nil).Tenant("acme"), "a nil Metrics stays a no-op")
+}
+
+// activeStreamsSample matches one wavehouse_sse_active_streams series in a
+// Prometheus scrape: its labels and its value.
+var activeStreamsSample = regexp.MustCompile(`(?m)^wavehouse_sse_active_streams\{([^}]*)\} (\S+)$`)
+
+// activeStreams scrapes h and returns the value of each
+// wavehouse_sse_active_streams series by its tenant label, "" for a series
+// without one.
+func activeStreams(t *testing.T, h http.Handler) map[string]string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
+	series := map[string]string{}
+	for _, m := range activeStreamsSample.FindAllStringSubmatch(rec.Body.String(), -1) {
+		_, tenant, _ := strings.Cut(m[1], `tenant="`)
+		tenant, _, _ = strings.Cut(tenant, `"`)
+		series[tenant] = m[2]
+	}
+	return series
+}
+
+// TestMetrics_ActiveStreamsStartAtZero: with the tenant label dropped, a
+// process that has served no stream exports wavehouse_sse_active_streams at
+// 0, on the one series its tenants' streams then count on (#1003). With the
+// label kept it exports none until a stream opens, and then only that
+// tenant's.
+func TestMetrics_ActiveStreamsStartAtZero(t *testing.T) {
+	// No t.Parallel(): InitProvider swaps the global meter provider and sets
+	// the label policy ZeroCounter follows.
+	id := observability.Identity{ServiceName: "wavehouse-test"}
+	savedProp, savedMP := otel.GetTextMapPropagator(), otel.GetMeterProvider()
+	t.Cleanup(func() {
+		// The policy outlives its provider and only InitProvider sets it, so
+		// end on the default one, which the package's other tests run under.
+		shutdown, _, err := observability.InitProvider(context.Background(), id, observability.ProviderConfig{PrometheusEnabled: true})
+		if assert.NoError(t, err) {
+			_ = shutdown(context.Background())
+		}
+		otel.SetTextMapPropagator(savedProp)
+		otel.SetMeterProvider(savedMP)
+	})
+
+	for _, tc := range []struct {
+		name       string
+		dropTenant bool
+		// The series, tenant label → value, before any stream and with one
+		// of acme's open.
+		before, open map[string]string
+	}{
+		{"tenant label dropped", true, map[string]string{"": "0"}, map[string]string{"": "1"}},
+		{"tenant label kept", false, map[string]string{}, map[string]string{"acme": "1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shutdown, scrape, err := observability.InitProvider(t.Context(), id, observability.ProviderConfig{
+				PrometheusEnabled: true, AggregateTenants: tc.dropTenant,
+			})
+			require.NoError(t, err)
+			defer func() { _ = shutdown(context.Background()) }()
+
+			m := NewMetrics()
+			assert.Equal(t, tc.before, activeStreams(t, scrape))
+			m.Tenant("acme").ConnOpened()
+			assert.Equal(t, tc.open, activeStreams(t, scrape))
+		})
+	}
 }
