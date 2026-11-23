@@ -138,9 +138,6 @@ const (
 	// window is whole minutes, so an age under a minute read back at boot is
 	// this one.
 	noHistoryAge = time.Second
-	// recordTimeout bounds one Record: what the acks of a written batch wait
-	// for the history at most.
-	recordTimeout = 5 * time.Second
 	// resizeTimeout bounds the JetStream calls SetMaxBytes makes to open a
 	// tenant's queue or apply a new cap to it — both streams share it. A
 	// settings reload holds the store's lock while its hooks run, so an

@@ -198,7 +198,7 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 		e.js, err = jetstream.New(e.nc)
 	}
 	if err == nil {
-		e.hist, err = newHistoryWriter(e.nc, cfg.JSDomain, topo.PublishTimeout)
+		e.hist, err = newHistoryWriter(e.nc, cfg.JSDomain, recordTimeout)
 	}
 	if err != nil {
 		e.nc.Close()
@@ -958,8 +958,9 @@ func (e *ExternalNATS) checkReplayWindow(id tenant.ID, window time.Duration) {
 }
 
 // Record stores each written row on the history stream under its topic, with
-// the time its partition accepted it, in order, within the topology's
-// PublishTimeout for the batch. It never creates anything: a history stream
+// the time its partition accepted it, in order, within recordTimeout for the
+// batch, whatever the topology's PublishTimeout: the batch's acks wait for it.
+// It never creates anything: a history stream
 // that is gone, full and refusing, or without a leader costs the batch its
 // replay, and the error says how many rows.
 func (e *ExternalNATS) Record(ctx context.Context, msgs []*Message) error {

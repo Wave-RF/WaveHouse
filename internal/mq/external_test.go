@@ -361,7 +361,13 @@ func written(t *testing.T, e *ExternalNATS, n int) {
 func TestExternalNATS_HistoryOutageCostsOnlyTheReplay(t *testing.T) {
 	t.Parallel()
 	f := shippedFixture(t)
-	e := f.broker(t, func(c *NATSConfig) { c.Topology.PublishTimeout = 500 * time.Millisecond })
+	e := f.broker(t, func(c *NATSConfig) { c.Topology.PublishTimeout = 10 * time.Second })
+	require.Equal(t, recordTimeout, e.hist.timeout, "a batch's acks wait for the history write, so its bound is fixed, not the publish timeout")
+	// A shorter budget than recordTimeout, so a history that does not answer
+	// costs the test half a second.
+	var err error
+	e.hist, err = newHistoryWriter(e.nc, "", 500*time.Millisecond)
+	require.NoError(t, err)
 	topic := Topic{Tenant: "acme", Table: "events"}
 	cons, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable})
 	require.NoError(t, err)

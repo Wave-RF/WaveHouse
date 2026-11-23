@@ -24,6 +24,11 @@ const (
 	// recordWindow is how many rows of a batch are in flight to the history at
 	// once.
 	recordWindow = 256
+	// recordTimeout bounds one Record on either broker: the acks of a written
+	// batch wait for the history that long at most, on top of the batch's
+	// wait and its INSERT, so it is fixed and small rather than a setting an
+	// operator could raise past the queue's redelivery timeout.
+	recordTimeout = 5 * time.Second
 )
 
 // historyWriter records written rows on a history stream.

@@ -262,7 +262,7 @@ Two more server limitations: events published while a connection opens can be mi
 
 ### Frames that can't be read
 
-A frame the SDK can't decode usually means a corrupted connection, so the first time, the stream reconnects from the last delivered event. If the same frame fails again at the same place after that reconnect, it is bad at the source: it is skipped, the resume point moves past it, and the stream goes on. Neither SDK ever reports a frame's payload, only the reason and the frame's id.
+A frame the SDK can't decode usually means a corrupted connection, so the first time, the stream reconnects from the last delivered event. If the same frame fails again at the same place after that reconnect, it is bad at the source: it is skipped, the resume point moves past it, and the stream goes on. A replayed frame has no id, and the replayed rows ahead of it do not move the resume point, so the SDKs recognize a repeat of one only when it is the first frame after the resume: an unreadable frame further into a replay is not skipped, and the stream reconnects each time it reaches it. Neither SDK ever reports a frame's payload, only the reason and the frame's id.
 
 | | TypeScript | Go |
 | --- | --- | --- |
