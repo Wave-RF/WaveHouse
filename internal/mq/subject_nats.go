@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -44,12 +45,35 @@ func validSubjectPrefix(prefix string) error {
 // n (or v) by one moves about 1/(n+1) of the tables, each into the new
 // partition (or shard). This is the one place a table is mapped.
 func natsRoute(t Topic, n, v int) (p, s int) {
+	key := natsRouteKey(t)
+	return shard.Jump(key, n), shard.Jump(shard.Mix(key), v)
+}
+
+// natsRouteKey is the hash a table is placed by.
+func natsRouteKey(t Topic) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(t.Tenant))
 	_, _ = h.Write([]byte{'.'})
 	_, _ = h.Write([]byte(keyenc.Escape(t.Table)))
-	key := h.Sum64()
-	return shard.Jump(key, n), shard.Jump(shard.Mix(key), v)
+	return h.Sum64()
+}
+
+// natsEarlierPartitions is the partitions topic t's table lived in under
+// every partition count below n, in the order it moved through them, without
+// the one it lives in under n. A jump hash only ever moves a key into the
+// newest bucket, so these are the only partitions among the n that can still
+// hold rows the table queued before the count was raised: about ln(n) of
+// them, none for most tables at a small n.
+func natsEarlierPartitions(t Topic, n int) []int {
+	key := natsRouteKey(t)
+	now := shard.Jump(key, n)
+	var earlier []int
+	for k := 1; k < n; k++ {
+		if p := shard.Jump(key, k); p != now && !slices.Contains(earlier, p) {
+			earlier = append(earlier, p)
+		}
+	}
+	return earlier
 }
 
 // natsIngestPartition is every subject of ingest partition p: what its

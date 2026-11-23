@@ -52,8 +52,12 @@ type replaySource struct {
 }
 
 // replayQueue is an ingest stream and the subject, or the wildcard, a topic's
-// waiting events are under in it.
-type replayQueue struct{ stream, subject string }
+// waiting events are under in it. An optional one is a stream its owner may
+// delete once it has drained: gone, it holds nothing to replay.
+type replayQueue struct {
+	stream, subject string
+	optional        bool
+}
 
 // replay sends the topic's events accepted at or after since: the written
 // ones the history holds, in the order they were written, then the ones
@@ -65,6 +69,9 @@ func (r replaySource) replay(ctx context.Context, since time.Time, send func(dat
 	lasts := make([]uint64, len(r.queues))
 	for i, q := range r.queues {
 		queue, err := r.js.Stream(ctx, q.stream)
+		if q.optional && errors.Is(err, jetstream.ErrStreamNotFound) {
+			continue // deleted: nothing waits there, and its last stays 0
+		}
 		if err != nil {
 			return fmt.Errorf("replay: ingest stream %s: %w", q.stream, err)
 		}
@@ -87,7 +94,11 @@ func (r replaySource) replay(ctx context.Context, since time.Time, send func(dat
 		return err
 	}
 	for i, q := range r.queues {
-		if more, err := r.waiting(ctx, q, lasts[i], since, send); err != nil || !more {
+		more, err := r.waiting(ctx, q, lasts[i], since, send)
+		if err != nil && q.optional && r.gone(ctx, q.stream) {
+			continue // deleted while it was read: what it held was written first
+		}
+		if err != nil || !more {
 			return err
 		}
 	}
@@ -154,6 +165,12 @@ func (r replaySource) written(ctx context.Context, cfg jetstream.ConsumerConfig,
 		}
 	}
 	return true, nil
+}
+
+// gone reports whether stream no longer exists.
+func (r replaySource) gone(ctx context.Context, stream string) bool {
+	_, err := r.js.Stream(ctx, stream)
+	return errors.Is(err, jetstream.ErrStreamNotFound)
 }
 
 // usable reports why a replay under way cannot go on: its context is done, or

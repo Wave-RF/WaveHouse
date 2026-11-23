@@ -970,21 +970,29 @@ func (e *ExternalNATS) Record(ctx context.Context, msgs []*Message) error {
 
 // ReplaySince sends topic's events accepted at or after since: the written
 // ones from the history stream, as long as its max_age keeps them, then the
-// ones still waiting on the partition that holds the topic — and on any
-// stream a lower partition count left behind — then the ones written while
-// those were read (replaySource). The history is read through ack-less
-// consumers of its own, in memory, that expire once idle; the partitions by
-// direct get. A read that fails before the replay catches up is an error; a
-// done ctx returns ctx's error.
+// ones still waiting wherever the topic's table has queued rows, then the
+// ones written while those were read (replaySource). Waiting rows can be on
+// the partition that holds the table now; on a partition that held it under
+// a smaller partition count, until the rows queued before the count was
+// raised are written (natsEarlierPartitions); and on a stream a lower count
+// left behind, which the operator deletes once it has drained, so one that is
+// gone is skipped. The history is read through ack-less consumers of its own,
+// in memory, that expire once idle; the partitions by direct get. A read that
+// fails before the replay catches up is an error; a done ctx returns ctx's
+// error.
 func (e *ExternalNATS) ReplaySince(ctx context.Context, topic Topic, since time.Time, send func(data []byte) bool) error {
 	historySubject, err := natsHistorySubject(e.topo.Prefix, topic)
 	if err != nil {
 		return err
 	}
 	p, _ := natsRoute(topic, e.topo.Partitions, e.topo.Shards)
-	queues := []replayQueue{{stream: e.partitions[p]}}
-	if queues[0].subject, err = natsWaitingSubject(e.topo.Prefix, p, topic); err != nil {
-		return err
+	var queues []replayQueue
+	for _, held := range append(natsEarlierPartitions(topic, e.topo.Partitions), p) {
+		subj, err := natsWaitingSubject(e.topo.Prefix, held, topic)
+		if err != nil {
+			return err
+		}
+		queues = append(queues, replayQueue{stream: e.partitions[held], subject: subj})
 	}
 	leftover, err := natsWaitingSubject(e.topo.Prefix, -1, topic)
 	if err != nil {
@@ -993,7 +1001,7 @@ func (e *ExternalNATS) ReplaySince(ctx context.Context, topic Topic, since time.
 	if xs := e.extras.Load(); xs != nil {
 		for _, u := range *xs {
 			if !slices.Contains(e.partitions, u.stream) && !slices.ContainsFunc(queues, func(q replayQueue) bool { return q.stream == u.stream }) {
-				queues = append(queues, replayQueue{stream: u.stream, subject: leftover})
+				queues = append(queues, replayQueue{stream: u.stream, subject: leftover, optional: true})
 			}
 		}
 	}

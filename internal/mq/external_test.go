@@ -937,6 +937,9 @@ func TestExternalNATS_LoweringNDrainsTheRemovedPartition(t *testing.T) { //nolin
 	require.Equal(t, "moved", receive(t, got))
 
 	require.NoError(t, f.admin.DeleteStream(t.Context(), removed))
+	// The broker lists the removed partition until its next re-check, five
+	// minutes apart. A replay skips it once it is gone rather than failing.
+	require.NoError(t, e.ReplaySince(t.Context(), topic, time.Time{}, func([]byte) bool { return true }))
 	require.Eventually(t, func() bool {
 		return strings.Contains(logs.String(), "mq: stopped draining a shard durable outside the configured ones")
 	}, 15*time.Second, 50*time.Millisecond, "the removed partition's delivery never ended")
@@ -947,6 +950,41 @@ func TestExternalNATS_LoweringNDrainsTheRemovedPartition(t *testing.T) { //nolin
 	}
 	require.NoError(t, e.Publish(t.Context(), topic, []byte("still")))
 	require.Equal(t, "still", receive(t, got))
+}
+
+// Raising N from 1 to 2 moves a table to the new partition, and the rows it
+// queued before the raise wait on the old one, which is still a partition of
+// the queue. A replay reads both: every row not yet written, whatever
+// partition it waits on (#1007).
+func TestExternalNATS_ReplayReadsTheRowsATableQueuedBeforeNWasRaised(t *testing.T) {
+	t.Parallel()
+	f := newNATSFixture(t)
+	f.apply(t, generatedTopology(t, 1, 2))
+	topic := topicIn(t, "acme", 1, 2, 2)
+	other := topicIn(t, "acme", 0, 2, 2)
+	old := f.broker(t, func(c *NATSConfig) { c.Topology.Partitions, c.Topology.Shards = 1, 2 })
+	for _, row := range []string{"before-1", "before-2"} {
+		require.NoError(t, old.Publish(t.Context(), topic, []byte(row)))
+	}
+	require.NoError(t, old.Publish(t.Context(), other, []byte("another table")))
+	require.NoError(t, old.Close())
+
+	require.NoError(t, generatedTopology(t, 2, 2).Apply(t.Context(), f.admin))
+	e := f.broker(t, func(c *NATSConfig) { c.Topology.Partitions, c.Topology.Shards = 2, 2 })
+	require.NoError(t, e.Publish(t.Context(), topic, []byte("after")))
+	require.Equal(t, uint64(3), f.streamMsgs(t, "WH_INGEST_0"), "the rows from before the raise wait on the old partition")
+	require.Equal(t, uint64(1), f.streamMsgs(t, "WH_INGEST_1"))
+
+	replayed := func(topic Topic) []string {
+		got := []string{}
+		require.NoError(t, e.ReplaySince(t.Context(), topic, time.Time{}, func(data []byte) bool {
+			got = append(got, string(data))
+			return true
+		}))
+		return got
+	}
+	assert.Equal(t, []string{"before-1", "before-2", "after"}, replayed(topic), "the earlier partition's rows, then the current one's")
+	assert.Equal(t, []string{"another table"}, replayed(other), "a table that did not move is read from its one partition")
 }
 
 // The queue's units are every partition's shard durables, in partition then
