@@ -15,16 +15,18 @@ import (
 
 // NATSTopology is what WaveHouse needs of an operator-owned JetStream: N
 // ingest partition streams with work-queue retention, each split into V
-// shards by a subject token, with one pinned-client durable per shard, and
-// each republishing every row it stores to the history
-// stream (limits retention, for SSE replay and the live hub) under the
-// row's subject without the partition; one dead-letter stream; and,
-// for coord.backend=nats, a KV bucket holding the leases (Leases). The
-// operator creates all of it (WriteNATSManifests renders it as nack CRs);
-// WaveHouse only checks it (verifyNATSTopology) and never repairs it.
+// shards by a subject token, with one pinned-client durable per shard, each
+// republishing every row it stores to the live subject, which no stream
+// holds, under the row's subject without the partition and shard, and each
+// allowing direct gets, which a replay reads its waiting rows by; the history
+// stream (limits retention) the ingest workers record every written row on,
+// for SSE replay; one dead-letter stream; and, for coord.backend=nats, a KV
+// bucket holding the leases (Leases). The operator creates all of it
+// (WriteNATSManifests renders it as nack CRs); WaveHouse only checks it
+// (verifyNATSTopology) and never repairs it.
 type NATSTopology struct {
-	// Prefix leads every subject: <prefix>.ingest.<p>.…, <prefix>.hist.… and
-	// <prefix>.dlq.….
+	// Prefix leads every subject: <prefix>.ingest.<p>.…, <prefix>.live.…,
+	// <prefix>.hist.… and <prefix>.dlq.….
 	Prefix string
 	// Partitions is N, the number of ingest partition streams.
 	Partitions int
@@ -282,9 +284,13 @@ type topologyVerifier struct {
 	t        NATSTopology
 	findings []Finding
 	// perms is the connection's refused publishes, nil to skip probing the
-	// user's permissions; probe is the shard durables found, to probe.
-	perms *natsPermissionWatch
-	probe []natsUnit
+	// user's permissions; probe is the shard durables found, to probe,
+	// partitions the partition streams found, direct the ones of them that
+	// allow direct gets, and history whether the history stream was found.
+	perms              *natsPermissionWatch
+	probe              []natsUnit
+	partitions, direct []string
+	history            bool
 }
 
 func (v *topologyVerifier) add(sev FindingSeverity, object, field, format string, args ...any) {
@@ -296,7 +302,8 @@ func (v *topologyVerifier) add(sev FindingSeverity, object, field, format string
 // server unreachable, a request refused); a missing stream or consumer is a
 // finding. With perms, the publishes the server refused js's connection, it
 // also probes that the connecting user may pull from and unpin every shard
-// durable (probePermissions).
+// durable, read every partition's waiting rows, record on the history and
+// subscribe to the live subject (probePermissions).
 func verifyNATSTopology(ctx context.Context, js jetstream.JetStream, t NATSTopology, perms *natsPermissionWatch) ([]Finding, error) {
 	t = t.withDefaults()
 	if err := t.validate(); err != nil {
@@ -319,7 +326,7 @@ func verifyNATSTopology(ctx context.Context, js jetstream.JetStream, t NATSTopol
 	if err := v.extras(ctx, partitions); err != nil {
 		return nil, err
 	}
-	if err := v.history(ctx); err != nil {
+	if err := v.historyStream(ctx); err != nil {
 		return nil, err
 	}
 	if err := v.dlq(ctx); err != nil {
@@ -449,6 +456,7 @@ func (v *topologyVerifier) partition(ctx context.Context, p int) (string, error)
 	obj := "stream " + cfg.Name
 	req := func(field, format string, args ...any) { v.add(FindingRequired, obj, field, format, args...) }
 	rec := func(field, format string, args ...any) { v.add(FindingRecommended, obj, field, format, args...) }
+	v.partitions = append(v.partitions, cfg.Name)
 
 	if !slices.Contains(cfg.Subjects, filter) {
 		req("subjects", "are %q; must include %q", cfg.Subjects, filter)
@@ -459,6 +467,13 @@ func (v *topologyVerifier) partition(ctx context.Context, p int) (string, error)
 		req("retention", "is %s; must be workqueue, so a row is kept until the ingest worker acks it, even while no consumer covers it", cfg.Retention)
 	}
 	v.republish(obj, cfg.RePublish, p)
+	// A work queue takes no second consumer, so a replay reads the rows still
+	// waiting on it by direct get.
+	if cfg.AllowDirect {
+		v.direct = append(v.direct, cfg.Name)
+	} else {
+		req("allow_direct", "is unset; must be set, or an SSE replay cannot read the rows still waiting to be written")
+	}
 	if cfg.Discard != jetstream.DiscardNew {
 		req("discard", "is %s; must be new, so a full partition refuses rather than dropping unwritten rows", cfg.Discard)
 	}
@@ -697,30 +712,37 @@ func findExtraUnits(ctx context.Context, js jetstream.JetStream, t NATSTopology,
 	return out, nil
 }
 
-func (v *topologyVerifier) history(ctx context.Context) error {
+func (v *topologyVerifier) historyStream(ctx context.Context) error {
 	t := v.t
 	obj := "stream " + t.HistoryStream
 	s, err := v.stream(ctx, obj, t.HistoryStream)
 	if s == nil || err != nil {
 		return err
 	}
+	v.history = true
 	info := s.CachedInfo()
 	cfg := info.Config
 	req := func(field, format string, args ...any) { v.add(FindingRequired, obj, field, format, args...) }
 
 	if subjects := natsHistorySubjects(t.Prefix); !slices.Equal(cfg.Subjects, []string{subjects}) {
-		req("subjects", "are %q; must be exactly %q, where the partitions republish every row", cfg.Subjects, subjects)
+		req("subjects", "are %q; must be exactly %q, where the ingest workers record every row they write", cfg.Subjects, subjects)
 	}
 	if len(cfg.Sources) > 0 || cfg.Mirror != nil {
-		req("sources", "are set; the history must have no sources or mirror, since the partitions' republish already stores every row there")
+		req("sources", "are set; the history must have no sources or mirror, since the ingest workers record every written row there themselves")
 	}
 	if cfg.Retention != jetstream.LimitsPolicy {
 		req("retention", "is %s; must be limits", cfg.Retention)
 	}
-	// A full history never holds up ingest (republish does not wait for it),
-	// but with discard new it stops taking the newest rows SSE wants.
+	// A full history never holds up ingest (the worker acks a row it could
+	// not record), but with discard new it stops taking the newest rows SSE
+	// wants.
 	if cfg.Discard != jetstream.DiscardOld {
 		v.add(FindingRecommended, obj, "discard", "is %s; old keeps the newest rows for SSE when the history is full", cfg.Discard)
+	}
+	// The worker waits for each row's ack before it acks the row off its
+	// partition.
+	if cfg.NoAck {
+		req("no_ack", "is set; must be unset, or every batch the ingest workers record waits out its timeout")
 	}
 	if cfg.MaxAge <= 0 {
 		req("max_age", "is unlimited; must be set, at least the longest gap window a tenant replays")
@@ -733,16 +755,16 @@ func (v *topologyVerifier) history(ctx context.Context) error {
 }
 
 // republish checks that partition p republishes every row it stores to the
-// history, with the partition token dropped from the subject.
+// live subject, with the partition and shard tokens dropped from the subject.
 func (v *topologyVerifier) republish(obj string, rp *jetstream.RePublish, p int) {
 	want := natsRepublish(v.t.Prefix, p)
 	switch {
 	case rp == nil:
-		v.add(FindingRequired, obj, "republish", "is unset; must be {src: %q, dest: %q}, or the history (SSE replay and the live hub) gets nothing", want.Source, want.Destination)
+		v.add(FindingRequired, obj, "republish", "is unset; must be {src: %q, dest: %q}, or no event reaches a live SSE stream", want.Source, want.Destination)
 	case rp.Source != want.Source || rp.Destination != want.Destination:
-		v.add(FindingRequired, obj, "republish", "is {src: %q, dest: %q}; must be {src: %q, dest: %q}", rp.Source, rp.Destination, want.Source, want.Destination)
+		v.add(FindingRequired, obj, "republish", "is {src: %q, dest: %q}; must be {src: %q, dest: %q}, the live subject every API process subscribes to", rp.Source, rp.Destination, want.Source, want.Destination)
 	case rp.HeadersOnly:
-		v.add(FindingRequired, obj, "republish", "is headers_only; the history needs the bodies")
+		v.add(FindingRequired, obj, "republish", "is headers_only; a live SSE stream needs the bodies")
 	}
 }
 

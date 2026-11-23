@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
@@ -32,6 +33,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/Wave-RF/WaveHouse/internal/testutil/logtest"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,7 +48,7 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockPublisher
 	pub := &testutil.MockPublisher{}
 	cache := &testutil.MockCache{}
 	w := &IngestWorker{
-		dlq:     pub,
+		queue:   pub,
 		failed:  make(chan error, 1),
 		clients: chconn.NewHTTPClients(func(*tls.Config) *http.Client { return &http.Client{Transport: rt} }),
 		cache:   cache,
@@ -309,7 +311,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 	// instead of the seed's 5s. StartIngestWorker's own setup is covered by
 	// TestStartIngestWorker_Validation + _StopFunc.
 	worker := &IngestWorker{
-		dlq:     emb,
+		queue:   emb,
 		clients: chconn.NewHTTPClients(ingestHTTPClient),
 		cache:   cache,
 		target: func(tenant.ID) chconn.Target {
@@ -949,6 +951,60 @@ func TestFlushTable_HappyPath(t *testing.T) {
 	)
 }
 
+// A written batch is recorded for replay, whole and in its order, before any
+// of its rows is acked: the ack lets the queue drop the row, and from then on
+// the history is the only place a replay finds it.
+func TestFlushTable_RecordsTheBatchBeforeItsAcks(t *testing.T) {
+	t.Parallel()
+	w, pub, _, wait := newTestWorker(&testutil.MockRoundTripper{})
+	msgs := []*testutil.MockMessage{
+		newIngestMsg(t, "events", "", map[string]any{"id": 1}),
+		newIngestMsg(t, "events", "", map[string]any{"id": 2}),
+		newIngestMsg(t, "events", "", map[string]any{"id": 3}),
+	}
+	ackedAtRecord := -1
+	pub.OnRecord = func([]*mq.Message) {
+		ackedAtRecord = 0
+		for _, m := range msgs {
+			if m.DoubleAcked.Load() {
+				ackedAtRecord++
+			}
+		}
+	}
+
+	flush(context.Background(), w, "events", parseAll(t, w, msgs...))
+	wait()
+
+	assert.Equal(t, []string{string(msgs[0].MsgData), string(msgs[1].MsgData), string(msgs[2].MsgData)}, pub.RecordedData())
+	assert.Zero(t, ackedAtRecord, "no row was acked before the batch was recorded")
+	for i, m := range msgs {
+		assert.True(t, m.DoubleAcked.Load(), "row %d is acked once recorded", i)
+	}
+}
+
+// The history is best effort: rows it could not take are acked all the same,
+// since they are in ClickHouse and one left unacked would be written again.
+// The failure is logged, with how many rows the batch held.
+func TestFlushTable_AHistoryWriteThatFailsStillAcks(t *testing.T) { //nolint:paralleltest // captures the default logger
+	logs := logtest.Capture(t, slog.LevelWarn)
+	rt := &testutil.MockRoundTripper{}
+	w, pub, mc, wait := newTestWorker(rt)
+	pub.RecordErr = errors.New("history unavailable")
+	m1 := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	m2 := newIngestMsg(t, "events", "", map[string]any{"id": 2})
+
+	flush(context.Background(), w, "events", parseAll(t, w, m1, m2))
+	wait()
+
+	assert.Equal(t, int32(1), rt.Hits(), "the rows are written once")
+	assert.True(t, m1.DoubleAcked.Load())
+	assert.True(t, m2.DoubleAcked.Load())
+	assert.False(t, m1.Naked.Load() || m2.Naked.Load(), "a written row is never handed back")
+	assert.NotEmpty(t, mc.GetNamespaces(), "the write still invalidates the cache")
+	assert.Contains(t, logs.String(), "not all recorded for replay")
+	assert.Contains(t, logs.String(), "history unavailable")
+}
+
 // TestFlushTable_MultiScope covers a single table with multiple scopes: one bulk
 // HTTP insert, but each unique scope still gets its own namespace invalidated.
 func TestFlushTable_MultiScope(t *testing.T) {
@@ -1074,6 +1130,9 @@ func TestFlushTable_BadRow_Isolated_GoesToDLQ(t *testing.T) {
 	assert.Equal(t, mq.Topic{Tenant: tenant.Default, Table: "events"}, published[0].Topic)
 	assert.Equal(t, "events", published[0].Headers.Get("X-DLQ-Table"))
 	assert.Contains(t, published[0].Headers.Get("X-DLQ-Error"), "Code: 60")
+	// Isolated rows are written, and so recorded, one at a time.
+	assert.ElementsMatch(t, []string{string(goodA.MsgData), string(goodB.MsgData)}, pub.RecordedData(),
+		"only a written row is recorded for replay: a dead-lettered one never is")
 }
 
 func TestFlushTable_BadRow_DLQDisabledForTable_LeftUnacked(t *testing.T) {
@@ -1106,6 +1165,7 @@ func TestFlushTable_BadRow_DLQDisabledForTable_LeftUnacked(t *testing.T) {
 	assert.True(t, good.DoubleAcked.Load(), "good row must still be acked")
 	assert.False(t, poison.DoubleAcked.Load(), "poison row must stay unacked for redelivery")
 	assert.Empty(t, pub.Published(), "nothing reaches the DLQ while it is disabled for the table")
+	assert.Equal(t, []string{string(good.MsgData)}, pub.RecordedData(), "a row left in the queue is not in the history")
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,7 +1356,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 	require.NoError(t, err)
 
 	worker := &IngestWorker{
-		dlq:     emb,
+		queue:   emb,
 		clients: chconn.NewHTTPClients(ingestHTTPClient),
 		cache:   &testutil.MockCache{},
 		target: func(tenant.ID) chconn.Target {
@@ -1390,7 +1450,7 @@ func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
 	require.NoError(t, err)
 
 	worker := &IngestWorker{
-		dlq:     emb,
+		queue:   emb,
 		clients: chconn.NewHTTPClients(ingestHTTPClient),
 		cache:   &testutil.MockCache{},
 		target: func(tenant.ID) chconn.Target {
@@ -1990,7 +2050,7 @@ func TestDispatchLoop_BatchesPerTenantTable(t *testing.T) {
 	require.NoError(t, err)
 	mc := &testutil.MockCache{}
 	worker := &IngestWorker{
-		dlq:     emb,
+		queue:   emb,
 		clients: chconn.NewHTTPClients(ingestHTTPClient),
 		cache:   mc,
 		// Each tenant's target names its own database.
@@ -2164,7 +2224,7 @@ func TestTableBatcher_Add_HandsBackTheRowsOfATenantWithNoLimits(t *testing.T) {
 	b, w, wait := newTestBatcher(t, rt)
 	w.consumer.AckWait = 45 * time.Second
 	w.limits = func(tenant.ID) (Limits, bool) { return Limits{}, false }
-	pub := w.dlq.(*testutil.MockPublisher)
+	pub := w.queue.(*testutil.MockPublisher)
 
 	held := newIngestMsg(t, "events", "", map[string]any{"id": 1})
 	b.add(context.Background(), parseAll(t, w, held)[0])
@@ -2209,7 +2269,7 @@ func TestTableBatcher_BatchBegunWithoutLimitsIsHandedBackOnceThePoolReturns(t *t
 		}
 		return chconn.Target{}
 	}
-	pub := w.dlq.(*testutil.MockPublisher)
+	pub := w.queue.(*testutil.MockPublisher)
 	inflight := make(chan struct{}) // the previous batch's park, still running
 	b.flushing = inflight
 
@@ -2403,6 +2463,7 @@ func TestFlushTable_ClickHouseUnavailable_RetriedNeverDeadLettered(t *testing.T)
 			}
 			assert.Equal(t, wantHits, rt.Hits(), "one bulk attempt, and isolation only to split a splittable failure")
 			assert.Empty(t, pub.Published(), "an unavailable ClickHouse never dead-letters a row")
+			assert.Empty(t, pub.RecordedData(), "nor is a row it could not take recorded as written")
 			assert.Empty(t, mc.GetNamespaces(), "nothing was written, so nothing is invalidated")
 			for i, m := range msgs {
 				assert.False(t, m.DoubleAcked.Load(), "row %d must stay in the queue", i)
@@ -2948,7 +3009,8 @@ func (c haltingConsumer) Halt() {
 }
 
 // scriptedWorker runs a worker over cons whose ClickHouse records each
-// insert on cons and then waits for gate, if set.
+// insert on cons and then waits for gate, if set, and whose queue records
+// each batch it is given for the replay history.
 func scriptedWorker(t *testing.T, cons mq.Consumer, rec func(string), gate func()) (cancel func(), done <-chan struct{}) {
 	t.Helper()
 	ch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2961,6 +3023,7 @@ func scriptedWorker(t *testing.T, cons mq.Consumer, rec func(string), gate func(
 	}))
 	t.Cleanup(ch.Close)
 	w := &IngestWorker{
+		queue:   &testutil.MockPublisher{OnRecord: func(msgs []*mq.Message) { rec(fmt.Sprintf("record %d", len(msgs))) }},
 		clients: chconn.NewHTTPClients(ingestHTTPClient),
 		cache:   &testutil.MockCache{},
 		target:  func(tenant.ID) chconn.Target { return chconn.Target{URL: ch.URL, Database: "db"} },
@@ -2977,7 +3040,8 @@ func scriptedWorker(t *testing.T, cons mq.Consumer, rec func(string), gate func(
 }
 
 // Stopping halts the consumer before the final flush, writes what it still
-// delivered while halting, and stops it — giving its units up — only after.
+// delivered while halting, records the written rows for replay before it acks
+// any of them, and stops it — giving its units up — only after.
 func TestIngestWorker_StopHaltsBeforeTheFlushAndStopsAfter(t *testing.T) {
 	t.Parallel()
 	cons := haltingConsumer{scriptedConsumer: &scriptedConsumer{}, t: t}
@@ -2988,11 +3052,12 @@ func TestIngestWorker_StopHaltsBeforeTheFlushAndStopsAfter(t *testing.T) {
 	cancel()
 	<-done
 	log := cons.log()
-	require.Len(t, log, 6, "%v", log)
+	require.Len(t, log, 7, "%v", log)
 	require.Equal(t, "halt", log[0], "%v", log)
 	assert.Equal(t, "insert 3", log[1], "the row delivered while halting is written with the rest: %v", log)
-	assert.ElementsMatch(t, []string{"ack a", "ack b", "ack late"}, log[2:5])
-	assert.Equal(t, []string{"stop"}, log[5:], "stopped only after the flush: %v", log)
+	assert.Equal(t, "record 3", log[2], "a row is in the history before the queue lets it go: %v", log)
+	assert.ElementsMatch(t, []string{"ack a", "ack b", "ack late"}, log[3:6])
+	assert.Equal(t, []string{"stop"}, log[6:], "stopped only after the flush: %v", log)
 }
 
 // A consumer that cannot halt may still deliver while the worker flushes:
@@ -3012,5 +3077,5 @@ func TestIngestWorker_StopNaksWhatArrivesAfterItStopsReading(t *testing.T) {
 	}
 	close(release)
 	<-done
-	assert.Equal(t, []string{"insert 1", "ack a", "nak x", "nak y", "nak z", "stop"}, cons.log())
+	assert.Equal(t, []string{"insert 1", "record 1", "ack a", "nak x", "nak y", "nak z", "stop"}, cons.log())
 }

@@ -191,8 +191,7 @@ func TestValidate_MQNATSIgnoredUnderEmbedded(t *testing.T) {
 }
 
 // On a shared queue every role split boots except the one the local cache
-// cannot serve (rule 5; cache.backend: redis lifts it), and a sweeper-only
-// process, which has nothing to run there.
+// cannot serve (rule 5; cache.backend: redis lifts it).
 func TestValidate_SplitsBootOnNATS(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -200,10 +199,9 @@ func TestValidate_SplitsBootOnNATS(t *testing.T) {
 		want  string
 	}{
 		{AllRoles(), ""},
-		{[]Role{RoleAPI, RoleIngest}, ""},
-		{[]Role{RoleSweeper}, "would run nothing"},
+		{[]Role{RoleIngest, RoleAPI}, ""},
 		{[]Role{RoleAPI}, "roles api with cache.backend=local"},
-		{[]Role{RoleIngest, RoleSweeper}, "roles ingest,sweeper with cache.backend=local"},
+		{[]Role{RoleIngest}, "roles ingest with cache.backend=local"},
 	} {
 		cfg := natsBackends()
 		cfg.Roles = tc.roles

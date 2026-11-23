@@ -13,7 +13,8 @@ Real-time consumption of the rows ingested into a table, over `GET /v1/stream` (
   <TabItem label="TypeScript">
 
 ```ts
-// Replay reaches back at most the server's gap window, 15 minutes by default.
+// A replay sends the rows written within the server's gap window (15 minutes
+// by default) and the rows not yet written.
 const stream = wh.from('clicks').stream({ since: new Date(Date.now() - 10 * 60_000).toISOString() });
 
 const unsub = stream.subscribe({
@@ -37,7 +38,8 @@ ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 defer stop()
 
 sub, err := wh.Subscribe(ctx, "clicks", &wavehouse.SubscribeOptions{
-    // Replay reaches back at most the server's gap window, 15 minutes by default.
+    // A replay sends the rows written within the server's gap window (15 minutes
+    // by default) and the rows not yet written.
     Since: time.Now().Add(-10 * time.Minute), // replay the last 10 minutes first
 })
 if err != nil {
@@ -197,7 +199,7 @@ interface StreamEvent<T> {
 
 ```go
 type Event struct {
-    ID         string    // the server's SSE id, when it received the row; a ResumeID
+    ID         string    // the SSE id in force: a live row's own, a replayed row leaves it as it was; a ResumeID
     Table      string
     ReceivedAt time.Time // the server's received_timestamp, parsed; zero if absent
     Columns    []string  // the names, in order; shared between events, don't modify
@@ -248,12 +250,12 @@ A Go client is not subject to CORS or to a browser's per-host connection limit.
 
 ### Resumption
 
-A reconnect resumes from the last event the SDK **delivered**: it sends that event's id as `Last-Event-ID`, and the server gap-fills what was missed. Before any event has been delivered, a reconnect replays from `since` / `Since` when you gave one, else from the start of the first live connection, taken from the server's `Date` header (or the local clock less 5 s when there is none), so rows ingested during the backoff are not lost. In Go, `ResumeID` starts a new subscription after a checkpointed event.
+A reconnect resumes from the last **live** event the SDK delivered: it sends that event's id as `Last-Event-ID`, and the server gap-fills what was missed. A replayed event carries no id of its own, because the server does not replay in timestamp order ([Replay](/api#replay)), so it leaves the resume point where it was: a stream that drops in the middle of a replay is sent that replay again from its start. In Go, a replayed event's `ID` is the id the stream is resuming from, `""` when there is none yet. Before any live event has been delivered, a reconnect replays from `since` / `Since` when you gave one, else from the start of the first live connection, taken from the server's `Date` header (or the local clock less 5 s when there is none), so rows ingested during the backoff are not lost. In Go, `ResumeID` starts a new subscription after a checkpointed event.
 
 :::caution[Resumption is at-least-once, and time-bounded]
-Delivery across a reconnect is **at-least-once**. The event id is the time the server received the event, and the server replays from that instant inclusively, so the last event you saw, and anything sharing its timestamp, arrives again; every row of one ingest request shares one id. Neither SDK deduplicates live events, so key on your own row identity if duplicates matter.
+Delivery across a reconnect is **at-least-once**. The event id is the time the server received the event, and the server replays from that instant inclusively, so the last event you saw, and anything sharing its timestamp, arrives again; every row of one ingest request shares one id. A replay can also send a row twice, and repeats in full when the stream drops before its first live event. Neither SDK deduplicates events, so key on your own row identity if duplicates matter.
 
-Replay is also bounded by the server's gap window: [`stream.gap_window_minutes`](/settings-directory#streaming), 15 minutes by default, or under [`mq.backend: nats`](/deployment#external-nats) the history stream's `max_age`. A drop longer than that resumes with a hole and **no signal**, because the purged messages are gone ([#951](https://github.com/Wave-RF/WaveHouse/issues/951)); so does a replay spanning the upgrade across the [v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope). Backfill over REST if you need those events.
+Replay of the rows already written to ClickHouse is also bounded by the server's gap window, counted from the write: [`stream.gap_window_minutes`](/settings-directory#streaming), 15 minutes by default, or under [`mq.backend: nats`](/deployment#external-nats) the history stream's `max_age`. A row not yet written is replayed whatever its age. A drop longer than the window resumes with a hole and **no signal**, because the expired rows are gone from the queue ([#951](https://github.com/Wave-RF/WaveHouse/issues/951)); so does a replay spanning the upgrade across the [v2 ingest envelope](/deployment#upgrading-across-the-v2-ingest-envelope). Backfill over REST if you need those events.
 
 Two more server limitations: events published while a connection opens can be missed ([#784](https://github.com/Wave-RF/WaveHouse/issues/784)), and a column change across a gap-fill may not be re-announced ([#543](https://github.com/Wave-RF/WaveHouse/issues/543)). For the second, both SDKs refuse a row whose length disagrees with the announced columns and reconnect, which makes the server announce them again, so an added or removed column costs a reconnect rather than mislabeled values. A **same-length** change (a `RENAME COLUMN`, or a drop paired with an add) is the case a length check cannot see: values are zipped under the wrong names until the next announcement or reconnect.
 :::

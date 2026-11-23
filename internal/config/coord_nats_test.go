@@ -45,9 +45,7 @@ func TestUnboundEnv_KnowsTheCoordNATSVariables(t *testing.T) {
 
 // Rules 3 and 4 (#613): NATS leases need the NATS connection, and a process
 // ingesting a shared queue needs shared leases for its shards; one without
-// ingest holds no lease there, so it may keep coord.backend=local. The
-// sweeper is not wired on nats, so a process that would run only it is
-// refused.
+// ingest holds no lease there, so it may keep coord.backend=local.
 func TestValidate_CoordAgainstMQ(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -63,8 +61,6 @@ func TestValidate_CoordAgainstMQ(t *testing.T) {
 		{"rule 4: every role on a local lease", MQNATS, CoordLocal, AllRoles(), "coord.backend=local with mq.backend=nats in a process running ingest"},
 		{"rule 4: an ingest-only process", MQNATS, CoordLocal, []Role{RoleIngest}, "set coord.backend=nats"},
 		{"rule 4 spares a process without ingest", MQNATS, CoordLocal, []Role{RoleAPI}, "-"},
-		{"a sweeper-only process runs nothing on nats", MQNATS, CoordNATS, []Role{RoleSweeper}, "would run nothing"},
-		{"a sweeper-only process runs nothing, whatever the coordinator", MQNATS, CoordLocal, []Role{RoleSweeper}, "would run nothing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

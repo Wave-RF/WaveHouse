@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -253,6 +254,122 @@ func (b blockingReplayer) ReplaySince(ctx context.Context, _ mq.Topic, _ time.Ti
 	close(b.started)
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+// scriptedReplayer answers every gap-fill with its events, in order, and
+// reports the time each one was asked to replay from.
+type scriptedReplayer struct {
+	events []string
+	since  chan time.Time
+}
+
+func (r scriptedReplayer) ReplaySince(_ context.Context, _ mq.Topic, since time.Time, send func([]byte) bool) error {
+	r.since <- since
+	for _, e := range r.events {
+		if !send([]byte(e)) {
+			return nil
+		}
+	}
+	return nil
+}
+
+// clickEvent is a published event of the clicks table carrying n, received at
+// receivedAt.
+func clickEvent(receivedAt string, n int) string {
+	return fmt.Sprintf(`{"table_name":"clicks","scope":"","received_timestamp":%q,"format":"JSONCompactEachRow","columns":["n"],"row":[%d]}`, receivedAt, n)
+}
+
+// rowFrames is the data frames of an SSE body, each as written, keyed by the
+// row it carries.
+func rowFrames(body string) map[string]string {
+	frames := map[string]string{}
+	for frame := range strings.SplitSeq(body, "\n\n") {
+		if _, row, ok := strings.Cut(frame, `"row":`); ok && !strings.HasPrefix(frame, "event: schema") {
+			frames[strings.TrimSuffix(row, "}")] = frame
+		}
+	}
+	return frames
+}
+
+// Only a live row moves the client's resume point. A replay sends rows in the
+// order they were written, then the ones still waiting, so a replayed row's
+// timestamp says nothing about which others the client has: it is written
+// with no id: line, and a client that drops mid-replay resumes from where the
+// replay began. A live row keeps its received_timestamp as its id.
+func TestSSE_OnlyLiveRowsMoveTheResumePoint(t *testing.T) {
+	t.Parallel()
+	hub := stream.NewHub(nil, nil, nil)
+	replayer := scriptedReplayer{
+		// Written late: the newer row was inserted first.
+		events: []string{clickEvent("2026-11-23T10:00:05Z", 2), clickEvent("2026-11-23T10:00:01Z", 1)},
+		since:  make(chan time.Time, 1),
+	}
+	h := &StreamHandler{Hub: hub, Replayer: replayer}
+	topic := mq.Topic{Tenant: tenant.Default, Table: "clicks"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)
+	req.Header.Set("Last-Event-ID", "2026-11-23T10:00:00Z")
+	w := &streamRecorder{ResponseRecorder: httptest.NewRecorder()}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.Handle(w, withTenant(req))
+	}()
+	require.Eventually(t, func() bool { return len(rowFrames(w.written())) == 2 }, 5*time.Second, 5*time.Millisecond, "the replay was not written")
+	assert.Equal(t, time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC), <-replayer.since)
+
+	hub.Broadcast(topic, []byte(clickEvent("2026-11-23T10:00:09Z", 3)))
+	require.Eventually(t, func() bool { return len(rowFrames(w.written())) == 3 }, 5*time.Second, 5*time.Millisecond, "the live row was not written")
+	cancel()
+	<-done
+
+	body := w.written()
+	frames := rowFrames(body)
+	for _, row := range []string{"[2]", "[1]"} {
+		assert.True(t, strings.HasPrefix(frames[row], "data: "), "a replayed row is written from its data: %q", frames[row])
+	}
+	assert.True(t, strings.HasPrefix(frames["[3]"], "id: 2026-11-23T10:00:09Z\ndata: "), "a live row leads with its id: %q", frames["[3]"])
+	assert.Equal(t, 1, strings.Count(body, "\nid:"), "one id: line in the stream, the live row's: %q", body)
+	assert.Less(t, strings.Index(body, `"row":[1]`), strings.Index(body, `"row":[3]`), "the replay is written ahead of what arrived live meanwhile")
+}
+
+// When the MQ's live feed may have skipped rows the hub ends every stream
+// (stream.Hub.EvictAll), and a row broadcast after that is not written to a
+// stream on its way out: its id would move the client past the rows it was
+// never sent, where the last one it holds is the point to replay from.
+func TestSSE_EndsWhenTheLiveFeedIsInterrupted(t *testing.T) {
+	t.Parallel()
+	hub := stream.NewHub(nil, nil, nil)
+	h := &StreamHandler{Hub: hub}
+	topic := mq.Topic{Tenant: tenant.Default, Table: "clicks"}
+
+	// The request is never cancelled: the handler returns only by ending the
+	// stream itself.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	w := &streamRecorder{ResponseRecorder: httptest.NewRecorder()}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.Handle(w, withTenant(httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)))
+	}()
+	require.Eventually(t, func() bool { return hub.Len(topic) == 1 }, 5*time.Second, 5*time.Millisecond)
+	hub.Broadcast(topic, []byte(clickEvent("2026-11-23T10:00:01Z", 1)))
+	require.Eventually(t, func() bool { return len(rowFrames(w.written())) == 1 }, 5*time.Second, 5*time.Millisecond)
+
+	hub.EvictAll()
+	hub.Broadcast(topic, []byte(clickEvent("2026-11-23T10:00:03Z", 3))) // row 2 was skipped
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream outlived the feed's interruption")
+	}
+	assert.Zero(t, hub.Len(topic))
+	frames := rowFrames(w.written())
+	assert.Contains(t, frames, "[1]")
+	assert.NotContains(t, frames, "[3]", "a row past the gap reached a stream that was ending")
 }
 
 // A stream ends on its own once its tenant stops being served — removed or

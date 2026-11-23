@@ -114,12 +114,18 @@ func TestVerifyNATSTopology_Findings(t *testing.T) {
 		{"partition interest retention", stream(p0, func(s *jetstream.StreamConfig) { s.Retention = jetstream.InterestPolicy }), spec, req(p0, "retention")},
 		{"partition republish missing", stream(p0, func(s *jetstream.StreamConfig) { s.RePublish = nil }), spec, want{FindingRequired, p0, "republish", "is unset"}},
 		{"partition republish keeps the partition token", stream(p0, func(s *jetstream.StreamConfig) {
-			s.RePublish = &jetstream.RePublish{Source: "wh.ingest.>", Destination: "wh.hist.>"}
+			s.RePublish = &jetstream.RePublish{Source: "wh.ingest.>", Destination: "wh.live.>"}
 		}), spec, want{FindingRequired, p0, "republish", "must be {src"}},
 		{"partition republish keeps the shard token", stream(p0, func(s *jetstream.StreamConfig) {
-			s.RePublish = &jetstream.RePublish{Source: "wh.ingest.0.>", Destination: "wh.hist.>"}
+			s.RePublish = &jetstream.RePublish{Source: "wh.ingest.0.>", Destination: "wh.live.>"}
 		}), spec, want{FindingRequired, p0, "republish", "must be {src"}},
+		// The topology an earlier release checked for: the history fed at
+		// acceptance, and no live subject.
+		{"partition republish into the history", stream(p0, func(s *jetstream.StreamConfig) {
+			s.RePublish = &jetstream.RePublish{Source: "wh.ingest.0.*.>", Destination: "wh.hist.>"}
+		}), spec, want{FindingRequired, p0, "republish", `dest: "wh.live.>"`}},
 		{"partition republish headers only", stream(p0, func(s *jetstream.StreamConfig) { s.RePublish.HeadersOnly = true }), spec, want{FindingRequired, p0, "republish", "headers_only"}},
+		{"partition allow_direct", stream(p0, func(s *jetstream.StreamConfig) { s.AllowDirect = false }), spec, req(p0, "allow_direct")},
 		{"partition discard", stream(p0, func(s *jetstream.StreamConfig) {
 			s.Discard, s.DiscardNewPerSubject = jetstream.DiscardOld, false
 		}), spec, req(p0, "discard")},
@@ -215,6 +221,7 @@ func TestVerifyNATSTopology_Findings(t *testing.T) {
 		}), spec, req(history, "sources")},
 		{"history retention", stream(history, func(s *jetstream.StreamConfig) { s.Retention = jetstream.InterestPolicy }), spec, req(history, "retention")},
 		{"history discard", stream(history, func(s *jetstream.StreamConfig) { s.Discard = jetstream.DiscardNew }), spec, rec(history, "discard")},
+		{"history no_ack", stream(history, func(s *jetstream.StreamConfig) { s.NoAck = true }), spec, req(history, "no_ack")},
 		{"history max_age", stream(history, func(s *jetstream.StreamConfig) { s.MaxAge = 0 }), spec, req(history, "max_age")},
 		{"history max_bytes", stream(history, func(s *jetstream.StreamConfig) { s.MaxBytes = -1 }), spec, rec(history, "max_bytes")},
 		{"history at one replica", nil, spec, want{FindingRecommended, history, "num_replicas", "sync_interval"}},

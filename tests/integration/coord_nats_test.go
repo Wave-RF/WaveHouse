@@ -20,9 +20,8 @@ import (
 )
 
 // Two full replicas on one NATS, through the shipped lease bucket as the
-// restricted wavehouse user, each hold a shard claim membership lease, and
-// take no sweeper lease: under nats retention is the operator's streams', so
-// no sweeper is wired. When one stops, its membership lease is resigned.
+// restricted wavehouse user, each hold a shard claim membership lease. When
+// one stops, its membership lease is resigned.
 func TestCoordNATS_ReplicasShareTheShards(t *testing.T) {
 	e := env(t)
 	ctx := context.Background()
@@ -54,9 +53,6 @@ func TestCoordNATS_ReplicasShareTheShards(t *testing.T) {
 	for id := range members() {
 		assert.Contains(t, replicas, id)
 	}
-	sweeper, err := op.LeaseHolder(ctx, natstest.CoordBucket, "sweeper")
-	require.NoError(t, err)
-	assert.Empty(t, sweeper, "no sweeper runs under nats")
 
 	var first string
 	for id := range replicas {

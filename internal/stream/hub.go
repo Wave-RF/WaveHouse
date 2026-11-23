@@ -221,6 +221,16 @@ func (h *Hub) Prune(served func(tenant.ID) bool) {
 	}
 }
 
+// EvictAll evicts every subscriber, so each handler ends its stream and each
+// client reconnects and replays from its Last-Event-ID. The MQ's live feed
+// asks for it when it may have skipped events (mq.Subscriber): a stream left
+// open would be sent a later event, whose id would become the client's resume
+// point, past the events it was never sent. An evicted subscriber takes no
+// further frame (Subscriber.Send), so none slips in before its handler ends.
+func (h *Hub) EvictAll() {
+	h.Prune(func(tenant.ID) bool { return false })
+}
+
 // roleBucket pairs a subscribed role with its bucket for the lock-free fan-out.
 type roleBucket struct {
 	role   string
@@ -663,7 +673,7 @@ func planForRole(p *policy.Policy, filter bool, role string, ev *eventView, kind
 		if filter || !json.Valid(ev.raw) {
 			return rolePlan{}, false
 		}
-		return rolePlan{data: Frame{Kind: kind, Data: wireFrame("", ev.raw)}}, true
+		return rolePlan{data: eventFrame(kind, "", ev.raw)}, true
 	}
 	if !ev.usable {
 		// The envelope decoded but declares a format we don't know, or its columns
@@ -690,8 +700,24 @@ func planForRole(p *policy.Policy, filter bool, role string, ev *eventView, kind
 		announce:  true,
 		table:     ev.evt.TableName,
 		projected: projected,
-		data:      Frame{Kind: kind, Data: wireFrame(ev.evt.ReceivedTimestamp, dataPayload(ev, idx))},
+		data:      eventFrame(kind, ev.evt.ReceivedTimestamp, dataPayload(ev, idx)),
 	}, true
+}
+
+// eventFrame assembles one data frame of kind. Only a live frame carries an
+// "id:" line. A replay sends events in the order they were written to
+// ClickHouse, then the ones still waiting, so a replayed event's timestamp
+// says nothing about which others the client has: resuming from it after a
+// drop mid-replay would skip the older ones not yet sent. Leaving the line out
+// leaves the client's Last-Event-ID where it was, so it replays from the same
+// point again. A live frame's timestamp is a safe point to resume from: live
+// events arrive in the order the queue accepted them, and each one's
+// timestamp was taken before it was accepted.
+func eventFrame(kind, receivedAt string, payload []byte) Frame {
+	if kind == KindReplay {
+		return Frame{Kind: kind, Data: dataLines(nil, payload)}
+	}
+	return Frame{Kind: kind, Data: wireFrame(receivedAt, payload)}
 }
 
 // projectIndices selects the positions of cols the role may read, returning both
@@ -784,9 +810,15 @@ func mustJSONString(s string) []byte {
 // can't emit a bare continuation line.
 func wireFrame(id string, payload []byte) []byte {
 	b := append([]byte("id: "), id...)
+	return dataLines(append(b, '\n'), payload)
+}
+
+// dataLines appends payload to b as "data:" lines and ends the frame.
+func dataLines(b, payload []byte) []byte {
 	for line := range bytes.SplitSeq(payload, []byte{'\n'}) {
-		b = append(b, "\ndata: "...)
+		b = append(b, "data: "...)
 		b = append(b, line...)
+		b = append(b, '\n')
 	}
-	return append(b, "\n\n"...)
+	return append(b, '\n')
 }

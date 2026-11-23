@@ -212,7 +212,7 @@ func TestIngestTraceContinuity_EndToEnd(t *testing.T) {
 	cons, err := emb.CreateConsumer(ctx, mq.ConsumerConfig{Durable: BufferConsumerName, MaxAckPending: 1000})
 	require.NoError(t, err)
 	worker := &IngestWorker{
-		dlq:     emb,
+		queue:   emb,
 		clients: chconn.NewHTTPClients(ingestHTTPClient),
 		cache:   &testutil.MockCache{},
 		target: func(tenant.ID) chconn.Target {
@@ -269,10 +269,29 @@ func TestIngestTraceContinuity_EndToEnd(t *testing.T) {
 			linked[l.SpanContext.SpanID()] = true
 		}
 	}
+	flushIDs := map[trace.SpanID]bool{}
+	for _, f := range flushes {
+		flushIDs[f.SpanContext().SpanID()] = true
+	}
+	// A flushed batch is recorded for replay after its flush span has ended,
+	// in the step that acks it: one history write per flush.
+	history := func() (spans []sdktrace.ReadOnlySpan) {
+		for _, s := range rec.Ended() {
+			if s.Name() == "mq.publish" && attr(s, "kind").AsString() == "history" {
+				spans = append(spans, s)
+			}
+		}
+		return spans
+	}
+	require.Eventually(t, func() bool { return len(history()) == len(flushes) }, 4*time.Second, 25*time.Millisecond, "the batch's history write never ended")
+	for _, s := range history() {
+		assert.Equal(t, trace.SpanKindProducer, s.SpanKind())
+		assert.True(t, flushIDs[s.Parent().SpanID()], "the history write is its flush span's child")
+	}
 	// Each publish is a producer span under its request's span.
 	publishedUnder := map[trace.SpanID]trace.SpanID{}
 	for _, s := range rec.Ended() {
-		if s.Name() == "mq.publish" {
+		if s.Name() == "mq.publish" && attr(s, "kind").AsString() == "ingest" {
 			assert.Equal(t, trace.SpanKindProducer, s.SpanKind())
 			publishedUnder[s.SpanContext().SpanID()] = s.Parent().SpanID()
 		}
@@ -288,10 +307,6 @@ func TestIngestTraceContinuity_EndToEnd(t *testing.T) {
 	assert.True(t, linkedRequests[req2.SpanContext().SpanID()], "the flush links to a publish of the second request")
 	assert.Len(t, linkedRequests, 2)
 
-	flushIDs := map[trace.SpanID]bool{}
-	for _, f := range flushes {
-		flushIDs[f.SpanContext().SpanID()] = true
-	}
 	inserted := 0
 	for _, s := range rec.Ended() {
 		if s.Name() != "clickhouse.insert" {

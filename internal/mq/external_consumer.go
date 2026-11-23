@@ -145,8 +145,9 @@ type consumerPart struct {
 	queue []jetstream.Msg
 	held  int
 
-	// wake tells the puller a row settled; ready tells the deliverer rows
-	// are queued.
+	// wake tells the puller there may be room to fetch again: a row settled,
+	// or left the queue for the handler. ready tells the deliverer rows are
+	// queued.
 	wake, ready chan struct{}
 	// halting stops fetching; end stops renewing the pin. fetched closes
 	// once nothing more will be queued, drained once the deliverer has
@@ -239,6 +240,9 @@ func (p *consumerPart) next() (jetstream.Msg, bool) {
 			p.queue[0] = nil
 			p.queue = p.queue[1:]
 			p.mu.Unlock()
+			// A puller that found the queue full waits for this, not for a
+			// settlement the handler may be a long time making.
+			signal(p.wake)
 			return m, true
 		}
 		p.mu.Unlock()
@@ -566,7 +570,7 @@ func (c *externalConsumer) deliver(part *consumerPart, handler func(*Message)) {
 		if !ok {
 			return
 		}
-		msg := c.e.wrapMsg(observability.ExtractHeaders(c.ctx, m.Headers()), m, true)
+		msg := c.e.wrapMsg(observability.ExtractHeaders(c.ctx, m.Headers()), m)
 		letGo := sync.OnceFunc(part.settle)
 		expire := time.AfterFunc(part.ackWait, letGo)
 		msg.OnSettled(func() { expire.Stop(); letGo() })

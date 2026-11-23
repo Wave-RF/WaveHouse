@@ -4,6 +4,7 @@ package mqtest_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/mq/mqtest"
@@ -19,6 +20,7 @@ func TestEmbeddedNATS_Conformance(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = e.Close() })
 			for _, id := range []tenant.ID{mqtest.Acme, mqtest.Globex} {
+				require.NoError(t, e.SetReplayWindow(t.Context(), id, 15*time.Minute))
 				require.NoError(t, e.SetMaxBytes(t.Context(), id, 64<<20))
 			}
 			return e
@@ -45,9 +47,11 @@ func TestEmbeddedNATS_Conformance(t *testing.T) {
 				}
 			}
 		},
+		Window: func(t *testing.T, b mq.Broker, id tenant.ID, window time.Duration) {
+			require.NoError(t, b.SetReplayWindow(t.Context(), id, window))
+		},
 		Caps: mqtest.Caps{
 			PerTenantBudget:    true,
-			PurgesAcked:        true,
 			UnbudgetedNotFound: true,
 			ConfiguresDurables: true,
 		},

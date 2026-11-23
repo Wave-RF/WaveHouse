@@ -28,9 +28,9 @@ func TestLocal_Conformance(t *testing.T) {
 }
 
 func TestLocal_TablesAreIndependent(t *testing.T) {
-	a, err := coord.NewLocal().TryAcquire(t.Context(), "sweeper")
+	a, err := coord.NewLocal().TryAcquire(t.Context(), "lease")
 	require.NoError(t, err)
-	b, err := coord.NewLocal().TryAcquire(t.Context(), "sweeper")
+	b, err := coord.NewLocal().TryAcquire(t.Context(), "lease")
 	require.NoError(t, err, "two processes on local coordination never see each other")
 	assert.Equal(t, a.Token(), b.Token())
 }

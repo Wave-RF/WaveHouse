@@ -71,10 +71,10 @@ func TestNew_NATSBackend(t *testing.T) {
 	assert.True(t, strings.HasPrefix(err.Error(), "ingest worker: "), "the failing component names itself: %v", err)
 }
 
-// Every role under mq.backend: nats wires no sweeper (retention is the
-// operator's stream policy there), and a tenant's gap window is checked
-// against what the history keeps instead, at boot and after a reload.
-func TestNew_NATSWiresNoSweeper(t *testing.T) { //nolint:paralleltest // captures the default logger
+// Under mq.backend: nats the history's retention is the operator's stream
+// policy, so a tenant's gap window is checked against what the history keeps,
+// at boot and after a reload.
+func TestNew_NATSChecksGapWindowsAgainstTheHistory(t *testing.T) { //nolint:paralleltest // captures the default logger
 	srv := natstest.Start(t)
 	cfg := natsConfig(t, srv.URL())
 	cfg.Roles = config.AllRoles()
@@ -82,7 +82,6 @@ func TestNew_NATSWiresNoSweeper(t *testing.T) { //nolint:paralleltest // capture
 	day := map[string]any{"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": 24 * 60, "subscriber_queue": 64}
 	rewriteSettings(t, cfg.Settings.Dir, map[string]any{"stream": day})
 	a := newApp(t, cfg, Options{})
-	assert.NotContains(t, componentNames(a), "sweeper")
 
 	// Captured after New: the boot check already warned for this window, so
 	// reloading it again warns nobody: only a changed window does.

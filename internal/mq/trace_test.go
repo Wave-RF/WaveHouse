@@ -74,14 +74,12 @@ func TestEmbeddedNATS_PublishSpan(t *testing.T) {
 	defer cancel()
 
 	got := make(chan trace.SpanContext, 1)
-	require.NoError(t, e.Subscribe(ctx, "span-consumer", func(msg *Message) error {
-		_ = msg.Ack()
+	require.NoError(t, e.Subscribe(ctx, func(msg *Message) {
 		select {
 		case got <- trace.SpanContextFromContext(msg.Ctx):
 		default:
 		}
-		return nil
-	}))
+	}, func() {}))
 
 	pctx, parent := otel.Tracer("test").Start(ctx, "request")
 	topic := Topic{Tenant: tenant.Default, Table: "default.events"}
@@ -168,11 +166,7 @@ func TestStartPublishBatch(t *testing.T) {
 	defer cancel()
 
 	got := make(chan trace.SpanContext, 3)
-	require.NoError(t, e.Subscribe(ctx, "batch-consumer", func(msg *Message) error {
-		_ = msg.Ack()
-		got <- trace.SpanContextFromContext(msg.Ctx)
-		return nil
-	}))
+	require.NoError(t, e.Subscribe(ctx, func(msg *Message) { got <- trace.SpanContextFromContext(msg.Ctx) }, func() {}))
 
 	pctx, parent := otel.Tracer("test").Start(ctx, "request")
 	bctx, end := StartPublishBatch(pctx)

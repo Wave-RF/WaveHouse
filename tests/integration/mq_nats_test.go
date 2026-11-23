@@ -164,10 +164,9 @@ func awaitEvent(t *testing.T, lines <-chan string, want string) {
 
 // awaitLiveFanOut returns once every stream has received an event that went
 // through the queue after it opened. It works around #784 (a stream says
-// ": connected" before it is registered for live events, and a hub bridge
-// reads the history stream from now on): once that is fixed, drop the probes
-// and assert that no event is lost after ": connected". Each probe is a row
-// of its own, so the rows the test checks are unaffected.
+// ": connected" before it is registered for live events): once that is fixed,
+// drop the probes and assert that no event is lost after ": connected". Each
+// probe is a row of its own, so the rows the test checks are unaffected.
 func awaitLiveFanOut(t *testing.T, p *natsProcess, streams ...<-chan string) {
 	t.Helper()
 	pending := map[int]bool{}
@@ -198,10 +197,11 @@ func awaitLiveFanOut(t *testing.T, p *natsProcess, streams ...<-chan string) {
 // api and ingest. Over a nested directory with two tenants it shows ingest
 // reaching each tenant's own ClickHouse database exactly once whichever
 // worker takes the row, live SSE events reaching the API process that did not
-// ingest them (every hub reads the history), SSE replay from the history,
-// dead-letter counts kept per tenant on the one shared dead-letter stream, and
-// the operator deleting the ingest durable ending every worker, and so every
-// process.
+// ingest them (every API process subscribes to the live subject), SSE replay
+// of written rows from the history, a viewer that dropped resuming on the
+// other process from the id of the last row it was sent, dead-letter counts
+// kept per tenant on the one shared dead-letter stream, and the operator
+// deleting the ingest durable ending every worker, and so every process.
 func TestNATSBackend_EndToEnd(t *testing.T) {
 	t.Parallel()
 	e := env(t)
@@ -262,9 +262,36 @@ func TestNATSBackend_EndToEnd(t *testing.T) {
 	assert.Zero(t, count(databases["acme"], "g1"))
 	assert.Zero(t, count(databases["globex"], "a1"))
 
-	// A reconnect replays from the history stream.
+	// A replay sends the written row, which the worker recorded on the
+	// history stream.
 	replay := b.sse(t, "acme", "table=events&since="+url.QueryEscape(since.Format(time.RFC3339Nano)))
 	awaitEvent(t, replay, `"a1"`)
+
+	// A viewer on B reads a row live and drops. It comes back on A with the
+	// id of that row, and is sent the row accepted while it was away, which
+	// is still waiting on its partition or already written.
+	acme := map[string]string{tenant.Header: "acme", "Content-Type": "application/json"}
+	viewer, drop := openSSE(t, b.baseURL, "table=events", acme)
+	var last sseFrame
+	seen := 0
+	require.Eventually(t, func() bool {
+		seen++
+		status, body := a.do(t, http.MethodPost, "/v1/ingest?table=events", acme, fmt.Sprintf(`{"id":"seen-%d","page":"seen"}`, seen))
+		require.Equal(t, http.StatusOK, status, body)
+		select {
+		case last = <-viewer:
+			return true
+		case <-time.After(500 * time.Millisecond):
+			return false
+		}
+	}, 30*time.Second, time.Millisecond, "no row arrived live")
+	require.NotEmpty(t, last.id, "a live row carries the id a viewer resumes from")
+	drop()
+	status, body := b.do(t, http.MethodPost, "/v1/ingest?table=events", acme, `{"id":"a2","page":"away"}`)
+	require.Equal(t, http.StatusOK, status, body)
+	resumed, _ := openSSE(t, a.baseURL, "table=events", map[string]string{tenant.Header: "acme", "Last-Event-ID": last.id})
+	missed, _ := awaitFrame(t, resumed, `"a2"`)
+	assert.Empty(t, missed.id, "a replayed row moves no resume point")
 
 	// A row no insert can take is parked on the shared dead-letter stream,
 	// and counted for its tenant alone.

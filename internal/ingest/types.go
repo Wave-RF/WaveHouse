@@ -3,7 +3,7 @@ package ingest
 import "encoding/json"
 
 // BufferConsumerName is the durable consumer name used by the ingest
-// worker. The Active Sweeper references this to read the AckFloor.
+// worker.
 const BufferConsumerName = "buffer-consumer"
 
 // FormatJSONCompactEachRow is the only row format the envelope carries today.

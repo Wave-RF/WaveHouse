@@ -77,7 +77,7 @@ Canceling a call (an aborted signal, a done context) ends a wait at once. In Go 
 
 ### Streams
 
-A stream reconnects on its own schedule rather than this one: without limit, on a jittered backoff, resuming from the last delivered event. A retryable answer on a connect (`5xx`, `408` or `429`, unless the body says `retryable: false`) is re-dialed, and its `Retry-After` is honored: TypeScript waits at least that long, clamped to 30 s, and Go waits it, capped at `MaxBackoff`. See [Transport behavior](/sdk/streaming#transport-behavior) for the schedule and what ends a stream.
+A stream reconnects on its own schedule rather than this one: without limit, on a jittered backoff, resuming from the last live event it delivered. A retryable answer on a connect (`5xx`, `408` or `429`, unless the body says `retryable: false`) is re-dialed, and its `Retry-After` is honored: TypeScript waits at least that long, clamped to 30 s, and Go waits it, capped at `MaxBackoff`. See [Transport behavior](/sdk/streaming#transport-behavior) for the schedule and what ends a stream.
 
 ### Attempt timeouts
 

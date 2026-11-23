@@ -21,15 +21,16 @@ const (
 	// Acme and Globex are the tenants Harness.New makes ready to publish.
 	Acme   tenant.ID = "acme"
 	Globex tenant.ID = "globex"
-	// Durable is the consumer the suite creates, consumes and purges by: the
-	// ingest worker's (ingest.BufferConsumerName), so a backend that only
-	// finds durables an operator made has one to find.
+	// Durable is the consumer the suite creates and consumes by: the ingest
+	// worker's (ingest.BufferConsumerName), so a backend that only finds
+	// durables an operator made has one to find.
 	Durable = "buffer-consumer"
 	// wait bounds every wait for something that should happen.
 	wait = 5 * time.Second
 	// quiet is how long a case watches for something that must not happen.
 	quiet = 300 * time.Millisecond
-	// retryPause spaces the polls of a backend whose replay store trails.
+	// retryPause separates two events, or an event and a time, by more than
+	// two clocks read a moment apart can disagree.
 	retryPause = 20 * time.Millisecond
 )
 
@@ -47,7 +48,11 @@ type Harness struct {
 	// Fill makes the next Publish for id refuse with mq.ErrQueueFull. nil
 	// skips the cases that need it.
 	Fill func(t *testing.T, b mq.Broker, id tenant.ID)
-	Caps Caps
+	// Window makes the replay history keep id's written events for window
+	// from their write, those it already holds included: the tenant's replay
+	// window, or the history's limit where that is the operator's.
+	Window func(t *testing.T, b mq.Broker, id tenant.ID, window time.Duration)
+	Caps   Caps
 }
 
 // Caps records where a backend's semantics legitimately differ.
@@ -55,9 +60,6 @@ type Caps struct {
 	// PerTenantBudget: a full queue refuses its own tenant alone, so Fill on
 	// one tenant leaves another publishing.
 	PerTenantBudget bool
-	// PurgesAcked: PurgeAcked removes acknowledged events past the cutoff,
-	// rather than leaving retention to the broker's operator.
-	PurgesAcked bool
 	// UnbudgetedNotFound: DeadLetterCounts of a tenant never given a budget
 	// is mq.ErrNoDeadLetterQueue rather than zero counts.
 	UnbudgetedNotFound bool
@@ -85,6 +87,7 @@ func Run(t *testing.T, h Harness) {
 		{"RoundTrip", true, roundTrip},
 		{"IdempotencyKeyDropsARepeat", true, idempotencyKeyDropsARepeat},
 		{"RefusesATopicWithoutATenant", true, refusesATopicWithoutATenant},
+		{"LiveOnceWhenAccepted", true, liveOnceWhenAccepted},
 		{"SubscribeCarriesTheTraceContext", true, subscribeCarriesTheTraceContext},
 		{"ConsumeCarriesTheTraceContext", true, consumeCarriesTheTraceContext},
 		{"SubscribeSeesEveryTenant", true, subscribeSeesEveryTenant},
@@ -94,6 +97,10 @@ func Run(t *testing.T, h Harness) {
 		{"DeadLetterKeepsTheTopicAndDoesNotAck", true, deadLetterKeepsTheTopicAndDoesNotAck},
 		{"DeadLetterCounts", true, deadLetterCounts},
 		{"ReplaySince", true, replaySince},
+		{"ReplayServesWrittenAndWaitingEvents", true, replayServesWrittenAndWaitingEvents},
+		{"ReplayOrdersWrittenEventsByTheirWrite", true, replayOrdersWrittenEventsByTheirWrite},
+		{"AWaitingEventOutlivesTheReplayWindow", true, aWaitingEventOutlivesTheReplayWindow},
+		{"ReplayCoversEventsWrittenMeanwhile", true, replayCoversEventsWrittenMeanwhile},
 		{"ReplaySinceStopsWhenContextIsDone", true, replaySinceStopsWhenContextIsDone},
 		{"ReplaySincePullFailureIsAnError", true, replaySincePullFailureIsAnError},
 		{"FailedOnceWhenDeliveryEnds", true, failedOnceWhenDeliveryEnds},
@@ -101,8 +108,7 @@ func Run(t *testing.T, h Harness) {
 		{"MaxBytesReportsTheBudget", true, maxBytesReportsTheBudget},
 		{"Stats", true, stats},
 		{"QueueFull", h.Fill != nil, queueFull},
-		{"PurgeAcked", true, purgeAcked},
-		{"PurgeAckedUnknownConsumer", true, purgeAckedUnknownConsumer},
+		{"AnUnackedEventHoldsBackOnlyItself", true, anUnackedEventHoldsBackOnlyItself},
 	}
 	// Not parallel: it swaps the publish histogram, and runs before the
 	// parallel cases start, so no other case's publishes reach it.

@@ -24,5 +24,5 @@ func httpPost(ctx context.Context, url, contentType string, body io.Reader) (*ht
 		return nil, err
 	}
 	req.Header.Set("Content-Type", contentType)
-	return http.DefaultClient.Do(req)
+	return http.DefaultClient.Do(req) //nolint:gosec // G704: a caller's closure-captured URL reads as tainted; every caller posts to the harness's own listener
 }

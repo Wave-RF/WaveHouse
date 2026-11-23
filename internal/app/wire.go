@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"math"
 	"net"
 	"net/http"
 	"os"
@@ -90,31 +89,6 @@ func defaultPolicy(tenants *settings.Registry) *policy.Policy {
 	return store.Policy()
 }
 
-// gapWindows is the history the sweeper keeps for each tenant: its own
-// stream.gap_window_minutes, since each tenant's events have a queue of their
-// own — for a rejected tenant, the window its folder last had, because a
-// rejection is the common reload failure (a typo, fixed minutes later) and
-// its clients resume from Last-Event-ID once it is served again. A removed
-// tenant is not named, so it keeps no history (mq.Purger.PurgeAcked).
-func gapWindows(tenants *settings.Registry) map[tenant.ID]time.Duration {
-	windows := map[tenant.ID]time.Duration{}
-	for id, store := range tenants.Known() {
-		if store == nil {
-			windows[id] = keepEverything
-			continue
-		}
-		windows[id] = store.GapWindow()
-	}
-	return windows
-}
-
-// keepEverything is the window of a tenant whose folder has been rejected
-// since boot: this process has never read its stream.gap_window_minutes, so
-// none of the history its queue holds is known to be past it. A rejected
-// tenant is sent no new events, so what it keeps is what its queue held at
-// boot.
-const keepEverything = time.Duration(math.MaxInt64)
-
 // served reports whether the registry is serving tenant id: what the
 // per-tenant resources — verifiers, dedupe stores, open streams, the cache
 // version index — are pruned by once a reload removes or rejects their
@@ -150,9 +124,7 @@ func perTenant[T any](tenants *settings.Registry, get func(*settings.Store) T) f
 // reason to destroy its row. Parked, it survives until the tenant resolves.
 // So a removed or rejected tenant's queued rows are parked in its own
 // dead-letter queue rather than left unacked for its return: unacked, each
-// would be redelivered every ack wait for as long as the tenant is away, and
-// would hold the tenant's ack floor, so the sweeper could purge none of its
-// queue past it.
+// would be redelivered every ack wait for as long as the tenant is away.
 func dlqFor(tenants *settings.Registry) func(tenant.ID, string) bool {
 	return func(id tenant.ID, table string) bool {
 		store, ok := tenants.For(id)
@@ -585,12 +557,14 @@ func (a *App) adoptMQ(broker mq.Broker) {
 }
 
 // wireEmbeddedMQ starts the embedded NATS under data_dir/nats and hands it
-// each served tenant's mq.max_bytes_gb, which opens that tenant's queue the
-// first time. The budget is hot-reloadable: after every
-// reload the registry applies, each served tenant's is handed over again,
-// and the MQ owns how it is split across the tenant's queues and keeps them
-// consistent (see mq.Broker.SetMaxBytes). A tenant no longer served keeps
-// its queue at the budget it last had. A queue that cannot be opened or
+// each served tenant's stream.gap_window_minutes, how long the queue keeps a
+// written row for replay, and its mq.max_bytes_gb, which opens that tenant's
+// queue the first time. Both are hot-reloadable: after every
+// reload the registry applies, each served tenant's are handed over again,
+// and the MQ owns how the budget is split across the tenant's queues and
+// keeps them consistent (see mq.Broker.SetMaxBytes and SetReplayWindow). A
+// tenant no longer served keeps its queue at the budget and the window it
+// last had. A queue that cannot be opened or
 // resized follows the registry's rule for the shape: a flat directory
 // refuses boot, like every other store, and on a reload logs it, keeping the
 // previous budget; a nested directory logs it at boot too, so it never costs
@@ -619,6 +593,12 @@ func (a *App) wireEmbeddedMQ(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
 				errs = append(errs, err)
 				break
+			}
+			// The window first: a queue opened below opens with it.
+			if err := broker.SetReplayWindow(ctx, id, store.GapWindow()); err != nil {
+				slog.Error("mq replay window not reconciled with settings; the next reload retries", "tenant", id, "error", err)
+				errs = append(errs, fmt.Errorf("tenant %s: %w", id, err))
+				continue
 			}
 			mb := store.MQMaxBytes()
 			if mb == broker.MaxBytes(id) {
@@ -739,32 +719,6 @@ func (a *App) wireCoord(ctx context.Context) error {
 	}
 }
 
-// sweeperLease is the lease the sweeper runs under, one sweeper per queue.
-const sweeperLease = "sweeper"
-
-// elected runs fn only while this process holds lease, campaigning again
-// whenever the term ends (coord.RunElected): the loop of a role that must
-// run in one process at a time, however many processes run the role.
-func (a *App) elected(lease string, fn func(ctx context.Context) error) func(ctx context.Context) error {
-	return func(ctx context.Context) error {
-		return coord.RunElected(ctx, a.coord, lease, coord.RetryPeriod, func(ctx context.Context, _ coord.Term) error {
-			return fn(ctx)
-		})
-	}
-}
-
-// wireSweeper adds the active sweeper — purges messages that are both
-// written to ClickHouse and older than their tenant's SSE gap window (its own
-// stream.gap_window_minutes, re-read every sweep — see gapWindows). Runs
-// every minute, while this process holds the sweeper lease.
-func (a *App) wireSweeper() {
-	sweeper := ingest.NewSweeper(a.mq, func() map[tenant.ID]time.Duration { return gapWindows(a.tenants) })
-	a.add(component{name: "sweeper", run: a.elected(sweeperLease, func(ctx context.Context) error {
-		sweeper.Start(ctx)
-		return nil
-	})})
-}
-
 // wireStreaming builds the SSE fan-out: one metric set shared by the Hub
 // (drop counts) and the stream handler (write counts); the Hub that
 // projects/serializes each event once per (topic, role) and pushes it to
@@ -778,17 +732,18 @@ func (a *App) wireStreaming() {
 	a.hub = stream.NewHub(perTenant(a.tenants, (*settings.Store).Policy), a.discoveries.For, a.sseMetrics)
 	a.tenants.AfterAdopt(func([]tenant.ID) { a.hub.Prune(a.served) })
 
-	// Hub bridge: MQ → broadcast to connected SSE clients. The Hub decodes and
-	// projects each event itself (skipping malformed payloads) under the
-	// tenant the message's topic names, so the bridge just forwards the topic
-	// and the raw bytes, and acks.
+	// Hub bridge: the MQ's live feed → broadcast to connected SSE clients. The
+	// Hub decodes and projects each event itself (skipping malformed payloads)
+	// under the tenant the message's topic names, so the bridge just forwards
+	// the topic and the raw bytes. A feed that may have skipped events ends
+	// every open stream before the next one is broadcast, so each client
+	// replays from its Last-Event-ID rather than resuming past the gap.
 	a.add(component{name: "hub bridge", run: func(ctx context.Context) error {
-		err := a.mq.Subscribe(ctx, "hub-bridge", func(msg *mq.Message) error {
+		err := a.mq.Subscribe(ctx, func(msg *mq.Message) {
 			a.hub.Broadcast(msg.Topic(), msg.Data)
-			if err := msg.Ack(); err != nil {
-				slog.Warn("failed to ack message from embedded hub bridge", "error", err)
-			}
-			return nil
+		}, func() {
+			slog.WarnContext(ctx, "the live event feed was interrupted; ending every open stream so each client replays from its Last-Event-ID", "component", "stream")
+			a.hub.EvictAll()
 		})
 		if err != nil {
 			return err

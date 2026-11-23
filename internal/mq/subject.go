@@ -11,14 +11,16 @@ import (
 // The embedded broker's naming. Private to this package: everything else
 // addresses events by Topic.
 const (
-	// Each tenant's queue is a pair of JetStream streams named after it:
-	// INGEST_<tenant> and DLQ_<tenant>. The prefixes differ in their first
-	// letter, so no tenant id makes one kind's name the other's, and the
-	// tenant grammar (tenant.Parse: letters, digits, '_' and '-', at most
-	// tenant.MaxLen bytes) keeps every name inside JetStream's. No namespacing
-	// beyond that: the embedded server is private to the WaveHouse process.
-	ingestStreamPrefix = "INGEST_"
-	dlqStreamPrefix    = "DLQ_"
+	// Each tenant's queue is three JetStream streams named after it:
+	// INGEST_<tenant>, HISTORY_<tenant> and DLQ_<tenant>. The prefixes differ
+	// in their first letter, so no tenant id makes one kind's name another's,
+	// and the tenant grammar (tenant.Parse: letters, digits, '_' and '-', at
+	// most tenant.MaxLen bytes) keeps every name inside JetStream's. No
+	// namespacing beyond that: the embedded server is private to the WaveHouse
+	// process.
+	ingestStreamPrefix  = "INGEST_"
+	historyStreamPrefix = "HISTORY_"
+	dlqStreamPrefix     = "DLQ_"
 
 	// legacyIngestStream / legacyDLQStream are the one pair an earlier build
 	// kept for every tenant. Their subjects (ingest.> and dlq.>) overlap every
@@ -32,15 +34,21 @@ const (
 	// and '-', so it is one token as it is — then the table and scope each
 	// as one encoded token. Tenant first so one wildcard selects a tenant's
 	// traffic (ingest.acme.>), which is what the tenant's streams hold. The
-	// same topic has the same tail on both kinds, so parking a message on the
-	// dead-letter queue is a prefix swap.
+	// same topic has the same tail on every kind, so parking a message on the
+	// dead-letter queue, or recording it in the history, is a prefix swap.
+	// The live subjects are held by no stream: the tenant's ingest stream
+	// republishes every row it stores there (live.go).
 	ingestPrefix = "ingest."
+	livePrefix   = "live."
+	histPrefix   = "hist."
 	dlqPrefix    = "dlq."
 )
 
-// ingestStreamName / dlqStreamName name tenant id's two streams.
-func ingestStreamName(id tenant.ID) string { return ingestStreamPrefix + string(id) }
-func dlqStreamName(id tenant.ID) string    { return dlqStreamPrefix + string(id) }
+// ingestStreamName / historyStreamName / dlqStreamName name tenant id's
+// three streams.
+func ingestStreamName(id tenant.ID) string  { return ingestStreamPrefix + string(id) }
+func historyStreamName(id tenant.ID) string { return historyStreamPrefix + string(id) }
+func dlqStreamName(id tenant.ID) string     { return dlqStreamPrefix + string(id) }
 
 // tenantSubjects is every subject of tenant id's under prefix: what its
 // stream of that kind holds.

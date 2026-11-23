@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"net/url"
 	"os"
@@ -50,10 +51,10 @@ type NATSConfig struct {
 	// default 60s.
 	TopologyWait time.Duration
 
-	// recheckEvery and historyEvery override the periodic checks' intervals
-	// (tests), and activeWithin how recently a unit's durable must have
-	// delivered or had an ack to count as someone's (default its pinned_ttl).
-	recheckEvery, historyEvery, activeWithin time.Duration
+	// recheckEvery overrides the periodic check's interval (tests), and
+	// activeWithin how recently a unit's durable must have delivered or had an
+	// ack to count as someone's (default its pinned_ttl).
+	recheckEvery, activeWithin time.Duration
 }
 
 // NATSTLS is the client side of TLS to the NATS servers.
@@ -69,27 +70,14 @@ const (
 	defaultNATSConnectTimeout = 5 * time.Second
 	defaultNATSTopologyWait   = 60 * time.Second
 	// topologyRecheck is how often the topology is checked again after boot,
-	// and historyPoll how often the history and the partitions are read for
-	// the history's gauges: one stream-info call each.
+	// and the history's max_age read with it.
 	topologyRecheck = 5 * time.Minute
-	historyPoll     = 30 * time.Second
 	recheckTimeout  = 30 * time.Second
 	// publishRetries is how many times a publish that got no answer is sent
 	// again, with the same Nats-Msg-Id, so the stream stores it once.
 	publishRetries   = 2
 	publishRetryWait = 250 * time.Millisecond
 	natsDrainTimeout = 5 * time.Second
-	// hubInactiveThreshold and replayInactiveThreshold are how long the
-	// server keeps the history consumers of a pod that went away. A replay's
-	// also has to outlast sending one fetched batch to a slow SSE client,
-	// since no pull is waiting meanwhile; a finished replay deletes its own.
-	hubInactiveThreshold    = time.Minute
-	replayInactiveThreshold = time.Minute
-	// replayPullWait bounds one pull of a replay whose remaining events the
-	// server has already counted, and replayBatch is how many one pull asks
-	// for: a replay is a round trip per batch, not per event.
-	replayPullWait = 2 * time.Second
-	replayBatch    = 256
 	// workerDurable is the ingest worker's durable name
 	// (ingest.BufferConsumerName), which maps to the operator's durable.
 	workerDurable = "buffer-consumer"
@@ -99,15 +87,18 @@ const (
 )
 
 // ExternalNATS is the Broker over an operator-owned NATS cluster (see
-// NATSTopology): every tenant shares N work-queue ingest partitions, a
-// history stream they republish every row to, and one dead-letter stream. It never
-// creates, changes, purges or deletes a stream or a durable. The only
+// NATSTopology): every tenant shares N work-queue ingest partitions, each
+// republishing every row it stores to the live subject, a history stream the
+// ingest workers record every written row on, and one dead-letter stream. It
+// never creates, changes, purges or deletes a stream or a durable. The only
 // JetStream objects it creates are auto-expiring consumers on the history
-// stream: one per Subscribe (the hub bridge) and one per replay.
+// stream, for the length of a replay.
 type ExternalNATS struct {
 	topo NATSTopology
 	nc   *nats.Conn
 	js   jetstream.JetStream
+	// hist records written rows on the history stream (Record).
+	hist historyWriter
 	// apiPrefix is the JetStream API's subject prefix, the domain's if set.
 	apiPrefix string
 	// activeWithin overrides each durable's pinned_ttl as the window
@@ -125,14 +116,13 @@ type ExternalNATS struct {
 
 	budgets    sync.Map // tenant.ID → int64
 	budgetNote sync.Once
-	// warnedGap holds, per tenant CheckReplayWindows warned about, the gap
-	// window it warned for.
-	warnedGap sync.Map // tenant.ID → time.Duration
-	// historyMaxAge is the history stream's max_age as last read, and
-	// replayWindows the gap windows CheckReplayWindows was last given, checked
-	// again when the poll reads a different max_age.
+	// replayWindows holds each tenant's replay window as last set, and
+	// warnedGap, per tenant warned about, the window it was warned for.
+	replayWindows sync.Map // tenant.ID → time.Duration
+	warnedGap     sync.Map // tenant.ID → time.Duration
+	// historyMaxAge is the history stream's max_age as last read: the windows
+	// are checked again when a re-check reads a different one.
 	historyMaxAge atomic.Int64
-	replayWindows atomic.Pointer[map[tenant.ID]time.Duration]
 
 	// perms is every publish the server refused the connection, which the
 	// topology check probes the user's shard durable permissions against.
@@ -141,14 +131,14 @@ type ExternalNATS struct {
 	topologyOK atomic.Bool
 	// closing is set by Close, whose own disconnect is not worth a warning.
 	closing atomic.Bool
-	// historyBehind is how far the history's newest row trails the
-	// partitions' newest, as last read (nanoseconds).
-	historyBehind atomic.Int64
-	gauges        metric.Registration
+	gauges  metric.Registration
 
 	mu       sync.Mutex
 	nextID   int
 	stoppers map[int]func()
+	// feeds is every live subscription (Subscribe), told when the connection
+	// is lost and when it is back.
+	feeds map[*liveFeed]struct{}
 
 	// rechecks asks the watch loop for a topology check now: a reconnect
 	// sends one, since the cluster may have come back without a stream.
@@ -187,6 +177,7 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 		activeWithin: cfg.activeWithin,
 		perms:        newNATSPermissionWatch(),
 		stoppers:     map[int]func(){},
+		feeds:        map[*liveFeed]struct{}{},
 		rechecks:     make(chan struct{}, 1),
 		loopDone:     make(chan struct{}),
 		connClosed:   make(chan struct{}),
@@ -205,6 +196,9 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 		e.js, err = jetstream.NewWithDomain(e.nc, cfg.JSDomain)
 	} else {
 		e.js, err = jetstream.New(e.nc)
+	}
+	if err == nil {
+		e.hist, err = newHistoryWriter(e.nc, cfg.JSDomain, topo.PublishTimeout)
 	}
 	if err != nil {
 		e.nc.Close()
@@ -249,7 +243,7 @@ func NewNATS(ctx context.Context, cfg NATSConfig) (*ExternalNATS, error) {
 	e.stopping, e.stop = context.WithCancel(context.Background()) //nolint:gosec // G118: Close calls it
 	go func() {
 		defer observability.Crash("mq_external")
-		e.watch(orDefault(cfg.recheckEvery, topologyRecheck), orDefault(cfg.historyEvery, historyPoll))
+		e.watch(orDefault(cfg.recheckEvery, topologyRecheck))
 		close(e.loopDone)
 	}()
 	return e, nil
@@ -297,6 +291,9 @@ func (e *ExternalNATS) connectOptions(cfg NATSConfig) ([]nats.Option, error) {
 		nats.PingInterval(20 * time.Second),
 		nats.MaxPingsOutstanding(3),
 		nats.CustomInboxPrefix(natsInboxPrefix(e.topo.Prefix)),
+		// A subscription the server refuses says so, which the topology check
+		// probes the live subject with.
+		nats.PermissionErrOnSubscribe(true),
 		nats.DrainTimeout(natsDrainTimeout),
 		nats.ConnectHandler(func(*nats.Conn) { e.connected.Store(true) }),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
@@ -304,10 +301,18 @@ func (e *ExternalNATS) connectOptions(cfg NATSConfig) ([]nats.Option, error) {
 			if !e.closing.Load() {
 				slog.Warn("mq: disconnected from nats; reconnecting", "component", "nats", "error", err)
 			}
+			// Whatever the partitions store from here on never reaches the
+			// live subscriptions.
+			for _, f := range e.liveFeeds() {
+				f.disconnected()
+			}
 		}),
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			e.connected.Store(true)
 			slog.Info("mq: reconnected to nats", "component", "nats", "url", nc.ConnectedUrlRedacted())
+			for _, f := range e.liveFeeds() {
+				f.reconnected()
+			}
 			select {
 			case e.rechecks <- struct{}{}:
 			default: // one is already due
@@ -421,12 +426,10 @@ func (e *ExternalNATS) readExtras(ctx context.Context) error {
 	return nil
 }
 
-// watch re-checks the topology and polls the history until Close.
-func (e *ExternalNATS) watch(recheck, poll time.Duration) {
+// watch re-checks the topology until Close.
+func (e *ExternalNATS) watch(recheck time.Duration) {
 	topology := time.NewTicker(recheck)
 	defer topology.Stop()
-	history := time.NewTicker(poll)
-	defer history.Stop()
 	for {
 		select {
 		case <-e.stopping.Done():
@@ -435,12 +438,6 @@ func (e *ExternalNATS) watch(recheck, poll time.Duration) {
 			e.recheck()
 		case <-e.rechecks:
 			e.recheck()
-		case <-history.C:
-			ctx, cancel := context.WithTimeout(e.stopping, recheckTimeout)
-			if err := e.readHistory(ctx); err != nil {
-				slog.Warn("mq: read the nats history stream", "component", "nats", "error", err)
-			}
-			cancel()
 		}
 	}
 }
@@ -471,6 +468,9 @@ func (e *ExternalNATS) recheck() {
 	if err := e.readExtras(ctx); err != nil {
 		slog.Warn("mq: could not list the shard durables outside the configured ones", "component", "nats", "error", err)
 	}
+	if err := e.readHistory(ctx); err != nil {
+		slog.Warn("mq: read the nats history stream", "component", "nats", "error", err)
+	}
 	was := e.topologyOK.Swap(len(faults) == 0)
 	switch {
 	case len(faults) > 0:
@@ -480,45 +480,24 @@ func (e *ExternalNATS) recheck() {
 	}
 }
 
-// readHistory reads the history stream's max_age, and how far its newest row
-// trails the newest row any partition stored. Republish is best effort, so
-// the history misses what the partitions stored while it refused rows (full,
-// or electing a leader); the gap shows until the next row reaches it. The
-// partitions are read first, so a row stored while the history is read
-// counts as newer only if the history really lacks it.
+// readHistory reads the history stream's max_age, and checks every tenant's
+// replay window against it again when it has changed.
 func (e *ExternalNATS) readHistory(ctx context.Context) error {
-	var newest time.Time
-	for _, name := range e.partitions {
-		p, err := e.js.Stream(ctx, name)
-		if err != nil {
-			return fmt.Errorf("partition stream %s: %w", name, err)
-		}
-		if last := p.CachedInfo().State.LastTime; last.After(newest) {
-			newest = last
-		}
-	}
 	s, err := e.js.Stream(ctx, e.topo.HistoryStream)
 	if err != nil {
 		return fmt.Errorf("history stream %s: %w", e.topo.HistoryStream, err)
 	}
-	info := s.CachedInfo()
-	if prev := e.historyMaxAge.Swap(int64(info.Config.MaxAge)); prev != int64(info.Config.MaxAge) {
-		if w := e.replayWindows.Load(); w != nil {
-			e.CheckReplayWindows(*w)
-		}
+	maxAge := int64(s.CachedInfo().Config.MaxAge)
+	if prev := e.historyMaxAge.Swap(maxAge); prev != maxAge {
+		e.replayWindows.Range(func(id, window any) bool {
+			e.checkReplayWindow(id.(tenant.ID), window.(time.Duration))
+			return true
+		})
 	}
-	// An empty history has no last row: it has seen nothing since it was
-	// created, so rows the partitions stored before that are not its gap.
-	since := info.State.LastTime
-	if since.IsZero() {
-		since = info.Created
-	}
-	e.historyBehind.Store(int64(max(0, newest.Sub(since))))
 	return nil
 }
 
-// registerGauges reports the connection, the topology check, and how far the
-// history trails the partitions.
+// registerGauges reports the connection and the topology check.
 func (e *ExternalNATS) registerGauges() (metric.Registration, error) {
 	meter := otel.Meter("wavehouse-mq")
 	connected, err := meter.Int64ObservableGauge("wavehouse_mq_connected",
@@ -531,17 +510,11 @@ func (e *ExternalNATS) registerGauges() (metric.Registration, error) {
 	if err != nil {
 		return nil, err
 	}
-	behind, err := meter.Float64ObservableGauge("wavehouse_mq_history_behind_seconds",
-		metric.WithDescription("How far the history stream's newest row trails the newest row an ingest partition stored; one that stays up or grows means the history is not taking rows, which SSE replay and the live hub then miss"))
-	if err != nil {
-		return nil, err
-	}
 	return meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		o.ObserveInt64(connected, boolGauge(e.connected.Load()))
 		o.ObserveInt64(topologyOK, boolGauge(e.topologyOK.Load()))
-		o.ObserveFloat64(behind, time.Duration(e.historyBehind.Load()).Seconds())
 		return nil
-	}, connected, topologyOK, behind)
+	}, connected, topologyOK)
 }
 
 func boolGauge(b bool) int64 {
@@ -625,8 +598,9 @@ func (e *ExternalNATS) DeadLetter(ctx context.Context, msg *Message, opts ...Pub
 // stored wherever the subject leads, and a mismatch the ack names is
 // reported as a topology fault and ErrUnavailable, the row left on the other
 // stream. An ingest publish goes without: the partition republishes each row
-// with its headers, and the history would refuse a copy expecting the
-// partition. The publish, retries included, is one mq.publish span of kind.
+// with its headers, and the expectation would ride every copy to every
+// process reading the live feed. The publish, retries included, is one
+// mq.publish span of kind.
 func (e *ExternalNATS) publish(ctx context.Context, kind, subj, stream string, expect bool, data []byte, opts []PublishOpt) (err error) {
 	spanCtx, end := beginPublish(ctx, kind)
 	attempts := 0
@@ -720,62 +694,66 @@ func (e *ExternalNATS) lostTopology(problem string) {
 	slog.Error("mq: nats topology no longer matches what WaveHouse needs", "component", "nats", "problem", problem)
 }
 
-// wrapMsg adapts a delivered message: its topic key is the subject with the
-// prefix and partition stripped.
-func (e *ExternalNATS) wrapMsg(ctx context.Context, m jetstream.Msg, acks bool) *Message {
+// wrapMsg adapts a message a shard durable delivered: its topic key is the
+// subject with the prefix, partition and shard stripped, and it was accepted
+// when its partition stored it.
+func (e *ExternalNATS) wrapMsg(ctx context.Context, m jetstream.Msg) *Message {
 	key, ok := natsTopicKey(e.topo.Prefix, m.Subject())
 	if !ok {
 		key = m.Subject()
 	}
-	if !acks {
-		return newMessage(ctx, key, m.Data(), time.Now(), nil, nil, nil)
+	msg := newMessage(ctx, key, m.Data(), time.Now(), m.DoubleAck, m.Ack, m.Nak, WithNakDelay(m.NakWithDelay))
+	if meta, err := m.Metadata(); err == nil {
+		msg.accepted = meta.Timestamp
 	}
-	return newMessage(ctx, key, m.Data(), time.Now(), m.DoubleAck, m.Ack, m.Nak, WithNakDelay(m.NakWithDelay))
+	return msg
 }
 
-// Subscribe delivers every ingest event stored on the history stream from
-// now on to handler, on one goroutine, until ctx is done or Close. It reads
-// through an ordered ack-less consumer of its own, which skips nothing across
-// reconnects and expires once this process is gone: every pod's hub needs
-// every event, which one shared durable would split between them. So
-// consumerName names nothing here, and a handler error has no redelivery to
-// ask for: it is logged.
-func (e *ExternalNATS) Subscribe(ctx context.Context, consumerName string, handler func(msg *Message) error) error {
-	cons, err := e.js.OrderedConsumer(ctx, e.topo.HistoryStream, jetstream.OrderedConsumerConfig{
-		FilterSubjects:    []string{natsHistorySubjects(e.topo.Prefix)},
-		DeliverPolicy:     jetstream.DeliverNewPolicy,
-		InactiveThreshold: hubInactiveThreshold,
-	})
-	if err != nil {
-		return fmt.Errorf("history consumer: %w", e.apiError(err))
-	}
-	cc, err := cons.Consume(func(m jetstream.Msg) {
-		defer observability.Crash("mq_delivery", slog.String("consumer", consumerName))
-		msg := e.wrapMsg(observability.ExtractHeaders(ctx, m.Headers()), m, false)
-		if err := handler(msg); err != nil {
-			slog.Warn("mq: subscriber could not handle an event", "component", "nats", "consumer", consumerName, "topic", msg.TopicKey(), "error", err)
+// Subscribe delivers every row a partition stores from now on to handler, one
+// at a time, until ctx is done or Close: a plain subscription to the subject
+// the partitions republish to, which every pod's hub holds for itself. A
+// lost connection skips what the partitions stored meanwhile, and a pod that
+// falls far enough behind has rows dropped: either way lost is called before
+// a later row is delivered, and once the connection is back (liveFeed).
+func (e *ExternalNATS) Subscribe(ctx context.Context, handler func(msg *Message), lost func()) error {
+	feed := newLiveFeed(func(m *nats.Msg) {
+		key, ok := natsTopicKey(e.topo.Prefix, m.Subject)
+		if !ok {
+			key = m.Subject
 		}
-	}, jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
-		slog.Warn("mq: history consumer reported an error", "component", "nats", "consumer", consumerName, "error", err)
-	}))
+		handler(newMessage(observability.ExtractHeaders(ctx, Headers(m.Header)), key, m.Data, time.Now(), nil, nil, nil))
+	}, lost, e.nc.IsConnected)
+	stop, stopped, err := subscribeLive(ctx, e.nc, natsLiveSubjects(e.topo.Prefix), feed)
 	if err != nil {
-		return fmt.Errorf("consume history: %w", err)
+		return fmt.Errorf("live subscription: %w", e.apiError(err))
 	}
-	untrack := e.track(cc.Stop)
+	untrack := e.track(stop)
+	e.mu.Lock()
+	e.feeds[feed] = struct{}{}
+	e.mu.Unlock()
 	go func() {
 		defer observability.Crash("mq_external")
-		select {
-		case <-ctx.Done():
-		case <-cc.Closed():
-		}
+		<-stopped
 		untrack()
-		cc.Stop()
+		e.mu.Lock()
+		delete(e.feeds, feed)
+		e.mu.Unlock()
 	}()
 	return nil
 }
 
+// liveFeeds is every live subscription there is.
+func (e *ExternalNATS) liveFeeds() []*liveFeed {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return slices.Collect(maps.Keys(e.feeds))
+}
+
 // apiError marks a JetStream request that got no answer as ErrUnavailable.
 func (e *ExternalNATS) apiError(err error) error {
+	if err == nil {
+		return nil
+	}
 	if noAnswer(err) || errors.Is(err, nats.ErrConnectionClosed) {
 		return fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
@@ -944,117 +922,93 @@ func (e *ExternalNATS) DeadLetterCounts(ctx context.Context, id tenant.ID, table
 	return DeadLetterCounts{Tables: deadLetterTables(info.State.Subjects, prefix, table), Total: total}, nil
 }
 
-// PurgeAcked removes nothing: the partitions delete each row once it is
-// acknowledged, and the history keeps what its max_age allows, both the
-// operator's. No sweeper is wired under this broker, so nothing calls it
-// there; it is here for the Broker contract.
-func (e *ExternalNATS) PurgeAcked(_ context.Context, consumer string, _ map[tenant.ID]time.Time) (bool, error) {
-	if _, ok := e.durable(consumer); !ok {
-		return false, fmt.Errorf("consumer %q: %w", consumer, ErrConsumerNotFound)
+// SetReplayWindow records tenant id's replay window and enforces nothing: the
+// history stream's max_age is the operator's, and every tenant's rows share
+// it. It warns when the window is longer than the history keeps, once per
+// tenant and window, so calling it after every settings reload repeats
+// nothing until a window changes; a re-check that reads a different max_age
+// checks every recorded window again, a tenant's no longer served included.
+// No I/O: max_age is read at boot and with each topology re-check.
+func (e *ExternalNATS) SetReplayWindow(_ context.Context, id tenant.ID, window time.Duration) error {
+	if _, err := tenant.Parse(string(id)); err != nil {
+		return fmt.Errorf("tenant: %w", err)
 	}
-	return false, nil
+	e.replayWindows.Store(id, window)
+	e.checkReplayWindow(id, window)
+	return nil
 }
 
-// CheckReplayWindows warns for each tenant whose gap window is longer than
-// the history stream keeps: SSE replay serves only the last max_age of it.
-// It warns once per tenant and window, so calling it after every settings
-// reload repeats nothing until a window changes. No I/O: max_age is read at
-// boot and by the periodic poll, which runs the check again with the last
-// windows when max_age changes.
-func (e *ExternalNATS) CheckReplayWindows(windows map[tenant.ID]time.Duration) {
-	e.replayWindows.Store(&windows)
+// checkReplayWindow warns when tenant id's window is longer than the history
+// stream keeps a row after it is written: a replay serves only the last
+// max_age of it.
+func (e *ExternalNATS) checkReplayWindow(id tenant.ID, window time.Duration) {
 	maxAge := time.Duration(e.historyMaxAge.Load())
 	if maxAge <= 0 {
 		return
 	}
-	for id, window := range windows {
-		if window <= maxAge {
-			e.warnedGap.Delete(id)
-			continue
-		}
-		if prev, ok := e.warnedGap.Swap(id, window); ok && prev.(time.Duration) == window {
-			continue
-		}
-		slog.Warn("mq: the nats history keeps less than this tenant's gap window; SSE replay serves only the last max_age",
-			"component", "nats", "tenant", id, "history_stream", e.topo.HistoryStream, "max_age", maxAge, "gap_window", window)
+	if window <= maxAge {
+		e.warnedGap.Delete(id)
+		return
 	}
+	if prev, ok := e.warnedGap.Swap(id, window); ok && prev.(time.Duration) == window {
+		return
+	}
+	slog.Warn("mq: the nats history keeps less than this tenant's gap window; SSE replay serves only the rows written within the last max_age",
+		"component", "nats", "tenant", id, "history_stream", e.topo.HistoryStream, "max_age", maxAge, "gap_window", window)
 }
 
-// ReplaySince reads topic's events from the history stream, stored at or
-// after since, through an ack-less consumer of its own that expires once
-// idle, in batches, until send returns false or the events the server
-// counted when the replay began are sent. Anything older than the history's max_age is gone.
-// A pull that fails before then is an error; a done ctx returns ctx's error.
+// Record stores each written row on the history stream under its topic, with
+// the time its partition accepted it, in order, within the topology's
+// PublishTimeout for the batch. It never creates anything: a history stream
+// that is gone, full and refusing, or without a leader costs the batch its
+// replay, and the error says how many rows.
+func (e *ExternalNATS) Record(ctx context.Context, msgs []*Message) error {
+	prefix := e.topo.Prefix + ".hist."
+	return e.hist.record(ctx, msgs, func(m *Message) (string, bool) { return prefix + m.topicKey, true },
+		jetstream.WithExpectStream(e.topo.HistoryStream))
+}
+
+// ReplaySince sends topic's events accepted at or after since: the written
+// ones from the history stream, as long as its max_age keeps them, then the
+// ones still waiting on the partition that holds the topic — and on any
+// stream a lower partition count left behind — then the ones written while
+// those were read (replaySource). The history is read through ack-less
+// consumers of its own, in memory, that expire once idle; the partitions by
+// direct get. A read that fails before the replay catches up is an error; a
+// done ctx returns ctx's error.
 func (e *ExternalNATS) ReplaySince(ctx context.Context, topic Topic, since time.Time, send func(data []byte) bool) error {
-	subj, err := natsHistorySubject(e.topo.Prefix, topic)
+	historySubject, err := natsHistorySubject(e.topo.Prefix, topic)
 	if err != nil {
 		return err
 	}
-	cons, err := e.js.CreateConsumer(ctx, e.topo.HistoryStream, jetstream.ConsumerConfig{
-		FilterSubject:     subj,
-		DeliverPolicy:     jetstream.DeliverByStartTimePolicy,
-		OptStartTime:      &since,
-		AckPolicy:         jetstream.AckNonePolicy,
-		InactiveThreshold: replayInactiveThreshold,
-		MemoryStorage:     true,
-		Replicas:          1,
-	})
+	p, _ := natsRoute(topic, e.topo.Partitions, e.topo.Shards)
+	queues := []replayQueue{{stream: e.partitions[p]}}
+	if queues[0].subject, err = natsWaitingSubject(e.topo.Prefix, p, topic); err != nil {
+		return err
+	}
+	leftover, err := natsWaitingSubject(e.topo.Prefix, -1, topic)
 	if err != nil {
-		return fmt.Errorf("replay consumer: %w", e.apiError(err))
+		return err
 	}
-	defer e.dropConsumer(cons.CachedInfo().Name)
-
-	// Counted once: events published during the replay reach the SSE client
-	// through the live subscription it registered first, so chasing them here
-	// would only send duplicates.
-	remaining := cons.CachedInfo().NumPending
-	for remaining > 0 {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		batch, err := cons.Fetch(int(min(remaining, replayBatch)), jetstream.FetchMaxWait(replayPullWait)) //nolint:gosec // capped
-		if err != nil {
-			return fmt.Errorf("replay fetch: %w", err)
-		}
-		got := 0
-		for msg := range batch.Messages() {
-			got++
-			remaining--
-			if !send(msg.Data()) {
-				return nil
+	if xs := e.extras.Load(); xs != nil {
+		for _, u := range *xs {
+			if !slices.Contains(e.partitions, u.stream) && !slices.ContainsFunc(queues, func(q replayQueue) bool { return q.stream == u.stream }) {
+				queues = append(queues, replayQueue{stream: u.stream, subject: leftover})
 			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if e.nc.IsClosed() || e.nc.IsDraining() {
-				return fmt.Errorf("replay: %w", nats.ErrConnectionClosed)
-			}
-		}
-		if err := batch.Error(); err != nil && !errors.Is(err, nats.ErrTimeout) {
-			return fmt.Errorf("replay fetch: %w", err)
-		}
-		if got == 0 {
-			// The history dropped what was left (max_age) while connected:
-			// that is caught up. A pull that raced the connection closing
-			// can end the same way, and that is not.
-			if e.nc.IsConnected() {
-				return nil
-			}
-			return fmt.Errorf("replay fetch: %w", nats.ErrConnectionClosed)
 		}
 	}
-	return nil
-}
-
-// dropConsumer deletes a finished replay's consumer rather than leaving it to
-// expire, best effort.
-func (e *ExternalNATS) dropConsumer(name string) {
-	if !e.nc.IsConnected() {
-		return
+	src := replaySource{
+		nc: e.nc, js: e.js, apiPrefix: e.apiPrefix,
+		history: e.topo.HistoryStream, historySubject: historySubject,
+		queues: queues,
+		consumer: jetstream.ConsumerConfig{
+			AckPolicy:         jetstream.AckNonePolicy,
+			InactiveThreshold: replayInactiveThreshold,
+			MemoryStorage:     true,
+			Replicas:          1,
+		},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = e.js.DeleteConsumer(ctx, e.topo.HistoryStream, name)
+	return e.apiError(src.replay(ctx, since, send))
 }
 
 // SetMaxBytes records tenant id's budget and enforces nothing: the tenants of

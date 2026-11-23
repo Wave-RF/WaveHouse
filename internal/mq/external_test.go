@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -309,16 +308,11 @@ func TestNewNATS_RefusesConflictingOptions(t *testing.T) {
 }
 
 // The re-check reports a topology the operator broke after boot, and its
-// repair. The history poll reports how far the history trails the partitions:
-// a row stored while the history refused it never reaches it, which shows
-// as a gap until the next row republished closes it.
+// repair.
 func TestExternalNATS_Recheck(t *testing.T) {
 	t.Parallel()
 	f := shippedFixture(t)
-	e := f.broker(t, func(c *NATSConfig) {
-		c.recheckEvery = 50 * time.Millisecond
-		c.historyEvery = 50 * time.Millisecond
-	})
+	e := f.broker(t, func(c *NATSConfig) { c.recheckEvery = 50 * time.Millisecond })
 	require.True(t, e.topologyOK.Load())
 
 	s, err := f.admin.Stream(t.Context(), "WH_DLQ")
@@ -329,36 +323,99 @@ func TestExternalNATS_Recheck(t *testing.T) {
 	_, err = f.admin.CreateStream(t.Context(), dlq)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { return e.topologyOK.Load() }, 5*time.Second, 10*time.Millisecond)
+}
 
+// written consumes e's shard durables as the ingest worker does until n rows
+// have been delivered, recording each as written and then acking it. It
+// returns once the consumer fetches no more, so a row published afterwards
+// stays on its partition.
+func written(t *testing.T, e *ExternalNATS, n int) {
+	t.Helper()
+	cons, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable})
+	require.NoError(t, err)
+	done := make(chan error, n)
+	stop, _, err := cons.Consume(func(m *Message) {
+		err := e.Record(m.Ctx, []*Message{m})
+		if err == nil {
+			err = m.DoubleAck(m.Ctx)
+		}
+		done <- err
+	}, 64)
+	require.NoError(t, err)
+	defer stop()
+	for range n {
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(15 * time.Second):
+			t.Fatal("timed out writing the queued rows")
+		}
+	}
+	cons.(Halter).Halt()
+}
+
+// The history is best effort: one that is full and refusing, or gone, costs a
+// written batch its replay and nothing else. Record says how many rows it
+// could not store, within its timeout, the acks go ahead, and ingest never
+// notices.
+func TestExternalNATS_HistoryOutageCostsOnlyTheReplay(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, func(c *NATSConfig) { c.Topology.PublishTimeout = 500 * time.Millisecond })
 	topic := Topic{Tenant: "acme", Table: "events"}
-	require.NoError(t, e.Publish(t.Context(), topic, []byte("1")))
-	require.Eventually(t, func() bool { return e.historyBehind.Load() == 0 }, 5*time.Second, 10*time.Millisecond, "healthy")
+	cons, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable})
+	require.NoError(t, err)
+	got := make(chan *Message, 8)
+	stop, _, err := cons.Consume(func(m *Message) { got <- m }, 8)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	write := func(data string) error {
+		t.Helper()
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(data)), "ingest does not depend on the history")
+		var m *Message
+		select {
+		case m = <-got:
+		case <-time.After(15 * time.Second):
+			t.Fatal("nothing delivered")
+		}
+		start := time.Now()
+		recordErr := e.Record(t.Context(), []*Message{m})
+		assert.Less(t, time.Since(start), 5*time.Second, "Record is bounded")
+		require.NoError(t, m.DoubleAck(t.Context()))
+		return recordErr
+	}
+	replayed := func() []string {
+		var out []string
+		require.NoError(t, e.ReplaySince(t.Context(), topic, time.Time{}, func(data []byte) bool {
+			out = append(out, string(data))
+			return true
+		}))
+		return out
+	}
+	require.NoError(t, write("kept"))
 
-	// A full history with discard new refuses the next row's copy.
+	// Full, with discard new: the history refuses the row.
 	h, err := f.admin.Stream(t.Context(), "WH_HISTORY")
 	require.NoError(t, err)
 	history := h.CachedInfo().Config
 	full := history
-	msgs := h.CachedInfo().State.Msgs
-	if msgs > math.MaxInt64 {
-		t.Fatalf("history holds %d messages", msgs)
-	}
-	// The guard above bounds the conversion; gosec does not read it.
-	full.MaxMsgs, full.Discard = int64(msgs), jetstream.DiscardNew //nolint:gosec // G115: bounded by the check above
+	full.MaxMsgs, full.Discard = 1, jetstream.DiscardNew
 	_, err = f.admin.UpdateStream(t.Context(), full)
 	require.NoError(t, err)
-	time.Sleep(50 * time.Millisecond) // a gap the gauge can see
-	published := time.Now()
-	require.NoError(t, e.Publish(t.Context(), topic, []byte("2")), "ingest does not depend on the history")
-	require.Eventually(t, func() bool { return e.historyBehind.Load() > 0 }, 5*time.Second, 10*time.Millisecond,
-		"a row the history refused shows as a gap")
-	assert.Less(t, time.Duration(e.historyBehind.Load()), time.Since(published)+time.Second, "the gap is the missed row's, bounded")
+	err = write("refused")
+	require.ErrorContains(t, err, "1 of 1 rows not recorded")
+	assert.Equal(t, []string{"kept"}, replayed(), "the row is in ClickHouse and acked, and no replay has it")
 
-	_, err = f.admin.UpdateStream(t.Context(), history)
+	// Gone: nothing answers, and Record gives up at its timeout.
+	require.NoError(t, f.admin.DeleteStream(t.Context(), "WH_HISTORY"))
+	err = write("unanswered")
+	require.ErrorIs(t, err, ErrUnavailable)
+	assert.Zero(t, f.streamMsgs(t, shippedPartition(mustPartition(topic))), "every written row left its partition")
+
+	_, err = f.admin.CreateStream(t.Context(), history)
 	require.NoError(t, err)
-	require.NoError(t, e.Publish(t.Context(), topic, []byte("3")))
-	require.Eventually(t, func() bool { return e.historyBehind.Load() == 0 }, 5*time.Second, 10*time.Millisecond,
-		"the next row republished closes it")
+	require.NoError(t, write("after"))
+	assert.Equal(t, []string{"after"}, replayed())
 }
 
 // A publish the ack says another stream stored — the operator replaced a
@@ -383,7 +440,7 @@ func TestExternalNATS_PublishStoredElsewhere(t *testing.T) {
 	assert.False(t, e.topologyOK.Load())
 }
 
-// The gauges report the connection, the topology and the history's gap.
+// The gauges report the connection and the topology.
 func TestExternalNATS_Gauges(t *testing.T) { //nolint:paralleltest // sets the global meter provider
 	reader := sdkmetric.NewManualReader()
 	prev := otel.GetMeterProvider()
@@ -411,12 +468,12 @@ func TestExternalNATS_Gauges(t *testing.T) { //nolint:paralleltest // sets the g
 	}
 	assert.Equal(t, []float64{1}, got["wavehouse_mq_connected"])
 	assert.Equal(t, []float64{1}, got["wavehouse_mq_topology_ok"])
-	assert.Equal(t, []float64{0}, got["wavehouse_mq_history_behind_seconds"])
+	assert.NotContains(t, got, "wavehouse_mq_history_behind_seconds", "the history trails the partitions by design now")
 }
 
-// PurgeAcked removes nothing. CheckReplayWindows warns for a tenant whose
-// gap window the history cannot hold, once per window: the same windows warn
-// nobody again, a longer one warns anew, and a window equal to max_age fits.
+// SetReplayWindow warns for a tenant whose gap window the history cannot
+// hold, once per window: the same window warns nobody again, a longer one
+// warns anew, and a window equal to max_age fits.
 func TestExternalNATS_ReplayWindowsAgainstTheHistory(t *testing.T) { //nolint:paralleltest // captures the default logger
 	logs := logtest.Capture(t, slog.LevelWarn)
 	f := shippedFixture(t)
@@ -424,24 +481,24 @@ func TestExternalNATS_ReplayWindowsAgainstTheHistory(t *testing.T) { //nolint:pa
 	maxAge := time.Duration(e.historyMaxAge.Load())
 	require.Positive(t, maxAge, "the shipped history has a max_age")
 
-	purged, err := e.PurgeAcked(t.Context(), workerDurable, map[tenant.ID]time.Time{"acme": time.Now().Add(-2 * maxAge)})
-	require.NoError(t, err)
-	assert.False(t, purged)
-	_, err = e.PurgeAcked(t.Context(), "someone-else", nil)
-	require.ErrorIs(t, err, ErrConsumerNotFound)
-
 	warned := func() int { return strings.Count(logs.String(), "keeps less than this tenant's gap window") }
 	windows := map[tenant.ID]time.Duration{"acme": 2 * maxAge, "globex": time.Minute, "initech": maxAge}
-	e.CheckReplayWindows(windows)
+	set := func() {
+		for id, window := range windows {
+			require.NoError(t, e.SetReplayWindow(t.Context(), id, window))
+		}
+	}
+	set()
 	assert.Equal(t, 1, warned(), "acme only: %s", logs.String())
 	assert.Contains(t, logs.String(), `"tenant":"acme"`)
-	e.CheckReplayWindows(windows)
+	set()
 	assert.Equal(t, 1, warned(), "the same window warns once")
 	windows["acme"] = 3 * maxAge
-	e.CheckReplayWindows(windows)
+	set()
 	assert.Equal(t, 2, warned(), "a longer window warns again")
+	require.Error(t, e.SetReplayWindow(t.Context(), "a.b", time.Minute), "a tenant outside the grammar has no window")
 
-	// The operator shortens the history: the poll checks the last windows again.
+	// The operator shortens the history: the re-check checks every window again.
 	h, err := f.admin.Stream(t.Context(), e.topo.HistoryStream)
 	require.NoError(t, err)
 	shorter := h.CachedInfo().Config
@@ -479,7 +536,9 @@ func TestExternalNATS_CreateConsumerChecksTheDurable(t *testing.T) {
 }
 
 // The shipped permissions refuse the wavehouse user everything that would
-// change the operator's topology.
+// change the operator's topology, and publishing on the live subject, which
+// only a partition's republish writes: a row there reaches every live SSE
+// stream as one the queue accepted.
 func TestNATSPermissions_RefuseTopologyChanges(t *testing.T) {
 	t.Parallel()
 	f := shippedFixture(t)
@@ -520,40 +579,54 @@ func TestNATSPermissions_RefuseTopologyChanges(t *testing.T) {
 	denied("delete a shard durable", call(ctx, func(ctx context.Context) error {
 		return js.DeleteConsumer(ctx, partition, "wh-ingest-0")
 	}))
-	denied("forge a history row", call(ctx, func(ctx context.Context) error {
-		_, err := js.Publish(ctx, "wh.hist.acme.events", []byte("forged"))
-		return err
-	}))
+
+	live, err := f.admin.Conn().SubscribeSync("wh.live.>")
+	require.NoError(t, err)
+	require.NoError(t, f.admin.Conn().Flush())
+	require.NoError(t, js.Conn().Publish("wh.live.acme.events", []byte("forged")))
+	require.NoError(t, js.Conn().Flush())
+	_, err = live.NextMsg(300 * time.Millisecond)
+	require.ErrorIs(t, err, nats.ErrTimeout, "a forged live row was delivered")
 
 	_, err = f.admin.Stream(ctx, "ROGUE")
 	require.ErrorIs(t, err, jetstream.ErrStreamNotFound)
-	h, err := f.admin.Stream(ctx, "WH_HISTORY")
-	require.NoError(t, err)
-	assert.Zero(t, h.CachedInfo().State.Msgs, "only the partitions' republish writes the history")
 	_, err = f.admin.Consumer(ctx, partition, "wh-ingest-0")
 	require.NoError(t, err)
 }
 
-// Each partition republishes a row to the history under its topic, the
-// partition token dropped, headers and body intact: what the hub and a
-// replay read, whatever the partition count.
-func TestExternalNATS_HistoryDropsThePartition(t *testing.T) {
+// Each partition republishes a row to the live subject under its topic, the
+// partition and shard dropped, headers and body intact, and writes nothing to
+// the history: that is the worker's to do once the row is in ClickHouse,
+// under the same topic, with the time the partition accepted the row.
+func TestExternalNATS_LiveAndHistorySubjects(t *testing.T) {
 	t.Parallel()
 	f := shippedFixture(t)
 	e := f.broker(t, nil)
+	live, err := f.admin.Conn().SubscribeSync("wh.live.>")
+	require.NoError(t, err)
+	require.NoError(t, f.admin.Conn().Flush())
+
 	topics := []Topic{{Tenant: "acme", Table: "events"}, {Tenant: "acme", Table: "events", Scope: "eu"}, {Tenant: "globex", Table: "a.b"}}
+	before := time.Now()
 	for _, topic := range topics {
 		require.NoError(t, e.Publish(t.Context(), topic, []byte(topic.Table), WithHeader("X-Test", "kept")))
 	}
+	var subjects []string
+	for range topics {
+		m, err := live.NextMsg(5 * time.Second)
+		require.NoError(t, err)
+		subjects = append(subjects, m.Subject)
+		assert.Equal(t, "kept", m.Header.Get("X-Test"))
+	}
+	assert.ElementsMatch(t, []string{"wh.live.acme.events", "wh.live.acme.events.eu", "wh.live.globex.a%2Eb"}, subjects)
+	assert.Zero(t, f.streamMsgs(t, "WH_HISTORY"), "nothing is in the history before it is written")
+
+	written(t, e, len(topics))
 	h, err := f.admin.Stream(t.Context(), "WH_HISTORY")
 	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		info, err := h.Info(t.Context(), jetstream.WithSubjectFilter(">"))
-		return err == nil && info.State.Msgs == uint64(len(topics))
-	}, 5*time.Second, 10*time.Millisecond)
 	info, err := h.Info(t.Context(), jetstream.WithSubjectFilter(">"))
 	require.NoError(t, err)
-	var subjects []string
+	subjects = subjects[:0]
 	for subj := range info.State.Subjects {
 		subjects = append(subjects, subj)
 	}
@@ -561,7 +634,12 @@ func TestExternalNATS_HistoryDropsThePartition(t *testing.T) {
 	m, err := h.GetLastMsgForSubject(t.Context(), "wh.hist.acme.events")
 	require.NoError(t, err)
 	assert.Equal(t, "events", string(m.Data))
-	assert.Equal(t, "kept", m.Header.Get("X-Test"))
+	accepted, err := time.Parse(time.RFC3339Nano, m.Header.Get(acceptedHeader))
+	require.NoError(t, err)
+	assert.False(t, accepted.Before(before.Add(-time.Second)) || accepted.After(m.Time), "accepted %s, written %s", accepted, m.Time)
+	for p := range 4 {
+		assert.Zero(t, f.streamMsgs(t, shippedPartition(p)), "a written row has left its partition")
+	}
 }
 
 // call runs a request that a permission violation answers by never
@@ -582,16 +660,12 @@ func measure(t *testing.T) {
 }
 
 // A publish's latency until the hub's Subscribe sees it, through the
-// partition and its republish to the history. Design risk 3 moves the hub off the
-// history if p99 passes 50ms.
+// partition and its republish to the live subject.
 func TestExternalNATS_MeasurePublishToHub(t *testing.T) {
 	measure(t)
 	e := shippedFixture(t).broker(t, nil)
 	seen := make(chan time.Time, 1)
-	require.NoError(t, e.Subscribe(t.Context(), "hub-bridge", func(*Message) error {
-		seen <- time.Now()
-		return nil
-	}))
+	require.NoError(t, e.Subscribe(t.Context(), func(*Message) { seen <- time.Now() }, func() {}))
 	topic := Topic{Tenant: "acme", Table: "t"}
 	const n = 2000
 	lat := make([]time.Duration, 0, n)
@@ -650,37 +724,34 @@ func TestExternalNATS_DuplicateWindowCoversEveryRetry(t *testing.T) {
 	assert.Equal(t, 4, n)
 }
 
-// A replay sends the events counted when it began and stops: events that
+// A replay sends the events stored when it began and stops: events that
 // arrive during it reach an SSE client through its live subscription.
 func TestExternalNATS_ReplayDoesNotChaseTheTail(t *testing.T) {
 	t.Parallel()
 	e := shippedFixture(t).broker(t, nil)
 	topic := Topic{Tenant: "acme", Table: "r"}
-	for _, d := range []string{"a", "b", "c"} {
-		require.NoError(t, e.Publish(t.Context(), topic, []byte(d)))
+	publishAll := func(rows ...string) {
+		for _, d := range rows {
+			require.NoError(t, e.Publish(t.Context(), topic, []byte(d)))
+		}
 	}
-	require.Eventually(t, func() bool {
-		n := 0
-		require.NoError(t, e.ReplaySince(t.Context(), topic, time.Time{}, func([]byte) bool { n++; return true }))
-		return n == 3
-	}, 5*time.Second, 20*time.Millisecond)
+	publishAll("a", "b")
+	written(t, e, 2)
+	publishAll("c", "d")
 
 	var got []string
 	require.NoError(t, e.ReplaySince(t.Context(), topic, time.Time{}, func(data []byte) bool {
 		if len(got) == 0 {
-			for range 5 {
-				assert.NoError(t, e.Publish(t.Context(), topic, []byte("late")))
-			}
-			time.Sleep(200 * time.Millisecond) // let the history copy them
+			publishAll("late", "late", "late")
 		}
 		got = append(got, string(data))
 		return true
 	}))
-	assert.Equal(t, []string{"a", "b", "c"}, got)
+	assert.Equal(t, []string{"a", "b", "c", "d"}, got, "the written rows, then the waiting ones, and none accepted meanwhile")
 }
 
-// A replay longer than one fetched batch, sent to a slow client, arrives
-// whole: its consumer outlives the time a batch takes to send.
+// A replay of written rows longer than one fetched batch, sent to a slow
+// client, arrives whole: its consumer outlives the time a batch takes to send.
 func TestExternalNATS_SlowReplayArrivesWhole(t *testing.T) {
 	t.Parallel()
 	e := shippedFixture(t).broker(t, nil)
@@ -689,11 +760,7 @@ func TestExternalNATS_SlowReplayArrivesWhole(t *testing.T) {
 	for i := range n {
 		require.NoError(t, e.Publish(t.Context(), topic, []byte(strconv.Itoa(i))))
 	}
-	require.Eventually(t, func() bool {
-		got := 0
-		require.NoError(t, e.ReplaySince(t.Context(), topic, time.Time{}, func([]byte) bool { got++; return got < n }))
-		return got == n
-	}, 5*time.Second, 20*time.Millisecond)
+	written(t, e, n)
 
 	var got []string
 	require.NoError(t, e.ReplaySince(t.Context(), topic, time.Time{}, func(data []byte) bool {
@@ -707,6 +774,81 @@ func TestExternalNATS_SlowReplayArrivesWhole(t *testing.T) {
 	}
 }
 
+// A row the handler takes and does not settle holds back no other row of its
+// shard: the next one is fetched as soon as the handler has the first, not
+// when a settlement or the pin's renewal next wakes the puller. The prefetch
+// leaves each shard room for one row, so the puller finds its queue full
+// after every fetch.
+func TestExternalNATS_AnUnsettledRowDoesNotHoldBackTheNext(t *testing.T) {
+	t.Parallel()
+	e := shippedFixture(t).broker(t, nil)
+	topic := Topic{Tenant: "acme", Table: "r"}
+	for _, d := range []string{"a", "b", "c"} {
+		require.NoError(t, e.Publish(t.Context(), topic, []byte(d)))
+	}
+	cons, err := e.CreateConsumer(t.Context(), ConsumerConfig{Durable: workerDurable})
+	require.NoError(t, err)
+	got := make(chan string, 4)
+	stop, _, err := cons.Consume(func(m *Message) { got <- string(m.Data) }, 16) // nothing is settled
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	start := time.Now()
+	for _, want := range []string{"a", "b", "c"} {
+		require.Equal(t, want, receive(t, got))
+	}
+	assert.Less(t, time.Since(start), renewEvery/2, "the rows waited on the pin's renewal")
+}
+
+// A reader of the live feed is told when rows may have been skipped: the
+// connection that carries its subscription was lost, and whatever the
+// partitions stored meanwhile never reaches it. lost is called once the
+// connection is back, before a later row is delivered, and not while the
+// broker cannot be reached, when a reader sent back to the replay would find
+// none.
+func TestExternalNATS_LiveFeedReportsALostConnection(t *testing.T) {
+	t.Parallel()
+	f := shippedFixture(t)
+	e := f.broker(t, func(c *NATSConfig) { c.Topology.PublishTimeout = 300 * time.Millisecond })
+	topic := Topic{Tenant: "acme", Table: "t"}
+	subject, _, err := natsIngestSubject("wh", 4, 8, topic)
+	require.NoError(t, err)
+
+	var mu sync.Mutex
+	var events []string
+	note := func(s string) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, s)
+	}
+	seen := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(events)
+	}
+	require.NoError(t, e.Subscribe(t.Context(), func(m *Message) { note(string(m.Data)) }, func() { note("lost") }))
+
+	require.NoError(t, e.Publish(t.Context(), topic, []byte("before")))
+	require.Eventually(t, func() bool { return slices.Equal(seen(), []string{"before"}) }, 5*time.Second, 10*time.Millisecond)
+
+	f.stop()
+	require.Eventually(t, func() bool { return !e.connected.Load() }, 5*time.Second, 10*time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, []string{"before"}, seen(), "nothing is reported while the broker cannot be reached")
+
+	f.restart(t)
+	// Stored by another process, perhaps before this broker's connection is
+	// back: a row it may have missed.
+	_, err = f.connect(t, "wavehouse").Publish(t.Context(), subject, []byte("missed"))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return slices.Contains(seen(), "lost") }, 15*time.Second, 20*time.Millisecond, "the break was never reported")
+	require.Eventually(t, func() bool { return e.Publish(t.Context(), topic, []byte("after")) == nil }, 15*time.Second, 100*time.Millisecond)
+	require.Eventually(t, func() bool { return slices.Contains(seen(), "after") }, 5*time.Second, 10*time.Millisecond)
+
+	got := seen()
+	assert.Equal(t, 1, strings.Count(strings.Join(got, ","), "lost"), "one break, reported once: %v", got)
+	assert.Less(t, slices.Index(got, "lost"), slices.Index(got, "after"), "reported before the next row is delivered: %v", got)
+}
+
 // Closing the broker is not a disconnect worth a warning; losing the server
 // still is.
 func TestExternalNATS_CloseLogsNoWarning(t *testing.T) { //nolint:paralleltest // captures the default logger
@@ -717,7 +859,7 @@ func TestExternalNATS_CloseLogsNoWarning(t *testing.T) { //nolint:paralleltest /
 	require.NoError(t, err)
 	_, _, err = cons.Consume(func(*Message) {}, 16)
 	require.NoError(t, err)
-	require.NoError(t, e.Subscribe(t.Context(), "hub", func(*Message) error { return nil }))
+	require.NoError(t, e.Subscribe(t.Context(), func(*Message) {}, func() {}))
 
 	logs := logtest.Capture(t, slog.LevelWarn)
 	require.NoError(t, e.Close())

@@ -15,11 +15,13 @@ import (
 // The external broker's subjects, on streams every tenant shares:
 //
 //	<prefix>.ingest.<p>.<s>.<tenant>.<table>[.<scope>]   (p, s) = natsRoute(topic, N, V)
-//	<prefix>.hist.<tenant>.<table>[.<scope>]             republished by each partition
+//	<prefix>.live.<tenant>.<table>[.<scope>]             republished by each partition; no stream holds it
+//	<prefix>.hist.<tenant>.<table>[.<scope>]             written by the ingest worker
 //	<prefix>.dlq.<tenant>.<table>[.<scope>]              not partitioned (low volume)
 //
-// The tail after the shard (or after hist or dlq) is the topic key, the same
-// one the embedded broker writes, so parking a message is still a prefix swap.
+// The tail after the shard (or after live, hist or dlq) is the topic key, the
+// same one the embedded broker writes, so parking or recording a message is
+// still a prefix swap.
 
 // subjectPrefixPattern is the grammar of a subject prefix: one lowercase
 // token, so it can neither split nor wildcard a subject, and uppercased it is
@@ -82,15 +84,30 @@ func parseShardDurable(consumerPrefix, name string) (int, bool) {
 // natsHistorySubjects is every subject of the history stream.
 func natsHistorySubjects(prefix string) string { return prefix + ".hist.>" }
 
-// natsHistorySubject is where topic t's rows are republished.
+// natsHistorySubject is where topic t's rows are recorded once written.
 func natsHistorySubject(prefix string, t Topic) (string, error) {
 	return subject(prefix+".hist.", t)
 }
 
+// natsLiveSubjects is every subject of the live feed, which no stream holds.
+func natsLiveSubjects(prefix string) string { return prefix + ".live.>" }
+
 // natsRepublish is how partition p republishes each row it stores to the
-// history: the same subject with the partition and shard tokens dropped.
+// live feed: the same subject with the partition and shard tokens dropped.
 func natsRepublish(prefix string, p int) jetstream.RePublish {
-	return jetstream.RePublish{Source: prefix + ".ingest." + strconv.Itoa(p) + ".*.>", Destination: natsHistorySubjects(prefix)}
+	return jetstream.RePublish{Source: prefix + ".ingest." + strconv.Itoa(p) + ".*.>", Destination: natsLiveSubjects(prefix)}
+}
+
+// natsWaitingSubject is every subject topic t's rows can be waiting on in a
+// stream holding ingest partition p — whatever shard a process on another
+// shard count published them under — or, for p below zero, in a stream a
+// lower partition count left behind, whatever its partition was.
+func natsWaitingSubject(prefix string, p int, t Topic) (string, error) {
+	partition := "*"
+	if p >= 0 {
+		partition = strconv.Itoa(p)
+	}
+	return subject(prefix+".ingest."+partition+".*.", t)
 }
 
 // natsDLQSubjects is every subject of the shared dead-letter stream.
@@ -110,8 +127,8 @@ func natsDLQSubject(prefix string, t Topic) (string, error) {
 }
 
 // natsTopicKey is the topic key a subject under prefix carries — the
-// partition and shard, the hist or the dlq token stripped — false for a
-// subject of none of those kinds.
+// partition and shard, the live, the hist or the dlq token stripped — false
+// for a subject of none of those kinds.
 func natsTopicKey(prefix, subj string) (string, bool) {
 	rest, ok := strings.CutPrefix(subj, prefix+".")
 	if !ok {
@@ -121,6 +138,9 @@ func natsTopicKey(prefix, subj string) (string, bool) {
 		return key, key != ""
 	}
 	if key, ok := strings.CutPrefix(rest, "hist."); ok {
+		return key, key != ""
+	}
+	if key, ok := strings.CutPrefix(rest, "live."); ok {
 		return key, key != ""
 	}
 	rest, ok = strings.CutPrefix(rest, "ingest.")

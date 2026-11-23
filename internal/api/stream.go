@@ -161,8 +161,10 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Gap fill from the MQ's retained messages (DeliverByStartTime, see
-	// mq.Replayer).
+	// Gap fill from what the MQ still holds (mq.Replayer): the events
+	// written within the tenant's replay window, then the ones still waiting
+	// to be written. Its frames carry no id (Hub.ReplayProjector), so a
+	// replayed event never moves the client's Last-Event-ID.
 	// Prefer Last-Event-ID header (set automatically by EventSource on reconnect)
 	// over the "since" query parameter.
 	// TODO: this breaks I think if we multiplex SSE? Need to test further...

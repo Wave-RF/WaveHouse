@@ -866,6 +866,95 @@ func TestHub_ReplayProjector(t *testing.T) {
 	}
 }
 
+// A replayed frame carries no "id:" line, where the same event sent live
+// carries its received_timestamp: a replay sends events in the order they were
+// written, so a replayed event's timestamp is no point to resume from, and a
+// frame without the line leaves the client's Last-Event-ID where it was. Not
+// an empty line either, which would clear it.
+func TestHub_ReplayFramesCarryNoID(t *testing.T) {
+	t.Parallel()
+	raw := rawEvent(t, "clicks", "2026-06-26T00:00:00Z", map[string]any{"page": "/home"})
+	tests := []struct {
+		name string
+		hub  *Hub
+		raw  []byte
+	}{
+		{"under a policy", NewHub(staticPolicy(&policy.Policy{Tables: map[string]policy.TablePolicy{
+			"clicks": {"viewer": {Select: &policy.SelectPermissions{}}},
+		}}), nil, nil), raw},
+		{"passthrough event", NewHub(nil, nil, nil), raw},
+		{"passthrough payload that is no event", NewHub(nil, nil, nil), []byte(`{"custom":"data"}`)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			frames := tt.hub.ReplayProjector(tenant.Default, "viewer", NewSubscriber(nil, nil))(tt.raw)
+			require.NotEmpty(t, frames)
+			data := frames[len(frames)-1]
+			require.Equal(t, KindReplay, data.Kind)
+			assert.True(t, strings.HasPrefix(string(data.Data), "data: "), "a replayed frame starts at its data: %q", data.Data)
+			assert.NotContains(t, string(data.Data), "id:")
+			assert.True(t, strings.HasSuffix(string(data.Data), "\n\n"))
+
+			// The live path keeps the line.
+			sub := NewSubscriber(nil, nil)
+			topic := mq.Topic{Tenant: tenant.Default, Table: "clicks"}
+			tt.hub.Add(topic, "viewer", sub)
+			tt.hub.Broadcast(topic, tt.raw)
+			var live Frame
+			for live.Kind != KindEvent {
+				select {
+				case live = <-sub.Frames():
+				default:
+					t.Fatal("the live event was not delivered")
+				}
+			}
+			assert.True(t, strings.HasPrefix(string(live.Data), "id: "), "a live frame leads with its id: %q", live.Data)
+		})
+	}
+}
+
+// EvictAll ends every tenant's streams, and an evicted subscriber is sent
+// nothing broadcast afterwards: a subscriber that joins after it is.
+func TestHub_EvictAll(t *testing.T) {
+	t.Parallel()
+	hub := NewHub(nil, nil, nil)
+	acme, globex := mq.Topic{Tenant: "acme", Table: "clicks"}, mq.Topic{Tenant: "globex", Table: "clicks"}
+	a, g := NewSubscriber(nil, nil), NewSubscriber(nil, nil)
+	hub.Add(acme, "viewer", a)
+	hub.Add(globex, "viewer", g)
+	raw := rawEvent(t, "clicks", "2026-06-26T00:00:00Z", map[string]any{"page": "/home"})
+
+	hub.EvictAll()
+	for name, sub := range map[string]*Subscriber{"acme": a, "globex": g} {
+		select {
+		case <-sub.Evicted():
+		default:
+			t.Fatalf("%s's subscriber was not evicted", name)
+		}
+	}
+
+	// Its handler has not removed it yet when the next event is broadcast.
+	later := NewSubscriber(nil, nil)
+	hub.Add(acme, "viewer", later)
+	hub.Broadcast(acme, raw)
+	select {
+	case f := <-a.Frames():
+		t.Fatalf("an evicted subscriber was sent a later event: %q", f.Data)
+	default:
+	}
+	select {
+	case <-later.Frames():
+	default:
+		t.Fatal("a subscriber that joined after the eviction was sent nothing")
+	}
+	select {
+	case <-later.Evicted():
+		t.Fatal("a subscriber that joined after the eviction was evicted")
+	default:
+	}
+}
+
 // A policy adopted while a gap-fill is in flight applies to the next replayed
 // row, as it does on the live path: the projector reads the policy per event
 // rather than once at construction.

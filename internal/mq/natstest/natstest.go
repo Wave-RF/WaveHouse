@@ -194,6 +194,7 @@ type nackStream struct {
 	DuplicateWindow   string            `yaml:"duplicateWindow"`
 	DenyPurge         bool              `yaml:"denyPurge"`
 	DenyDelete        bool              `yaml:"denyDelete"`
+	AllowDirect       bool              `yaml:"allowDirect"`
 	Metadata          map[string]string `yaml:"metadata"`
 	PreventDelete     bool              `yaml:"preventDelete"`
 	Republish         *struct {
@@ -321,6 +322,7 @@ func streamConfig(s nackStream) (jetstream.StreamConfig, error) {
 		Replicas:             s.Replicas,
 		DenyPurge:            s.DenyPurge,
 		DenyDelete:           s.DenyDelete,
+		AllowDirect:          s.AllowDirect,
 		Metadata:             s.Metadata,
 	}
 	var err error
