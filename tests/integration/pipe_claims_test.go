@@ -28,6 +28,10 @@ const pipeClaimsTable = "it_pipe_claims_orders"
 // with no closer, which ClickHouse and validation both read as a bareword.
 const pipeHeredocTable = "it_pipe_heredoc_orders"
 
+// pipeLiteralTable is the table the tenant_literal pipe in the shared settings
+// reads: one row per hostile claim value, keyed by the value itself.
+const pipeLiteralTable = "it_pipe_literal_claims"
+
 // TestPipe_ClaimBindsOnNumericColumn (#938) pins, against ClickHouse itself,
 // what the unit tests can only assert on the SQL text: a claim binds as a
 // quoted literal that the column's type reads — a token's tenant_ids array,
@@ -152,4 +156,69 @@ func TestPipe_ValueCannotCloseHeredoc(t *testing.T) {
 	status, rows = call(t, "$t$, region FROM "+pipeHeredocTable+" ORDER BY tenant_id -- ")
 	assert.Equal(t, http.StatusOK, status)
 	assert.Empty(t, rows)
+}
+
+// TestPipe_HostileClaimValueMatchesItsLiteral pins, against ClickHouse over
+// its HTTP interface, that a claim value is bound as exactly the string it is:
+// one carrying a quote, a backslash, a placeholder's braces, a claim
+// reference, a parameter placeholder, a positional `?` or an injection
+// attempt matches only the row keyed by that same string, through the scalar
+// binding and the IN set alike. A value that closed the template's quote, or
+// was scanned again for placeholders once bound, would match another row (the
+// victim row, which is what the claim reference it carries would expand to)
+// or none, or fail the statement.
+func TestPipe_HostileClaimValueMatchesItsLiteral(t *testing.T) {
+	t.Parallel()
+	e := env(t)
+	ctx := context.Background()
+	require.NoError(t, e.chConn.Exec(ctx, fmt.Sprintf(
+		"CREATE TABLE IF NOT EXISTS %s (tenant_id String, label String) ENGINE = MergeTree() ORDER BY tenant_id", pipeLiteralTable)))
+	t.Cleanup(func() {
+		dropCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = e.chConn.Exec(dropCtx, "DROP TABLE IF EXISTS "+pipeLiteralTable)
+	})
+	hostile := map[string]string{
+		"quote":           `a'b`,
+		"backslash":       `a\b`,
+		"backslash quote": `a\'b`,
+		"closing braces":  `x}}`,
+		"claim reference": "{{ jwt.app_metadata.other }}",
+		"param":           "{{region}}",
+		"question mark":   "?",
+		"injection":       `' OR 1=1 --`,
+		"everything":      `'\}}{{ jwt.app_metadata.other }}?{{region}}`,
+		"trailing escape": `\`,
+	}
+	// Sent as native column data, so no value passes through SQL text here.
+	batch, err := e.chConn.PrepareBatch(ctx, "INSERT INTO "+pipeLiteralTable)
+	require.NoError(t, err)
+	require.NoError(t, batch.Append("victim", "victim"))
+	require.NoError(t, batch.Append("", "empty"))
+	for name, v := range hostile {
+		require.NoError(t, batch.Append(v, "own:"+name))
+	}
+	require.NoError(t, batch.Send())
+
+	for name, v := range hostile {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			claims := map[string]any{"role": "member", "app_metadata": map[string]any{
+				"tenant_id": v, "tenant_ids": []any{v, "nope"}, "other": "victim",
+			}}
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.baseURL+"/v1/pipes/tenant_literal", strings.NewReader(`{"region": "victim"}`))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+testutil.MakeJWT(t, claims))
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer func() { _ = resp.Body.Close() }()
+			raw, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", raw)
+			var rows []map[string]any
+			require.NoError(t, json.Unmarshal(raw, &rows), "body: %s", raw)
+			assert.Equal(t, []map[string]any{{"label": "own:" + name}}, rows)
+		})
+	}
 }

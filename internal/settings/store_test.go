@@ -108,6 +108,7 @@ func TestStore_SeedIsValid(t *testing.T) {
 	assert.Equal(t, Auth{JWKSURL: "", RoleClaim: "role"}, s.Auth())
 	assert.True(t, s.DLQFor("anything"))
 	assert.Equal(t, Ingest{MaxBatchBytes: 262144, MaxBatchWait: 5 * time.Second, InsertTimeout: 30 * time.Second, RetryBackoffMax: 30 * time.Second}, s.Ingest())
+	assert.Zero(t, s.ParseTimeout(), "the seed sets none: boot config's applies")
 	assert.Equal(t, 10000, s.DefaultMaxRows())
 	assert.Equal(t, 60, s.TimestampBucketSeconds())
 	assert.Equal(t, 60*time.Second, s.SchemaRefreshInterval())
@@ -131,9 +132,10 @@ func TestStore_SeedIsValid(t *testing.T) {
 func TestStore_TypedAccessors(t *testing.T) {
 	t.Parallel()
 	s := newLoadedStore(t, map[string]string{
-		settings.FileConfig: configJSON(`{"clickhouse": {"insert_timeout": 7}, "ingest": {"max_batch_bytes": 1048576, "max_batch_wait_ms": 250, "retry_backoff_max": 120}, "query": {"default_max_rows": 250, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 5}, "stream": {"keepalive_interval": 10, "keepalive_buckets": 2, "gap_window_minutes": 0, "subscriber_queue": 8}, "mq": {"max_bytes_gb": 2}, "cors": {"allowed_origins": ["https://app.example.com"]}}`),
+		settings.FileConfig: configJSON(`{"clickhouse": {"insert_timeout": 7}, "ingest": {"max_batch_bytes": 1048576, "max_batch_wait_ms": 250, "retry_backoff_max": 120, "parse_timeout": 90}, "query": {"default_max_rows": 250, "timestamp_bucket_seconds": 0}, "schema": {"refresh_interval": 5}, "stream": {"keepalive_interval": 10, "keepalive_buckets": 2, "gap_window_minutes": 0, "subscriber_queue": 8}, "mq": {"max_bytes_gb": 2}, "cors": {"allowed_origins": ["https://app.example.com"]}}`),
 	})
 	assert.Equal(t, Ingest{MaxBatchBytes: 1 << 20, MaxBatchWait: 250 * time.Millisecond, InsertTimeout: 7 * time.Second, RetryBackoffMax: 2 * time.Minute}, s.Ingest())
+	assert.Equal(t, 90*time.Second, s.ParseTimeout())
 	assert.Equal(t, 250, s.DefaultMaxRows())
 	assert.Equal(t, 0, s.TimestampBucketSeconds())
 	assert.Equal(t, 5*time.Second, s.SchemaRefreshInterval())

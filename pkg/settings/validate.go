@@ -615,13 +615,13 @@ func (v *validator) checkClickHouse(ch *ClickHouseConfig) {
 	}
 	v.checkClickHousePool(ch)
 	// Both hops reach the same host, and each carries the credentials in the
-	// clear without TLS — the HTTP one on every insert and raw-SQL query, the
-	// native one in its handshake — so encrypting one alone is almost
-	// certainly not what the operator meant. One warning per direction.
+	// clear without TLS — the HTTP one on every query and insert, the native
+	// one in its handshake — so encrypting one alone is almost certainly not
+	// what the operator meant. One warning per direction.
 	if ch.TLS != nil && ch.TLS.Enabled != nil && ch.HTTPScheme != nil {
 		switch {
 		case *ch.TLS.Enabled && *ch.HTTPScheme == "http":
-			v.warnf(FileConfig, "clickhouse.http_scheme", "clickhouse.tls.enabled is on but this HTTP hop is plaintext, and it carries the ClickHouse credentials on every insert and raw-SQL query")
+			v.warnf(FileConfig, "clickhouse.http_scheme", "clickhouse.tls.enabled is on but this HTTP hop is plaintext, and it carries the ClickHouse credentials on every query and insert")
 		case !*ch.TLS.Enabled && *ch.HTTPScheme == "https":
 			v.warnf(FileConfig, "clickhouse.tls.enabled", "clickhouse.http_scheme is https but the native hop is plaintext, and its handshake carries the ClickHouse password")
 		}
@@ -873,6 +873,9 @@ func (v *validator) parseConfig(data []byte) TenantConfig {
 			v.required("ingest.retry_backoff_max")
 		} else if *i.RetryBackoffMax < 1 || int64(*i.RetryBackoffMax) > maxSeconds {
 			v.errorf(FileConfig, "ingest.retry_backoff_max", "must be in 1-%d seconds, got %d", maxSeconds, *i.RetryBackoffMax)
+		}
+		if p := i.ParseTimeout; p != nil && (*p < 1 || int64(*p) > maxSeconds) {
+			v.errorf(FileConfig, "ingest.parse_timeout", "must be in 1-%d seconds, got %d", maxSeconds, *p)
 		}
 	}
 	if q := c.Query; q == nil {

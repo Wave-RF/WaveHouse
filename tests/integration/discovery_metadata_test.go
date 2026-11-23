@@ -53,7 +53,8 @@ func TestDiscovery_MetadataAgainstRealClickHouse(t *testing.T) {
 	assert.EqualValues(t, 4, byName["day"].Position, "a MATERIALIZED column still occupies a position")
 	// Two claims this layer makes that no unit fake can reach: testutil hardcodes
 	// kind="DEFAULT" whenever HasDefault, and no unit case sets MATERIALIZED.
-	// HasDefault is load-bearing — validation.go uses it to decide "not required".
+	// HasDefault is load-bearing — the SDK codegen reads has_default to make a
+	// field optional.
 	assert.True(t, byName["day"].HasDefault, "MATERIALIZED is a non-empty default_kind")
 	assert.NotEmpty(t, byName["day"].DefaultExpression, "and carries its expression")
 

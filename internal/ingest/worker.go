@@ -20,6 +20,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
+	"github.com/Wave-RF/WaveHouse/internal/typelayer"
 	"github.com/Wave-RF/WaveHouse/pkg/chsql"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 	"go.opentelemetry.io/otel"
@@ -298,7 +299,7 @@ func ingestHTTPClient(tlsCfg *tls.Config) *http.Client {
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
+		IdleConnTimeout:       chconn.IdleConnTimeout,
 		TLSHandshakeTimeout:   10 * time.Second,
 		TLSClientConfig:       tlsCfg,
 		ExpectContinueTimeout: 1 * time.Second,
@@ -782,7 +783,7 @@ func (w *IngestWorker) parseMsg(ctx context.Context, m *mq.Message) (parsedMsg, 
 
 // flushTable inserts one table's batch into ClickHouse, then (on success) kicks
 // off cache invalidation + backgrounded acks via handleSuccess. On bulk failure
-// it asks what the failure was (chconn.Classify):
+// it asks what the failure was (insertClass, chconn.Classify with 452 a denial):
 //
 //   - ClickHouse REJECTED the batch — it read it and refused something in it:
 //     row-by-row isolation. Each row that re-inserts cleanly is acked, each
@@ -862,7 +863,7 @@ func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []
 		for _, later := range groups[i+1:] {
 			unsettled = append(unsettled, later...)
 		}
-		class := chconn.Classify(err)
+		class := insertClass(err)
 		failed, scope := pool, "ClickHouse"
 		if chconn.TableScoped(err) {
 			// The server answered for the table alone: the pool is up.
@@ -938,7 +939,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 		w.handleSuccess(ctx, tableName, group)
 		return nil, nil
 	}
-	if chconn.Classify(err) != chconn.Rejected && (len(group) == 1 || !chconn.Splittable(err)) {
+	if insertClass(err) != chconn.Rejected && (len(group) == 1 || !chconn.Splittable(err)) {
 		return group, err
 	}
 
@@ -953,7 +954,7 @@ func (w *IngestWorker) flushGroup(ctx context.Context, tableName string, group [
 		switch {
 		case singleErr == nil:
 			w.handleSuccess(ctx, tableName, []parsedMsg{pm})
-		case chconn.Classify(singleErr) != chconn.Rejected:
+		case insertClass(singleErr) != chconn.Rejected:
 			// ClickHouse cannot take this row now — it went away mid-isolation,
 			// or a split batch's failure was the server's after all: this row
 			// and the rest were never judged, so none of them is dead-lettered.
@@ -992,10 +993,29 @@ func (w *IngestWorker) retryLater(ctx context.Context, tableName string, msgs []
 	))
 }
 
+// settingConstraintViolation is ClickHouse's SETTING_CONSTRAINT_VIOLATION.
+const settingConstraintViolation int32 = 452
+
+// insertClass is chconn.Classify for the worker's INSERTs, but with 452 as
+// Denied: every setting an INSERT sends is WaveHouse's own, so a profile
+// constraint refusing one refuses every INSERT alike. That is the operator's to
+// fix, not a verdict on a row, so the rows wait under the backoff unparked.
+func insertClass(err error) chconn.Class {
+	if code, ok := chconn.ExceptionCode(err); ok && code == settingConstraintViolation {
+		return chconn.Denied
+	}
+	return chconn.Classify(err)
+}
+
 // insertToClickHouse writes one group as a single INSERT naming columns
 // explicitly, so the positional rows land in the right slots, under timeout
 // (0 is none) from the request to the end of the response. Callers group by
 // column list first: a batch spanning two lists cannot share one statement.
+// Every INSERT is synchronous (typelayer.InsertSettings pins async_insert=0):
+// an async flush merges concurrent INSERTs of the same statement into one
+// block, and a CHECK constraint one row violates fails every INSERT in it, so
+// a good row isolated beside another writer's bad one would be parked with it.
+// Sync skips the async flush wait too, about 55 ms per INSERT on 26.8.
 func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, columns []string, msgs []parsedMsg, timeout time.Duration) (err error) {
 	var buf bytes.Buffer
 	for _, m := range msgs {
@@ -1034,20 +1054,17 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	q.Set("database", t.Database)
 	q.Set("param_target_table", tableName)
 	q.Set("query", fmt.Sprintf("INSERT INTO {target_table:Identifier} (%s) FORMAT JSONCompactEachRow", strings.Join(quoted, ", ")))
-	q.Set("date_time_input_format", "best_effort")
-	// A field the record omitted rides as an explicit null in its column's slot,
-	// because a positional row has one value per column and no way to say
-	// "absent". For a NON-nullable column with a default this setting turns that
-	// null back into the default, matching what omitting the key did under
-	// JSONEachRow. It is already the server default (verified on 26.6.3), so
-	// this is belt-and-braces for a server configured otherwise.
-	//
-	// TRANSITIONAL DIVERGENCE, and it is NOT what this setting controls: on a
-	// NULLABLE column an explicit null is stored as NULL whatever the setting
-	// says — only an ABSENT key ever took the default. So a `Nullable(T) DEFAULT
-	// …` column now stores NULL where it previously took its default. Verified
-	// on 26.6.3: omitted key → default; explicit null → NULL at both settings.
-	q.Set("input_format_null_as_default", "1")
+	// The parsing settings are the ones the API judged these rows under
+	// (typelayer), not literals of the worker's own: a setting the two did not
+	// share would ask the server a question chtypes never answered. Each row
+	// is ClickHouse's own export of its record, DEFAULTs already evaluated, so
+	// parsing it again under the same settings stores the values judged.
+	for k, v := range typelayer.InsertSettings() {
+		q.Set(k, v)
+	}
+	// insert_deduplicate stays at the server default: idempotency is the
+	// gateway's (internal/dedupe), and a Replicated engine's block-hash dedupe
+	// is the operator's choice for their engine.
 
 	req, err := http.NewRequestWithContext(ctx, "POST", t.URL+"?"+q.Encode(), &buf)
 	if err != nil {

@@ -34,9 +34,9 @@ func validFiles() map[string]string {
 
 // configJSON returns the seed config.json with patch merged over it, one
 // level deep (a patched block's keys replace the seed's, the rest of the
-// block is kept). Every key but dedupe.retention is required, so tests that
-// care about one key build a complete document from the seed rather than
-// repeating all of them.
+// block is kept). Every key but dedupe.retention and ingest.parse_timeout is
+// required, so tests that care about one key build a complete document from
+// the seed rather than repeating all of them.
 func configJSON(patch string) string {
 	seed, err := Seed()
 	if err != nil {
@@ -107,6 +107,32 @@ func TestValidate_ValidDirectory(t *testing.T) {
 	assert.Nil(t, doc.Config.Dedupe.Tables["clicks"].RequireID, "unset override field stays nil (inherit)")
 	require.NotNil(t, doc.Config.Schema)
 	assert.Equal(t, 60, *doc.Config.Schema.RefreshInterval)
+}
+
+// ingest.parse_timeout is optional: absent, the document holds nil, which
+// the server reads as boot config's ingest.parse_timeout.
+func TestValidate_IngestParseTimeoutIsOptional(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		patch string
+		want  *int
+	}{
+		{"absent", `{}`, nil},
+		{"above the boot default", `{"ingest": {"parse_timeout": 60}}`, new(60)},
+		{"the least", `{"ingest": {"parse_timeout": 1}}`, new(1)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			files := validFiles()
+			files[FileConfig] = configJSON(tt.patch)
+			doc, findings := validateBoth(t, files)
+			require.Empty(t, findings)
+			require.NotNil(t, doc)
+			assert.Equal(t, tt.want, doc.Config.Ingest.ParseTimeout)
+		})
+	}
 }
 
 func TestValidate_EmptyDocuments(t *testing.T) {
@@ -304,6 +330,10 @@ func TestValidate_ContentRules(t *testing.T) {
 		{"zero ingest.max_batch_wait_ms", FileConfig, `{"ingest": {"max_batch_wait_ms": 0}}`, "ingest.max_batch_wait_ms: must be in 1-9223372036854 ms, got 0"},
 		{"ingest.retry_backoff_max past a duration", FileConfig, `{"ingest": {"retry_backoff_max": 9223372037}}`, "ingest.retry_backoff_max: must be in 1-9223372036 seconds, got 9223372037"},
 		{"ingest.max_batch_wait_ms past a duration", FileConfig, `{"ingest": {"max_batch_wait_ms": 9223372036855}}`, "ingest.max_batch_wait_ms: must be in 1-9223372036854 ms, got 9223372036855"},
+		{"zero ingest.parse_timeout", FileConfig, configJSON(`{"ingest": {"parse_timeout": 0}}`), "ingest.parse_timeout: must be in 1-9223372036 seconds, got 0"},
+		{"negative ingest.parse_timeout", FileConfig, configJSON(`{"ingest": {"parse_timeout": -30}}`), "ingest.parse_timeout: must be in 1-9223372036 seconds, got -30"},
+		{"ingest.parse_timeout past a duration", FileConfig, configJSON(`{"ingest": {"parse_timeout": 9223372037}}`), "ingest.parse_timeout: must be in 1-9223372036 seconds, got 9223372037"},
+		{"parse timeout as a duration string", FileConfig, configJSON(`{"ingest": {"parse_timeout": "30s"}}`), "parse_timeout"},
 		{"batch wait as a duration string", FileConfig, `{"ingest": {"max_batch_wait_ms": "5s"}}`, "max_batch_wait_ms"},
 		{"empty dlq override table name", FileConfig, `{"dlq": {"tables": {"": {"enabled": false}}}}`, "table name must not be empty"},
 		{"dlq override table whitespace", FileConfig, `{"dlq": {"tables": {"clicks ": {"enabled": false}}}}`, "surrounding whitespace"},

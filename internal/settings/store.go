@@ -17,9 +17,11 @@ import (
 // accessors below each resolve from a single snapshot load, so a reload lands
 // between lookups, never inside one.
 //
-// There are no compiled defaults here on purpose, but one: every key but
-// dedupe.retention (missing means "0", forever) is required by Validate, so
-// the snapshot is exactly what the files said when they were adopted.
+// There are no compiled defaults here on purpose: every key but
+// dedupe.retention (missing means "0", forever) and ingest.parse_timeout
+// (missing means boot config's, which the caller holds) is required by
+// Validate, so the snapshot is exactly what the files said when they were
+// adopted.
 // Defaults live in the seed directory (Seed / WriteSeed).
 type Store struct {
 	// tenant is the id the Registry created the store for; the zero value
@@ -236,6 +238,15 @@ func (s *Store) Ingest() Ingest {
 		InsertTimeout:   time.Duration(*c.ClickHouse.InsertTimeout) * time.Second,
 		RetryBackoffMax: time.Duration(*c.Ingest.RetryBackoffMax) * time.Second,
 	}
+}
+
+// ParseTimeout returns the tenant's own limit on validating one ingest
+// request's body (ingest.parse_timeout), or 0 when it sets none.
+func (s *Store) ParseTimeout() time.Duration {
+	if p := s.doc().Config.Ingest.ParseTimeout; p != nil {
+		return time.Duration(*p) * time.Second
+	}
+	return 0
 }
 
 // DefaultMaxRows returns the fallback result LIMIT for structured queries.

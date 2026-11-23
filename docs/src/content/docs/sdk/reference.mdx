@@ -147,14 +147,15 @@ A REST call never throws for anything the server returns: every API error comes 
 | 404 | `HTTP_404` | No | Table or pipe not found |
 | 408 | `HTTP_408` | Yes | A request timeout, from something in front |
 | 429 | `HTTP_429` | Yes | Rate limited, by something in front; resent on every call but raw SQL |
-| 400 | `clickhouse.rejected` / `clickhouse.limit_exceeded` | No | ClickHouse refused the query (bad SQL, an unknown column, a type mismatch) or it outran a limit, the role's own caps included |
+| 422 | `HTTP_422` | No | Ingest only: the validation engine could not judge the body or a record (`validation engine declined: …`), an insert check could not be evaluated, or validating the body took longer than its [time limit](/configuration#ingest-validation) (`ingest validation took longer than the time limit (30s)`, nothing published). It says neither that the data is bad nor that it was accepted; a body it could not judge is the call's error, a record in a batch a per-record `error`. Not retried |
+| 400 | `clickhouse.rejected` / `clickhouse.limit_exceeded` | No | ClickHouse refused the query (bad SQL, an unknown column, a type mismatch) or it outran a limit, the role's own caps included. On ingest, `clickhouse.rejected` is ClickHouse's parser refusing the body: the first record it cannot read refuses the whole insert, the message names the record (`record 2: …`), and `exception_code` carries its code |
 | 403 | `clickhouse.access_denied` | No | ClickHouse's user lacks a grant the statement needs |
-| 500 | `HTTP_500` | Yes | Server error |
+| 500 | `HTTP_500` | Yes, unless the body says `retryable: false` | Server error. An ingest `500` carrying `retryable: false` (a role whose insert permissions cannot be enforced on the table) is final, and returned on the first attempt |
 | 500 / 502 | `clickhouse.unknown` | Yes | ClickHouse failed with no verdict; `502` on `wh.sql` |
-| 502 | `clickhouse.misconfigured` | No | ClickHouse refused WaveHouse's own credentials or database, or the route to it is wrong: an operator fix |
-| 502 | `clickhouse.response_too_large` | No | A raw-SQL response over the 64 MiB cap |
+| 502 | `clickhouse.misconfigured` | No | ClickHouse refused WaveHouse's own credentials or database, a read ran under a `readonly=1` profile and was refused as a write, the route to it is wrong, or a pipe's SQL chooses an output format other than `JSONEachRow`: an operator fix |
+| 502 | `clickhouse.response_too_large` | No | A response over the 64 MiB cap, on any query path (structured query, pipe or raw SQL) |
 | 503 | `clickhouse.unavailable` | Yes | ClickHouse is down, unreachable or overloaded; `Retry-After: 5` |
-| 503 | `HTTP_503` | Yes | Service unavailable: a schema not discovered yet, no ClickHouse connection open, a dedupe store that cannot answer, a token sent while the server's JWKS has not been fetched yet (`Retry-After: 30`), or a record whose dedupe id another request is still publishing. Each `Retry-After` is honored between attempts |
+| 503 | `HTTP_503` | Yes | Service unavailable: a schema not discovered yet, no ClickHouse connection open, a tenant or table the type layer cannot serve (`ingest validation is unavailable`, `Retry-After: 5`; [causes](/deployment#chtypes-artifacts)), a dedupe store that cannot answer, a token sent while the server's JWKS has not been fetched yet (`Retry-After: 30`), or a record whose dedupe id another request is still publishing. Each `Retry-After` is honored between attempts |
 | 3xx (0 in a browser) | `REDIRECT` | No | A redirect not followed, because the request carries a credential ([Redirects](#redirects)) |
 | 2xx | `DECODE_ERROR` | No | A success whose body is not JSON, such as an intermediary's HTML page or a raw SQL `FORMAT` clause. Sent once, never resent |
 | 0 | `NETWORK_ERROR` | Yes | No answer arrived. Retried on reads and ingest; for raw SQL and pipes, see above |
@@ -341,7 +342,7 @@ Codegen reads `/v1/ops/schema`, which is **admin-only**: against a non-dev serve
 
 An argument codegen does not recognize (a mistyped flag, a bare positional, `--flag=value`) is an error, not skipped. A request carrying a token or an operator key does not follow a redirect, for the reason in [Redirects](#redirects): codegen stops and names the target, so point `--url` at the final address.
 
-The generated row type is the **read** shape, with one exception running the other way: an `EPHEMERAL` column declares a default, so codegen emits it, though no query can return it. A `MATERIALIZED` or `ALIAS` column declares a default, so it is emitted as optional, but supplying one on `insert` is a `400` (`column "x" of table "t" is materialized and cannot be inserted`), and the type won't catch it. Omit computed columns; the server fills them in. A table or column name that is not an identifier (`user-id`, `2fa`, `order id`) is quoted, and tables whose names differ only in case, or start with a digit, get distinct valid interface names.
+The generated row type is the **read** shape, with one exception running the other way: an `EPHEMERAL` column declares a default, so codegen emits it, though no query can return it. `MATERIALIZED` and `ALIAS` columns declare defaults too, so they are emitted as optional, but supplying either on `insert` is a `400` carrying ClickHouse's own code 117 (`Unknown field found while parsing JSONEachRow format: x`), and the type won't catch it. An `EPHEMERAL` value is accepted on a JSON `insert` when the role may write the column, a `DEFAULT` column reads it and no `MATERIALIZED`, `ALIAS` or other `EPHEMERAL` column does; it feeds that default and is never stored or returned. Otherwise it is a `400` with code 117, like an unknown column. Omit computed columns; the server fills them in. A table or column name that is not an identifier (`user-id`, `2fa`, `order id`) is quoted, and tables whose names differ only in case, or start with a digit, get distinct valid interface names.
 
 **Example output:**
 
@@ -356,9 +357,8 @@ export interface OrdersRow {
   customer: string;
   items: number;
   /**
-   * A Decimal. `/v1/query` sends it as a quoted string, to keep its precision.
-   * A stream row carries the value as the producer sent it, and `sql()` returns
-   * ClickHouse JSON numbers.
+   * A Decimal. The codegen types it as `string`, but queries, pipes and
+   * streams send it as a JSON number, so `JSON.parse` rounds a value past 2^53.
    */
   amount: string;
   received_timestamp?: string;
@@ -370,8 +370,9 @@ export interface OrdersRow {
 | ClickHouse Type | TypeScript Type |
 |----------------|-----------------|
 | `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Enum*`, `IPv4/6` | `string` |
-| `Decimal*` | `string`, with the comment above |
-| `UInt*`, `Int*`, `Float*` | `number` |
+| `Decimal*` | `string`, with the comment above: the server sends a JSON number |
+| `UInt*`, `Int*` | `number`: 64-bit and wider integers come back as JSON numbers, not strings, so `JSON.parse` rounds a value past 2^53 (store an id that large as a `String` column to keep every digit) |
+| `Float32`, `Float64`, `BFloat16` | `number`, but a NaN or infinity comes back as the string `"nan"`, `"inf"` or `"-inf"` from queries, pipes and streams alike, which this type does not include: check `typeof v === 'number'` before doing arithmetic on a column that can hold one |
 | `Bool` | `boolean` |
 | `Nullable(T)` | `T \| null` |
 | `Array(T)` | `T[]` |

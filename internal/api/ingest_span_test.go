@@ -45,6 +45,7 @@ func TestIngest_SpanStatus(t *testing.T) {
 		name     string
 		registry RegistrySource
 		pubErr   error
+		noTypes  bool
 		table    string
 		body     any
 		status   int
@@ -71,6 +72,11 @@ func TestIngest_SpanStatus(t *testing.T) {
 			name: "schema not loaded", registry: notLoaded, table: "clicks", body: one,
 			status: http.StatusServiceUnavailable, wantCode: codes.Error, wantDesc: schemaNotLoadedMessage,
 		},
+		{
+			name: "type layer unavailable", registry: loaded, noTypes: true, table: "clicks", body: one,
+			status: http.StatusServiceUnavailable, wantCode: codes.Error, wantDesc: "ingest validation is unavailable",
+		},
+		{name: "body refused by the parser", registry: loaded, table: "clicks", body: map[string]any{"nope": 1}, status: http.StatusBadRequest, wantCode: codes.Unset},
 		{name: "accepted", registry: loaded, table: "clicks", body: one, status: http.StatusOK, wantCode: codes.Unset},
 		{name: "missing table", registry: loaded, body: one, status: http.StatusBadRequest, wantCode: codes.Unset},
 		{name: "unknown table", registry: loaded, table: "nope", body: one, status: http.StatusNotFound, wantCode: codes.Unset},
@@ -78,7 +84,11 @@ func TestIngest_SpanStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec.Reset()
-			h := NewIngestHandler(tt.registry, &testutil.MockPublisher{Err: tt.pubErr})
+			h := newTestIngestHandler(t, testRegistry(t), &testutil.MockPublisher{Err: tt.pubErr})
+			h.Registry = tt.registry
+			if tt.noTypes {
+				h.Types = nil
+			}
 			w := httptest.NewRecorder()
 			h.Handle(w, withTenant(ingestRequest(t, tt.table, tt.body)))
 			require.Equal(t, tt.status, w.Code)
@@ -118,7 +128,7 @@ func TestIngest_PublishSpanPerWindow(t *testing.T) {
 	})
 	rows := []map[string]any{{"page": "/a"}, {"page": "/b"}, {"page": "/c"}}
 
-	h := NewIngestHandler(fixedRegistry(testRegistry(t)), &testutil.MockPublisher{})
+	h := newTestIngestHandler(t, testRegistry(t), &testutil.MockPublisher{})
 	h.window = 2
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(ingestRequest(t, "clicks", rows)))
@@ -134,7 +144,7 @@ func TestIngest_PublishSpanPerWindow(t *testing.T) {
 	}
 
 	rec.Reset()
-	h = NewIngestHandler(fixedRegistry(testRegistry(t)), &testutil.MockPublisher{Err: errors.New("boom")})
+	h = newTestIngestHandler(t, testRegistry(t), &testutil.MockPublisher{Err: errors.New("boom")})
 	h.Handle(httptest.NewRecorder(), withTenant(ingestRequest(t, "clicks", rows)))
 	pubs = spansNamed(rec, "mq.publish")
 	require.Len(t, pubs, 1)

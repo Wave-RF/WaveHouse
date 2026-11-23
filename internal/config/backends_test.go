@@ -11,12 +11,14 @@ import (
 )
 
 // withDefaultBackends sets what defaults() would: a literal Config
-// names no backend, no role and no dedupe lease, and Validate refuses that.
+// names no backend, no role, no dedupe lease and no parse time limit, and
+// Validate refuses that.
 func withDefaultBackends(c Config) *Config {
 	c.Roles = AllRoles()
 	c.MQ.Backend, c.Cache.Backend = MQEmbedded, CacheLocal
 	c.MQ.AckWait, c.MQ.MaxAckPending, c.MQ.Prefetch = defaultAckWait, defaultMaxAckPending, defaultPrefetch
 	c.Dedupe, c.Coord.Backend = defaults().Dedupe, CoordLocal
+	c.Ingest = defaults().Ingest
 	return &c
 }
 

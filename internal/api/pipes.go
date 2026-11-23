@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
@@ -33,14 +32,16 @@ type PipesHandler struct {
 	// is tenant-exempt, so they carry no request tenant and read the one
 	// ?tenant= names, the default one without it (opsStore).
 	Tenants *settings.Registry
-	// CHConn yields the request tenant's connection (chconn.Pools.For in
-	// production); nil is a tenant on no pool, a 503.
-	CHConn func(*settings.Store) driver.Conn
-	// CHTarget names the tenant's ClickHouse on the clickhouse.query span
-	// (chconn.Pools.Target in production); nil leaves the server off it.
-	CHTarget func(*settings.Store) chconn.Target
+	// Target yields the request tenant's ClickHouse HTTP wiring
+	// (chconn.Pools.Target in production); the zero Target is a tenant on no
+	// pool, a 503.
+	Target func(*settings.Store) chconn.Target
+	// MaxConns caps the concurrent reads on the tenant's pool (its native
+	// pool's size in production); nil or non-positive is defaultReadConns.
+	MaxConns func(*settings.Store) int
 	Cache    cache.Cache
 	sf       singleflight.Group
+	ch       *chReader
 	// queryTimeout bounds each pipe execution, read per request off the
 	// tenant's settings ((*settings.Store).ClickHouse().QueryTimeout in
 	// production) so a settings reload applies without a restart.
@@ -57,9 +58,13 @@ type PipesHandler struct {
 	metrics *queryMetrics
 }
 
-func NewPipesHandler(source func(*settings.Store) pipes.Source, policySource PolicySource, conn func(*settings.Store) driver.Conn, c cache.Cache, queryTimeout func(*settings.Store) time.Duration) *PipesHandler {
-	return &PipesHandler{Source: source, PolicySource: policySource, CHConn: conn, Cache: c, queryTimeout: queryTimeout, metrics: newQueryMetrics()}
+func NewPipesHandler(source func(*settings.Store) pipes.Source, policySource PolicySource, target func(*settings.Store) chconn.Target, c cache.Cache, queryTimeout func(*settings.Store) time.Duration) *PipesHandler {
+	return &PipesHandler{Source: source, PolicySource: policySource, Target: target, Cache: c, ch: NewCHReader(), queryTimeout: queryTimeout, metrics: newQueryMetrics()}
 }
+
+// SetReader replaces the handler's private reader with a shared one. Call it
+// before serving.
+func (h *PipesHandler) SetReader(r *CHReader) { h.ch = r }
 
 // List returns all named queries of the ?tenant= (admin endpoint).
 func (h *PipesHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -160,8 +165,13 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	// The verified token's claims bind the SQL's {{ jwt.<path> }} references;
 	// a request with no valid token has none, so every such reference fails
 	// closed below. The request's parameters never reach a claim reference.
+	// BindParams inlines every value, claims included, as an escaped SQL
+	// literal — a pipe's placeholders can sit anywhere in the statement,
+	// including positions (LIMIT, an identifier) where a bound parameter is
+	// not legal — so the rendered SQL carries no placeholders and nothing is
+	// bound here.
 	claims, _ := auth.ClaimsFromContext(r.Context())
-	sql, params, err := pipes.BindParams(q, supplied, claims)
+	sql, err := pipes.BindParams(q, supplied, claims)
 	if err != nil {
 		var unresolved *pipes.UnresolvedClaimError
 		if errors.As(err, &unresolved) {
@@ -173,7 +183,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if chsql.IsMutation(sql) {
-		h.executeWrite(w, r, store, q.Name, sql, params)
+		h.executeWrite(w, r, store, q.Name, sql)
 		return
 	}
 
@@ -186,7 +196,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	// once its pool below is taken — orphans the fill.
 	// TODO: once pipes expose their tables/scopes, pass them as deps here so writes
 	// invalidate cached pipe results.
-	cacheKey := queryCacheKey(store.Tenant(), sql, params)
+	cacheKey := queryCacheKey(store.Tenant(), sql, nil)
 	var entry cache.Entry
 	var snap cache.Snapshot
 	if h.Cache != nil {
@@ -196,8 +206,8 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	// The tenant's pool, ahead of serving a hit: a tenant on none — its
 	// tuple could not be opened, such as by the connection ceiling — fails
 	// closed rather than serve what it cached before (#583 story 6).
-	conn := connOf(h.CHConn, store)
-	if conn == nil {
+	target := targetOf(h.Target, store)
+	if target.URL == "" {
 		writeUnavailable(w, noConnectionMessage, retryAfterPool)
 		return
 	}
@@ -210,23 +220,24 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		data, queryDuration, err := h.run(r.Context(), store, conn, opPipe, q.Name, sql, params)
+		start := time.Now()
+		data, err := h.run(r.Context(), store, target, opPipe, q.Name, chRequest{sql: sql})
 		if err != nil {
 			return nil, err
 		}
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), snap, data, cache.QueryTimeToTTL(queryDuration))
+			_ = h.Cache.Set(r.Context(), snap, data, cache.QueryTimeToTTL(time.Since(start)))
 		}
 		return data, nil
 	})
 	if err != nil {
-		writeCHError(w, r, err, err.Error(), http.StatusInternalServerError, queryCaps{})
+		writeCHError(w, r, err, chErrorMessage(err), http.StatusInternalServerError, queryCaps{readonly: true})
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
-	_, _ = w.Write(v.([]byte)) //nolint:gosec // G705: the tenant id on the key only selects the entry; the bytes are JSON the handler marshalled from ClickHouse rows
+	_, _ = w.Write(v.([]byte)) //nolint:gosec // G705: the tenant id on the key only selects the entry; the bytes are ClickHouse's JSONEachRow rows framed as an array
 }
 
 // writeClaimUnresolved answers a pipe whose SQL reads a claim the caller's
@@ -275,43 +286,45 @@ func writeClaimUnresolved(w http.ResponseWriter, r *http.Request, q *pipes.Named
 
 // executeWrite runs a pipe that writes, on every call: a cached or coalesced
 // response would answer a repeat without executing it, silently dropping the
-// write (#386) — on every instance once the cache is shared. chsql.IsMutation is the
-// classifier executeCHQuery routes Exec by, so what bypasses here is exactly
-// what runs as a write. no-store keeps an HTTP cache in front of a GET from
-// answering a repeat the same way.
-func (h *PipesHandler) executeWrite(w http.ResponseWriter, r *http.Request, store *settings.Store, name, sql string, params []any) {
-	conn := connOf(h.CHConn, store)
-	if conn == nil {
+// write (#386) — on every instance once the cache is shared. It is the one
+// statement sent without readonly=2, so what bypasses here is exactly what
+// may write. no-store keeps an HTTP cache in front of a GET from answering a
+// repeat the same way.
+func (h *PipesHandler) executeWrite(w http.ResponseWriter, r *http.Request, store *settings.Store, name, sql string) {
+	target := targetOf(h.Target, store)
+	if target.URL == "" {
 		writeUnavailable(w, noConnectionMessage, retryAfterPool)
 		return
 	}
-	data, _, err := h.run(r.Context(), store, conn, opPipeWrite, name, sql, params)
+	data, err := h.run(r.Context(), store, target, opPipeWrite, name, chRequest{sql: sql, write: true})
 	if err != nil {
-		writeCHWriteError(w, r, err, err.Error())
+		writeCHWriteError(w, r, err, chErrorMessage(err))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "BYPASS")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(data) //nolint:gosec // G705: JSON the handler marshalled from the exec result
+	_, _ = w.Write(data) //nolint:gosec // G705: ClickHouse's JSONEachRow rows framed as an array, [] for a write
 }
 
 // run executes pipe name's bound SQL under the tenant's query timeout and
-// returns the rows as JSON with how long ClickHouse took, recording the call
-// as operation (opPipe or opPipeWrite).
-func (h *PipesHandler) run(ctx context.Context, store *settings.Store, conn driver.Conn, operation, name, sql string, params []any) ([]byte, time.Duration, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, timeoutOf(h.queryTimeout, store))
+// returns ClickHouse's rows as a JSON array, recording the call as operation
+// (opPipe or opPipeWrite). A pipe carries no per-role
+// resource caps (allowed_roles is its whole policy), so the query timeout is
+// the only limit it sends; the deadline outlasts it by capBackstop, as on
+// the structured query.
+func (h *PipesHandler) run(ctx context.Context, store *settings.Store, target chconn.Target, operation, name string, req chRequest) ([]byte, error) {
+	timeout := timeoutOf(h.queryTimeout, store)
+	queryCtx, cancel := context.WithTimeout(ctx, timeout+capBackstop)
 	defer cancel()
+	req.settings = chReadSettings(chQueryLimits{ExecutionTime: timeout})
 	queryCtx, span := otel.Tracer(chTracerName).Start(queryCtx, chQuerySpanName,
-		chQuerySpanOptions(targetOf(h.CHTarget, store), false, operation, sql, attribute.String("pipe", name))...)
+		chQuerySpanOptions(target, operation, req.sql, attribute.String("pipe", name))...)
 	start := time.Now()
-	rows, err := executeCHQuery(queryCtx, conn, sql, params)
-	queryDuration := time.Since(start)
-	setCHQueryResult(span, h.metrics.observe(ctx, operation, queryDuration, err, queryCaps{}))
+	data, err := h.ch.do(queryCtx, target, connsOf(h.MaxConns, store), req)
+	// A read is sent under readonly=2, so its refusal classifies as the
+	// response's does; a write is not.
+	setCHQueryResult(span, h.metrics.observe(ctx, operation, time.Since(start), err, queryCaps{readonly: !req.write}))
 	span.End()
-	if err != nil {
-		return nil, 0, err
-	}
-	data, err := json.Marshal(rows)
-	return data, queryDuration, err
+	return data, err
 }

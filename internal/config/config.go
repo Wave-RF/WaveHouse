@@ -31,6 +31,7 @@ type Config struct {
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`
 	MQ         MQ         `yaml:"mq"`
+	Ingest     Ingest     `yaml:"ingest"`
 	Cache      Cache      `yaml:"cache"`
 	Dedupe     Dedupe     `yaml:"dedupe"`
 	Coord      Coord      `yaml:"coord"`
@@ -149,17 +150,77 @@ type Server struct {
 	TrustedProxies []string `yaml:"trusted_proxies" env:"WH_SERVER_TRUSTED_PROXIES"`
 }
 
-// ClickHouse holds the connection ceiling. The wiring — address, HTTP port
-// and scheme, database, username, password, query timeout, TLS, headers,
-// pool size — is the settings directory's `clickhouse` block (hot-reloadable:
-// a change swaps the connection; the password is a tenant's own, #529). The
-// ceiling stays here because it is capacity, sized once per process, not
-// wiring.
+// ClickHouse holds the connection ceiling and how the type layer gets chtypes
+// artifacts. The wiring — address, HTTP port and scheme, database, username,
+// password, query timeout, TLS, headers, pool size — is the settings
+// directory's `clickhouse` block (hot-reloadable: a change swaps the
+// connection; the password is a tenant's own, #529). The ceiling and the
+// chtypes keys stay here because each is read once per process: capacity, and
+// the registry the type layer opens at boot.
 type ClickHouse struct {
 	// MaxTotalConns caps the native connections the process may hold open
 	// across its pools: the settings directory's clickhouse.max_open_conns
 	// must not exceed it. 0, the default, is no ceiling.
 	MaxTotalConns int `yaml:"max_total_conns" env:"WH_CH_MAX_TOTAL_CONNS"`
+	// ChtypesCache is the chtypes cache root the type layer reads artifacts
+	// from and autofetch installs into (typelayer.Config.CacheDir), with
+	// CHTYPES_CACHE semantics: the dev SDK uses <dir>/v2-dev, as `chtypes
+	// fetch --cache <dir>` does. Empty, the default, is $CHTYPES_CACHE, else
+	// ${XDG_CACHE_HOME:-~/.cache}/chtypes/v2-dev. Either way
+	// /usr/local/share/chtypes/v2-dev and /opt/chtypes/v2-dev are read after
+	// it, as the layout itself.
+	// Only a process with the api role reads the three chtypes keys.
+	ChtypesCache string `yaml:"chtypes_cache" env:"WH_CHTYPES_CACHE"`
+	// ChtypesAutofetch fetches a ClickHouse line no layout holds when its
+	// first tenant binds. On by default; off (air-gapped), such a tenant is
+	// unavailable and a host with no build made for this chtypes SDK refuses
+	// boot.
+	ChtypesAutofetch bool `yaml:"chtypes_autofetch" env:"WH_CHTYPES_AUTOFETCH"`
+	// ChtypesArtifactsURL is the registries and mirrors a fetch tries, in
+	// order, comma-separated (CHTYPES_ARTIFACTS_URL semantics). The 2.0.0-dev
+	// SDK ignores it (with one warning) and fetches only from its staging
+	// registry; chtypes 2.0.0 honours it again.
+	ChtypesArtifactsURL string `yaml:"chtypes_artifacts_url" env:"WH_CHTYPES_ARTIFACTS_URL"`
+}
+
+// Ingest bounds how long an API process spends validating one ingest
+// request's body, counted from when the body takes a parse slot. A tenant's
+// own ingest.parse_timeout (the settings directory) replaces ParseTimeout for
+// its requests, up to MaxParseTimeout; the rest of the settings directory's
+// ingest block is the worker's batching.
+type Ingest struct {
+	// ParseTimeout is the limit for a tenant that sets none. A body still
+	// being read past it stops at the next parse window and is a 422; a
+	// window already running finishes, since the published chtypes library
+	// builds decline a cancellable call (option-not-implemented).
+	ParseTimeout time.Duration `yaml:"parse_timeout" env:"WH_INGEST_PARSE_TIMEOUT"`
+	// MaxParseTimeout is the most a tenant's ingest.parse_timeout may be.
+	MaxParseTimeout time.Duration `yaml:"max_parse_timeout" env:"WH_INGEST_MAX_PARSE_TIMEOUT"`
+}
+
+func (i Ingest) validate() error {
+	if i.ParseTimeout <= 0 {
+		return fmt.Errorf("ingest.parse_timeout (WH_INGEST_PARSE_TIMEOUT) must be > 0, got %s", i.ParseTimeout)
+	}
+	if i.MaxParseTimeout <= 0 {
+		return fmt.Errorf("ingest.max_parse_timeout (WH_INGEST_MAX_PARSE_TIMEOUT) must be > 0, got %s", i.MaxParseTimeout)
+	}
+	if i.ParseTimeout > i.MaxParseTimeout {
+		return fmt.Errorf("ingest.parse_timeout (WH_INGEST_PARSE_TIMEOUT) %s is over ingest.max_parse_timeout (WH_INGEST_MAX_PARSE_TIMEOUT) %s", i.ParseTimeout, i.MaxParseTimeout)
+	}
+	return nil
+}
+
+// ChtypesBases is ChtypesArtifactsURL split on commas, blanks dropped; nil
+// when empty.
+func (c ClickHouse) ChtypesBases() []string {
+	var out []string
+	for _, b := range strings.Split(c.ChtypesArtifactsURL, ",") {
+		if b = strings.TrimSpace(b); b != "" {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 // Auth holds the platform's own credential. The verifier wiring — `jwks_url`,
@@ -272,10 +333,12 @@ func defaultInstanceID() string {
 // configuration.mdx documents these; a config test pins the two together.
 func defaults() Config {
 	return Config{
-		DataDir: "./data",
-		Roles:   AllRoles(),
-		Server:  Server{Port: 8080, ShutdownTimeout: 10},
-		MQ:      MQ{Backend: MQEmbedded, AckWait: defaultAckWait, MaxAckPending: defaultMaxAckPending, Prefetch: defaultPrefetch, NATS: defaultMQNATS()},
+		DataDir:    "./data",
+		Roles:      AllRoles(),
+		Server:     Server{Port: 8080, ShutdownTimeout: 10},
+		ClickHouse: ClickHouse{ChtypesAutofetch: true},
+		MQ:         MQ{Backend: MQEmbedded, AckWait: defaultAckWait, MaxAckPending: defaultMaxAckPending, Prefetch: defaultPrefetch, NATS: defaultMQNATS()},
+		Ingest:     Ingest{ParseTimeout: 30 * time.Second, MaxParseTimeout: 5 * time.Minute},
 		Cache: Cache{
 			Backend: CacheLocal, L1MaxCost: 64 << 20,
 			Redis: CacheRedisConfig{
@@ -315,6 +378,12 @@ func (c *Config) Validate() error {
 
 	if c.ClickHouse.MaxTotalConns < 0 {
 		return fmt.Errorf("clickhouse.max_total_conns must be >= 0 (0 is no ceiling), got %d", c.ClickHouse.MaxTotalConns)
+	}
+
+	for _, b := range c.ClickHouse.ChtypesBases() {
+		if !strings.HasPrefix(b, "https://") && !strings.HasPrefix(b, "http://") && !strings.HasPrefix(b, "file://") {
+			return fmt.Errorf("clickhouse.chtypes_artifacts_url (WH_CHTYPES_ARTIFACTS_URL): %q is not an http(s):// or file:// URL", b)
+		}
 	}
 
 	if c.OTel.Enabled {
@@ -376,7 +445,10 @@ func (c *Config) Validate() error {
 	if err := c.validateBackends(); err != nil {
 		return err
 	}
-	return c.validateTopology()
+	if err := c.validateTopology(); err != nil {
+		return err
+	}
+	return c.Ingest.validate()
 }
 
 // Load reads config from a YAML file (if it exists) with env var overrides.

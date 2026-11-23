@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -24,11 +23,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/chconn"
-	"github.com/Wave-RF/WaveHouse/internal/chconn/chconntest"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/pipes"
@@ -85,9 +81,9 @@ func TestStructuredQuery_CHSpan(t *testing.T) {
 	rec := recordCHSpans(t)
 	_, server := otel.Tracer("test").Start(context.Background(), "server")
 	defer server.End()
-	h := newCapturingHandler(t, &failingConn{err: chException(62, "DB::Exception", "Syntax error near 'hunter2'")},
+	h := newCapturingHandler(t, &fakeCH{answer: refused(400, 62, "Syntax error near 'hunter2'")},
 		policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}}))
-	h.CHTarget = staticTarget("http://ch.internal:8123", "default", "secret", "events")
+	h.Target = staticTarget("http://ch.internal:8123", "default", "secret", "events")
 
 	r := viewerRequest(t, query.StructuredQuery{Columns: []string{"page"}, Filters: []query.Filter{{Column: "page", Op: "eq", Value: "hunter2"}}})
 	h.Handle(httptest.NewRecorder(), withTenant(r.WithContext(trace.ContextWithSpan(r.Context(), server))))
@@ -102,9 +98,6 @@ func TestStructuredQuery_CHSpan(t *testing.T) {
 	assert.Contains(t, attrs, attribute.String("operation", opStructuredQuery))
 	assert.Contains(t, attrs, attribute.String("result", chResult(codeCHRejected)))
 	assert.Contains(t, attrs, attribute.String("error.type", chResult(codeCHRejected)))
-	for _, kv := range attrs {
-		assert.NotEqual(t, "server.port", string(kv.Key), "the native port is not the URL's")
-	}
 	assert.Equal(t, codes.Error, s.Status().Code)
 	assert.Equal(t, chResult(codeCHRejected), s.Status().Description)
 }
@@ -117,8 +110,10 @@ func TestPipes_CHSpan(t *testing.T) {
 	defer server.End()
 
 	store := staticPipes(&pipes.NamedQuery{Name: "p", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}})
-	p := NewPipesHandler(store, staticPolicy(&policy.Policy{}), fixedConn(&failingConn{err: chException(159, "DB::Exception", "Timeout exceeded")}), nil,
+	failing := &fakeCH{answer: refused(408, 159, "Timeout exceeded")}
+	p := NewPipesHandler(store, staticPolicy(&policy.Policy{}), failing.target, nil,
 		func(*settings.Store) time.Duration { return time.Second })
+	p.ch = failing.reader()
 	r := pipesRequest(t, http.MethodGet, "/v1/pipes/p", "p", nil)
 	p.Execute(httptest.NewRecorder(), withTenant(r.WithContext(auth.WithRole(trace.ContextWithSpan(r.Context(), server), "viewer"))))
 	s := chSpan(t, rec, server, "SELECT 1")
@@ -129,7 +124,7 @@ func TestPipes_CHSpan(t *testing.T) {
 
 	rec.Reset()
 	const insert = "INSERT INTO audit_log VALUES ({{msg}}, now())"
-	wp := writerPipesHandler(t, &writeConn{}, nil, &pipes.NamedQuery{Name: "log", SQL: insert})
+	wp := writerPipesHandler(t, &fakeCH{}, nil, &pipes.NamedQuery{Name: "log", SQL: insert})
 	w := httptest.NewRecorder()
 	r = pipesRequest(t, http.MethodPost, "/v1/pipes/log", "log", map[string]any{"msg": "hunter2"})
 	wp.Execute(w, withTenant(r.WithContext(auth.WithRole(trace.ContextWithSpan(r.Context(), server), "writer"))))
@@ -196,57 +191,40 @@ func TestOpsQuery_CHSpan(t *testing.T) {
 	}
 }
 
-// ctxConn records the context each statement reached the driver with.
-type ctxConn struct {
-	driver.Conn
-	mu   sync.Mutex
-	ctxs []context.Context
-}
-
-func (c *ctxConn) keep(ctx context.Context) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.ctxs = append(c.ctxs, ctx)
-}
-
-func (c *ctxConn) Query(ctx context.Context, _ string, _ ...any) (driver.Rows, error) {
-	c.keep(ctx)
-	return &chainEmptyRows{}, nil
-}
-
-func (c *ctxConn) Exec(ctx context.Context, _ string, _ ...any) error {
-	c.keep(ctx)
-	return nil
-}
-
-// last is the context of the last statement, checked to be the only one.
-func (c *ctxConn) last(t *testing.T) context.Context {
+// traceparent is the trace context ch's last request carried to ClickHouse,
+// checked to be its only request.
+func traceparent(t *testing.T, ch *fakeCH) string {
 	t.Helper()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	require.Len(t, c.ctxs, 1)
-	ctx := c.ctxs[0]
-	c.ctxs = nil
-	return ctx
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	require.Len(t, ch.seen, 1)
+	tp := ch.seen[0].header.Get("traceparent")
+	ch.seen = nil
+	return tp
+}
+
+// wantTraceparent is the traceparent header naming s.
+func wantTraceparent(s sdktrace.ReadOnlySpan) string {
+	sc := s.SpanContext()
+	return "00-" + sc.TraceID().String() + "-" + sc.SpanID().String() + "-01"
 }
 
 // A structured query sends its clickhouse.query span to ClickHouse as the
-// query's trace context, alongside the role's caps.
+// request's traceparent header, alongside the role's caps.
 func TestStructuredQuery_SendsTraceContext(t *testing.T) {
 	rec := recordCHSpans(t)
 	_, server := otel.Tracer("test").Start(context.Background(), "server")
 	defer server.End()
-	conn := &ctxConn{}
-	h := newCapturingHandler(t, conn, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}, MaxRows: 5}))
+	ch := &fakeCH{}
+	h := newCapturingHandler(t, ch, policyWithViewer(policy.SelectPermissions{AllowColumns: []string{"*"}, MaxRows: 5}))
 
 	r := viewerRequest(t, query.StructuredQuery{Columns: []string{"page"}})
 	w := httptest.NewRecorder()
 	h.Handle(w, withTenant(r.WithContext(trace.ContextWithSpan(r.Context(), server))))
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
-	span, settings := chconntest.QueryOptions(conn.last(t), t)
-	assert.Equal(t, chSpan(t, rec, server, "").SpanContext(), span)
-	assert.Equal(t, 5, settings["max_result_rows"], "the role's caps still ride on the query")
+	assert.Equal(t, "5", ch.setting("max_result_rows"), "the role's caps still ride on the query")
+	assert.Equal(t, wantTraceparent(chSpan(t, rec, server, "")), traceparent(t, ch))
 }
 
 // A pipe's read and write each send their clickhouse.query span.
@@ -255,26 +233,25 @@ func TestPipes_SendTraceContext(t *testing.T) {
 	_, server := otel.Tracer("test").Start(context.Background(), "server")
 	defer server.End()
 
-	conn := &ctxConn{}
+	ch := &fakeCH{}
 	store := staticPipes(&pipes.NamedQuery{Name: "p", SQL: "SELECT 1", AllowedRoles: []string{"viewer"}})
-	p := NewPipesHandler(store, staticPolicy(&policy.Policy{}), fixedConn(conn), nil,
+	p := NewPipesHandler(store, staticPolicy(&policy.Policy{}), ch.target, nil,
 		func(*settings.Store) time.Duration { return time.Second })
+	p.ch = ch.reader()
 	r := pipesRequest(t, http.MethodGet, "/v1/pipes/p", "p", nil)
 	w := httptest.NewRecorder()
 	p.Execute(w, withTenant(r.WithContext(auth.WithRole(trace.ContextWithSpan(r.Context(), server), "viewer"))))
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	span, _ := chconntest.QueryOptions(conn.last(t), t)
-	assert.Equal(t, chSpan(t, rec, server, "SELECT 1").SpanContext(), span)
+	assert.Equal(t, wantTraceparent(chSpan(t, rec, server, "SELECT 1")), traceparent(t, ch))
 
 	rec.Reset()
 	const insert = "INSERT INTO audit_log VALUES ({{msg}}, now())"
-	wp := writerPipesHandler(t, conn, nil, &pipes.NamedQuery{Name: "log", SQL: insert})
+	wp := writerPipesHandler(t, ch, nil, &pipes.NamedQuery{Name: "log", SQL: insert})
 	w = httptest.NewRecorder()
 	r = pipesRequest(t, http.MethodPost, "/v1/pipes/log", "log", map[string]any{"msg": "hunter2"})
 	wp.Execute(w, withTenant(r.WithContext(auth.WithRole(trace.ContextWithSpan(r.Context(), server), "writer"))))
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	span, _ = chconntest.QueryOptions(conn.last(t), t)
-	assert.Equal(t, chSpan(t, rec, server, "INSERT INTO audit_log").SpanContext(), span)
+	assert.Equal(t, wantTraceparent(chSpan(t, rec, server, "INSERT INTO audit_log")), traceparent(t, ch))
 }
 
 // The raw-SQL proxy sends its clickhouse.query span as a traceparent header,
@@ -302,8 +279,7 @@ func TestOpsQuery_SendsTraceContext(t *testing.T) {
 	h.Handle(w, httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/ops/query", bytes.NewReader(body)))
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
-	sc := chSpan(t, rec, server, "SELECT 1").SpanContext()
-	assert.Equal(t, "00-"+sc.TraceID().String()+"-"+sc.SpanID().String()+"-01", <-got)
+	assert.Equal(t, wantTraceparent(chSpan(t, rec, server, "SELECT 1")), <-got)
 }
 
 func TestSQLVerb(t *testing.T) {

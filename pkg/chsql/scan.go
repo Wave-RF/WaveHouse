@@ -8,17 +8,17 @@ import (
 // The functions in this file read ClickHouse SQL text as ClickHouse's own
 // lexer reads it — past whitespace, comments, quoted tokens and heredocs —
 // for two callers that cannot share code any other way, since internal/api
-// imports pkg/pipes: IsMutation, the write classifier the API routes a
-// statement to Exec or Query by, and Opaque, the spans ClickHouse reads as
-// text, which the pipes template check refuses a placeholder inside.
+// imports pkg/pipes: IsMutation, the write classifier the API runs a pipe as
+// a write by, and Opaque, the spans ClickHouse reads as text, which the pipes
+// template check refuses a placeholder inside.
 
 // mutationVerbs is a set of SQL leading keywords that don't return a result
-// set — anything that mutates schema or data. The API routes such a
-// statement through Exec rather than Query (internal/api's executeCHQuery).
+// set — anything that mutates schema or data. A pipe led by one runs as a
+// write (internal/api's PipesHandler.executeWrite).
 // Sourced from the ClickHouse statement reference: DML, DDL, role/privilege
 // management, and runtime control (SYSTEM/KILL/SET). Read-only verbs
 // (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/EXISTS) intentionally fall through to
-// the default Query path.
+// the read path, under readonly=2.
 var mutationVerbs = map[string]struct{}{
 	"INSERT":   {},
 	"UPDATE":   {},
@@ -41,18 +41,20 @@ var mutationVerbs = map[string]struct{}{
 	"SYSTEM":   {},
 }
 
-// IsMutation reports whether sql's leading statement is a non-SELECT — i.e.
-// one that returns no result set and must go through Exec, not Query.
-// Leading whitespace and comments are skipped as ClickHouse's lexer skips
-// them, then the first bareword is matched whole, case-insensitively, against
-// mutationVerbs. After a WITH list ClickHouse parses only SELECT, a FROM-first
-// SELECT or INSERT INTO, so a WITH-led statement is a write exactly when it
-// holds INSERT INTO at the top level (hasTopLevelInsertInto). An
-// `EXECUTE AS <user>` prefix is looked through to the statement it runs. A
-// write classified as a read goes through Query, which runs it and then fails
-// the call, so a client that retries the error writes again. The statement
-// cases are internal/testutil/mutationtest, run by internal/api's unit test
-// and, against ClickHouse's own parser, by the integration suite.
+// IsMutation reports whether sql's leading statement is a non-SELECT — one
+// that returns no result set and may change something, so a pipe running it
+// is never cached or coalesced (#386). Leading whitespace and comments are
+// skipped as ClickHouse's lexer skips them, then the first bareword is matched
+// whole, case-insensitively, against mutationVerbs. After a WITH list
+// ClickHouse parses only SELECT, a FROM-first SELECT or INSERT INTO, so a
+// WITH-led statement is a write exactly when it holds INSERT INTO at the top
+// level (hasTopLevelInsertInto). An `EXECUTE AS <user>` prefix is looked
+// through to the statement it runs. A write classified as a read runs under
+// readonly=2, which refuses only what ClickHouse counts as a write in readonly
+// mode (DDL, INSERT, ALTER, access management). BACKUP, RESTORE and UNDROP are
+// not in that set, so they run and their result is cached like a read (#666).
+// The statement cases are internal/testutil/mutationtest, run by internal/api's
+// unit test and, against ClickHouse's own parser, by the integration suite.
 func IsMutation(sql string) bool {
 	s := StripLeadingComments(sql)
 	if rest, ok := SkipExecuteAs(s); ok {
