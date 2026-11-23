@@ -14,7 +14,6 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
 )
 
@@ -65,9 +64,16 @@ func (a *App) wireNATSMQ(ctx context.Context) error {
 	if !a.cfg.Has(config.RoleAPI) {
 		return nil // replay and dedupe run on the API path only
 	}
-	// No sweeper runs here, so what it warned about (a gap window longer than
-	// the history keeps) is checked by the processes that replay.
-	checkWindows := func() { broker.CheckReplayWindows(servedGapWindows(a.tenants)) }
+	// The history's max_age is the operator's: the processes that replay
+	// hand over each served tenant's gap window, and a longer one is warned
+	// about.
+	checkWindows := func() {
+		for id, store := range a.tenants.All() {
+			if err := broker.SetReplayWindow(a.stopCtx, id, store.GapWindow()); err != nil {
+				slog.Error("mq replay window not recorded", "tenant", id, "error", err)
+			}
+		}
+	}
 	checkWindows()
 	a.tenants.AfterAdopt(func([]tenant.ID) { checkWindows() })
 	window, err := broker.DuplicateWindow(ctx)
@@ -78,15 +84,6 @@ func (a *App) wireNATSMQ(ctx context.Context) error {
 	a.warnShortRetention(window)
 	a.tenants.AfterAdopt(func([]tenant.ID) { a.warnShortRetention(window) })
 	return nil
-}
-
-// servedGapWindows is each served tenant's stream.gap_window_minutes.
-func servedGapWindows(tenants *settings.Registry) map[tenant.ID]time.Duration {
-	windows := map[tenant.ID]time.Duration{}
-	for id, store := range tenants.All() {
-		windows[id] = store.GapWindow()
-	}
-	return windows
 }
 
 // dedupeLease is the lease ingest runs with: dedupe.lease, or the default for 0.

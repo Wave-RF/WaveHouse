@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"testing"
 	"time"
 
@@ -91,42 +90,20 @@ func replay(t *testing.T, b mq.Broker, topic mq.Topic, since time.Time) []string
 	return got
 }
 
-// replayEventually waits for a replay of topic since to be want: a backend
-// may serve replays from a store that trails the ingest queue.
-func replayEventually(t *testing.T, b mq.Broker, topic mq.Topic, since time.Time, want []string) {
+// write runs the suite's durable as the ingest worker would until n messages
+// have been delivered: each one take accepts is recorded as written and then
+// acked, in the order it arrived, and the others are left unacked, as rows
+// ClickHouse cannot take yet are.
+func write(t *testing.T, b mq.Broker, n int, take func(data string) bool) {
 	t.Helper()
-	deadline := time.Now().Add(wait)
-	for {
-		got := replay(t, b, topic, since)
-		if slices.Equal(got, want) {
-			return
+	got, stop, _ := consume(ctx(t), t, b, mq.ConsumerConfig{MaxAckPending: 1000}, func(m *mq.Message) {
+		if take == nil || take(string(m.Data)) {
+			assert.NoError(t, b.Record(m.Ctx, []*mq.Message{m}))
+			assert.NoError(t, m.DoubleAck(m.Ctx))
 		}
-		if time.Now().After(deadline) {
-			assert.Equal(t, want, got, "replay of %+v since %v", topic, since)
-			return
-		}
-		time.Sleep(retryPause)
-	}
-}
-
-// replayReaches waits until a replay of topic from the start holds at least
-// n events: that they are stored where the backend replays from. It stops the
-// replay at n, so it never waits out a caught-up.
-func replayReaches(t *testing.T, b mq.Broker, topic mq.Topic, n int) {
-	t.Helper()
-	deadline := time.Now().Add(wait)
-	for {
-		got := 0
-		require.NoError(t, b.ReplaySince(ctx(t), topic, time.Time{}, func([]byte) bool {
-			got++
-			return got < n
-		}))
-		if got >= n {
-			return
-		}
-		require.False(t, time.Now().After(deadline), "a replay of %+v never reached %d events", topic, n)
-		time.Sleep(retryPause)
-	}
+	})
+	next(t, got, n)
+	stop()
 }
 
 type ctxKey struct{}
@@ -171,7 +148,7 @@ func idempotencyKeyDropsARepeat(t *testing.T, h Harness) {
 		"a repeat under the same key is reported as success, not stored again")
 	require.NoError(t, b.Publish(ctx(t), topic, []byte("second"), mq.WithIdempotencyKey("k2")))
 
-	replayEventually(t, b, topic, time.Time{}, []string{"first", "second"})
+	assert.Equal(t, []string{"first", "second"}, replay(t, b, topic, time.Time{}))
 }
 
 // Nothing lands on a tenant by omission (#583), and an invalid tenant is not
@@ -186,15 +163,43 @@ func refusesATopicWithoutATenant(t *testing.T, h Harness) {
 	}
 }
 
+// A live reader is handed each event once, when the queue accepts it: in the
+// order it was accepted, whether or not anything consumes the queue, and never
+// a repeat the queue's duplicate window dropped.
+func liveOnceWhenAccepted(t *testing.T, h Harness) {
+	b := h.New(t)
+	got := make(chan delivery, 16)
+	lost := make(chan struct{}, 1)
+	require.NoError(t, b.Subscribe(t.Context(), func(m *mq.Message) {
+		got <- delivery{topic: m.Topic(), data: string(m.Data)}
+	}, func() { lost <- struct{}{} }))
+
+	topic := mq.Topic{Tenant: Acme, Table: "live", Scope: "s.1"}
+	publish(t, b, topic, "first", mq.WithIdempotencyKey("k1"))
+	publish(t, b, topic, "repeat", mq.WithIdempotencyKey("k1"))
+	publish(t, b, topic, "second")
+
+	for _, want := range []string{"first", "second"} {
+		d := next(t, got, 1)[0]
+		assert.Equal(t, want, d.data)
+		assert.Equal(t, topic, d.topic)
+	}
+	// Nothing has consumed the queue: the events are still waiting to be
+	// written, and each has been handed over all the same.
+	assert.Equal(t, []string{"first", "second"}, replay(t, b, topic, time.Time{}))
+
+	// Writing them hands none over again.
+	write(t, b, 2, nil)
+	none(t, got, "an event was delivered twice")
+	none(t, lost, "the feed reported a break")
+}
+
 // The trace context of the publishing request reaches the Subscribe handler
 // through the message's headers, alongside any the options set.
 func subscribeCarriesTheTraceContext(t *testing.T, h Harness) {
 	b := h.New(t)
 	got := make(chan context.Context, 4)
-	require.NoError(t, b.Subscribe(t.Context(), "hub-bridge", func(m *mq.Message) error {
-		got <- m.Ctx
-		return nil
-	}))
+	require.NoError(t, b.Subscribe(t.Context(), func(m *mq.Message) { got <- m.Ctx }, func() {}))
 
 	sc := trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID:    trace.TraceID{0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e, 0x47, 0x36},
@@ -242,10 +247,7 @@ func consumeCarriesTheTraceContext(t *testing.T, h Harness) {
 func subscribeSeesEveryTenant(t *testing.T, h Harness) {
 	b := h.New(t)
 	got := make(chan mq.Topic, 8)
-	require.NoError(t, b.Subscribe(t.Context(), "hub-bridge", func(m *mq.Message) error {
-		got <- m.Topic()
-		return nil
-	}))
+	require.NoError(t, b.Subscribe(t.Context(), func(m *mq.Message) { got <- m.Topic() }, func() {}))
 	want := []mq.Topic{{Tenant: Acme, Table: "t"}, {Tenant: Globex, Table: "t"}}
 	for _, topic := range want {
 		publish(t, b, topic, "x")
@@ -405,10 +407,9 @@ func replaySince(t *testing.T, h Harness) {
 	b := h.New(t)
 	topic := mq.Topic{Tenant: Acme, Table: "r"}
 	publish(t, b, topic, "one")
-	// Waiting until "one" replays puts it before since in whatever store the
-	// backend replays from.
-	replayReaches(t, b, topic, 1)
+	time.Sleep(retryPause)
 	since := time.Now()
+	time.Sleep(retryPause)
 	publish(t, b, topic, "two")
 	publish(t, b, topic, "three")
 	publish(t, b, mq.Topic{Tenant: Acme, Table: "r2"}, "other table")
@@ -430,9 +431,125 @@ func replaySince(t *testing.T, h Harness) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			replayEventually(t, b, tt.topic, tt.since, tt.want)
+			assert.Equal(t, tt.want, replay(t, b, tt.topic, tt.since))
 		})
 	}
+}
+
+// A replay sends what the ingest queue accepted since a time and the broker
+// still holds, wherever it is: the events already written, which the worker
+// recorded before it acked them off the queue, then the ones still waiting to
+// be written. An event is in one or the other, whether it was accepted before
+// or after another topic's, a second ago or an hour.
+func replayServesWrittenAndWaitingEvents(t *testing.T, h Harness) {
+	b := h.New(t)
+	topic := mq.Topic{Tenant: Acme, Table: "r"}
+	other := mq.Topic{Tenant: Acme, Table: "other"}
+	publish(t, b, topic, "a")
+	time.Sleep(retryPause)
+	since := time.Now()
+	time.Sleep(retryPause)
+	for _, data := range []string{"b", "c", "d"} {
+		publish(t, b, topic, data)
+	}
+	publish(t, b, other, "x")
+
+	// The worker writes a and b, and the other table's row; ClickHouse cannot
+	// take c and d yet.
+	write(t, b, 5, func(data string) bool { return data == "a" || data == "b" || data == "x" })
+
+	assert.Equal(t, []string{"a", "b", "c", "d"}, replay(t, b, topic, time.Time{}), "written, then waiting")
+	assert.Equal(t, []string{"b", "c", "d"}, replay(t, b, topic, since), "by when the queue accepted each, written or not")
+	assert.Equal(t, []string{"x"}, replay(t, b, other, time.Time{}))
+	assert.Equal(t, []string{}, replay(t, b, topic, time.Now().Add(time.Hour)))
+
+	// send returning false ends it, wherever it is reading.
+	for stopAt := 1; stopAt <= 4; stopAt++ {
+		var got []string
+		require.NoError(t, b.ReplaySince(ctx(t), topic, time.Time{}, func(data []byte) bool {
+			got = append(got, string(data))
+			return len(got) < stopAt
+		}))
+		assert.Equal(t, []string{"a", "b", "c", "d"}[:stopAt], got)
+	}
+}
+
+// A replay sends the written events in the order they were written, which is
+// the worker's and need not be the queue's, and picks each by when the queue
+// accepted it, not by when it was written.
+func replayOrdersWrittenEventsByTheirWrite(t *testing.T, h Harness) {
+	b := h.New(t)
+	topic := mq.Topic{Tenant: Acme, Table: "o"}
+	publish(t, b, topic, "a")
+	time.Sleep(retryPause)
+	since := time.Now()
+	time.Sleep(retryPause)
+	publish(t, b, topic, "b")
+	publish(t, b, topic, "c")
+
+	got, stop, _ := consume(ctx(t), t, b, mq.ConsumerConfig{MaxAckPending: 100}, nil)
+	held := map[string]*mq.Message{}
+	for _, d := range next(t, got, 3) {
+		held[d.data] = d.msg
+	}
+	for _, data := range []string{"c", "a", "b"} {
+		m := held[data]
+		require.NoError(t, b.Record(m.Ctx, []*mq.Message{m}))
+		require.NoError(t, m.DoubleAck(m.Ctx))
+	}
+	stop()
+
+	assert.Equal(t, []string{"c", "a", "b"}, replay(t, b, topic, time.Time{}), "in the order written")
+	assert.Equal(t, []string{"c", "b"}, replay(t, b, topic, since), "a was written after since, and accepted before it")
+}
+
+// The replay window bounds how long a written event is kept, counted from
+// its write, and nothing else: an event still waiting to be written is
+// replayed whatever its age (#1007). With a window of a second the written
+// event is gone once it has passed, and the waiting one, accepted before it,
+// is still sent.
+func aWaitingEventOutlivesTheReplayWindow(t *testing.T, h Harness) {
+	b := h.New(t)
+	topic := mq.Topic{Tenant: Acme, Table: "w"}
+	publish(t, b, topic, "waiting")
+	publish(t, b, topic, "written")
+	write(t, b, 2, func(data string) bool { return data == "written" })
+	require.Equal(t, []string{"written", "waiting"}, replay(t, b, topic, time.Time{}))
+
+	h.Window(t, b, Acme, time.Second)
+	var got []string
+	for deadline := time.Now().Add(wait); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		if got = replay(t, b, topic, time.Time{}); len(got) == 1 {
+			break
+		}
+	}
+	assert.Equal(t, []string{"waiting"}, got)
+}
+
+// An event written while a replay runs is not missed: the worker records it
+// before the queue lets it go, and the replay reads what was recorded
+// meanwhile last. More events than one read of the queue returns, all of them
+// written once the replay has sent its first: every one is sent, some twice.
+func replayCoversEventsWrittenMeanwhile(t *testing.T, h Harness) {
+	b := h.New(t)
+	topic := mq.Topic{Tenant: Acme, Table: "moving"}
+	const n = 300 // one read of the queue returns 256
+	for i := range n {
+		publish(t, b, topic, fmt.Sprint(i))
+	}
+
+	seen := map[string]int{}
+	require.NoError(t, b.ReplaySince(ctx(t), topic, time.Time{}, func(data []byte) bool {
+		if len(seen) == 0 {
+			write(t, b, n, nil)
+		}
+		seen[string(data)]++
+		return true
+	}))
+	for i := range n {
+		assert.Positive(t, seen[fmt.Sprint(i)], "event %d was not replayed", i)
+	}
+	assert.Equal(t, n, len(seen))
 }
 
 // A done ctx ends a replay before the next event, with ctx's error.
@@ -441,7 +558,6 @@ func replaySinceStopsWhenContextIsDone(t *testing.T, h Harness) {
 	topic := mq.Topic{Tenant: Acme, Table: "r"}
 	publish(t, b, topic, "one")
 	publish(t, b, topic, "two")
-	replayReaches(t, b, topic, 2)
 
 	c, cancel := context.WithCancel(ctx(t))
 	defer cancel()
@@ -462,7 +578,6 @@ func replaySincePullFailureIsAnError(t *testing.T, h Harness) {
 	topic := mq.Topic{Tenant: Acme, Table: "r"}
 	publish(t, b, topic, "one")
 	publish(t, b, topic, "two")
-	replayReaches(t, b, topic, 2)
 
 	var got []string
 	err := b.ReplaySince(ctx(t), topic, time.Time{}, func(data []byte) bool {
@@ -520,48 +635,43 @@ func stats(t *testing.T, h Harness) {
 	assert.GreaterOrEqual(t, s.Connections, int64(1), "the broker's own connection")
 }
 
-// A full queue refuses with ErrQueueFull; with per-tenant budgets, only its
-// own tenant.
+// A full queue refuses the publish with mq.ErrQueueFull, which is the
+// backpressure the ingest handler answers 503 for: for the whole queue, or,
+// where each tenant has a budget of its own, for that tenant alone. A refused
+// event was not accepted, so no live reader is handed it.
 func queueFull(t *testing.T, h Harness) {
 	b := h.New(t)
 	h.Fill(t, b, Acme)
+	live := make(chan delivery, 4)
+	require.NoError(t, b.Subscribe(t.Context(), func(m *mq.Message) {
+		live <- delivery{topic: m.Topic(), data: string(m.Data)}
+	}, func() {}))
+
 	err := b.Publish(ctx(t), mq.Topic{Tenant: Acme, Table: "full"}, []byte("x"))
 	require.ErrorIs(t, err, mq.ErrQueueFull)
 	if h.Caps.PerTenantBudget {
-		publish(t, b, mq.Topic{Tenant: Globex, Table: "full"}, "x")
+		other := mq.Topic{Tenant: Globex, Table: "full"}
+		publish(t, b, other, "x")
+		assert.Equal(t, other, next(t, live, 1)[0].topic)
 	}
+	none(t, live, "a refused event reached the live feed")
 }
 
-// PurgeAcked never removes an unacked event. A backend that purges removes
-// the acked ones past the cutoff; one that leaves retention to the operator
-// reports nothing purged.
-func purgeAcked(t *testing.T, h Harness) {
+// An event left unacked holds back only itself (#653): the ones accepted
+// after it are delivered all the same, and each leaves the queue at its own
+// ack, so the unacked one is all the queue still holds.
+func anUnackedEventHoldsBackOnlyItself(t *testing.T, h Harness) {
 	b := h.New(t)
 	topic := mq.Topic{Tenant: Acme, Table: "p"}
-	for _, data := range []string{"a", "b", "c", "left"} {
+	for _, data := range []string{"stuck", "a", "b", "c"} {
 		publish(t, b, topic, data)
 	}
 	got, _, _ := consume(ctx(t), t, b, mq.ConsumerConfig{MaxAckPending: 100}, func(m *mq.Message) {
-		if string(m.Data) != "left" {
+		if string(m.Data) != "stuck" {
 			assert.NoError(t, m.DoubleAck(m.Ctx))
 		}
 	})
 	next(t, got, 4)
 
-	future := time.Now().Add(time.Hour)
-	purged, err := b.PurgeAcked(ctx(t), Durable, map[tenant.ID]time.Time{Acme: future, Globex: future})
-	require.NoError(t, err)
-	if h.Caps.PurgesAcked {
-		assert.True(t, purged)
-		replayEventually(t, b, topic, time.Time{}, []string{"left"})
-		return
-	}
-	assert.False(t, purged)
-	replayEventually(t, b, topic, time.Time{}, []string{"a", "b", "c", "left"})
-}
-
-func purgeAckedUnknownConsumer(t *testing.T, h Harness) {
-	b := h.New(t)
-	_, err := b.PurgeAcked(ctx(t), "no-such-consumer", nil)
-	require.ErrorIs(t, err, mq.ErrConsumerNotFound)
+	assert.Equal(t, []string{"stuck"}, replay(t, b, topic, time.Time{}), "an acked event nothing recorded is gone with its ack")
 }

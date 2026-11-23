@@ -37,8 +37,8 @@ const (
 // BuildInfoMetric is the gauge naming the build and roles each process runs.
 const BuildInfoMetric = "wavehouse_build_info"
 
-// roles is the role set as one value, "api,ingest,sweeper", so it reads the
-// same as a resource attribute, a metric label and a log field.
+// roles is the role set as one value, "api,ingest", so it reads the same as a
+// resource attribute, a metric label and a log field.
 func (id Identity) roles() string { return strings.Join(id.Roles, ",") }
 
 // LogAttrs are the fields every log record carries to name the process and

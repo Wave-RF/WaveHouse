@@ -116,8 +116,10 @@ func limitsOf(store *settings.Store) ingest.Limits {
 // that is still inserting, and they insert twice. It bounds that case only:
 // a batch queued behind its table's in-flight flush, a flush of several
 // column lists, and the row-by-row isolation of a rejected batch each add
-// INSERT deadlines the rule does not count, so the seeds keep the sum well
-// under the ack wait; a flush-level bound is not built.
+// INSERT deadlines the rule does not count, and so does the history write a
+// written batch's acks wait for (five seconds at most, while the history does
+// not answer), so the seeds keep the sum well under the ack wait; a
+// flush-level bound is not built.
 func checkIngestLimits(lim ingest.Limits, ackWait time.Duration) error {
 	// Compared without adding: each value fits a duration (the validator
 	// bounds the file's integers), but two can still sum past one, and a

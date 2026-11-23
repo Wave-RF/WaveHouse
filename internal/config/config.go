@@ -194,12 +194,9 @@ const (
 	// RoleIngest runs the ingest worker, queue to ClickHouse. Under nats each
 	// shard of the queue is delivered to one ingest process at a time.
 	RoleIngest Role = "ingest"
-	// RoleSweeper runs the sweeper, one per queue, under the sweeper lease, on
-	// the embedded MQ only: under nats the streams' own retention replaces it.
-	RoleSweeper Role = "sweeper"
 )
 
-var allRoles = []Role{RoleAPI, RoleIngest, RoleSweeper}
+var allRoles = []Role{RoleAPI, RoleIngest}
 
 // AllRoles is every role, the default: one process runs all the work.
 func AllRoles() []Role { return slices.Clone(allRoles) }

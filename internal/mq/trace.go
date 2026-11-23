@@ -14,8 +14,9 @@ import (
 
 // Kinds of publish, the "kind" attribute on an mq.publish span.
 const (
-	publishKindIngest = "ingest" // a row onto its tenant's ingest queue
-	publishKindDLQ    = "dlq"    // a row parked on the dead-letter stream
+	publishKindIngest  = "ingest"  // a row onto its tenant's ingest queue
+	publishKindDLQ     = "dlq"     // a row parked on the dead-letter stream
+	publishKindHistory = "history" // a written batch recorded on the history stream
 )
 
 // publishBatchKey is the context key of the publishBatch StartPublishBatch

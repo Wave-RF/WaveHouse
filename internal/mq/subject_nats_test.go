@@ -42,6 +42,33 @@ func TestNATSRoute_Golden(t *testing.T) {
 	}
 }
 
+// The partitions a table lived in under every smaller count are the ones it
+// moved through, in order, without the one it lives in now, so a replay that
+// reads them finds the rows the table queued before the count was raised. A
+// table moves about ln(n) times on the way to n partitions.
+func TestNATSEarlierPartitions(t *testing.T) {
+	t.Parallel()
+	const tables, n = 2_000, 16
+	total := 0
+	for i := range tables {
+		topic := Topic{Tenant: tenant.ID("t" + strconv.Itoa(i%97)), Table: "table_" + strconv.Itoa(i)}
+		now, _ := natsRoute(topic, n, 1)
+		var want []int
+		for k := 1; k < n; k++ {
+			if p, _ := natsRoute(topic, k, 1); p != now && (len(want) == 0 || want[len(want)-1] != p) {
+				want = append(want, p)
+			}
+		}
+		got := natsEarlierPartitions(topic, n)
+		require.Equal(t, want, got, "%+v", topic)
+		assert.NotContains(t, got, now)
+		total += len(got)
+	}
+	assert.Empty(t, natsEarlierPartitions(Topic{Tenant: "acme", Table: "events"}, 1), "one partition has no earlier one")
+	// The harmonic number of 16 is about 3.4 buckets visited, the current one included.
+	assert.InDelta(t, 2.4, float64(total)/tables, 0.3)
+}
+
 // Consistent hashing, for partitions and shards alike: growing the count by
 // one moves a table only into the new bucket, and about 1/(n+1) of the
 // tables; the tables spread evenly. The shard does not depend on the

@@ -67,6 +67,19 @@ func (x *ExternalFixture) FillPartition(t *testing.T, b Broker, id tenant.ID) {
 	}
 }
 
+// SetHistoryMaxAge sets how long the history keeps a row, as the operator
+// could, with a duplicate window that fits inside it.
+func (x *ExternalFixture) SetHistoryMaxAge(t *testing.T, maxAge time.Duration) {
+	t.Helper()
+	s, err := x.f.admin.Stream(t.Context(), "WH_HISTORY")
+	require.NoError(t, err)
+	cfg := s.CachedInfo().Config
+	cfg.MaxAge = maxAge
+	cfg.Duplicates = min(cfg.Duplicates, maxAge)
+	_, err = x.f.admin.UpdateStream(t.Context(), cfg)
+	require.NoError(t, err)
+}
+
 // topicIn is a table of id's whose events go to partition p of n (v shards).
 func topicIn(t *testing.T, id tenant.ID, p, n, v int) Topic {
 	t.Helper()

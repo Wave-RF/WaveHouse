@@ -178,6 +178,9 @@ func TestVerifyNATSTopology_ProbeLeavesTheDurablesAlone(t *testing.T) {
 	assert.Zero(t, info.NumAckPending)
 	assert.Zero(t, info.Delivered.Stream)
 	assert.Empty(t, info.PriorityGroups[0].PinnedClientID, "a probe pinned no one")
+	h, err := f.admin.Stream(t.Context(), "WH_HISTORY")
+	require.NoError(t, err)
+	assert.Zero(t, h.CachedInfo().State.Msgs, "the history's probe stored nothing")
 }
 
 // A refusal seen before a probe says nothing about it: permissions change,

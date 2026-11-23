@@ -78,10 +78,9 @@ type Subscriber struct {
 	//
 	// It does NOT make Hub.deliver's check→send→record sequence atomic, and
 	// deliver does not need it to be: the hub bridge registered in
-	// internal/app calls Broadcast inline per message, on one delivery
-	// goroutine per tenant (mq.Subscriber), and a connection subscribes to one
-	// tenant's topic — so all of its events come from that one goroutine, and
-	// no two events race to announce the same connection's columns. A future
+	// internal/app calls Broadcast inline per message, and the live feed
+	// delivers one message at a time (mq.Subscriber) — so no two events race
+	// to announce the same connection's columns. A future
 	// change that fans one tenant's Broadcasts out across goroutines must hold
 	// a lock across that whole sequence, or two events will both send an
 	// announcement (harmless) while a third slips a row between a check and its
@@ -183,10 +182,21 @@ func (s *Subscriber) Frames() <-chan Frame {
 // (a slow consumer). The drop is counted here, labeled by the frame's kind, so no
 // producer can forget to; callers may ignore the result (a keepalive that drops
 // coalesces harmlessly — the full queue keeps the stream alive anyway).
+//
+// An evicted subscriber takes no frame: its stream is ending, and its handler
+// may still write what is queued before it notices. A frame queued after the
+// eviction could be one past events the client was never sent (Hub.EvictAll),
+// and its id would become the client's resume point.
 func (s *Subscriber) Send(f Frame) bool {
 	if s.closed.Load() != nil {
 		s.drop(f.Kind)
 		return false
+	}
+	select {
+	case <-s.evict:
+		s.metric.FrameDropped(s.table, f.Kind, DropStreamClosed)
+		return false
+	default:
 	}
 	select {
 	case s.out <- f:

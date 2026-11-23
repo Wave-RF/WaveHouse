@@ -32,10 +32,10 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/config"
-	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe/dedupetest"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
@@ -1246,55 +1246,54 @@ func gapWindow(minutes int) map[string]any {
 	return map[string]any{"stream": map[string]any{"keepalive_interval": 30, "keepalive_buckets": 3, "gap_window_minutes": minutes, "subscriber_queue": 64}}
 }
 
-// Each tenant keeps its own stream.gap_window_minutes, since each has a queue
-// of its own — a rejected tenant the window its folder last had, so its
-// clients resume once the folder is fixed, and everything while that window
-// is unknown. A removed tenant is not named and keeps no history
-// (mq.Purger.PurgeAcked). A flat directory's single tenant gets exactly its
-// own window.
-func TestGapWindows(t *testing.T) {
+// The embedded queue keeps a written row for replay for its tenant's own
+// stream.gap_window_minutes, handed over at boot and again after every
+// reload: a tenant whose window is 0 keeps none, until a reload gives it one.
+func TestReload_EmbeddedQueueFollowsEachTenantsGapWindow(t *testing.T) {
 	t.Parallel()
-	open := func(t *testing.T, dir string) *settings.Registry {
+	root := writeNestedSettings(t, map[string]map[string]any{"acme": gapWindow(15), "globex": gapWindow(0)})
+	a := newApp(t, testConfig(t, root), Options{})
+
+	// The test is the ingest worker: New wires one and Run would start it.
+	cons, err := a.mq.CreateConsumer(t.Context(), mq.ConsumerConfig{Durable: ingest.BufferConsumerName, MaxAckPending: 10})
+	require.NoError(t, err)
+	written := make(chan error, 8)
+	stop, _, err := cons.Consume(func(msg *mq.Message) {
+		err := a.mq.Record(msg.Ctx, []*mq.Message{msg})
+		if err == nil {
+			err = msg.DoubleAck(msg.Ctx)
+		}
+		written <- err
+	}, 4)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	// replayable writes one row of id's and returns what a replay then sends.
+	replayable := func(id tenant.ID, row string) []string {
 		t.Helper()
-		tenants, findings := settings.Open(dir)
-		require.NotNil(t, tenants, "findings: %v", findings)
-		return tenants
+		topic := mq.Topic{Tenant: id, Table: "t"}
+		require.NoError(t, a.mq.Publish(t.Context(), topic, []byte(row)))
+		select {
+		case err := <-written:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s was not written", row)
+		}
+		got := []string{}
+		require.NoError(t, a.mq.ReplaySince(t.Context(), topic, time.Time{}, func(data []byte) bool {
+			got = append(got, string(data))
+			return true
+		}))
+		return got
 	}
 
-	t.Run("flat directory", func(t *testing.T) {
-		t.Parallel()
-		assert.Equal(t, map[tenant.ID]time.Duration{tenant.Default: 45 * time.Minute}, gapWindows(open(t, writeSettings(t, gapWindow(45)))))
-	})
+	assert.Equal(t, []string{"a1"}, replayable("acme", "a1"), "kept for acme's window")
+	assert.Empty(t, replayable("globex", "g1"), "globex keeps no history")
 
-	t.Run("nested directory", func(t *testing.T) {
-		t.Parallel()
-		root := writeNestedSettings(t, map[string]map[string]any{"acme": gapWindow(15), "globex": gapWindow(60), "initech": gapWindow(30)})
-		tenants := open(t, root)
-		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "globex": 60 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants))
-
-		rewriteSettings(t, filepath.Join(root, "globex"), invalidQuery)
-		tenants.Reload("test")
-		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "globex": 60 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants),
-			"a rejected tenant keeps the window its folder last had")
-
-		require.NoError(t, os.RemoveAll(filepath.Join(root, "globex")))
-		tenants.Reload("test")
-		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "initech": 30 * time.Minute}, gapWindows(tenants),
-			"a removed tenant keeps none")
-	})
-
-	t.Run("a folder rejected since boot keeps everything", func(t *testing.T) {
-		t.Parallel()
-		// globex is what lets boot open the directory at all.
-		root := writeNestedSettings(t, map[string]map[string]any{"acme": invalidQuery, "globex": gapWindow(30)})
-		tenants := open(t, root)
-		assert.Equal(t, map[tenant.ID]time.Duration{"acme": keepEverything, "globex": 30 * time.Minute}, gapWindows(tenants))
-
-		rewriteSettings(t, filepath.Join(root, "acme"), gapWindow(15))
-		tenants.Reload("test")
-		assert.Equal(t, map[tenant.ID]time.Duration{"acme": 15 * time.Minute, "globex": 30 * time.Minute}, gapWindows(tenants),
-			"its own window once its folder validates")
-	})
+	rewriteSettings(t, filepath.Join(root, "globex"), gapWindow(30))
+	_, adopted := a.tenants.Reload("test")
+	require.True(t, adopted)
+	assert.Equal(t, []string{"g2"}, replayable("globex", "g2"), "the reload gave globex a window")
+	assert.Equal(t, []string{"a1", "a2"}, replayable("acme", "a2"), "and moved nothing of acme's")
 }
 
 // A finding about a nested directory itself — a loose file beside the tenant
@@ -1572,29 +1571,6 @@ func TestRun_ServesUntilCancelled(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 	assert.Error(t, err, "the listener is closed after Run returns")
-}
-
-func TestRun_SweeperRunsUnderItsLease(t *testing.T) {
-	t.Parallel()
-	var lc net.ListenConfig
-	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	a := newApp(t, testConfig(t, writeSettings(t, nil)), Options{Listener: ln})
-	rival := a.coord.(*coord.Local).Peer()
-
-	_, stop := runApp(t, a, ln)
-	require.Eventually(t, func() bool {
-		term, err := rival.TryAcquire(t.Context(), sweeperLease)
-		if err == nil { // the sweeper has not campaigned yet: give it back
-			require.NoError(t, term.Resign(t.Context()))
-		}
-		return errors.Is(err, coord.ErrHeld)
-	}, 5*time.Second, 5*time.Millisecond, "the sweeper campaigns for its lease and keeps it while it runs")
-	require.NoError(t, stop())
-
-	term, err := rival.TryAcquire(t.Context(), sweeperLease)
-	require.NoError(t, err, "a stopped sweeper hands its lease on")
-	require.NoError(t, term.Resign(t.Context()))
 }
 
 func TestRun_PrometheusSidecar(t *testing.T) {

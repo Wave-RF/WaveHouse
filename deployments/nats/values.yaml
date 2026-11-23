@@ -3,10 +3,12 @@
 # file storage, and an account holding two users —
 #   nack       the JetStream controller that applies jetstream.yaml (full access)
 #   wavehouse  WaveHouse itself, with exactly the permissions it needs: it can
-#              publish, read and consume, unpin and reset its shard durables,
-#              read and write the lease keys in the coord bucket, and cannot
-#              create, change, purge or delete a stream or bucket, create a
-#              durable on an ingest partition, or publish to the history.
+#              publish to its ingest, history and dead-letter subjects,
+#              subscribe to the live subject the partitions republish to,
+#              consume, unpin and reset its shard durables, read a stream's
+#              messages without a consumer, read and write the lease keys in
+#              the coord bucket, and cannot create, change, purge or delete a
+#              stream or bucket, or create a durable on an ingest partition.
 # Passwords come from Secrets through the container env; `<< $VAR >>` is the
 # chart's syntax for an unquoted NATS config variable.
 #
@@ -17,7 +19,17 @@
 # `wavehouse mq permissions --shards <V>` (add --js-domain <D> when
 # mq.nats.js_domain is set). A test keeps them in step with WaveHouse, and the
 # conformance tests connect with them verbatim. WaveHouse refuses to boot when
-# they do not let it pull every shard's durable.
+# they do not let it pull every shard's durable, read every partition's
+# waiting rows, record on the history, or subscribe to the live subject.
+#
+# The reads without a consumer ($JS.API.DIRECT.GET.* and
+# $JS.API.STREAM.MSG.GET.*, which an SSE replay reads a partition's waiting
+# rows by) name the stream by a wildcard, as the shard durables' entries do: a
+# NATS wildcard is a whole token, so it cannot stop at the ingest partitions.
+# The wavehouse user can therefore read any stream of this account by
+# sequence, the dead-letter stream and the lease bucket included, and by
+# direct get any that sets allow_direct. Keep streams it must not read in
+# another account.
 #
 # The chart sets each server's max_file_store to fileStore.maxSize, else to
 # the PVC's size: 100Gi here. Every server holds a replica of every stream
@@ -47,12 +59,15 @@ config:
               publish:
                 allow:
                   - wh.ingest.>
+                  - wh.hist.>
                   - wh.dlq.>
                   - $JS.API.INFO
                   - $JS.API.STREAM.NAMES
                   - $JS.API.STREAM.INFO.*
                   - $JS.API.CONSUMER.INFO.*.*
                   - $JS.API.CONSUMER.NAMES.*
+                  - $JS.API.DIRECT.GET.*
+                  - $JS.API.STREAM.MSG.GET.*
                   - $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-0
                   - $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-1
                   - $JS.API.CONSUMER.MSG.NEXT.*.wh-ingest-2
@@ -99,7 +114,6 @@ config:
                   - $KV.wh_coord.lease.>
                   - $JS.API.DIRECT.GET.KV_wh_coord.$KV.wh_coord.lease.>
                 deny:
-                  - wh.hist.>
                   - $JS.API.STREAM.CREATE.>
                   - $JS.API.STREAM.UPDATE.>
                   - $JS.API.STREAM.DELETE.>
@@ -108,6 +122,7 @@ config:
               subscribe:
                 allow:
                   - _INBOX_wh.>
+                  - wh.live.>
 
 container:
   image:

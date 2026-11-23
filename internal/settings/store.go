@@ -256,8 +256,8 @@ func (s *Store) Keepalive() (period time.Duration, buckets int) {
 	return time.Duration(*st.KeepaliveInterval) * time.Second, *st.KeepaliveBuckets
 }
 
-// GapWindow returns how much ACKed history the sweeper keeps for SSE
-// gap-fill.
+// GapWindow returns how long a row stays replayable for SSE gap-fill once
+// the ingest worker has written it.
 func (s *Store) GapWindow() time.Duration {
 	return time.Duration(*s.doc().Config.Stream.GapWindowMinutes) * time.Minute
 }

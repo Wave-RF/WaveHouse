@@ -300,7 +300,7 @@ const MaxKeepaliveBuckets = 100
 const MaxSubscriberQueue = 10_000
 
 // StreamConfig tunes GET /v1/stream: the tenant's SSE keepalive wheel, how
-// much NATS history the Active Sweeper keeps for its gap-fill, and each
+// long the queue keeps a written row for its gap-fill, and each
 // connection's outbound queue. Keepalives are set to the proxy in front of
 // the tenant's streams, the gap window is its replay budget and the queue is
 // how far a slow client may fall behind before frames are dropped, all of
@@ -314,9 +314,11 @@ type StreamConfig struct {
 	// KeepaliveBuckets spreads the keepalive writes across the interval so
 	// each tick nudges ~1/N of live streams. Must be in 1-MaxKeepaliveBuckets.
 	KeepaliveBuckets *int `json:"keepalive_buckets"`
-	// GapWindowMinutes is how many minutes of ACKed messages the sweeper
-	// keeps in NATS for SSE gap-fill (Last-Event-ID replay). Must be >= 0;
-	// applies from the next sweep.
+	// GapWindowMinutes is how many minutes a row stays replayable for SSE
+	// gap-fill (Last-Event-ID replay) once the ingest worker has written it;
+	// a row still waiting to be written is replayable whatever its age. Must
+	// be >= 0, and 0 keeps no written row. A reload applies it to the rows
+	// already kept: a shorter window expires the older ones at once.
 	GapWindowMinutes *int `json:"gap_window_minutes"`
 	// SubscriberQueue is each connection's outbound queue, in frames: how
 	// many event frames may wait for a slow client before the ones that do
@@ -327,14 +329,16 @@ type StreamConfig struct {
 
 // MQConfig sizes the tenant's message queue on disk.
 type MQConfig struct {
-	// MaxBytesGB caps the tenant's ingest queue (its dead-letter queue gets a
-	// tenth of it). Must be >= 1. A reload updates the live queues in place:
+	// MaxBytesGB caps the tenant's ingest queue, the rows not yet written
+	// (its dead-letter queue and its replay history get a tenth of it each,
+	// on top). Must be >= 1. A reload updates the live queues in place:
 	// growing takes effect immediately; shrinking below what is currently
-	// buffered makes the ingest queue refuse new publishes (DiscardNew → 503
-	// backpressure) until the sweeper purges it back under the limit —
-	// nothing already buffered is dropped — and a dead-letter queue holding
+	// queued makes the ingest queue refuse new publishes (DiscardNew → 503
+	// backpressure) until the worker has written it back under the limit —
+	// nothing already queued is dropped — and a dead-letter queue holding
 	// more than a tenth of the new budget keeps what it holds rather than
-	// dropping its oldest rows.
+	// dropping its oldest rows. The replay history drops its oldest rows to
+	// fit, which are in ClickHouse.
 	MaxBytesGB *int `json:"max_bytes_gb"`
 }
 

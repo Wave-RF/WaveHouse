@@ -1,7 +1,6 @@
 package app
 
 import (
-	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/config"
-	"github.com/Wave-RF/WaveHouse/internal/coord"
 	"github.com/Wave-RF/WaveHouse/internal/testutil/storedir"
 	"github.com/Wave-RF/WaveHouse/pkg/settings"
 	"github.com/Wave-RF/WaveHouse/pkg/tenant"
@@ -34,7 +32,7 @@ func TestNew_RolesChooseTheComponents(t *testing.T) {
 	}{
 		{"every role", config.AllRoles(), []string{
 			"clickhouse", "schema discovery", "dedupe", "mq", "cache", "coord",
-			"sweeper", "hub bridge", "keepalive", "ingest worker",
+			"hub bridge", "keepalive", "ingest worker",
 			"auth", "sighup", "settings watcher", "http server",
 		}},
 		{"api", []config.Role{config.RoleAPI}, []string{
@@ -45,16 +43,6 @@ func TestNew_RolesChooseTheComponents(t *testing.T) {
 		{"ingest", []config.Role{config.RoleIngest}, []string{
 			"clickhouse", "mq", "cache", "coord",
 			"ingest worker",
-			"sighup", "settings watcher", "http server",
-		}},
-		{"sweeper", []config.Role{config.RoleSweeper}, []string{
-			"mq", "coord",
-			"sweeper",
-			"sighup", "settings watcher", "http server",
-		}},
-		{"ingest and sweeper", []config.Role{config.RoleSweeper, config.RoleIngest}, []string{
-			"clickhouse", "mq", "cache", "coord",
-			"sweeper", "ingest worker",
 			"sighup", "settings watcher", "http server",
 		}},
 	} {
@@ -111,15 +99,17 @@ func TestNew_OpsOnlyRouter(t *testing.T) {
 	require.Equal(t, http.StatusOK, do(full, http.MethodPost, "/v1/ops/settings/reload", "Authorization", "Bearer "+admin).Code,
 		"the API admits the admin token")
 
-	sweeperCfg := *cfg
-	sweeperCfg.Roles = []config.Role{config.RoleSweeper}
+	ingestCfg := *cfg
+	ingestCfg.Roles = []config.Role{config.RoleIngest}
 	// Its own store: full's embedded JetStream is still open on cfg.DataDir.
-	sweeperCfg.DataDir = storedir.New(t)
-	a := newApp(t, &sweeperCfg, Options{})
+	ingestCfg.DataDir = storedir.New(t)
+	a := newApp(t, &ingestCfg, Options{})
 
-	for _, path := range []string{"/livez", "/readyz", "/healthz", "/version"} {
+	for _, path := range []string{"/livez", "/healthz", "/version"} {
 		assert.Equal(t, http.StatusOK, do(a, http.MethodGet, path, "", "").Code, path)
 	}
+	assert.Equal(t, http.StatusServiceUnavailable, do(a, http.MethodGet, "/readyz", "", "").Code,
+		"the probe is served; no ClickHouse answers here (TestNew_OpsOnlyReadiness)")
 
 	reload := "/v1/ops/settings/reload"
 	rec := do(a, http.MethodPost, reload, "X-Operator-Key", cfg.Auth.OperatorKey)
@@ -147,8 +137,8 @@ func TestNew_OpsOnlyRouter(t *testing.T) {
 }
 
 // Readiness follows what the process has: an ingest process is ready when a
-// ClickHouse pool answers (here none can), a sweeper-only one once booted.
-// Liveness never waits on schema discovery, which only the API runs.
+// ClickHouse pool answers (here none can). Liveness never waits on schema
+// discovery, which only the API runs.
 func TestNew_OpsOnlyReadiness(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig(t, writeSettings(t, nil))
@@ -188,27 +178,19 @@ func TestNew_OpsOnlyPrometheusInline(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "wavehouse_")
 }
 
-// A sweeper-only process serves its listener and runs the sweeper under the
-// lease, as the all-roles one does.
-func TestRun_SweeperOnlyProcess(t *testing.T) {
+// A process without the api role serves its listener and runs its
+// components, as the all-roles one does.
+func TestRun_IngestOnlyProcess(t *testing.T) {
 	t.Parallel()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	cfg := testConfig(t, writeSettings(t, nil))
-	cfg.Roles = []config.Role{config.RoleSweeper}
+	cfg.Roles = []config.Role{config.RoleIngest}
 	a := newApp(t, cfg, Options{Listener: ln})
-	rival := a.coord.(*coord.Local).Peer()
 
 	baseURL, stop := runApp(t, a, ln)
-	status, _ := httpGet(t, baseURL+"/readyz")
+	status, _ := httpGet(t, baseURL+"/livez")
 	assert.Equal(t, http.StatusOK, status)
-	require.Eventually(t, func() bool {
-		term, err := rival.TryAcquire(t.Context(), sweeperLease)
-		if err == nil {
-			require.NoError(t, term.Resign(t.Context()))
-		}
-		return errors.Is(err, coord.ErrHeld)
-	}, 5*time.Second, 5*time.Millisecond)
 	require.NoError(t, stop())
 }

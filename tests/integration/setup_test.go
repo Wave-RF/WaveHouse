@@ -2,7 +2,7 @@
 
 // Package tests contains integration tests for WaveHouse. The package brings
 // up a single ClickHouse testcontainer and, against it, the production wiring
-// (app.New: embedded NATS, ingest worker, sweeper, hub, the API server) in
+// (app.New: embedded NATS, ingest worker, hub, the API server) in
 // TestMain, then exposes that environment to every test in the package via
 // env(). Each test creates its own ClickHouse table for data
 // isolation; the shared infra avoids the per-test container churn that drove
@@ -164,8 +164,8 @@ func setup() (int, func()) {
 	cleanups.push(func() { _ = os.RemoveAll(settingsDir) })
 
 	// The wired app on a harness listener: the same construction the binary
-	// uses (embedded NATS in-process, the ingest worker, sweeper, hub bridge,
-	// every handler), so the suite exercises the real wiring rather than a
+	// uses (embedded NATS in-process, the ingest worker, hub bridge, every
+	// handler), so the suite exercises the real wiring rather than a
 	// hand-built subset that drifts from it.
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")

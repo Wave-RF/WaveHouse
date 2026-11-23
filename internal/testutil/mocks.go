@@ -22,7 +22,7 @@ var (
 	_ mq.Publisher       = (*MockPublisher)(nil)
 	_ mq.Subscriber      = (*MockSubscriber)(nil)
 	_ mq.DeadLetterer    = (*MockPublisher)(nil)
-	_ mq.Purger          = (*MockPurger)(nil)
+	_ mq.Recorder        = (*MockPublisher)(nil)
 	_ mq.DeadLetterStats = (*MockDeadLetterStats)(nil)
 	_ http.RoundTripper  = (*MockRoundTripper)(nil)
 )
@@ -30,11 +30,17 @@ var (
 // ── Mock Publisher ───────────────────────────────────────────────
 
 // MockPublisher records all published messages — ingest publishes and
-// dead-letter parkings alike — for test assertions.
+// dead-letter parkings alike — and the messages recorded as written, for test
+// assertions.
 type MockPublisher struct {
 	mu       sync.Mutex
 	Messages []PublishedMessage
-	Err      error // if set, Publish and DeadLetter return this error
+	// Recorded is every message Record was given, in order; RecordErr is what
+	// Record returns, and OnRecord, if set, runs first, under the mock's lock.
+	Recorded  []*mq.Message
+	RecordErr error
+	OnRecord  func(msgs []*mq.Message)
+	Err       error // if set, Publish and DeadLetter return this error
 	// ErrAfter lets that many calls succeed before Err applies, to fail a
 	// batch part-way through.
 	ErrAfter int
@@ -60,6 +66,27 @@ func (m *MockPublisher) Publish(_ context.Context, topic mq.Topic, data []byte, 
 
 func (m *MockPublisher) DeadLetter(_ context.Context, msg *mq.Message, opts ...mq.PublishOpt) error {
 	return m.record(PublishedMessage{Topic: msg.Topic(), DeadLetter: true, Data: msg.Data}, opts)
+}
+
+func (m *MockPublisher) Record(_ context.Context, msgs []*mq.Message) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.OnRecord != nil {
+		m.OnRecord(msgs)
+	}
+	m.Recorded = append(m.Recorded, msgs...)
+	return m.RecordErr
+}
+
+// RecordedData is the data of every message Record was given, in order.
+func (m *MockPublisher) RecordedData() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.Recorded))
+	for i, msg := range m.Recorded {
+		out[i] = string(msg.Data)
+	}
+	return out
 }
 
 func (m *MockPublisher) record(pm PublishedMessage, opts []mq.PublishOpt) error {
@@ -106,11 +133,13 @@ func (m *MockPublisher) LastMessage() *PublishedMessage {
 // MockSubscriber implements mq.Subscriber for testing.
 type MockSubscriber struct {
 	Err     error
-	Handler func(msg *mq.Message) error
+	Handler func(msg *mq.Message)
+	// Lost is the feed's interruption callback, for a test to call.
+	Lost func()
 }
 
-func (m *MockSubscriber) Subscribe(_ context.Context, _ string, handler func(msg *mq.Message) error) error {
-	m.Handler = handler
+func (m *MockSubscriber) Subscribe(_ context.Context, handler func(msg *mq.Message), lost func()) error {
+	m.Handler, m.Lost = handler, lost
 	return m.Err
 }
 
@@ -328,30 +357,6 @@ func (m *MockMessage) Message() *mq.Message {
 			return m.NakErr
 		}),
 	)
-}
-
-// ── Mock mq.Purger ───────────────────────────────────────────────
-
-// MockPurger implements mq.Purger and records every call.
-type MockPurger struct {
-	Purged bool  // what PurgeAcked reports
-	Err    error // if set, PurgeAcked returns this error
-
-	mu    sync.Mutex
-	Calls []PurgeCall
-}
-
-// PurgeCall records one PurgeAcked call.
-type PurgeCall struct {
-	Consumer  string
-	OlderThan map[tenant.ID]time.Time
-}
-
-func (m *MockPurger) PurgeAcked(_ context.Context, consumer string, olderThan map[tenant.ID]time.Time) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, PurgeCall{Consumer: consumer, OlderThan: olderThan})
-	return m.Purged, m.Err
 }
 
 // ── Mock mq.DeadLetterStats ──────────────────────────────────────

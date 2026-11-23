@@ -49,8 +49,9 @@ const TestServerVersion = "24.8.1.1"
 
 // NewEmbeddedMQ starts the embedded broker over a storedir.New directory,
 // closed by the test framework, with a queue open for each of tenants —
-// tenant.Default when none is named — at maxBytes: a tenant has a queue once
-// its budget is applied, as the wiring does for every tenant it serves.
+// tenant.Default when none is named — at maxBytes and a replay window of 15
+// minutes, the seed's: a tenant has a queue once its window and budget are
+// applied, as the wiring does for every tenant it serves.
 func NewEmbeddedMQ(t testing.TB, maxBytes int64, tenants ...tenant.ID) *mq.EmbeddedNATS {
 	t.Helper()
 	emb, err := mq.NewEmbedded(storedir.New(t))
@@ -60,6 +61,7 @@ func NewEmbeddedMQ(t testing.TB, maxBytes int64, tenants ...tenant.ID) *mq.Embed
 		tenants = []tenant.ID{tenant.Default}
 	}
 	for _, id := range tenants {
+		require.NoError(t, emb.SetReplayWindow(context.Background(), id, 15*time.Minute))
 		require.NoError(t, emb.SetMaxBytes(context.Background(), id, maxBytes))
 	}
 	return emb

@@ -502,14 +502,14 @@ func TestRoles_BootRefusesWhatTheBackendsCannotServe(t *testing.T) {
 		want string
 	}{
 		{"1: unknown backend", map[string]string{"WH_CACHE_BACKEND": "memcached"}, "is not a backend this build has; valid: local, redis"},
-		{"1: unknown role", map[string]string{"WH_ROLES": "api,reader"}, "is not a role; valid: api,ingest,sweeper"},
+		{"1: unknown role", map[string]string{"WH_ROLES": "api,reader"}, "is not a role; valid: api,ingest"},
+		{"1: the sweeper role an earlier release had", map[string]string{"WH_ROLES": "api,ingest,sweeper"}, "sweeper\\\" is not a role; valid: api,ingest"},
 		{"1: repeated role", map[string]string{"WH_ROLES": "api,api"}, "api\\\" twice"},
-		{"2: a split over the embedded queue", map[string]string{"WH_ROLES": "api,ingest"}, "the embedded MQ lives inside this process"},
+		{"2: a split over the embedded queue", map[string]string{"WH_ROLES": "api"}, "the embedded MQ lives inside this process"},
 		{"3: nats leases without the nats queue", map[string]string{"WH_COORD_BACKEND": "nats"}, "the NATS leases ride mq.nats"},
 		{"4: ingest on the nats queue with local leases", merge(nats, map[string]string{"WH_COORD_BACKEND": "local", "WH_ROLES": "api,ingest"}), "in a process running ingest"},
-		{"a sweeper-only process on the nats queue runs nothing", merge(nats, map[string]string{"WH_ROLES": "sweeper"}), "would run nothing"},
 		{"5: api without ingest over a local cache", merge(nats, map[string]string{"WH_ROLES": "api"}), "would never reach the API's cache"},
-		{"5: ingest without api over a local cache", merge(nats, map[string]string{"WH_ROLES": "ingest,sweeper"}), "would never reach the API's cache"},
+		{"5: ingest without api over a local cache", merge(nats, map[string]string{"WH_ROLES": "ingest"}), "would never reach the API's cache"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

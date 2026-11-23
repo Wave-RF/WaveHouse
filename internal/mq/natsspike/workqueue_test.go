@@ -7,6 +7,7 @@
 package natsspike
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"testing"
@@ -19,10 +20,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The tests in this file pin why an ingest partition has work-queue
-// retention and feeds the history by republish: a row no consumer covers is
-// kept, not dropped; the server refuses a second consumer on a subject; and a
-// history that is gone or full never holds up ingest.
+// The tests in this file pin what the ingest queue's design rests on, on both
+// brokers. A work queue keeps a row no consumer covers and refuses a second
+// consumer on a subject, so the live feed is the stream's republish to a plain
+// subject, and a replay reads the waiting rows by direct get. Its retention
+// cannot be changed by an update, so a stream of another retention is deleted
+// and created again.
 
 // server runs an in-process JetStream server on a random TCP port, shut
 // down by the test framework.
@@ -63,13 +66,6 @@ func stream(t *testing.T, js jetstream.JetStream, name string) jetstream.Stream 
 	s, err := js.Stream(t.Context(), name)
 	require.NoError(t, err)
 	return s
-}
-
-func msgs(t *testing.T, js jetstream.JetStream, name string) uint64 {
-	t.Helper()
-	info, err := stream(t, js, name).Info(t.Context())
-	require.NoError(t, err)
-	return info.State.Msgs
 }
 
 func subjectMsgs(t *testing.T, js jetstream.JetStream, name, filter string) uint64 {
@@ -158,81 +154,94 @@ func TestS2_WorkQueueRefusesOverlap(t *testing.T) {
 	require.Error(t, durable(t, js, "IN", "s0", "wh.ingest.0.0.>", "wh.ingest.0.1.>"), "an update into the overlap")
 }
 
-// republishSetup is one work-queue partition of 200 rows republishing to a
-// history, with a durable on the partition.
-func republishSetup(t *testing.T, history jetstream.StreamConfig) jetstream.JetStream {
+// partition is one work-queue partition republishing each row it stores to
+// the live subject, with the partition and shard tokens dropped, and a durable
+// on shard 0.
+func partition(t *testing.T, cfg jetstream.StreamConfig) jetstream.JetStream {
 	t.Helper()
 	js := connect(t, server(t))
-	_, err := js.CreateStream(t.Context(), jetstream.StreamConfig{
-		Name: "WH_INGEST_0", Subjects: []string{"wh.ingest.0.>"}, Retention: jetstream.WorkQueuePolicy,
-		MaxMsgs: 200, Discard: jetstream.DiscardNew,
-		RePublish: &jetstream.RePublish{Source: "wh.ingest.0.>", Destination: "wh.hist.>"},
-	})
+	cfg.Name, cfg.Subjects, cfg.Retention = "WH_INGEST_0", []string{"wh.ingest.0.>"}, jetstream.WorkQueuePolicy
+	cfg.Discard = jetstream.DiscardNew
+	cfg.RePublish = &jetstream.RePublish{Source: "wh.ingest.0.*.>", Destination: "wh.live.>"}
+	_, err := js.CreateStream(t.Context(), cfg)
 	require.NoError(t, err)
-	require.NoError(t, durable(t, js, "WH_INGEST_0", "wh-ingest", "wh.ingest.0.>"))
-	history.Name, history.Subjects = "WH_HISTORY", []string{"wh.hist.>"}
-	_, err = js.CreateStream(t.Context(), history)
-	require.NoError(t, err)
+	require.NoError(t, durable(t, js, "WH_INGEST_0", "wh-ingest-0", "wh.ingest.0.0.>"))
 	return js
 }
 
-// The history gets every row the partition stores, under the subject with
-// the partition token dropped, and the ack empties the partition only.
-func TestS2_RepublishFeedsTheHistory(t *testing.T) {
-	t.Parallel()
-	js := republishSetup(t, jetstream.StreamConfig{MaxAge: time.Hour})
-	publish(t, js, "wh.ingest.0.acme.orders", 30)
-	publish(t, js, "wh.ingest.0.acme.orders.scope1", 20)
-	assert.Equal(t, 50, drain(t, js, "WH_INGEST_0", "wh-ingest"))
-	assert.Zero(t, msgs(t, js, "WH_INGEST_0"), "acked rows leave the partition at once")
-	require.Eventually(t, func() bool { return msgs(t, js, "WH_HISTORY") == 50 }, 5*time.Second, 10*time.Millisecond)
-	assert.Equal(t, uint64(30), subjectMsgs(t, js, "WH_HISTORY", "wh.hist.acme.orders"))
-	assert.Equal(t, uint64(20), subjectMsgs(t, js, "WH_HISTORY", "wh.hist.acme.orders.scope1"))
+// live subscribes to the live subject as an API process does: a plain
+// subscription, no consumer.
+func live(t *testing.T, js jetstream.JetStream) *nats.Subscription {
+	t.Helper()
+	sub, err := js.Conn().SubscribeSync("wh.live.>")
+	require.NoError(t, err)
+	require.NoError(t, js.Conn().Flush())
+	return sub
 }
 
-// A history that is deleted, or full and refusing, never holds up ingest:
-// every publish is stored and every acked row leaves the partition.
-func TestS2_HistoryOutageNeverHoldsIngest(t *testing.T) {
+// A plain subscriber of the republish subject gets every row the partition
+// stores, once, in the order it stored them, under the subject without the
+// partition and shard, with the stream's sequence and stored time and the
+// publisher's own headers: the trace context rides them, and so would an
+// expected-stream header, which is why an ingest publish sets none. Acked rows
+// leaving the partition break nothing in the sequence.
+func TestS2_RepublishFeedsALiveSubject(t *testing.T) {
 	t.Parallel()
-	t.Run("deleted", func(t *testing.T) {
-		t.Parallel()
-		js := republishSetup(t, jetstream.StreamConfig{MaxAge: time.Hour})
-		require.NoError(t, js.DeleteStream(t.Context(), "WH_HISTORY"))
-		publish(t, js, "wh.ingest.0.acme.t1", 50)
-		assert.Equal(t, 50, drain(t, js, "WH_INGEST_0", "wh-ingest"))
-		assert.Zero(t, msgs(t, js, "WH_INGEST_0"))
-	})
-	t.Run("full", func(t *testing.T) {
-		t.Parallel()
-		js := republishSetup(t, jetstream.StreamConfig{MaxMsgs: 10, Discard: jetstream.DiscardNew})
-		for range 20 { // 400 rows through a 200-row partition, beside a 10-row history
-			publish(t, js, "wh.ingest.0.acme.t1", 20)
-			drain(t, js, "WH_INGEST_0", "wh-ingest")
+	js := partition(t, jetstream.StreamConfig{})
+	sub := live(t, js)
+
+	for i := range 3 {
+		m := nats.NewMsg("wh.ingest.0.0.acme.orders")
+		m.Data = fmt.Appendf(nil, "%d", i)
+		m.Header = nats.Header{"traceparent": []string{"00-trace-span-01"}}
+		_, err := js.PublishMsg(t.Context(), m)
+		require.NoError(t, err)
+	}
+	require.Equal(t, 3, drain(t, js, "WH_INGEST_0", "wh-ingest-0"))
+	publish(t, js, "wh.ingest.0.0.acme.orders.scope1", 2)
+
+	wantSubjects := []string{"wh.live.acme.orders", "wh.live.acme.orders", "wh.live.acme.orders", "wh.live.acme.orders.scope1", "wh.live.acme.orders.scope1"}
+	wantData := []string{"0", "1", "2", "0", "1"}
+	for i := range wantSubjects {
+		m, err := sub.NextMsg(5 * time.Second)
+		require.NoError(t, err, "row %d", i)
+		assert.Equal(t, wantSubjects[i], m.Subject)
+		assert.Equal(t, wantData[i], string(m.Data))
+		assert.Equal(t, "WH_INGEST_0", m.Header.Get("Nats-Stream"))
+		assert.Equal(t, fmt.Sprint(i+1), m.Header.Get("Nats-Sequence"), "the stream's sequence, with no gap")
+		stored, err := time.Parse(time.RFC3339Nano, m.Header.Get("Nats-Time-Stamp"))
+		require.NoError(t, err)
+		assert.WithinDuration(t, time.Now(), stored, 10*time.Second)
+		if i < 3 {
+			assert.Equal(t, "00-trace-span-01", m.Header.Get("traceparent"), "the copy keeps the publish's headers")
 		}
-		assert.Zero(t, msgs(t, js, "WH_INGEST_0"))
-		assert.Equal(t, uint64(10), msgs(t, js, "WH_HISTORY"))
-	})
+	}
+	_, err := sub.NextMsg(200 * time.Millisecond)
+	require.ErrorIs(t, err, nats.ErrTimeout, "each stored row once")
 }
 
-// The republished copy carries the publish's headers. A publish that expects
-// its stream by name therefore reaches the history expecting the partition,
-// and the history refuses it: the reason ExternalNATS publishes ingest rows
-// without that expectation and checks the ack's stream instead.
-func TestS2_RepublishCarriesTheExpectedStream(t *testing.T) {
+// Only a stored row is republished: neither a publish the duplicate window
+// drops nor one a full partition refuses reaches the live subject, and a live
+// subject nobody reads holds up no publish.
+func TestS2_RepublishOnlyWhatIsStored(t *testing.T) {
 	t.Parallel()
-	js := republishSetup(t, jetstream.StreamConfig{MaxAge: time.Hour})
-	_, err := js.Publish(t.Context(), "wh.ingest.0.acme.a", []byte("x"), jetstream.WithExpectStream("WH_INGEST_0"))
+	js := partition(t, jetstream.StreamConfig{MaxMsgs: 2, Duplicates: time.Minute})
+	publish(t, js, "wh.ingest.0.0.acme.unread", 1) // no subscriber yet
+	sub := live(t, js)
+
+	_, err := js.Publish(t.Context(), "wh.ingest.0.0.acme.t", []byte("first"), jetstream.WithMsgID("k1"))
 	require.NoError(t, err)
-	ack, err := js.Publish(t.Context(), "wh.ingest.0.acme.b", []byte("x"), jetstream.WithMsgID("id-1"))
+	ack, err := js.Publish(t.Context(), "wh.ingest.0.0.acme.t", []byte("repeat"), jetstream.WithMsgID("k1"))
 	require.NoError(t, err)
-	assert.Equal(t, "WH_INGEST_0", ack.Stream, "the ack names the stream that stored it")
-	require.Eventually(t, func() bool { return msgs(t, js, "WH_HISTORY") == 1 }, 5*time.Second, 10*time.Millisecond)
-	time.Sleep(200 * time.Millisecond)
-	assert.Zero(t, subjectMsgs(t, js, "WH_HISTORY", "wh.hist.acme.a"), "the copy expecting WH_INGEST_0 is refused")
-	m, err := stream(t, js, "WH_HISTORY").GetLastMsgForSubject(t.Context(), "wh.hist.acme.b")
+	assert.True(t, ack.Duplicate)
+	_, err = js.Publish(t.Context(), "wh.ingest.0.0.acme.t", []byte("refused"))
+	require.Error(t, err, "the partition is full")
+
+	m, err := sub.NextMsg(5 * time.Second)
 	require.NoError(t, err)
-	assert.Equal(t, "id-1", m.Header.Get(jetstream.MsgIDHeader), "the copy keeps the publish's headers")
-	assert.Equal(t, "WH_INGEST_0", m.Header.Get("Nats-Stream"))
+	assert.Equal(t, "first", string(m.Data))
+	_, err = sub.NextMsg(200 * time.Millisecond)
+	require.ErrorIs(t, err, nats.ErrTimeout)
 }
 
 // A republish destination the stream's own subjects would capture is a
@@ -246,15 +255,153 @@ func TestS2_RepublishRefusesACycle(t *testing.T) {
 	require.Error(t, err)
 }
 
-// A work-queue partition keeps its last row's timestamp after the row is
-// acked away, which the history gauge compares against.
-func TestS2_WorkQueueKeepsTheLastTimestamp(t *testing.T) {
-	t.Parallel()
-	js := republishSetup(t, jetstream.StreamConfig{MaxAge: time.Hour})
-	publish(t, js, "wh.ingest.0.acme.t1", 3)
-	require.Equal(t, 3, drain(t, js, "WH_INGEST_0", "wh-ingest"))
-	info, err := stream(t, js, "WH_INGEST_0").Info(t.Context())
+// directGet sends one batched direct get to stream and returns the rows it
+// answered with, as "<sequence>:<data>", and the rows of the subject it left
+// unread; found is false when it answered that nothing matched.
+func directGet(t *testing.T, js jetstream.JetStream, stream string, req map[string]any) (rows []string, pending string, found bool) {
+	t.Helper()
+	body, err := json.Marshal(req)
 	require.NoError(t, err)
-	assert.Zero(t, info.State.Msgs)
-	assert.WithinDuration(t, time.Now(), info.State.LastTime, 10*time.Second)
+	nc := js.Conn()
+	inbox := nats.NewInbox()
+	sub, err := nc.SubscribeSync(inbox)
+	require.NoError(t, err)
+	defer func() { _ = sub.Unsubscribe() }()
+	require.NoError(t, nc.PublishRequest("$JS.API.DIRECT.GET."+stream, inbox, body))
+	for {
+		m, err := sub.NextMsg(5 * time.Second)
+		require.NoError(t, err)
+		switch status := m.Header.Get("Status"); status {
+		case "":
+			rows = append(rows, m.Header.Get("Nats-Sequence")+":"+string(m.Data))
+		case "204":
+			return rows, m.Header.Get("Nats-Num-Pending"), true
+		case "404":
+			return nil, "", false
+		default:
+			t.Fatalf("direct get %s: status %s %s", body, status, m.Header.Get("Description"))
+		}
+	}
+}
+
+// A work queue's waiting rows can be read with no consumer, which it would
+// refuse: a batched direct get by subject, from a sequence or a start time,
+// answers with the rows still stored, skipping the acked ones, then how many
+// it left unread; nothing matching is a 404.
+func TestS2_DirectGetReadsAWorkQueuesWaitingRows(t *testing.T) {
+	t.Parallel()
+	js := partition(t, jetstream.StreamConfig{AllowDirect: true})
+	publish(t, js, "wh.ingest.0.0.acme.t1", 3) // sequences 1-3
+	publish(t, js, "wh.ingest.0.0.acme.t2", 2) // 4-5
+	later := time.Now()
+	time.Sleep(20 * time.Millisecond)
+	publish(t, js, "wh.ingest.0.0.acme.t1", 2) // 6-7
+
+	_, err := js.CreateOrUpdateConsumer(t.Context(), "WH_INGEST_0", jetstream.ConsumerConfig{
+		FilterSubject: "wh.ingest.0.0.acme.t1", AckPolicy: jetstream.AckNonePolicy, InactiveThreshold: time.Minute,
+	})
+	require.Error(t, err, "a replay cannot hold a consumer of its own on a work queue")
+
+	// The worker writes and acks the first row.
+	c, err := js.Consumer(t.Context(), "WH_INGEST_0", "wh-ingest-0")
+	require.NoError(t, err)
+	b, err := c.Fetch(1, jetstream.FetchMaxWait(5*time.Second))
+	require.NoError(t, err)
+	for m := range b.Messages() {
+		require.NoError(t, m.DoubleAck(t.Context()))
+	}
+
+	const subject = "wh.ingest.0.0.acme.t1"
+	rows, pending, found := directGet(t, js, "WH_INGEST_0", map[string]any{"batch": 100, "seq": 1, "next_by_subj": subject})
+	require.True(t, found)
+	assert.Equal(t, []string{"2:1", "3:2", "6:0", "7:1"}, rows, "the acked row is gone, the other table's are skipped")
+	assert.Equal(t, "0", pending)
+
+	rows, pending, found = directGet(t, js, "WH_INGEST_0", map[string]any{"batch": 2, "seq": 1, "next_by_subj": subject})
+	require.True(t, found)
+	assert.Equal(t, []string{"2:1", "3:2"}, rows)
+	assert.Equal(t, "2", pending, "a short batch says how many it left")
+
+	rows, _, found = directGet(t, js, "WH_INGEST_0", map[string]any{"batch": 100, "start_time": later, "next_by_subj": subject})
+	require.True(t, found)
+	assert.Equal(t, []string{"6:0", "7:1"}, rows, "from a time")
+
+	_, _, found = directGet(t, js, "WH_INGEST_0", map[string]any{"batch": 100, "start_time": time.Now().Add(time.Hour), "next_by_subj": subject})
+	assert.False(t, found, "nothing stored since")
+	_, _, found = directGet(t, js, "WH_INGEST_0", map[string]any{"batch": 100, "seq": 1, "next_by_subj": "wh.ingest.0.0.acme.none"})
+	assert.False(t, found, "nothing on the subject")
+}
+
+// The stream's leader answers a message get for the next row of a subject
+// too, one row a request, whether or not the stream allows direct gets: what
+// a replay asks last, since a direct get may be answered by a replica that
+// trails.
+func TestS2_LeaderGetReadsAWorkQueuesNextRow(t *testing.T) {
+	t.Parallel()
+	js := partition(t, jetstream.StreamConfig{})
+	publish(t, js, "wh.ingest.0.0.acme.t2", 1)
+	publish(t, js, "wh.ingest.0.0.acme.t1", 2)
+
+	next := func(seq uint64) (*nats.Msg, error) {
+		body, err := json.Marshal(map[string]any{"seq": seq, "next_by_subj": "wh.ingest.0.0.acme.t1"})
+		require.NoError(t, err)
+		return js.Conn().Request("$JS.API.STREAM.MSG.GET.WH_INGEST_0", body, 5*time.Second)
+	}
+	var got struct {
+		Message *struct {
+			Seq  uint64 `json:"seq"`
+			Data []byte `json:"data"`
+		} `json:"message"`
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	resp, err := next(1)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(resp.Data, &got))
+	require.NotNil(t, got.Message)
+	assert.Equal(t, uint64(2), got.Message.Seq)
+	assert.Equal(t, "0", string(got.Message.Data))
+
+	got.Message = nil
+	resp, err = next(4)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(resp.Data, &got))
+	assert.Nil(t, got.Message)
+	require.NotNil(t, got.Error)
+	assert.Equal(t, 404, got.Error.Code)
+}
+
+// A stream update cannot change retention to or from work queue, so a stream
+// an earlier build created with another retention has to be deleted and
+// created again; allow_direct and the republish can be set on a stream that
+// exists, which is how an operator moves a deployed partition.
+func TestS2_RetentionCannotBeUpdated(t *testing.T) {
+	t.Parallel()
+	js := connect(t, server(t))
+	cfg := jetstream.StreamConfig{Name: "IN", Subjects: []string{"wh.ingest.0.>"}, Retention: jetstream.LimitsPolicy}
+	_, err := js.CreateStream(t.Context(), cfg)
+	require.NoError(t, err)
+
+	cfg.Retention = jetstream.WorkQueuePolicy
+	var apiErr *jetstream.APIError
+	_, err = js.UpdateStream(t.Context(), cfg)
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, jetstream.ErrorCode(10052), apiErr.ErrorCode)
+
+	require.NoError(t, js.DeleteStream(t.Context(), "IN"))
+	cfg.RePublish = &jetstream.RePublish{Source: "wh.ingest.0.*.>", Destination: "wh.hist.>"}
+	_, err = js.CreateStream(t.Context(), cfg)
+	require.NoError(t, err)
+	cfg.AllowDirect = true
+	cfg.RePublish = &jetstream.RePublish{Source: "wh.ingest.0.*.>", Destination: "wh.live.>"}
+	s, err := js.UpdateStream(t.Context(), cfg)
+	require.NoError(t, err)
+	assert.True(t, s.CachedInfo().Config.AllowDirect)
+	assert.Equal(t, "wh.live.>", s.CachedInfo().Config.RePublish.Destination)
+
+	cfg.Retention = jetstream.LimitsPolicy
+	_, err = js.UpdateStream(t.Context(), cfg)
+	require.ErrorAs(t, err, &apiErr, "nor back")
+	assert.Equal(t, jetstream.ErrorCode(10052), apiErr.ErrorCode)
 }

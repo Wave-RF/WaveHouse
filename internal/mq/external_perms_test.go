@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,46 @@ func TestNewNATS_RefusesPermissionsNarrowerThanTheShards(t *testing.T) {
 	assert.Contains(t, err.Error(), "wavehouse mq permissions --shards 16")
 	assert.NotContains(t, err.Error(), "wh-ingest-7: permissions")
 	assert.Equal(t, 4*8, countRequired(te.Findings))
+}
+
+// Boot refuses the permissions an earlier release generated, which let the
+// wavehouse user neither record on the history, nor subscribe to the live
+// subject, nor read a partition without a consumer. Without the check the
+// broker boots and ingest answers 200, while no event reaches a live stream
+// and no replay finds a row. Each finding names what the refusal costs.
+func TestNewNATS_RefusesPermissionsAnEarlierReleaseGenerated(t *testing.T) {
+	t.Parallel()
+	current := natsPermissions(NATSTopology{Shards: 8}, "")
+	without := func(all []string, drop ...string) []string {
+		return slices.DeleteFunc(slices.Clone(all), func(s string) bool { return slices.Contains(drop, s) })
+	}
+	earlier := natsPermissionSet{
+		PublishAllow:   without(current.PublishAllow, "wh.hist.>", "$JS.API.DIRECT.GET.*", "$JS.API.STREAM.MSG.GET.*"),
+		PublishDeny:    append([]string{"wh.hist.>"}, current.PublishDeny...),
+		SubscribeAllow: without(current.SubscribeAllow, "wh.live.>"),
+	}
+	require.Len(t, earlier.PublishAllow, len(current.PublishAllow)-3)
+	require.Len(t, earlier.SubscribeAllow, len(current.SubscribeAllow)-1)
+
+	f := newNATSFixtureFrom(t, valuesWithPermissionSet(t, earlier), nil)
+	f.apply(t, shippedTopology(t))
+	_, err := NewNATS(t.Context(), NATSConfig{
+		URLs: []string{f.server.ClientURL()}, User: "wavehouse", PasswordFile: writeSecret(t, fixturePassword("wavehouse")),
+		Topology: NATSTopology{Partitions: 4, Shards: 8}, TopologyWait: time.Second,
+	})
+	require.ErrorIs(t, err, ErrTopology)
+	var te *TopologyError
+	require.ErrorAs(t, err, &te)
+	for _, want := range []string{
+		"required: stream WH_HISTORY: permissions: the connecting user may not publish to wh.hist.$probe, so no written row is recorded for SSE replay",
+		"required: stream WH_INGEST_3: permissions: the connecting user may not publish to $JS.API.DIRECT.GET.WH_INGEST_3, so an SSE replay cannot read the rows waiting on this partition",
+		"required: subject wh.live.>: permissions: the connecting user may not subscribe to wh.live.>, so no event reaches a live SSE stream",
+		"wavehouse mq permissions --shards 8",
+	} {
+		assert.Contains(t, err.Error(), want)
+	}
+	assert.Equal(t, 1+4+1, countRequired(te.Findings), "the history, each partition once, and the live subject: %v", te.Findings)
+	assert.Zero(t, f.streamMsgs(t, "WH_HISTORY"), "the probe stored nothing")
 }
 
 // The same under a JetStream domain, on a server in it: the probe goes out
@@ -90,6 +131,7 @@ func TestNATSPermissions_RefuseAcksOutsideTheShards(t *testing.T) {
 	f := shippedFixture(t)
 	e := f.broker(t, nil)
 	require.NoError(t, e.Publish(t.Context(), Topic{Tenant: "acme", Table: "t"}, []byte("row")))
+	written(t, e, 1)
 
 	js := f.connect(t, "wavehouse", nats.ErrorHandler(func(*nats.Conn, *nats.Subscription, error) {}))
 	c, err := js.CreateConsumer(t.Context(), "WH_HISTORY", jetstream.ConsumerConfig{AckPolicy: jetstream.AckExplicitPolicy, InactiveThreshold: time.Minute})
@@ -118,7 +160,7 @@ func TestExternalNATS_AcksUnderBothAckSubjectLayouts(t *testing.T) {
 			drainsWithAcks(t, f, f.broker(t, nil))
 
 			// The layout the server used, by token count, read off the
-			// history stream's copy of the row just drained. A second row
+			// history stream's record of the row just drained. A second row
 			// would go to the consumer drainsWithAcks leaves running, whose
 			// ack of it races the end of the test.
 			c, err := f.admin.CreateConsumer(t.Context(), "WH_HISTORY", jetstream.ConsumerConfig{AckPolicy: jetstream.AckExplicitPolicy})
@@ -131,8 +173,9 @@ func TestExternalNATS_AcksUnderBothAckSubjectLayouts(t *testing.T) {
 	}
 }
 
-// drainsWithAcks publishes a row, consumes and acks it through e, and
-// requires the work-queue partition to have dropped it: the ack was taken.
+// drainsWithAcks publishes a row, consumes it through e, records it as
+// written and acks it, and requires the work-queue partition to have dropped
+// it: the ack was taken.
 func drainsWithAcks(t *testing.T, f *natsFixture, e *ExternalNATS) {
 	t.Helper()
 	topic := Topic{Tenant: "acme", Table: "t"}
@@ -141,6 +184,7 @@ func drainsWithAcks(t *testing.T, f *natsFixture, e *ExternalNATS) {
 	require.NoError(t, err)
 	got := make(chan string, 4)
 	stop, _, err := cons.Consume(func(m *Message) {
+		assert.NoError(t, e.Record(m.Ctx, []*Message{m}))
 		assert.NoError(t, m.DoubleAck(m.Ctx))
 		got <- string(m.Data)
 	}, 4)
@@ -267,11 +311,17 @@ func holdsALease(t *testing.T, e *ExternalNATS) {
 // user's permissions generated for shards and domain.
 func valuesWithPermissions(t *testing.T, shards int, domain string) string {
 	t.Helper()
+	return valuesWithPermissionSet(t, natsPermissions(NATSTopology{Shards: shards}, domain))
+}
+
+// valuesWithPermissionSet is the shipped Helm values with the wavehouse
+// user's permissions replaced by p.
+func valuesWithPermissionSet(t *testing.T, p natsPermissionSet) string {
+	t.Helper()
 	raw, err := os.ReadFile(natstest.ShippedValues())
 	require.NoError(t, err)
 	var values map[string]any
 	require.NoError(t, yaml.Unmarshal(raw, &values))
-	p := natsPermissions(NATSTopology{Shards: shards}, domain)
 	accounts := values["config"].(map[string]any)["merge"].(map[string]any)["accounts"].(map[string]any)
 	for _, acc := range accounts {
 		for _, u := range acc.(map[string]any)["users"].([]any) {

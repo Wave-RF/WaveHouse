@@ -1,9 +1,10 @@
 // Package mq is the message-queue boundary: the only package that imports
 // NATS/JetStream (enforced by the depguard rule in .golangci.yml, Key Design
 // Decision #20), and the only one that knows how the broker works. The rest of
-// the process says what it wants — publish an event for a table, consume the
-// ingest queue, park a message on the dead-letter queue, replay since a time,
-// drop what is both written and expired — in the types below. How that maps to
+// the process says what it wants — publish an event for a table, follow the
+// events as they are accepted, consume the ingest queue, park a message on the
+// dead-letter queue, record what was written, replay since a time — in the
+// types below. How that maps to
 // subjects, streams, sequences, and consumers is the implementation's
 // (EmbeddedNATS, or ExternalNATS over an operator-owned cluster), so a broker
 // change lands here once. The behavior below is
@@ -57,7 +58,11 @@ type Message struct {
 	// the form the broker delivered it, so parking it (DeadLetter) is a prefix
 	// swap that never decodes or re-encodes a name, and TopicKey is free (see
 	// TopicKey / Topic).
-	topicKey    string
+	topicKey string
+	// accepted is when the ingest queue stored the message, zero when the
+	// message did not come off it: what Recorder files it under, so a replay
+	// can still tell when it was accepted once it is written.
+	accepted    time.Time
 	doubleAckFn func(ctx context.Context) error
 	ackFn       func() error
 	nakFn       func() error
@@ -211,31 +216,27 @@ type Publisher interface {
 	Close() error
 }
 
-// Subscriber delivers every event on the ingest queue, across all tenants
-// and topics: each tenant's in the order it was published.
+// Subscriber is the live feed: every event the ingest queue accepts, across
+// all tenants and topics, as it is accepted.
 type Subscriber interface {
-	// Subscribe registers a handler for incoming events, across every
-	// tenant — those whose queues open after Subscribe included. Every event
-	// published after Subscribe returns is delivered; whether earlier ones
-	// are is the implementation's, and so is whether consumerName names a
-	// durable consumer. The handler runs one message at a time on each
-	// delivery unit — a tenant's queue, or the partition that holds it — so
-	// it must be safe to call concurrently for different units. The messages
-	// fetched ahead of it are a fixed number split across the units, as
-	// Consumer.Consume's prefetch is, so they do not grow with the number of
-	// tenants.
+	// Subscribe delivers to handler every event the ingest queue stores from
+	// now on, once each, until ctx is done: every tenant's, those whose queues
+	// open after Subscribe included, and each topic's in the order the queue
+	// stored it. An event the queue did not store — a repeat its duplicate
+	// window dropped, one it refused as full — is never delivered. handler
+	// runs one event at a time, with the trace context the publisher's
+	// headers carried.
 	//
-	// CONTRACT: If the handler intends to return an error to trigger automatic
-	// redelivery, it MUST NOT manually call msg.Ack() or msg.Nak() beforehand.
-	//
-	// CONTRACT: Symmetrically, if you explicitly call msg.Nak(), do NOT also
-	// return an error — the consume loop will call Nak() again on any non-nil
-	// error return.
-	//
-	// CONTRACT: Calling msg.DoubleAck(ctx) and then returning a non-nil error is
-	// undefined behavior — the consume loop will Nak() after a successful
-	// broker-confirmed Ack. Call DoubleAck, then return nil on success.
-	Subscribe(ctx context.Context, consumerName string, handler func(msg *Message) error) error
+	// The feed is read beside the ingest queue, not from it: nothing is acked,
+	// nothing is redelivered, and an event stored before Subscribe is the
+	// Replayer's to serve. So the feed can skip events — the connection to the
+	// broker was lost, or the process fell far enough behind that some were
+	// dropped — and when it may have, lost is called before any later event
+	// reaches handler. Whoever relays the feed must then send its readers back
+	// to the Replayer: one that kept reading would take a later event's
+	// position as its own and never be sent the skipped ones. lost may also be
+	// called while handler runs, as soon as a lost connection is back.
+	Subscribe(ctx context.Context, handler func(msg *Message), lost func()) error
 	Close() error
 }
 
@@ -427,33 +428,42 @@ type DeadLetterStats interface {
 	DeadLetterCounts(ctx context.Context, id tenant.ID, table string) (DeadLetterCounts, error)
 }
 
-// ErrConsumerNotFound is returned by Purger.PurgeAcked when the named
-// consumer does not exist (yet) on a tenant's queue.
-var ErrConsumerNotFound = errors.New("consumer not found")
-
-// Purger reclaims ingest-queue storage.
-type Purger interface {
-	// PurgeAcked removes, from each tenant's ingest queue, the events that
-	// are BOTH acknowledged by the named durable consumer (everything before
-	// its first unacked event) AND stored before that tenant's cutoff in
-	// olderThan. Either bound alone keeps the event: unacked events are not
-	// yet written, and recent ones are still needed for replay. A tenant
-	// olderThan does not name keeps no history: everything it has
-	// acknowledged goes. Reports whether anything was removed, and joins
-	// each failed tenant's error — ErrConsumerNotFound for one whose queue the
-	// consumer has not been created on; the other tenants' are purged all the
-	// same. An implementation whose retention the broker's operator owns
-	// removes nothing and reports false: either way, no unacked event is
-	// removed.
-	PurgeAcked(ctx context.Context, consumer string, olderThan map[tenant.ID]time.Time) (purged bool, err error)
+// Recorder keeps written events for the Replayer.
+type Recorder interface {
+	// Record stores each of msgs — messages a Consumer delivered, whose rows
+	// are now written — in the replay history of its tenant, under its topic
+	// and with the time the ingest queue accepted it, in the order given: what
+	// ReplaySince serves of it once the message is acked and gone from the
+	// queue. Call it after the write and before the acks, so an event is
+	// always in the queue or in the history. It acks nothing.
+	//
+	// Best effort, and bounded: the error counts the messages it could not
+	// store in the time it allows itself, and the caller acks them all the
+	// same — a written row left unacked is written again when the queue
+	// redelivers it. Such a row is missing from replays from then on. How
+	// long the history keeps a row, counted from its Record, is the tenant's
+	// replay window (Broker.SetReplayWindow), or the broker operator's.
+	Record(ctx context.Context, msgs []*Message) error
 }
+
+// ErrConsumerNotFound reports a durable consumer the broker's operator owns
+// that is not there: CreateConsumer's answer for a name that maps to none or
+// whose durable or stream is gone, and the failure a delivery ends on when its
+// durable is deleted under it.
+var ErrConsumerNotFound = errors.New("consumer not found")
 
 // Replayer re-delivers stored events for SSE gap-fill.
 type Replayer interface {
-	// ReplaySince sends the data of every event on topic stored at or after
-	// since, in order, until send returns false or the queue is caught up.
+	// ReplaySince sends the data of every event on topic that the ingest
+	// queue accepted at or after since and the broker still holds: the ones
+	// already written that the history keeps (Recorder), in the order they
+	// were written, then the ones still waiting in the queue to be written,
+	// whatever their age, in the order they were accepted. An event written
+	// while the replay runs may be sent twice; none it holds is left out. It
+	// ends when send returns false or everything stored when it began has
+	// been sent: what is accepted meanwhile is the Subscriber's to deliver.
 	// Running out of events is the normal end; failing to start the replay, or
-	// a delivery failure before it catches up, is an error. A done ctx stops
+	// a read that fails before it catches up, is an error. A done ctx stops
 	// the replay and returns ctx's error. A topic without a valid tenant is
 	// refused as Publish refuses it.
 	ReplaySince(ctx context.Context, topic Topic, since time.Time, send func(data []byte) bool) error
@@ -468,7 +478,7 @@ type Broker interface {
 	ConsumerManager
 	DeadLetterer
 	DeadLetterStats
-	Purger
+	Recorder
 	Replayer
 	// SetMaxBytes applies tenant id's byte budget (its hot-reloadable
 	// mq.max_bytes_gb) to that tenant's queues — how it is split between them
@@ -483,6 +493,14 @@ type Broker interface {
 	// has been.
 	SetMaxBytes(ctx context.Context, id tenant.ID, maxBytes int64) error
 	MaxBytes(id tenant.ID) int64
+	// SetReplayWindow applies tenant id's replay window (its hot-reloadable
+	// stream.gap_window_minutes): how long the history keeps one of the
+	// tenant's events after it is recorded as written (Recorder), 0 for not at
+	// all. A tenant whose window was never set keeps none; one no longer
+	// served keeps the window it last had. An implementation whose history
+	// the broker's operator sizes only records the window, and warns when the
+	// history keeps less.
+	SetReplayWindow(ctx context.Context, id tenant.ID, window time.Duration) error
 	// Stats reports the broker counters the system gauges observe.
 	Stats() (observability.MQStats, error)
 }

@@ -14,7 +14,7 @@ func TestLoad_RolesDefaultToEveryRole(t *testing.T) {
 	t.Parallel()
 	cfg, err := Load("nonexistent.yaml")
 	require.NoError(t, err)
-	assert.Equal(t, []Role{RoleAPI, RoleIngest, RoleSweeper}, cfg.Roles)
+	assert.Equal(t, []Role{RoleAPI, RoleIngest}, cfg.Roles)
 	for _, r := range AllRoles() {
 		assert.True(t, cfg.Has(r), r)
 	}
@@ -30,11 +30,11 @@ func TestLoad_RolesDefaultToEveryRole(t *testing.T) {
 // cleanenv splits a slice variable on commas; the entries are trimmed, and
 // their order is not significant.
 func TestLoad_RolesFromEnv(t *testing.T) {
-	t.Setenv("WH_ROLES", "sweeper, api ,ingest")
+	t.Setenv("WH_ROLES", "ingest, api ")
 	t.Setenv("WH_INSTANCE_ID", " pod-a ")
 	cfg, err := Load("nonexistent.yaml")
 	require.NoError(t, err)
-	assert.Equal(t, []Role{RoleSweeper, RoleAPI, RoleIngest}, cfg.Roles)
+	assert.Equal(t, []Role{RoleIngest, RoleAPI}, cfg.Roles)
 	assert.Equal(t, "pod-a", cfg.InstanceID)
 }
 
@@ -56,12 +56,12 @@ func TestLoad_RolesFromYAML(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
-roles: [sweeper, api, ingest]
+roles: [ingest, api]
 instance_id: pod-b
 `), 0o600))
 	cfg, err := Load(path)
 	require.NoError(t, err)
-	assert.Equal(t, []Role{RoleSweeper, RoleAPI, RoleIngest}, cfg.Roles, "the file's list, not the default")
+	assert.Equal(t, []Role{RoleIngest, RoleAPI}, cfg.Roles, "the file's list, not the default")
 	assert.Equal(t, "pod-b", cfg.InstanceID)
 }
 
@@ -79,7 +79,9 @@ func TestValidate_Roles(t *testing.T) {
 	}{
 		{"empty", nil, "roles (WH_ROLES) is empty"},
 		{"empty entry", []Role{RoleAPI, "", RoleIngest}, "roles (WH_ROLES) api,,ingest has an empty entry"},
-		{"unknown", []Role{RoleAPI, "worker"}, `roles (WH_ROLES) "worker" is not a role; valid: api,ingest,sweeper`},
+		{"unknown", []Role{RoleAPI, "worker"}, `roles (WH_ROLES) "worker" is not a role; valid: api,ingest`},
+		// The role an earlier release had: upgrading.md has the operator drop it.
+		{"the sweeper role is gone", []Role{RoleAPI, RoleIngest, "sweeper"}, `roles (WH_ROLES) "sweeper" is not a role; valid: api,ingest`},
 		{"duplicate", []Role{RoleAPI, RoleIngest, RoleAPI}, `roles (WH_ROLES) names "api" twice`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -94,8 +96,7 @@ func TestValidate_Roles(t *testing.T) {
 // Rules 2 and 5 of the #613 design. The embedded MQ refuses every split. A
 // shared queue, set directly as a stand-in for any shared backend, lets a
 // process run any subset — except api without ingest or ingest without api
-// over a local cache: the worker's invalidation would miss the API's cache. A
-// sweeper-only process holds no cache, so it passes.
+// over a local cache: the worker's invalidation would miss the API's cache.
 func TestValidate_RoleSplits(t *testing.T) {
 	t.Parallel()
 	all := AllRoles()
@@ -108,16 +109,11 @@ func TestValidate_RoleSplits(t *testing.T) {
 	}{
 		{"every role, embedded", all, MQEmbedded, CacheLocal, ""},
 		{"api, embedded", []Role{RoleAPI}, MQEmbedded, CacheLocal, "roles api with mq.backend=embedded: the embedded MQ lives inside this process"},
-		{"api+ingest, embedded", []Role{RoleAPI, RoleIngest}, MQEmbedded, CacheLocal, "roles api,ingest with mq.backend=embedded"},
-		{"sweeper, embedded, shared cache", []Role{RoleSweeper}, MQEmbedded, "shared", "roles sweeper with mq.backend=embedded"},
+		{"ingest, embedded, shared cache", []Role{RoleIngest}, MQEmbedded, "shared", "roles ingest with mq.backend=embedded"},
 
 		{"every role, shared queue", all, "shared", CacheLocal, ""},
-		{"api+ingest, shared queue", []Role{RoleAPI, RoleIngest}, "shared", CacheLocal, ""},
-		{"sweeper, shared queue", []Role{RoleSweeper}, "shared", CacheLocal, ""},
 		{"api, local cache", []Role{RoleAPI}, "shared", CacheLocal, "roles api with cache.backend=local: api and ingest run in different processes, and the ingest worker's cache invalidation would never reach the API's cache — run api and ingest together, or set cache.backend=redis"},
 		{"ingest, local cache", []Role{RoleIngest}, "shared", CacheLocal, "roles ingest with cache.backend=local"},
-		{"api+sweeper, local cache", []Role{RoleAPI, RoleSweeper}, "shared", CacheLocal, "roles api,sweeper with cache.backend=local"},
-		{"ingest+sweeper, local cache", []Role{RoleIngest, RoleSweeper}, "shared", CacheLocal, "roles ingest,sweeper with cache.backend=local"},
 		{"api, shared cache", []Role{RoleAPI}, "shared", "shared", ""},
 		{"ingest, shared cache", []Role{RoleIngest}, "shared", "shared", ""},
 		{"api, redis cache", []Role{RoleAPI}, "shared", CacheRedis, ""},
@@ -145,7 +141,7 @@ func TestRoles_WithoutTheAPIRole(t *testing.T) {
 	t.Parallel()
 	cfg := defaultBackends()
 	cfg.MQ.Backend = "shared"
-	cfg.Roles = []Role{RoleSweeper}
+	cfg.Roles = []Role{RoleIngest}
 	assert.Empty(t, cfg.Warnings())
 	assert.False(t, cfg.NeedsDataDir(), "only the api role opens Pebble")
 	cfg.Roles = []Role{RoleAPI, RoleIngest}

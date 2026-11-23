@@ -48,6 +48,30 @@ func TestSubscriber_EvictedIsOpenUntilEvicted(t *testing.T) {
 	}
 }
 
+// An evicted subscriber takes no further frame, whatever room its queue has:
+// its handler may still write what is queued, and a frame queued after the
+// eviction could be one past events the client was never sent. What was
+// queued before stays.
+func TestSubscriber_SendAfterEvictIsRefused(t *testing.T) {
+	t.Parallel()
+	sub := newSubscriber(4, nil)
+	before := Frame{Kind: KindEvent, Data: []byte("id: 1\ndata: {}\n\n")}
+	assert.True(t, sub.Send(before))
+
+	sub.Evict()
+	assert.False(t, sub.Send(Frame{Kind: KindEvent, Data: []byte("id: 3\ndata: {}\n\n")}))
+	assert.False(t, sub.Send(Frame{Kind: KindKeepalive, Data: []byte(":\n\n")}))
+
+	assert.Equal(t, before, <-sub.Frames())
+	select {
+	case f := <-sub.Frames():
+		t.Fatalf("a frame was queued after the eviction: %q", f.Data)
+	default:
+	}
+	dropped, _, _, _ := sub.QueueStats()
+	assert.Zero(t, dropped, "a refused frame is not a slow consumer's drop")
+}
+
 // The queue is the size the handler passes — the tenant's
 // stream.subscriber_queue — and the package default for a caller that
 // passes none.

@@ -1,10 +1,10 @@
 // Package coord holds leases for work that must run in one process at a
-// time — the sweeper, and the ingest processes' shard claim membership. A lease is taken with
+// time — the ingest processes' shard claim membership. A lease is taken with
 // TryAcquire and held as a Term until it is resigned, its coordinator is
-// closed, or the backend reports it lost; RunElected drives a leader loop
-// over one. Local is the in-process implementation; a distributed one lives
-// with the connection it rides on (a NATS KV bucket in internal/mq), so this
-// package imports only the standard library.
+// closed, or the backend reports it lost. Local is the in-process
+// implementation; a distributed one lives with the connection it rides on (a
+// NATS KV bucket in internal/mq), so this package imports only the standard
+// library.
 //
 // Every implementation runs the shared suite in coordtest.
 package coord

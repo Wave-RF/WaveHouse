@@ -1,6 +1,13 @@
 import type { Policy } from "@wavehouse/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { authClient, dataClient, publicClient, testId, waitForCondition } from "./helpers.js";
+import {
+  authClient,
+  chQuery,
+  dataClient,
+  publicClient,
+  testId,
+  waitForCondition,
+} from "./helpers.js";
 import { readPolicyFile, setPolicy } from "./settings.js";
 import { suiteTables } from "./tables.js";
 
@@ -101,6 +108,54 @@ describe("Streaming", () => {
         if (unsub) unsub();
         stream.close();
       }
+    });
+
+    it("replays rows accepted before the stream opened, waiting or written (#1007)", async () => {
+      const whPublic = publicClient();
+      const whAuth = dataClient();
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const id = testId();
+
+      const insert = await whAuth.from(T.clicks).insert({
+        event_id: id,
+        page: "/sse-replay-test",
+        user_id: "replay-user",
+        session_id: "sse-sess",
+        country: "US",
+        duration_ms: 99,
+      });
+      expect(insert.error).toBeNull();
+
+      // A stream opened after the row was accepted is sent it by replay.
+      const replayed = async () => {
+        const received: any[] = [];
+        const stream = whPublic.from(T.clicks).stream({ since });
+        const unsub = stream.subscribe({
+          next: (event) => received.push(event),
+          error: (err) => console.error("SSE error:", err),
+        });
+        try {
+          await stream.connected(5_000);
+          await waitForCondition(() => received.some((e) => e.data?.event_id === id), 10_000);
+        } finally {
+          unsub();
+          stream.close();
+        }
+        return received.find((e) => e.data?.event_id === id);
+      };
+
+      // Right after the insert the row is still waiting for its batch.
+      expect((await replayed())?.data.user_id).toBe("replay-user");
+
+      // Once the worker has written it, the replay reads it from the history.
+      await waitForCondition(async (signal) => {
+        const r = await chQuery(
+          `SELECT event_id FROM default.${T.clicks} WHERE event_id = '${id}'`,
+          signal,
+        );
+        return r.length === 1;
+      }, 15_000);
+      expect((await replayed())?.data.user_id).toBe("replay-user");
     });
 
     it("row DateTime columns arrive canonicalized, matching /v1/query (#372)", async () => {

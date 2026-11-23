@@ -93,13 +93,13 @@ func TestLeases_TokensAreMonotonicRevisions(t *testing.T) {
 		assert.Greater(t, term.Token(), last)
 		last = term.Token()
 		// Renewals move the revision on; the token stays the acquisition's.
-		hist, err := admin.History(t.Context(), leaseKeyPrefix+"sweeper")
+		hist, err := admin.History(t.Context(), leaseKeyPrefix+"lease")
 		require.NoError(t, err)
 		require.Contains(t, revisions(hist), term.Token())
 	}
 	for i := range 3 {
 		c := []*natsLeases{a, b}[i%2]
-		term, err := c.TryAcquire(t.Context(), "sweeper")
+		term, err := c.TryAcquire(t.Context(), "lease")
 		require.NoError(t, err)
 		check(term)
 		time.Sleep(3 * testRenewEvery)
@@ -107,9 +107,9 @@ func TestLeases_TokensAreMonotonicRevisions(t *testing.T) {
 	}
 
 	// A holder gone quiet: b takes over once the revision has sat still.
-	_, err = admin.Put(t.Context(), leaseKeyPrefix+"sweeper", []byte(`{"holder":"gone","duration_ms":400}`))
+	_, err = admin.Put(t.Context(), leaseKeyPrefix+"lease", []byte(`{"holder":"gone","duration_ms":400}`))
 	require.NoError(t, err)
-	term := acquireEventually(t, b, "sweeper", 5*time.Second)
+	term := acquireEventually(t, b, "lease", 5*time.Second)
 	check(term)
 }
 
@@ -188,13 +188,13 @@ func TestLeases_StalledHolderIsReplacedAfterTheWindow(t *testing.T) {
 	b := newNATSLeases(f.bucketAs(t), "b", testTimings())
 	t.Cleanup(func() { _ = a.Close(context.Background()); _ = b.Close(context.Background()) })
 
-	held, err := a.TryAcquire(t.Context(), "sweeper")
+	held, err := a.TryAcquire(t.Context(), "lease")
 	require.NoError(t, err)
 
 	// Renewing, a holder outlasts many lease durations of campaigning.
 	until := time.Now().Add(3 * testLeaseDuration)
 	for time.Now().Before(until) {
-		_, err := b.TryAcquire(t.Context(), "sweeper")
+		_, err := b.TryAcquire(t.Context(), "lease")
 		require.ErrorIs(t, err, coord.ErrHeld)
 		time.Sleep(testRenewEvery / 2)
 	}
@@ -204,7 +204,7 @@ func TestLeases_StalledHolderIsReplacedAfterTheWindow(t *testing.T) {
 	stalledAt := time.Now()
 	var term coord.Term
 	for term == nil {
-		got, err := b.TryAcquire(t.Context(), "sweeper")
+		got, err := b.TryAcquire(t.Context(), "lease")
 		if err == nil {
 			term = got
 			break
@@ -271,7 +271,7 @@ func TestLeases_RenewalFailuresAreLoggedAndCounted(t *testing.T) { //nolint:para
 	kv := &failingKV{KeyValue: f.bucketAs(t)}
 	a := newNATSLeases(kv, "a", WithLeaseTimings(2*time.Hour, time.Hour, testRenewEvery))
 	t.Cleanup(func() { _ = a.Close(context.Background()) })
-	term, err := a.TryAcquire(t.Context(), "sweeper")
+	term, err := a.TryAcquire(t.Context(), "lease")
 	require.NoError(t, err)
 
 	kv.failing.Store(true)
@@ -289,14 +289,14 @@ func TestLeases_RenewalFailuresAreLoggedAndCounted(t *testing.T) { //nolint:para
 
 	warns := strings.Count(logs.String(), `"level":"WARN","msg":"coord: lease renewal failed`)
 	assert.Equal(t, 1, warns, "one WARN per streak:\n%s", logs.String())
-	assert.Contains(t, logs.String(), `"lease":"sweeper"`)
+	assert.Contains(t, logs.String(), `"lease":"lease"`)
 	assert.Contains(t, logs.String(), `"msg":"coord: lease renewed again"`)
 	assert.Equal(t, 1, strings.Count(logs.String(), `"msg":"coord: lease renewed again"`))
 	assert.Contains(t, logs.String(), "kv unreachable")
 
 	failures, held := leaseMetrics(t, reader)
-	assert.GreaterOrEqual(t, failures["sweeper"], int64(2), "every failed renewal of the streak counted")
-	assert.Equal(t, map[string]int64{"sweeper": 1}, held, "the lease this process holds")
+	assert.GreaterOrEqual(t, failures["lease"], int64(2), "every failed renewal of the streak counted")
+	assert.Equal(t, map[string]int64{"lease": 1}, held, "the lease this process holds")
 
 	require.NoError(t, term.Resign(t.Context()))
 	_, held = leaseMetrics(t, reader)
@@ -317,7 +317,7 @@ func TestLeases_ResignMidRenewalIsNotAFailure(t *testing.T) { //nolint:parallelt
 	kv := &stallableKV{KeyValue: f.bucketAs(t)}
 	a := newNATSLeases(kv, "a", WithLeaseTimings(2*time.Hour, time.Hour, testRenewEvery))
 	t.Cleanup(func() { _ = a.Close(context.Background()) })
-	term, err := a.TryAcquire(t.Context(), "sweeper")
+	term, err := a.TryAcquire(t.Context(), "lease")
 	require.NoError(t, err)
 	kv.stall()
 	kv.awaitBlocked(t, 1) // a renewal is now waiting on the stall
@@ -325,7 +325,7 @@ func TestLeases_ResignMidRenewalIsNotAFailure(t *testing.T) { //nolint:parallelt
 	assertTermEnded(t, term)
 
 	failures, held := leaseMetrics(t, reader)
-	assert.Zero(t, failures["sweeper"], "the renewal the resign cut short is not a failure")
+	assert.Zero(t, failures["lease"], "the renewal the resign cut short is not a failure")
 	assert.Empty(t, held, "resigned")
 	assert.NotContains(t, logs.String(), "coord: lease renewal failed", "nothing logged for it:\n%s", logs.String())
 }
@@ -364,7 +364,7 @@ func TestLeases_ResignAbortsAStuckRenewal(t *testing.T) {
 	akv := &stallableKV{KeyValue: f.bucketAs(t)}
 	a := newNATSLeases(akv, "a", WithLeaseTimings(2*time.Hour, time.Hour, testRenewEvery))
 	t.Cleanup(func() { _ = a.Close(context.Background()) })
-	term, err := a.TryAcquire(t.Context(), "sweeper")
+	term, err := a.TryAcquire(t.Context(), "lease")
 	require.NoError(t, err)
 	akv.stall()
 	akv.awaitBlocked(t, 1) // a renewal is now waiting on the stall
@@ -384,7 +384,7 @@ func TestLeases_ResignClearsARenewalItCutShort(t *testing.T) {
 	a := newNATSLeases(akv, "a", WithLeaseTimings(2*time.Hour, time.Hour, testRenewEvery))
 	b := newNATSLeases(f.bucketAs(t), "b", WithLeaseTimings(2*time.Hour, time.Hour, testRenewEvery))
 	t.Cleanup(func() { _ = a.Close(context.Background()); _ = b.Close(context.Background()) })
-	term, err := a.TryAcquire(t.Context(), "sweeper")
+	term, err := a.TryAcquire(t.Context(), "lease")
 	require.NoError(t, err)
 	admin, err := f.admin.KeyValue(t.Context(), natstest.CoordBucket)
 	require.NoError(t, err)
@@ -392,13 +392,13 @@ func TestLeases_ResignClearsARenewalItCutShort(t *testing.T) {
 	akv.loseReplies = true
 	akv.mu.Unlock()
 	require.Eventually(t, func() bool {
-		e, err := admin.Get(t.Context(), leaseKeyPrefix+"sweeper")
+		e, err := admin.Get(t.Context(), leaseKeyPrefix+"lease")
 		return err == nil && e.Revision() > term.Token()
 	}, 2*time.Second, testRenewEvery/2, "a renewal is stored with its answer withheld")
 	require.NoError(t, term.Resign(t.Context()))
-	_, err = admin.Get(t.Context(), leaseKeyPrefix+"sweeper")
+	_, err = admin.Get(t.Context(), leaseKeyPrefix+"lease")
 	require.ErrorIs(t, err, jetstream.ErrKeyNotFound, "the resign deleted the renewal it cut short")
-	_, err = b.TryAcquire(t.Context(), "sweeper")
+	_, err = b.TryAcquire(t.Context(), "lease")
 	require.NoError(t, err, "free at once, with no lease duration to wait out")
 }
 
@@ -413,9 +413,9 @@ func TestLeases_TermsWriteTheirOwnIDs(t *testing.T) {
 	require.NoError(t, err)
 	var ids []string
 	for range 2 {
-		term, err := a.TryAcquire(t.Context(), "sweeper")
+		term, err := a.TryAcquire(t.Context(), "lease")
 		require.NoError(t, err)
-		e, err := admin.Get(t.Context(), leaseKeyPrefix+"sweeper")
+		e, err := admin.Get(t.Context(), leaseKeyPrefix+"lease")
 		require.NoError(t, err)
 		var v leaseValue
 		require.NoError(t, json.Unmarshal(e.Value(), &v))
@@ -449,7 +449,7 @@ func TestLeases_CloseDuringACampaign(t *testing.T) {
 	a := newNATSLeases(g, "a", testTimings())
 	got := make(chan error, 1)
 	go func() {
-		_, err := a.TryAcquire(context.Background(), "sweeper")
+		_, err := a.TryAcquire(context.Background(), "lease")
 		got <- err
 	}()
 	<-g.stored
@@ -458,7 +458,7 @@ func TestLeases_CloseDuringACampaign(t *testing.T) {
 	require.ErrorIs(t, <-got, coord.ErrClosed)
 	admin, err := f.admin.KeyValue(t.Context(), natstest.CoordBucket)
 	require.NoError(t, err)
-	_, err = admin.Get(t.Context(), leaseKeyPrefix+"sweeper")
+	_, err = admin.Get(t.Context(), leaseKeyPrefix+"lease")
 	require.ErrorIs(t, err, jetstream.ErrKeyNotFound, "the lease was handed back")
 }
 
@@ -479,12 +479,12 @@ func TestLeases_CloseHandsOverAtOnce(t *testing.T) {
 	a := newNATSLeases(f.bucketAs(t), "a", WithLeaseTimings(time.Hour, 50*time.Minute, testRenewEvery))
 	b := newNATSLeases(f.bucketAs(t), "b", testTimings())
 	t.Cleanup(func() { _ = b.Close(context.Background()) })
-	_, err := a.TryAcquire(t.Context(), "sweeper")
+	_, err := a.TryAcquire(t.Context(), "lease")
 	require.NoError(t, err)
-	_, err = b.TryAcquire(t.Context(), "sweeper")
+	_, err = b.TryAcquire(t.Context(), "lease")
 	require.ErrorIs(t, err, coord.ErrHeld)
 	require.NoError(t, a.Close(t.Context()))
-	_, err = b.TryAcquire(t.Context(), "sweeper")
+	_, err = b.TryAcquire(t.Context(), "lease")
 	require.NoError(t, err)
 }
 
@@ -496,7 +496,7 @@ func TestLeases_ResumesItsOwnWrite(t *testing.T) {
 	akv := &stallableKV{KeyValue: f.bucketAs(t)}
 	a := newNATSLeases(akv, "a", WithLeaseTimings(time.Hour, testRenewDeadline, testRenewEvery))
 	t.Cleanup(func() { _ = a.Close(context.Background()) })
-	first, err := a.TryAcquire(t.Context(), "sweeper")
+	first, err := a.TryAcquire(t.Context(), "lease")
 	require.NoError(t, err)
 	akv.stall()
 	select {
@@ -508,7 +508,7 @@ func TestLeases_ResumesItsOwnWrite(t *testing.T) {
 	akv.mu.Lock()
 	akv.stalled = false
 	akv.mu.Unlock()
-	second, err := a.TryAcquire(t.Context(), "sweeper")
+	second, err := a.TryAcquire(t.Context(), "lease")
 	require.NoError(t, err, "its own write, not a stranger's: no wait")
 	assert.Greater(t, second.Token(), first.Token())
 }
@@ -544,7 +544,7 @@ func TestExternalNATS_Leases(t *testing.T) {
 	e := f.broker(t, func(c *NATSConfig) { c.Topology.CoordBucket = natstest.CoordBucket })
 	c, err := e.Leases(t.Context(), natstest.CoordBucket, "a", testTimings())
 	require.NoError(t, err)
-	term, err := c.TryAcquire(t.Context(), "sweeper")
+	term, err := c.TryAcquire(t.Context(), "lease")
 	require.NoError(t, err)
 	time.Sleep(3 * testRenewEvery)
 	require.NoError(t, term.Err(), "renewals as the wavehouse user")

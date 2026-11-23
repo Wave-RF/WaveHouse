@@ -9,6 +9,7 @@ package mq_test
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/mq/mqtest"
@@ -46,9 +47,12 @@ func TestExternalNATS_Conformance(t *testing.T) {
 		Fill: func(t *testing.T, b mq.Broker, id tenant.ID) {
 			fixtureOf(b).FillPartition(t, b, id)
 		},
+		// The history's max_age is the operator's, one for every tenant.
+		Window: func(t *testing.T, b mq.Broker, _ tenant.ID, window time.Duration) {
+			fixtureOf(b).SetHistoryMaxAge(t, window)
+		},
 		Caps: mqtest.Caps{
 			PerTenantBudget:    false,
-			PurgesAcked:        false,
 			UnbudgetedNotFound: false,
 			ConfiguresDurables: false,
 		},

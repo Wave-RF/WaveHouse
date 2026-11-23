@@ -178,6 +178,8 @@ func (p *fakeProc) UnitStates(context.Context) ([]mq.UnitState, error) {
 
 func (p *fakeProc) DeadLetter(context.Context, *mq.Message, ...mq.PublishOpt) error { return nil }
 
+func (p *fakeProc) Record(context.Context, []*mq.Message) error { return nil }
+
 func (p *fakeProc) CreateConsumer(_ context.Context, cfg mq.ConsumerConfig) (mq.Consumer, error) {
 	if len(cfg.Units) != 1 {
 		return &fakeUnitConsumer{}, nil // the boot check of every unit
@@ -296,6 +298,7 @@ func (plainQueue) CreateConsumer(context.Context, mq.ConsumerConfig) (mq.Consume
 	return nil, nil //nolint:nilnil // never called
 }
 func (plainQueue) DeadLetter(context.Context, *mq.Message, ...mq.PublishOpt) error { return nil }
+func (plainQueue) Record(context.Context, []*mq.Message) error                     { return nil }
 
 // Three processes split the units with none shared, none left over, and no
 // process above an even share.

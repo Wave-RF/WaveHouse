@@ -29,11 +29,12 @@ import (
 )
 
 // Queue is what the worker needs from the MQ: a durable consumer on the
-// ingest queue and somewhere to park what it cannot write. mq.Broker
-// satisfies it.
+// ingest queue, somewhere to park what it cannot write, and somewhere to
+// record what it wrote, for replay. mq.Broker satisfies it.
 type Queue interface {
 	mq.ConsumerManager
 	mq.DeadLetterer
+	mq.Recorder
 }
 
 type parsedMsg struct {
@@ -54,7 +55,13 @@ func columnSignature(cols []string) string {
 }
 
 type IngestWorker struct {
-	dlq mq.DeadLetterer
+	// queue is where a row the worker cannot write is parked, and where a
+	// written one is recorded before its ack, so a replay still finds it once
+	// the queue has let it go (handleSuccess).
+	queue interface {
+		mq.DeadLetterer
+		mq.Recorder
+	}
 	// failed carries the one error that ends the worker on its own — the
 	// consumer could not start, or delivery ended underneath it. Buffered so
 	// the dispatch loop never blocks on a caller that has already gone.
@@ -254,7 +261,7 @@ func StartIngestWorker(
 	}
 
 	worker := &IngestWorker{
-		dlq:        queue,
+		queue:      queue,
 		failed:     make(chan error, 1),
 		clients:    chconn.NewHTTPClients(ingestHTTPClient),
 		cache:      cache,
@@ -1121,12 +1128,14 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 	// so the first row names whose namespaces the insert changed.
 	w.invalidate(ctx, msgs[0].tenant, tableName, msgs)
 
-	// Ack in the background, tracked on ackWg. DoubleAck is fsync-bound
-	// (SyncAlways) and slow, so it must stay off the insert path. dispatchLoop
-	// drains ackWg only after every tableLoop has returned, so each Add here
-	// happens-before that Wait — no race, no reliance on synchronous flushing.
+	// Record, then ack, in the background, tracked on ackWg: both wait on the
+	// broker's disk (the embedded one syncs every write), so they stay off the
+	// insert path. dispatchLoop drains ackWg only after every tableLoop has
+	// returned, so each Add here happens-before that Wait — no race, no
+	// reliance on synchronous flushing.
 	w.ackWg.Go(func() {
 		defer observability.Crash("ingest_worker", slog.String("tenant", msgs[0].tenant.String()), slog.String("table", tableName))
+		w.record(context.WithoutCancel(ctx), tableName, msgs)
 		var acks sync.WaitGroup
 		for _, pm := range msgs {
 			acks.Go(func() {
@@ -1138,6 +1147,22 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 		}
 		acks.Wait()
 	})
+}
+
+// record files a written batch in the replay history, in its order, before
+// the acks let the queue drop it: from then on the history is the only place a
+// replay finds the rows. Best effort, as the history always was: the rows are
+// in ClickHouse, and one left unacked would be written again, so a failure is
+// logged and the acks go ahead. Those rows are missing from replays.
+func (w *IngestWorker) record(ctx context.Context, tableName string, msgs []parsedMsg) {
+	written := make([]*mq.Message, len(msgs))
+	for i, pm := range msgs {
+		written[i] = pm.msg
+	}
+	if err := w.queue.Record(ctx, written); err != nil {
+		slog.WarnContext(ctx, "written rows were not all recorded for replay; they are acked all the same, and a replay will not send the ones left out",
+			"tenant", msgs[0].tenant, "table", tableName, "rows", len(msgs), "error", err)
+	}
 }
 
 // invalidate bumps the cache namespaces a batch of inserts into tableName
@@ -1258,7 +1283,7 @@ func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parse
 // the stream, so the next redelivery parks a second copy — counting the first
 // would overstate the total by one per retry.
 func (w *IngestWorker) parkOnDLQ(ctx context.Context, msg *mq.Message, tableName, errMsg string) bool {
-	pubErr := w.dlq.DeadLetter(ctx, msg,
+	pubErr := w.queue.DeadLetter(ctx, msg,
 		mq.WithHeader("X-DLQ-Table", tableName),
 		mq.WithHeader("X-DLQ-Error", errMsg),
 		mq.WithHeader("X-DLQ-Timestamp", time.Now().UTC().Format(time.RFC3339)),

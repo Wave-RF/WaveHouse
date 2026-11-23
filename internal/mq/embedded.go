@@ -51,13 +51,19 @@ func (slogNATSLogger) Tracef(format string, v ...any) {
 }
 
 // EmbeddedNATS runs an in-process NATS server with JetStream, and gives each
-// tenant a queue of its own: an ingest stream and a dead-letter stream
-// (subject.go names them), each with its own byte cap, and the durable
-// consumers on the ingest one. Nothing outside this package sees that layout.
+// tenant a queue of its own, laid out as an external NATS is (NATSTopology):
+// an ingest stream with work-queue retention, which the ingest worker's
+// durable consumer drains and which republishes every row it stores to the
+// tenant's live subject; a history stream the worker records every written
+// row on, kept for the tenant's replay window; and a dead-letter stream
+// (subject.go names them), each with its own byte cap. Nothing outside this
+// package sees that layout.
 type EmbeddedNATS struct {
 	server *natsserver.Server
 	conn   *nats.Conn
 	js     jetstream.JetStream
+	// hist records written rows on the tenants' history streams (Record).
+	hist historyWriter
 
 	// mu guards queues, consumers and writes to opened, and serializes
 	// opening or resizing a tenant's queue with registering a consumer, so a
@@ -68,13 +74,17 @@ type EmbeddedNATS struct {
 	// consumers are the durable consumers held on every tenant's queue, each
 	// joined to a queue as it opens.
 	consumers []*fanIn
-	// opened holds the tenants whose queue has both streams and every
+	// opened holds the tenants whose queue has its three streams and every
 	// registered consumer joined to it — what Publish trusts, rather than a
 	// stream answering: an open that gave up can leave behind a stream
 	// JetStream goes on to create, which no consumer holds, and a queue a
 	// consumer could not join takes no row until it has. Written under mu,
 	// read without it.
 	opened sync.Map // tenant.ID → struct{}
+	// windows holds each tenant's replay window as last asked (SetReplayWindow,
+	// or read back from its history stream at boot): Record reads it without
+	// mu, which a resize can hold for seconds.
+	windows sync.Map // tenant.ID → time.Duration
 	// reopening merges into one attempt the publishes and parks that find
 	// the same tenant's queue not open, and failedOpen holds, for a tenant
 	// whose last such attempt failed, its error and until when its publishes
@@ -93,8 +103,9 @@ type openFailure struct {
 
 // tenantQueue is what the broker knows of one tenant's queue.
 type tenantQueue struct {
-	// ingest and dlq report whether each of the tenant's streams exists.
-	ingest, dlq bool
+	// ingest, history and dlq report whether each of the tenant's streams
+	// exists.
+	ingest, history, dlq bool
 	// maxBytes is the budget last applied in full (MaxBytes), every
 	// registered consumer joined; asked is the budget last asked for, which a
 	// publish or park that finds the queue not open opens it at. Boot reads
@@ -103,9 +114,13 @@ type tenantQueue struct {
 	// (takeStock).
 	maxBytes, asked int64
 	// ingestCap is the cap the ingest stream has — what a failed resize
-	// restores it to. Not maxBytes: a pair boot found split has a cap but no
-	// budget applied in full, and a cap of 0 would be none at all.
-	ingestCap int64
+	// restores it to. Not maxBytes: a queue boot found split has a cap but no
+	// budget applied in full, and a cap of 0 would be none at all. historyCap
+	// is the history stream's, which a change of window keeps.
+	ingestCap, historyCap int64
+	// window is the replay window last asked for the tenant, which its
+	// history stream is opened with and e.windows mirrors.
+	window time.Duration
 }
 
 // EmbeddedNATS implements every mq interface.
@@ -113,8 +128,16 @@ var _ Broker = (*EmbeddedNATS)(nil)
 
 const (
 	// dlqShare is a tenant's dead-letter stream's slice of its byte budget: a
-	// tenth of the ingest stream's cap.
-	dlqShare = 10
+	// tenth of the ingest stream's cap. historyShare is its history stream's,
+	// the same: both come on top of the budget.
+	dlqShare     = 10
+	historyShare = 10
+	// noHistoryAge is the max_age of the history stream of a tenant whose
+	// replay window is 0: a stream has none of 0, which would be no limit, so
+	// it keeps what it holds for a second, and nothing is recorded on it. A
+	// window is whole minutes, so an age under a minute read back at boot is
+	// this one.
+	noHistoryAge = time.Second
 	// resizeTimeout bounds the JetStream calls SetMaxBytes makes to open a
 	// tenant's queue or apply a new cap to it — both streams share it. A
 	// settings reload holds the store's lock while its hooks run, so an
@@ -149,10 +172,12 @@ var errNoQueue = errors.New("no queue is open for it yet")
 // is held on every one of them, those of tenants no longer served included,
 // whose queued rows still have to reach the ingest worker. The pair of streams
 // an earlier build kept for every tenant together is deleted, since its
-// subjects overlap every tenant's; the events it held are not carried over. A
-// tenant's queue is opened by SetMaxBytes, the first time its budget is
-// applied, or by a publish or park that finds it missing, at the budget last
-// asked for it. The server logs through slog's default logger.
+// subjects overlap every tenant's, and so is a tenant's ingest stream an
+// earlier build created with limits retention, which no update can make a
+// work queue; the events they held are not carried over. A tenant's queue is
+// opened by SetMaxBytes, the first time its budget is applied, or by a publish
+// or park that finds it missing, at the budget last asked for it. The server
+// logs through slog's default logger.
 func NewEmbedded(storeDir string) (*EmbeddedNATS, error) {
 	// A store the server cannot create fails JetStream in the background, and
 	// ReadyForConnections would only give up on it after its whole wait.
@@ -207,7 +232,14 @@ func NewEmbedded(storeDir string) (*EmbeddedNATS, error) {
 		return nil, fmt.Errorf("jetstream new: %w", err)
 	}
 
-	e := &EmbeddedNATS{server: ns, conn: nc, js: js, queues: map[tenant.ID]*tenantQueue{}}
+	hist, err := newHistoryWriter(nc, "", recordTimeout)
+	if err != nil {
+		nc.Close()
+		ns.Shutdown()
+		return nil, err
+	}
+
+	e := &EmbeddedNATS{server: ns, conn: nc, js: js, hist: hist, queues: map[tenant.ID]*tenantQueue{}}
 	if err := e.takeStock(context.Background()); err != nil {
 		_ = e.Close()
 		return nil, err
@@ -216,8 +248,9 @@ func NewEmbedded(storeDir string) (*EmbeddedNATS, error) {
 }
 
 // takeStock deletes the pair of streams an earlier build kept for every
-// tenant together, then records every tenant stream on disk, with the budget
-// its ingest stream last had.
+// tenant together and each tenant's ingest stream of another retention, then
+// records every tenant stream on disk, with the budget its ingest stream last
+// had and the replay window its history stream last had.
 func (e *EmbeddedNATS) takeStock(ctx context.Context) error {
 	for _, name := range []string{legacyIngestStream, legacyDLQStream} {
 		if err := e.deleteLegacy(ctx, name); err != nil {
@@ -229,21 +262,33 @@ func (e *EmbeddedNATS) takeStock(ctx context.Context) error {
 		held  uint64
 	}
 	dlqs := map[tenant.ID]dlqState{}
-	// duplicates is the ingest stream's own Duplicates window as found on
-	// disk, keyed alongside dlqs: a stream from before EmbeddedDuplicateWindow
-	// existed, or reopened under a different value, must not be counted as
+	// current holds the tenants whose ingest stream is configured as
+	// ingestStreamConfig would have it, bar its cap: a stream from before a
+	// field took its value, or reopened under another, must not be counted as
 	// already at budget below, or SetMaxBytes(same budget) short-circuits and
-	// the stale window is never brought forward (measured: a stream with
+	// the stale value is never brought forward (measured: a stream with
 	// Duplicates=10s kept 10s after NewEmbedded + SetMaxBytes(same budget)).
-	duplicates := map[tenant.ID]time.Duration{}
+	current := map[tenant.ID]bool{}
+	var earlier []*jetstream.StreamInfo
 	streams := e.js.ListStreams(ctx)
 	for info := range streams.Info() {
 		name := info.Config.Name
 		if id, ok := streamTenant(ingestStreamPrefix, name); ok {
 			q := e.queue(id)
-			q.ingest = true
-			q.asked, q.ingestCap = info.Config.MaxBytes, info.Config.MaxBytes
-			duplicates[id] = info.Config.Duplicates
+			q.asked = info.Config.MaxBytes
+			if info.Config.Retention != jetstream.WorkQueuePolicy {
+				earlier = append(earlier, info)
+				continue
+			}
+			q.ingest, q.ingestCap = true, info.Config.MaxBytes
+			current[id] = sameIngestStream(info.Config, ingestStreamConfig(id, info.Config.MaxBytes))
+		} else if id, ok := streamTenant(historyStreamPrefix, name); ok {
+			q := e.queue(id)
+			q.history, q.historyCap = true, info.Config.MaxBytes
+			if age := info.Config.MaxAge; age >= time.Minute {
+				q.window = age
+			}
+			e.windows.Store(id, q.window)
 		} else if id, ok := streamTenant(dlqStreamPrefix, name); ok {
 			e.queue(id).dlq = true
 			dlqs[id] = dlqState{limit: info.Config.MaxBytes, held: info.State.Bytes}
@@ -252,23 +297,36 @@ func (e *EmbeddedNATS) takeStock(ctx context.Context) error {
 	if err := streams.Err(); err != nil {
 		return fmt.Errorf("list streams: %w", err)
 	}
-	// A pair is at its budget when its dead-letter stream is at a tenth of
+	for _, info := range earlier {
+		if err := e.deleteEarlier(ctx, info); err != nil {
+			return err
+		}
+	}
+	// A queue is at its budget when its dead-letter stream is at a tenth of
 	// the ingest cap, or above it holding more than that: the shrink guard's
-	// doing, AND its ingest stream's duplicate window already matches
-	// EmbeddedDuplicateWindow. Anything else is a pair a stop or a failed
-	// update left split, one missing its dead-letter stream, or one whose
-	// duplicate window is stale, so its budget stays unapplied and the boot's
-	// SetMaxBytes applies it — and the current window — to both streams again.
+	// doing, its history stream at a tenth too, AND its ingest stream is
+	// configured as this build configures one. Anything else is a queue a
+	// stop or a failed update left split, one missing a stream, or one whose
+	// configuration is stale, so its budget stays unapplied and the boot's
+	// SetMaxBytes applies it — and the current configuration — to every
+	// stream again.
 	for id, q := range e.queues {
 		d, ok := dlqs[id]
 		tenth := q.asked / dlqShare
 		guarded := d.limit > tenth && d.held <= math.MaxInt64 && int64(d.held) > tenth
-		if q.ingest && ok && (d.limit == tenth || guarded) && duplicates[id] == EmbeddedDuplicateWindow {
+		if q.ingest && ok && (d.limit == tenth || guarded) && q.history && q.historyCap == q.asked/historyShare && current[id] {
 			q.maxBytes = q.asked
 		}
-		e.record(id, q)
+		e.note(id, q)
 	}
 	return nil
+}
+
+// sameIngestStream reports whether an ingest stream holds the fields this
+// package sets on one, bar its cap.
+func sameIngestStream(have, want jetstream.StreamConfig) bool {
+	return have.Duplicates == want.Duplicates && have.AllowDirect == want.AllowDirect &&
+		have.RePublish != nil && *have.RePublish == *want.RePublish
 }
 
 // deleteLegacy deletes one stream of the pair an earlier build kept for every
@@ -288,6 +346,30 @@ func (e *EmbeddedNATS) deleteLegacy(ctx context.Context, name string) error {
 	}
 	slog.Warn("mq: deleted the stream an earlier build kept for every tenant together; its messages are not carried over",
 		"component", "nats", "stream", name, "messages", held)
+	return nil
+}
+
+// deleteEarlier deletes a tenant's ingest stream an earlier build created
+// with limits retention: the server refuses the update that would make it a
+// work queue, so the stream is created again when its queue next opens, at
+// the budget it had. It logs what the stream held, and how many of those
+// messages the ingest worker had not acknowledged — rows that had not reached
+// ClickHouse, which are lost with it; the rest was replay history. A stream
+// the worker never consumed held nothing but such rows.
+func (e *EmbeddedNATS) deleteEarlier(ctx context.Context, info *jetstream.StreamInfo) error {
+	name := info.Config.Name
+	unwritten := info.State.Msgs
+	if c, err := e.js.Consumer(ctx, name, workerDurable); err == nil {
+		ci := c.CachedInfo()
+		unwritten = ci.NumPending + uint64(max(0, ci.NumAckPending))
+	} else if !errors.Is(err, jetstream.ErrConsumerNotFound) {
+		return fmt.Errorf("look up the ingest consumer of stream %s: %w", name, err)
+	}
+	if err := e.js.DeleteStream(ctx, name); err != nil {
+		return fmt.Errorf("delete stream %s: %w", name, err)
+	}
+	slog.Warn("mq: deleted the ingest stream an earlier build kept with limits retention, which cannot become a work queue; its messages are not carried over, and the unwritten ones never reached ClickHouse",
+		"component", "nats", "stream", name, "messages", info.State.Msgs, "unwritten", unwritten)
 	return nil
 }
 
@@ -315,13 +397,13 @@ func (e *EmbeddedNATS) ingestTenants() []tenant.ID {
 	return ids
 }
 
-// record brings opened in line with what the broker knows of tenant id's
-// queue: open with both streams known and every registered consumer joined
-// to it. A queue a consumer could not join stays unrecorded, so the tenant's
-// publishes are refused until a publish or a reload joins it. Under e.mu (or
-// before e is shared).
-func (e *EmbeddedNATS) record(id tenant.ID, q *tenantQueue) {
-	if q.ingest && q.dlq && e.joined(id) {
+// note brings opened in line with what the broker knows of tenant id's
+// queue: open with its three streams known and every registered consumer
+// joined to it. A queue a consumer could not join stays unnoted, so the
+// tenant's publishes are refused until a publish or a reload joins it. Under
+// e.mu (or before e is shared).
+func (e *EmbeddedNATS) note(id tenant.ID, q *tenantQueue) {
+	if q.ingest && q.history && q.dlq && e.joined(id) {
 		e.opened.Store(id, struct{}{})
 		e.failedOpen.Delete(id)
 	} else {
@@ -340,18 +422,44 @@ func (e *EmbeddedNATS) record(id tenant.ID, q *tenantQueue) {
 // this queue still drops the retry's second copy.
 const EmbeddedDuplicateWindow = 2 * time.Minute
 
-// ingestStreamConfig is tenant id's ingest stream. LimitsPolicy: standard
-// append-only log; the Active Sweeper handles message purging. MaxBytes caps
-// the tenant's share of the disk. DiscardNew rejects new messages when full,
-// propagating backpressure to the upstream API — for this tenant alone.
+// ingestStreamConfig is tenant id's ingest stream. WorkQueuePolicy: a row
+// leaves when the ingest worker acks it and not before, whatever the rows
+// around it, so one left unacked holds back only itself (#653). MaxBytes caps
+// the tenant's unwritten rows on the disk. DiscardNew rejects new messages
+// when full, propagating backpressure to the upstream API — for this tenant
+// alone. Every row it stores is republished to the tenant's live subject, and
+// a replay reads the ones still waiting by direct get, a work queue taking no
+// second consumer.
 func ingestStreamConfig(id tenant.ID, maxBytes int64) jetstream.StreamConfig {
 	return jetstream.StreamConfig{
-		Name:       ingestStreamName(id),
-		Subjects:   []string{tenantSubjects(ingestPrefix, id)},
-		Retention:  jetstream.LimitsPolicy,
-		MaxBytes:   maxBytes,
-		Discard:    jetstream.DiscardNew,
-		Duplicates: EmbeddedDuplicateWindow,
+		Name:        ingestStreamName(id),
+		Subjects:    []string{tenantSubjects(ingestPrefix, id)},
+		Retention:   jetstream.WorkQueuePolicy,
+		MaxBytes:    maxBytes,
+		Discard:     jetstream.DiscardNew,
+		Duplicates:  EmbeddedDuplicateWindow,
+		AllowDirect: true,
+		RePublish:   &jetstream.RePublish{Source: tenantSubjects(ingestPrefix, id), Destination: tenantSubjects(livePrefix, id)},
+	}
+}
+
+// historyStreamConfig is tenant id's history stream: every row the worker has
+// written, kept for window from the write (the stream's own clock starts
+// when it stores a row), which is how long a replay can still send it.
+// DiscardOld: a full one drops its oldest rows rather than refusing the
+// newest, as the dead-letter stream does.
+func historyStreamConfig(id tenant.ID, maxBytes int64, window time.Duration) jetstream.StreamConfig {
+	age := max(window, noHistoryAge)
+	return jetstream.StreamConfig{
+		Name:      historyStreamName(id),
+		Subjects:  []string{tenantSubjects(histPrefix, id)},
+		Retention: jetstream.LimitsPolicy,
+		MaxBytes:  maxBytes,
+		MaxAge:    age,
+		Discard:   jetstream.DiscardOld,
+		// No row is published here under an idempotency key, and the server
+		// refuses a window longer than max_age.
+		Duplicates: min(age, EmbeddedDuplicateWindow),
 	}
 }
 
@@ -380,10 +488,11 @@ func (e *EmbeddedNATS) MaxBytes(id tenant.ID) int64 {
 }
 
 // SetMaxBytes applies tenant id's byte budget (its hot-reloadable
-// mq.max_bytes_gb) to its queue: the ingest stream takes maxBytes and the
-// dead-letter stream a tenth of it. A tenant with no queue yet has one opened,
-// its dead-letter stream first, so no row is queued that could not be parked,
-// and every registered consumer joins it. No other tenant's queue is touched.
+// mq.max_bytes_gb) to its queue: the ingest stream takes maxBytes, and the
+// history and dead-letter streams a tenth of it each. A tenant with no queue
+// yet has one opened, its dead-letter and history streams first, so no row is
+// queued that could not be parked or recorded, and every registered consumer
+// joins it. No other tenant's queue is touched.
 //
 // A consumer that cannot join is this tenant's failure alone: the error says
 // so, the queue stays closed to the tenant's publishes (ErrQueueFull), and
@@ -394,19 +503,23 @@ func (e *EmbeddedNATS) MaxBytes(id tenant.ID) int64 {
 // JetStream applies a limit change to a live stream without touching its
 // messages: growing takes effect immediately; shrinking the ingest stream
 // below its current size makes DiscardNew refuse new publishes until the
-// sweeper purges it back under the cap — nothing buffered is dropped. The
+// worker has written it back under the cap — nothing queued is dropped. The
 // dead-letter stream is DiscardOld, which would delete its oldest parked rows
 // to fit a smaller cap, so it is never capped below the bytes it holds (#532):
-// it keeps what it has, and that is logged.
+// it keeps what it has, and that is logged. The history stream is DiscardOld
+// too and has no such guard: what a smaller cap drops is its oldest rows,
+// which are in ClickHouse.
 //
-// The pair moves together where it can. If the dead-letter update fails after
-// the ingest one succeeded, the ingest resize is undone so the pair stays at
-// the previous budget, and the next call retries both. Safe in that direction
-// — the ingest stream is DiscardNew, so shrinking it back drops nothing
-// stored. The undo is best effort: if it fails too, the ingest stream stays at
-// the new limit and the dead-letter one at the previous, and the error says
-// so. On any error MaxBytes keeps reporting the previous budget, so a later
-// call with the new budget reapplies both.
+// The streams move together where they can. If the dead-letter update fails
+// after the ingest one succeeded, the ingest resize is undone so the two stay
+// at the previous budget, and the next call retries both. Safe in that
+// direction — the ingest stream is DiscardNew, so shrinking it back drops
+// nothing stored. The undo is best effort: if it fails too, the ingest stream
+// stays at the new limit and the dead-letter one at the previous, and the
+// error says so. The history stream is resized last, and a failure there
+// leaves the other two at the new budget. On any error MaxBytes keeps
+// reporting the previous budget, so a later call with the new budget
+// reapplies all three.
 //
 // The JetStream calls are bounded by resizeTimeout, plus rollbackTimeout for
 // the undo — or another resizeTimeout for the consumers joining a queue they
@@ -425,10 +538,43 @@ func (e *EmbeddedNATS) SetMaxBytes(ctx context.Context, id tenant.ID, maxBytes i
 	defer e.mu.Unlock()
 	q := e.queue(id)
 	q.asked = maxBytes
-	if q.ingest && q.dlq && maxBytes == q.maxBytes && e.joined(id) {
+	if q.ingest && q.history && q.dlq && maxBytes == q.maxBytes && e.joined(id) {
 		return nil
 	}
 	return e.apply(ctx, id, q, maxBytes)
+}
+
+// SetReplayWindow applies tenant id's replay window (its hot-reloadable
+// stream.gap_window_minutes) to its history stream, as the stream's max_age:
+// a written row is kept, and can be replayed, for that long from its write.
+// Shortening it expires what is older at once; lengthening it brings back
+// nothing already gone. A window of 0 keeps none: nothing is recorded for the
+// tenant from then on. A tenant with no queue yet has the window recorded,
+// and its history stream opened with it (SetMaxBytes). On an error the
+// previous window stays in force, and the next call retries.
+func (e *EmbeddedNATS) SetReplayWindow(ctx context.Context, id tenant.ID, window time.Duration) error {
+	if _, err := tenant.Parse(string(id)); err != nil {
+		return fmt.Errorf("tenant: %w", err)
+	}
+	if window < 0 {
+		return fmt.Errorf("replay window %s is negative", window)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	q := e.queue(id)
+	if q.window == window {
+		return nil
+	}
+	if q.history {
+		resizeCtx, cancel := context.WithTimeout(ctx, resizeTimeout)
+		defer cancel()
+		if _, err := e.js.UpdateStream(resizeCtx, historyStreamConfig(id, q.historyCap, window)); err != nil {
+			return fmt.Errorf("history stream: %w", err)
+		}
+	}
+	q.window = window
+	e.windows.Store(id, window)
+	return nil
 }
 
 // apply brings tenant id's queue to maxBytes: opening it when its ingest
@@ -436,11 +582,14 @@ func (e *EmbeddedNATS) SetMaxBytes(ctx context.Context, id tenant.ID, maxBytes i
 // that do not hold it; only then is the budget applied in full (see
 // SetMaxBytes). Under e.mu.
 func (e *EmbeddedNATS) apply(ctx context.Context, id tenant.ID, q *tenantQueue, maxBytes int64) error {
-	defer e.record(id, q)
+	defer e.note(id, q)
 	resizeCtx, cancel := context.WithTimeout(ctx, resizeTimeout)
 	defer cancel()
 	if !q.ingest {
 		if err := e.applyDLQ(resizeCtx, id, q, maxBytes); err != nil {
+			return err
+		}
+		if err := e.applyHistory(resizeCtx, id, q, maxBytes); err != nil {
 			return err
 		}
 		if _, err := e.js.CreateOrUpdateStream(resizeCtx, ingestStreamConfig(id, maxBytes)); err != nil {
@@ -471,10 +620,29 @@ func (e *EmbeddedNATS) apply(ctx context.Context, id tenant.ID, q *tenantQueue, 
 		q.ingestCap = prevCap
 		return fmt.Errorf("%w (ingest stream restored to the previous limit)", err)
 	}
+	if err := e.applyHistory(resizeCtx, id, q, maxBytes); err != nil {
+		return err
+	}
 	return e.applied(ctx, id, q, maxBytes)
 }
 
-// applied ends an apply that left both of tenant id's streams at maxBytes:
+// applyHistory gives tenant id's history stream a tenth of maxBytes, at the
+// tenant's replay window, creating it when it is missing. Under e.mu.
+func (e *EmbeddedNATS) applyHistory(ctx context.Context, id tenant.ID, q *tenantQueue, maxBytes int64) error {
+	limit := maxBytes / historyShare
+	verb := "resize"
+	if !q.history {
+		verb = "open"
+	}
+	if _, err := e.js.CreateOrUpdateStream(ctx, historyStreamConfig(id, limit, q.window)); err != nil {
+		return fmt.Errorf("%s history stream: %w", verb, err)
+	}
+	q.history, q.historyCap = true, limit
+	e.windows.Store(id, q.window)
+	return nil
+}
+
+// applied ends an apply that left tenant id's streams at maxBytes:
 // the consumers that do not hold the queue join it, and only then is the
 // budget applied in full. Under e.mu.
 func (e *EmbeddedNATS) applied(ctx context.Context, id tenant.ID, q *tenantQueue, maxBytes int64) error {
@@ -561,24 +729,20 @@ func (e *EmbeddedNATS) reopen(ctx context.Context, id tenant.ID) error {
 	if q == nil || q.asked == 0 {
 		return fmt.Errorf("tenant %s: %w", id, errNoQueue)
 	}
-	defer e.record(id, q)
+	defer e.note(id, q)
 	// What is missing is asked of JetStream rather than read off the flags,
 	// which may still say the stream the publish just missed exists — or it
 	// may be back already, opened by a caller that held mu first.
-	for _, name := range []string{ingestStreamName(id), dlqStreamName(id)} {
+	for name, there := range map[string]*bool{ingestStreamName(id): &q.ingest, historyStreamName(id): &q.history, dlqStreamName(id): &q.dlq} {
 		_, err := e.js.Stream(ctx, name)
 		switch {
 		case errors.Is(err, jetstream.ErrStreamNotFound):
-			if name == ingestStreamName(id) {
-				q.ingest = false
-			} else {
-				q.dlq = false
-			}
+			*there = false
 		case err != nil:
 			return fmt.Errorf("stream info: %w", err)
 		}
 	}
-	if q.ingest && q.dlq && e.joined(id) {
+	if q.ingest && q.history && q.dlq && e.joined(id) {
 		return nil
 	}
 	return e.apply(ctx, id, q, q.asked)
@@ -691,10 +855,11 @@ func (e *EmbeddedNATS) publish(ctx context.Context, subj string, data []byte, op
 	return err
 }
 
-// wrapMsg adapts a received JetStream message to the mq-owned Message. ctx
-// becomes Message.Ctx as given; Subscribe extracts the trace context first.
+// wrapMsg adapts a message the ingest worker's durable delivered to the
+// mq-owned Message, accepted when its tenant's ingest stream stored it. ctx
+// becomes Message.Ctx as given.
 func wrapMsg(ctx context.Context, m jetstream.Msg) *Message {
-	return newMessage(ctx, topicKey(ingestPrefix, m.Subject()), m.Data(), time.Now(),
+	msg := newMessage(ctx, topicKey(ingestPrefix, m.Subject()), m.Data(), time.Now(),
 		func(ctx context.Context) error {
 			return m.DoubleAck(ctx)
 		},
@@ -706,37 +871,26 @@ func wrapMsg(ctx context.Context, m jetstream.Msg) *Message {
 		},
 		WithNakDelay(m.NakWithDelay),
 	)
+	if meta, err := m.Metadata(); err == nil {
+		msg.accepted = meta.Timestamp
+	}
+	return msg
 }
 
-// Subscribe holds a durable explicit-ack consumer named consumerName on every
-// tenant's queue, those opened later included, and delivers each message to
-// handler with the trace context its headers carry, until ctx is done. It
-// fetches the client's default number of messages ahead across the tenants
-// together (see fanIn.share), so what sits client-side does not grow with
-// the tenants. A tenant's queue that cannot be joined when it opens stays
-// closed to the tenant's publishes until it is (SetMaxBytes), so handler
-// misses none of its events.
-func (e *EmbeddedNATS) Subscribe(ctx context.Context, consumerName string, handler func(msg *Message) error) error {
-	f := e.newFanIn(ctx, jetstream.ConsumerConfig{Durable: consumerName, AckPolicy: jetstream.AckExplicitPolicy})
-	if err := e.register(ctx, f); err != nil {
-		return fmt.Errorf("create consumer: %w", err)
+// Subscribe delivers every row a tenant's ingest stream stores from now on to
+// handler, one at a time, with the trace context its headers carry, until ctx
+// is done: a plain subscription to the subjects the ingest streams republish
+// to, every tenant's, those whose queues open later included. The server is
+// in this process, so the subscription loses no connection; a handler slow
+// enough that the client drops rows ahead of it is the one way a row is
+// skipped, and lost is called before the next one is delivered (liveFeed).
+func (e *EmbeddedNATS) Subscribe(ctx context.Context, handler func(msg *Message), lost func()) error {
+	feed := newLiveFeed(func(m *nats.Msg) {
+		handler(newMessage(observability.ExtractHeaders(ctx, Headers(m.Header)), topicKey(livePrefix, m.Subject), m.Data, time.Now(), nil, nil, nil))
+	}, lost, func() bool { return true })
+	if _, _, err := subscribeLive(ctx, e.conn, livePrefix+">", feed); err != nil {
+		return fmt.Errorf("live subscription: %w", err)
 	}
-	stop, err := f.start(func(m jetstream.Msg) {
-		msg := wrapMsg(observability.ExtractHeaders(ctx, m.Headers()), m)
-		if err := handler(msg); err != nil {
-			_ = msg.Nak()
-		}
-	}, jetstream.DefaultMaxMessages, false)
-	if err != nil {
-		return fmt.Errorf("consume: %w", err)
-	}
-
-	go func() {
-		defer observability.Crash("mq_embedded")
-		<-ctx.Done()
-		stop()
-	}()
-
 	return nil
 }
 
@@ -775,7 +929,7 @@ func (e *EmbeddedNATS) CreateConsumer(ctx context.Context, cfg ConsumerConfig) (
 }
 
 // newFanIn is a fanIn over cfg, not yet holding any durable; the caller sets
-// its fail, when it watches its deliveries (start), and registers it.
+// its fail and registers it.
 func (e *EmbeddedNATS) newFanIn(ctx context.Context, cfg jetstream.ConsumerConfig) *fanIn {
 	return &fanIn{
 		e:       e,
@@ -807,14 +961,14 @@ func (e *EmbeddedNATS) unregister(f *fanIn) {
 }
 
 // fanIn is one durable consumer held on every tenant's ingest stream — the
-// ingest worker's (CreateConsumer) or the hub bridge's (Subscribe) —
+// ingest worker's (CreateConsumer), the one consumer a work queue takes —
 // delivering them all into one handler: each tenant's messages on a
 // goroutine of their own, so a tenant's arrive in order and different
 // tenants' concurrently, and a handler blocked on one tenant holds back that
 // tenant alone. Its fields are guarded by e.mu, bar stopped.
 type fanIn struct {
 	e   *EmbeddedNATS
-	ctx context.Context // each delivered Message.Ctx (CreateConsumer), or where Subscribe extracts trace context into
+	ctx context.Context // each delivered Message.Ctx
 	cfg jetstream.ConsumerConfig
 
 	// fail reports a tenant's delivery that ended on its own.
@@ -828,9 +982,7 @@ type fanIn struct {
 	// prefetch is the fetch-ahead asked for across the tenants together; 0
 	// leaves each tenant the client default.
 	prefetch int
-	// watch reports a delivery that ends on its own through fail.
-	watch   bool
-	stopped atomic.Bool
+	stopped  atomic.Bool
 }
 
 // join holds f's durable on tenant id's ingest stream — looked up first, and
@@ -937,9 +1089,6 @@ func (f *fanIn) run(id tenant.ID) error {
 		return err
 	}
 	f.running[id] = cctx
-	if !f.watch {
-		return nil
-	}
 	go func() {
 		defer observability.Crash("mq_embedded")
 		<-cctx.Closed()
@@ -957,13 +1106,13 @@ func (f *fanIn) run(id tenant.ID) error {
 
 // start begins delivery to deliver from every tenant's durable, and from
 // each queue joined later, fetching about prefetch messages ahead across the
-// tenants together (see share); watch reports a delivery that ends on its own
+// tenants together (see share); a delivery that ends on its own is reported
 // through fail. The returned stop ends every delivery and stops joining new
 // queues, without waiting.
-func (f *fanIn) start(deliver func(jetstream.Msg), prefetch int, watch bool) (stop func(), err error) {
+func (f *fanIn) start(deliver func(jetstream.Msg), prefetch int) (stop func(), err error) {
 	f.e.mu.Lock()
 	defer f.e.mu.Unlock()
-	f.deliver, f.prefetch, f.watch = deliver, prefetch, watch
+	f.deliver, f.prefetch = deliver, prefetch
 	stop = func() {
 		f.e.mu.Lock()
 		defer f.e.mu.Unlock()
@@ -997,128 +1146,11 @@ type workerConsumer struct {
 func (c *workerConsumer) Consume(handler func(msg *Message), prefetch int) (func(), <-chan error, error) {
 	stop, err := c.start(func(m jetstream.Msg) {
 		handler(wrapMsg(observability.ExtractHeaders(c.ctx, m.Headers()), m))
-	}, prefetch, true)
+	}, prefetch)
 	if err != nil {
 		return nil, nil, fmt.Errorf("consume: %w", err)
 	}
 	return stop, c.failed, nil
-}
-
-// stream resolves a stream handle by name.
-func (e *EmbeddedNATS) stream(ctx context.Context, name string) (*jsStream, error) {
-	s, err := e.js.Stream(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-	return &jsStream{s: s}, nil
-}
-
-// jsStream is the sequencedStream over a resolved JetStream stream.
-type jsStream struct {
-	s jetstream.Stream
-}
-
-func (s *jsStream) state(ctx context.Context, subjectFilter string) (streamState, error) {
-	var opts []jetstream.StreamInfoOpt
-	if subjectFilter != "" {
-		opts = append(opts, jetstream.WithSubjectFilter(subjectFilter))
-	}
-	info, err := s.s.Info(ctx, opts...)
-	if err != nil {
-		return streamState{}, err
-	}
-	return streamState{
-		FirstSeq: info.State.FirstSeq,
-		LastSeq:  info.State.LastSeq,
-		Msgs:     info.State.Msgs,
-		Subjects: info.State.Subjects,
-	}, nil
-}
-
-func (s *jsStream) messageTime(ctx context.Context, seq uint64) (time.Time, error) {
-	msg, err := s.s.GetMsg(ctx, seq)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrMsgNotFound) {
-			return time.Time{}, fmt.Errorf("sequence %d: %w", seq, errSequenceNotFound)
-		}
-		return time.Time{}, err
-	}
-	return msg.Time, nil
-}
-
-func (s *jsStream) purgeBelow(ctx context.Context, seq uint64) error {
-	return s.s.Purge(ctx, jetstream.WithPurgeSequence(seq))
-}
-
-func (s *jsStream) consumerAckFloor(ctx context.Context, consumer string) (uint64, error) {
-	cons, err := s.s.Consumer(ctx, consumer)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrConsumerNotFound) {
-			return 0, fmt.Errorf("consumer %q: %w", consumer, ErrConsumerNotFound)
-		}
-		return 0, err
-	}
-	info, err := cons.Info(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("consumer info: %w", err)
-	}
-	return info.AckFloor.Stream, nil
-}
-
-// PurgeAcked purges each tenant's ingest stream below MIN(consumer's ack
-// floor + 1, first sequence stored at or after the tenant's cutoff) — see
-// purgeAcked. A tenant olderThan does not name is purged up to its ack floor.
-// A failure on one tenant's stream is joined into the error and the sweep
-// goes on to the next; a done ctx ends it.
-func (e *EmbeddedNATS) PurgeAcked(ctx context.Context, consumer string, olderThan map[tenant.ID]time.Time) (bool, error) {
-	e.mu.Lock()
-	ids := e.ingestTenants()
-	e.mu.Unlock()
-
-	now := time.Now()
-	var (
-		errs    []error
-		tenants int
-	)
-	for _, id := range ids {
-		if err := ctx.Err(); err != nil {
-			errs = append(errs, err)
-			break
-		}
-		cutoff, ok := olderThan[id]
-		if !ok {
-			cutoff = now
-		}
-		s, err := e.stream(ctx, ingestStreamName(id))
-		if err != nil {
-			errs = append(errs, fmt.Errorf("tenant %s: get stream: %w", id, err))
-			continue
-		}
-		report, err := purgeAcked(ctx, s, consumer, cutoff)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("tenant %s: %w", id, err))
-			continue
-		}
-		// The sweep's own log lines: their detail is in sequences, which only
-		// this package speaks. Per tenant at Debug, since a sweep reaches
-		// every tenant each minute; the summary below is the Info line.
-		switch {
-		case report.purged:
-			tenants++
-			slog.DebugContext(ctx, "sweeper: purged",
-				"tenant", id,
-				"purged_below_seq", report.target,
-				"ack_floor", report.ackFloor,
-				"gap_seq", report.gapSeq,
-			)
-		case report.gapSeq == 0:
-			slog.DebugContext(ctx, "sweeper: all messages within gap window, skipping purge", "tenant", id)
-		}
-	}
-	if tenants > 0 {
-		slog.InfoContext(ctx, "sweeper: purged", "tenants", tenants)
-	}
-	return tenants > 0, errors.Join(errs...)
 }
 
 // DeadLetterCounts reads tenant id's dead-letter stream's per-subject counts
@@ -1129,7 +1161,7 @@ func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, id tenant.ID, table
 	if _, err := tenant.Parse(string(id)); err != nil {
 		return DeadLetterCounts{}, fmt.Errorf("tenant: %w", err)
 	}
-	s, err := e.stream(ctx, dlqStreamName(id))
+	s, err := e.js.Stream(ctx, dlqStreamName(id))
 	if err != nil {
 		if errors.Is(err, jetstream.ErrStreamNotFound) {
 			return DeadLetterCounts{}, fmt.Errorf("%w: %w", ErrNoDeadLetterQueue, err)
@@ -1137,55 +1169,54 @@ func (e *EmbeddedNATS) DeadLetterCounts(ctx context.Context, id tenant.ID, table
 		return DeadLetterCounts{}, fmt.Errorf("get dlq stream: %w", err)
 	}
 
-	state, err := s.state(ctx, tenantSubjects(dlqPrefix, id))
+	info, err := s.Info(ctx, jetstream.WithSubjectFilter(tenantSubjects(dlqPrefix, id)))
 	if err != nil {
 		return DeadLetterCounts{}, fmt.Errorf("dlq stream info: %w", err)
 	}
 
-	return DeadLetterCounts{Tables: deadLetterTables(state.Subjects, dlqPrefix, table), Total: state.Msgs}, nil
+	return DeadLetterCounts{Tables: deadLetterTables(info.State.Subjects, dlqPrefix, table), Total: info.State.Msgs}, nil
 }
 
-// ReplaySince creates an ephemeral consumer on topic's ingest subject, in its
-// tenant's queue, starting at since (DeliverByStartTime) and drains it to send
-// until caught up. The consumer is ack-less and expires on its own once idle.
-// Caught up is the client's no-messages or request-timeout answer to a pull;
-// any other pull failure (a closed connection, a deleted consumer) is returned
-// so the caller knows the replay ended short rather than empty. A done ctx
-// ends the drain between pulls and returns ctx's error. A topic without a
-// valid tenant is refused like a publish (see subject).
+// ReplaySince sends topic's events accepted at or after since: the written
+// ones from its tenant's history stream, for as long as the tenant's replay
+// window keeps them, then the ones still waiting on its ingest stream, then
+// the ones written while those were read (replaySource). The history is read
+// through ack-less consumers of its own that expire once idle, the ingest
+// stream by direct get. A read that fails before the replay catches up is an
+// error — a tenant with no queue has nothing to read from — and a done ctx
+// returns ctx's error. A topic without a valid tenant is refused like a
+// publish (see subject).
 func (e *EmbeddedNATS) ReplaySince(ctx context.Context, topic Topic, since time.Time, send func(data []byte) bool) error {
 	subj, err := subject(ingestPrefix, topic)
 	if err != nil {
 		return err
 	}
-	cons, err := e.js.CreateOrUpdateConsumer(ctx, ingestStreamName(topic.Tenant), jetstream.ConsumerConfig{
-		FilterSubject:     subj,
-		DeliverPolicy:     jetstream.DeliverByStartTimePolicy,
-		OptStartTime:      &since,
-		AckPolicy:         jetstream.AckNonePolicy,
-		InactiveThreshold: 5 * time.Second,
-	})
-	if err != nil {
-		return fmt.Errorf("replay consumer: %w", err)
+	src := replaySource{
+		nc: e.conn, js: e.js, apiPrefix: jetstream.DefaultAPIPrefix,
+		history: historyStreamName(topic.Tenant), historySubject: histPrefix + topic.key(),
+		queues:   []replayQueue{{stream: ingestStreamName(topic.Tenant), subject: subj}},
+		consumer: jetstream.ConsumerConfig{AckPolicy: jetstream.AckNonePolicy, InactiveThreshold: replayInactiveThreshold},
 	}
+	return src.replay(ctx, since, send)
+}
 
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
+// Record stores each written row on its tenant's history stream, under its
+// topic and with the time the ingest stream accepted it, in order, within
+// recordTimeout for the batch. A row of a tenant whose replay window is 0, or
+// was never set, is not recorded: the tenant keeps no history. A history
+// stream that is missing costs its rows their replay, and the error says how
+// many.
+func (e *EmbeddedNATS) Record(ctx context.Context, msgs []*Message) error {
+	return e.hist.record(ctx, msgs, func(m *Message) (string, bool) {
+		id, ok := keyTenant(m.topicKey)
+		if !ok {
+			return "", false
 		}
-		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
-		if err != nil {
-			// A pull that raced the connection closing can end in either
-			// answer too, and that is not caught up.
-			if (errors.Is(err, jetstream.ErrNoMessages) || errors.Is(err, nats.ErrTimeout)) && !e.conn.IsClosed() {
-				return nil // caught up
-			}
-			return fmt.Errorf("replay next: %w", err)
+		if window, _ := e.windows.Load(id); window == nil || window.(time.Duration) <= 0 {
+			return "", false
 		}
-		if !send(msg.Data()) {
-			return nil
-		}
-	}
+		return histPrefix + m.topicKey, true
+	})
 }
 
 // Stats reports the embedded server's client connections and its cumulative

@@ -19,8 +19,8 @@ import (
 var publishBuckets = []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 20}
 
 // publishSeconds is where every publish's duration is recorded (#896): one
-// value per Publish or DeadLetter, retries included, by kind and result. It
-// is swapped only by UsePublishMeter.
+// value per Publish, DeadLetter or Record, retries included, by kind and
+// result. It is swapped only by UsePublishMeter.
 var publishSeconds atomic.Pointer[metric.Float64Histogram]
 
 func init() {
@@ -31,7 +31,7 @@ func init() {
 func newPublishHistogram(m metric.Meter) (metric.Float64Histogram, error) {
 	return m.Float64Histogram(
 		"wavehouse_mq_publish_duration_seconds",
-		metric.WithDescription("Duration of each publish to the queue, retries included, by kind (ingest, or dlq for a row the worker parked) and result (ok, queue_full, unavailable, error, or canceled when the caller went away)"),
+		metric.WithDescription("Duration of each publish to the queue, retries included, by kind (ingest, dlq for a row the worker parked, or history for a batch of written rows it recorded for replay) and result (ok, queue_full, unavailable, error, or canceled when the caller went away)"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(publishBuckets...),
 	)
