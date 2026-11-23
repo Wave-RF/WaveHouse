@@ -15,18 +15,18 @@
   },
   "dependencies": {
     "@astrojs/check": "^0.9.12",
-    "@astrojs/markdown-remark": "^7.3.6",
-    "@astrojs/starlight": "^0.42.10",
+    "@astrojs/markdown-remark": "^7.3.9",
+    "@astrojs/starlight": "^0.43.1",
     "@astrojs/starlight-tailwind": "^5.0.0",
     "@fontsource-variable/inter": "^5.3.0",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@tailwindcss/vite": "^4.3.5",
     "@wave-rf/astro-themed-mermaid": "^0.4.0",
     "@wave-rf/astro-trademarks": "^0.1.0",
-    "@wave-rf/cloudflare-md-router": "^0.3.0",
+    "@wave-rf/cloudflare-md-router": "^0.4.1",
     "@wave-rf/starlight-llm-tools": "^0.3.2",
     "@wavehouse/sdk": "^0.3.0",
-    "astro": "^7.4.7",
+    "astro": "^7.4.12",
     "astro-vtbot": "^3.1.0",
     "katex": "^0.19.1",
     "rehype-katex": "^7.0.1",
@@ -34,15 +34,15 @@
     "remark-math": "^6.0.0",
     "satteri": "^0.11.7",
     "sharp": "^0.35.5",
-    "starlight-image-zoom": "^0.16.2",
+    "starlight-image-zoom": "^0.16.3",
     "starlight-links-validator": "^0.27.0",
     "tailwindcss": "^4.3.5",
     "typescript": "^6.0.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261109.1",
-    "playwright": "^1.65.0",
-    "wrangler": "^4.158.0"
+    "@cloudflare/workers-types": "^5.20261116.1",
+    "playwright": "^1.65.1",
+    "wrangler": "^4.163.0"
   },
   "engines": {
     "node": ">=22"
